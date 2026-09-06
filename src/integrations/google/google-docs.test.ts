@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vites
 import { createDocsTool } from './google-docs.js';
 import type { IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
+import { FULL_SCOPES, SCOPES } from './google-auth.js';
 
 vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn(async () => dnsLookupStub()) },
@@ -20,10 +21,16 @@ afterAll(() => { restorePinnedFetchBridge?.(); });
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-function createMockAuth(scopes: string[] = []): GoogleAuth {
+// Default: a FULLY granted BYO connection. These tests exercise the tool's
+// mechanics, not its scope gate — the gate has its own tests, which pass a
+// narrow list explicitly. Before the per-action gate existed the default was
+// `[]`, i.e. every one of these read paths ran on a connection that had
+// granted nothing, which is precisely the hole this wave closes.
+function createMockAuth(scopes: string[] = [...FULL_SCOPES], ownPair = true): GoogleAuth {
   return {
     getAccessToken: vi.fn().mockResolvedValue('mock-token'),
     hasScope: vi.fn().mockImplementation((s: string) => scopes.includes(s)),
+    hasOwnClientPair: vi.fn().mockReturnValue(ownPair),
   } as unknown as GoogleAuth;
 }
 
@@ -117,7 +124,7 @@ describe('google_docs tool', () => {
         content: 'Hello',
       }, createMockAgent('Yes'));
 
-      expect(result).toContain('requires document write permissions');
+      expect(result).toContain(SCOPES.DOCS);
     });
 
     it('creates document via Drive HTML upload', async () => {

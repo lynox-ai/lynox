@@ -68,6 +68,9 @@ import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
+import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
+import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
+import { hostPolicyOf } from '../core/tool-context.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -1361,6 +1364,54 @@ export class LynoxHTTPApi {
 
   private static readonly OAUTH_STATE_COOKIE = 'lynox_oauth_state';
   private static readonly OAUTH_STATE_TTL_SEC = 10 * 60;
+
+  /**
+   * Does the control plane hold a Google client pair?
+   *
+   * Cached for 60 s per API instance. The CP rate-limits `/oauth/google/status`
+   * to 30 requests per minute PER IP and tenants share egress IPs, so an
+   * uncached probe on every status poll would spend the fleet's budget on one
+   * card refresh.
+   *
+   * ⚠ It says the CP has a client — NOT that this user's Google account will
+   * get through lynox's consent screen. Nothing destructive may rest on it.
+   *
+   * Any failure answers `false`: an unreachable CP, a `deny-all` egress policy
+   * (`cpFetch` throws before the request), a 501 from a CP without Google
+   * configured. A card that offers a button which cannot work is worse than
+   * one that says the connection is still being set up.
+   */
+  private _brokerProbe: { at: number; inFlight: Promise<boolean> } | null = null;
+  private static readonly BROKER_PROBE_TTL_MS = 60_000;
+
+  private async _probeBrokerAvailable(engine: Engine): Promise<boolean> {
+    const now = Date.now();
+    const cached = this._brokerProbe;
+    // The PROMISE is cached, not only the settled value. Caching the value
+    // alone leaves the cold-cache moment unprotected: a page load and the 3 s
+    // auth-poll, or two open tabs, each see an empty cache and each fetch —
+    // spending the rate-limit budget at exactly the busiest instant, which is
+    // the one this cache exists for.
+    if (cached && now - cached.at < LynoxHTTPApi.BROKER_PROBE_TTL_MS) return cached.inFlight;
+
+    const inFlight = this._runBrokerProbe(engine);
+    this._brokerProbe = { at: now, inFlight };
+    return inFlight;
+  }
+
+  private async _runBrokerProbe(engine: Engine): Promise<boolean> {
+    const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    if (!controlPlaneUrl) return false;
+    try {
+      const probeRes = await cpFetch(controlPlaneUrl, '/oauth/google/status', { method: 'GET' },
+        hostPolicyOf(engine.getToolContext()));
+      if (!probeRes.ok) return false;
+      const data = (await probeRes.json()) as { configured?: unknown };
+      return data.configured === true;
+    } catch {
+      return false;
+    }
+  }
 
   private _signOAuthStateCookie(state: string, secret: string): string {
     const ts = Math.floor(Date.now() / 1000).toString();
@@ -6665,33 +6716,74 @@ export class LynoxHTTPApi {
     });
 
     // ── Google Auth ──
+    //
+    // TWO LEVELS, and the split is the whole point. Broker availability is a
+    // property of the CONTROL PLANE and is computed without a `GoogleAuth`;
+    // connection state is a property of this tenant and may legitimately be
+    // "none". The route used to open with `if (!google) return {available:false}`,
+    // which collapsed both into one word — and on a brokered tenant no
+    // `GoogleAuth` exists until the first successful claim, so every field the
+    // card needs was unreachable in exactly the state the card is for.
     this.addStatic('user', 'GET /api/google/status', async (_req, res) => {
       const google = engine.getGoogleAuth();
-      if (!google) { jsonResponse(res, 200, { available: false }); return; }
+      const clientSource = engine.getGoogleClientSource();
+      // Probed whenever the instance is provisioned, not only in broker mode:
+      // a managed tenant on its OWN client needs this answer too, because the
+      // switch-back confirm (D12) destroys that client pair and the broker is
+      // what it lands on.
+      const brokerAvailable = hasControlPlaneInstanceId()
+        ? await this._probeBrokerAvailable(engine)
+        : false;
+
+      if (!google) {
+        jsonResponse(res, 200, {
+          available: false,
+          authenticated: false,
+          client_source: clientSource,
+          managed_broker: isBrokerMode(clientSource),
+          broker_available: brokerAvailable,
+          mode: null,
+        });
+        return;
+      }
+
+      const info = google.getAccountInfo();
       jsonResponse(res, 200, {
         available: true,
         authenticated: google.isAuthenticated(),
-        // Which source supplied the client pair, and whether that pair is lynox's
-        // shared broker rather than the tenant's own. Added FOR the card to route on
-        // — it does not yet: GoogleStatus does not declare these and GoogleSettings
-        // still branches on isManaged(). Saying "the card routes on these" would be
-        // the third false wiring claim in this change alone.
-        client_source: engine.getGoogleClientSource(),
-        managed_broker: engine.isGoogleManagedBroker(),
-        ...google.getAccountInfo(),
+        client_source: clientSource,
+        managed_broker: isBrokerMode(clientSource),
+        broker_available: brokerAvailable,
+        // Server-computed: the required sets are core constants and the
+        // per-tenant `google_oauth_scopes` override is runtime config, so a
+        // browser cannot decide this without both.
+        mode: google.isAuthenticated()
+          ? computeScopeMode(info.scopes, engine.getUserConfig().google_oauth_scopes ?? STANDARD_SCOPES)
+          : null,
+        ...info,
       });
     });
 
     this.addStatic('user', 'POST /api/google/auth', async (_req, res, _params, body) => {
+      // A brokered tenant has no client pair to run a consent with, so there is
+      // nothing this route can do for it — it connects through the control
+      // plane instead. Refused on the CONJUNCTION (provisioned AND no pair):
+      // keyed on the control-plane identity alone it would refuse every managed
+      // tenant that brought its own Google client, which is a supported state.
+      if (isBrokerMode(engine.getGoogleClientSource())) {
+        errorResponse(res, 400, 'managed_broker');
+        return;
+      }
+
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
-      // Scope mode: "full" includes write scopes, default is read-only
+      // Two named modes. `full` is standard + every sensitive and restricted
+      // scope this client may ever need, so a power user consents once.
       const b = body as Record<string, unknown> | null;
-      const { READ_ONLY_SCOPES, WRITE_SCOPES } = await import('../integrations/google/google-auth.js');
       const scopes = b?.['scopeMode'] === 'full'
-        ? [...READ_ONLY_SCOPES, ...WRITE_SCOPES]
-        : [...READ_ONLY_SCOPES];
+        ? [...FULL_SCOPES]
+        : [...STANDARD_SCOPES];
 
       // Web-hosted instances: use redirect flow (ORIGIN env is set on managed instances)
       const origin = process.env['ORIGIN'];
@@ -6818,6 +6910,17 @@ export class LynoxHTTPApi {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
       await google.revoke();
+      jsonResponse(res, 200, { ok: true });
+    });
+
+    // Drop the local grant WITHOUT revoking it at Google — the switch-back
+    // path (D12). Separate from `/revoke` on purpose: the two differ only in
+    // whether a request goes to Google, and that difference is irreversible,
+    // so it must be visible in the route name rather than hidden in a flag.
+    this.addStatic('user', 'POST /api/google/disconnect', async (_req, res) => {
+      const google = engine.getGoogleAuth();
+      if (!requireService(res, google, 'Google auth')) return;
+      google.disconnect();
       jsonResponse(res, 200, { ok: true });
     });
 

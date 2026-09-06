@@ -135,7 +135,7 @@ export interface GoogleAuthOptions {
   clientSecret?: string | undefined;
   serviceAccountKeyPath?: string | undefined;
   vault?: SecretVault | undefined;
-  /** Override default OAuth scopes. Defaults to READ_ONLY_SCOPES. */
+  /** Override default OAuth scopes. Defaults to STANDARD_SCOPES. */
   scopes?: string[] | undefined;
   /**
    * The live host-policy view (`network_policy` + the operator floor), so every
@@ -173,46 +173,208 @@ const DEVICE_POLL_INTERVAL_MS = 5_000; // Poll every 5s for device flow
 const DEVICE_TIMEOUT_MS = 300_000; // 5 min to complete device auth
 
 // Scope constants
+//
+// Every scope lynox will ever accept lives here, and the three sets below
+// partition it by GOOGLE's classification — not by read/write, which is what
+// the removed `READ_ONLY_SCOPES`/`WRITE_SCOPES` pair claimed and got wrong
+// (it listed `drive.file`, a write scope, under neither, and an alias named
+// READ_ONLY that returns write scopes lies to every caller).
 export const SCOPES = {
+  OPENID: 'openid',
+  USERINFO_EMAIL: 'https://www.googleapis.com/auth/userinfo.email',
   GMAIL_READONLY: 'https://www.googleapis.com/auth/gmail.readonly',
   GMAIL_SEND: 'https://www.googleapis.com/auth/gmail.send',
   GMAIL_MODIFY: 'https://www.googleapis.com/auth/gmail.modify',
+  GMAIL_COMPOSE: 'https://www.googleapis.com/auth/gmail.compose',
+  GMAIL_METADATA: 'https://www.googleapis.com/auth/gmail.metadata',
+  MAIL_GOOGLE_COM: 'https://mail.google.com/',
   SHEETS_READONLY: 'https://www.googleapis.com/auth/spreadsheets.readonly',
   SHEETS: 'https://www.googleapis.com/auth/spreadsheets',
   DRIVE_READONLY: 'https://www.googleapis.com/auth/drive.readonly',
   DRIVE_FILE: 'https://www.googleapis.com/auth/drive.file',
   DRIVE: 'https://www.googleapis.com/auth/drive',
+  DRIVE_METADATA_READONLY: 'https://www.googleapis.com/auth/drive.metadata.readonly',
   CALENDAR_READONLY: 'https://www.googleapis.com/auth/calendar.readonly',
   CALENDAR_EVENTS: 'https://www.googleapis.com/auth/calendar.events',
+  CALENDAR_FREEBUSY: 'https://www.googleapis.com/auth/calendar.freebusy',
+  CALENDAR: 'https://www.googleapis.com/auth/calendar',
+  CALENDAR_LIST_READONLY: 'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
   DOCS_READONLY: 'https://www.googleapis.com/auth/documents.readonly',
   DOCS: 'https://www.googleapis.com/auth/documents',
 } as const;
 
-/** Read-only scopes — safe default for initial auth. */
-export const READ_ONLY_SCOPES = [
-  SCOPES.GMAIL_READONLY,
-  SCOPES.SHEETS_READONLY,
-  SCOPES.DRIVE_READONLY,
-  SCOPES.CALENDAR_READONLY,
-  SCOPES.DOCS_READONLY,
-] as const;
-
-/** Write scopes — opt-in via config or requestScope(). */
-export const WRITE_SCOPES = [
-  SCOPES.GMAIL_SEND,
-  SCOPES.GMAIL_MODIFY,
-  SCOPES.SHEETS,
-  SCOPES.DRIVE,
-  SCOPES.DRIVE_FILE,
+/**
+ * The default consent set — every scope in it is NON-SENSITIVE or SENSITIVE,
+ * none is RESTRICTED, so it needs app verification but no annual CASA
+ * assessment. Read off the Google Cloud Console's Data Access page on
+ * 2026-08-20 — Google publishes no such list — and cross-checked against its
+ * published Gmail/Drive/Sheets/Docs scope pages on 2026-08-26.
+ *
+ * `calendar.freebusy` is the one entry whose class was never read off the
+ * Console; it is carried here because `calendar.events` is already sensitive,
+ * so it cannot raise the set's class — only the table's completeness is open.
+ */
+export const STANDARD_SCOPES = [
+  SCOPES.OPENID,
+  SCOPES.USERINFO_EMAIL,
   SCOPES.CALENDAR_EVENTS,
-  SCOPES.DOCS,
+  SCOPES.CALENDAR_FREEBUSY,
+  SCOPES.DRIVE_FILE,
 ] as const;
 
-/** Default scopes for initial auth — read-only for security. */
-const DEFAULT_SCOPES: readonly string[] = READ_ONLY_SCOPES;
+/**
+ * SENSITIVE by Google's classification: app verification, no CASA.
+ *
+ * None of these is requested by the standard set. The three `*.readonly`
+ * entries are here because they were accepted yesterday and `VALID_SCOPES`
+ * may not narrow — a tenant carrying one in `google_oauth_scopes` would
+ * otherwise break on its next re-consent, and no test that looks only at the
+ * new sets would see it.
+ */
+export const SENSITIVE_EXTRA_SCOPES = [
+  SCOPES.SHEETS,
+  SCOPES.SHEETS_READONLY,
+  SCOPES.DOCS,
+  SCOPES.DOCS_READONLY,
+  SCOPES.CALENDAR,
+  SCOPES.CALENDAR_READONLY,
+  SCOPES.CALENDAR_LIST_READONLY,
+  SCOPES.GMAIL_SEND,
+] as const;
 
-/** All known valid Google OAuth scopes. */
-const VALID_SCOPES = new Set<string>([...READ_ONLY_SCOPES, ...WRITE_SCOPES]);
+/**
+ * RESTRICTED by Google's classification: verification PLUS an annual CASA
+ * assessment and a Letter of Assessment. Nothing lynox requests by default is
+ * in here, and that is the whole point of the standard set.
+ */
+export const RESTRICTED_SCOPES = [
+  SCOPES.GMAIL_READONLY,
+  SCOPES.GMAIL_MODIFY,
+  SCOPES.GMAIL_COMPOSE,
+  SCOPES.GMAIL_METADATA,
+  SCOPES.MAIL_GOOGLE_COM,
+  SCOPES.DRIVE,
+  SCOPES.DRIVE_READONLY,
+  SCOPES.DRIVE_METADATA_READONLY,
+] as const;
+
+/**
+ * ⚠ THE THREE SETS ABOVE AND THIS ONE ANSWER TWO DIFFERENT QUESTIONS. Do not
+ * merge them back together.
+ *
+ *  - The three sets are a CLASSIFICATION. They exist so `VALID_SCOPES` can
+ *    accept everything a tenant might legitimately already hold, and so the
+ *    "no restricted scope in the default set" claim is checkable. They must
+ *    stay complete.
+ *  - `FULL_SCOPES` is a REQUEST BUNDLE — what a consent screen actually asks a
+ *    human for. It must stay MINIMAL, because Google's verification requires
+ *    "the least amount of access … necessary", and a scope no lynox code path
+ *    exercises is by definition not necessary.
+ *
+ * The PRD's sentence "`full` = all three sets" collapses the two, and building
+ * it literally would have put `mail.google.com/` — read, send and permanently
+ * delete the whole mailbox — on the consent screen of a mode whose Gmail half
+ * D7 removed from this stage. Every entry below names the code path that
+ * exercises it; `FULL_SCOPE_CONSUMERS` is that list, and a test holds the two
+ * in step so a scope cannot return to the bundle without one.
+ */
+export const FULL_SCOPES: readonly string[] = [
+  ...STANDARD_SCOPES,
+  SCOPES.SHEETS,
+  SCOPES.SHEETS_READONLY,
+  SCOPES.DOCS,
+  SCOPES.DOCS_READONLY,
+  SCOPES.CALENDAR_READONLY,
+  SCOPES.GMAIL_SEND,
+  SCOPES.GMAIL_READONLY,
+  SCOPES.DRIVE,
+  SCOPES.DRIVE_READONLY,
+];
+
+/**
+ * What `full` adds over the standard set, and the code path that exercises
+ * each addition. Checked against the real tree by a test, so a stale entry
+ * fails instead of reassuring.
+ *
+ * The standard set itself is not listed: it is decided in the PRD and defended
+ * by its own tests (nothing restricted, hence CASA-free). `openid` and
+ * `userinfo.email` are in it and have no `hasScope` reader yet — §3.5's
+ * `email` field is W5 — which is exactly why they belong to the decided set
+ * and not to this table.
+ *
+ * The scopes deliberately absent, and what would put them back:
+ *  - `gmail.compose`, `gmail.metadata`, `mail.google.com/` — nothing drafts,
+ *    reads metadata-only, or needs delete rights.
+ *  - `gmail.modify` — measured: `OAuthGmailProvider` lists, searches, fetches
+ *    and sends, and reads `labelIds` OUT of a list response. It never writes a
+ *    label, trashes, or calls `messages.modify`, so `gmail.readonly` alone
+ *    covers the reading half. This entry was in the table for one commit with
+ *    `gmail.readonly`'s evidence string copied into it — which is how a scope
+ *    with no consumer passed a test whose whole job is to catch that. The test
+ *    now requires each evidence string to belong to exactly one scope.
+ *  - `calendar.calendarlist.readonly` — D9 dropped `list_calendars`; the
+ *    calendar id stays a parameter the user names.
+ *  - `drive.metadata.readonly` — accepted if a tenant already holds it, but
+ *    `drive.file` and `drive.readonly` authorise every Drive call lynox makes.
+ *  - `calendar` — the blanket scope adds nothing over `calendar.events`,
+ *    `calendar.readonly` and `calendar.freebusy` together.
+ */
+export const FULL_SCOPE_CONSUMERS: Readonly<Record<string, { file: string; evidence: string }>> = {
+  [SCOPES.SHEETS]: { file: 'src/integrations/google/google-sheets.ts', evidence: 'SCOPES.SHEETS' },
+  [SCOPES.SHEETS_READONLY]: { file: 'src/integrations/google/google-sheets.ts', evidence: 'SCOPES.SHEETS_READONLY' },
+  [SCOPES.DOCS]: { file: 'src/integrations/google/google-docs.ts', evidence: 'SCOPES.DOCS' },
+  [SCOPES.DOCS_READONLY]: { file: 'src/integrations/google/google-docs.ts', evidence: 'SCOPES.DOCS_READONLY' },
+  [SCOPES.CALENDAR_READONLY]: { file: 'src/integrations/google/google-calendar.ts', evidence: 'SCOPES.CALENDAR_READONLY' },
+  [SCOPES.DRIVE]: { file: 'src/integrations/google/google-drive.ts', evidence: 'SCOPES.DRIVE' },
+  [SCOPES.DRIVE_READONLY]: { file: 'src/integrations/google/google-drive.ts', evidence: 'SCOPES.DRIVE_READONLY' },
+  [SCOPES.GMAIL_SEND]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: "gmailPost<GmailSendResponse>('messages/send'" },
+  [SCOPES.GMAIL_READONLY]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: 'gmailGet<GmailListResponse>' },
+};
+
+/** Default scopes for initial auth — the CASA-free standard set. */
+const DEFAULT_SCOPES: readonly string[] = STANDARD_SCOPES;
+
+/**
+ * All known valid Google OAuth scopes — the ACCEPTANCE allowlist.
+ *
+ * Built from the three CLASSIFICATION sets, deliberately not from
+ * `FULL_SCOPES`: `requestScope` throws on anything outside this set, so
+ * narrowing it breaks a tenant whose stored `google_oauth_scopes` names a
+ * scope that used to be fine. Accepting is cheap; requesting is not.
+ */
+const VALID_SCOPES = new Set<string>([
+  ...STANDARD_SCOPES,
+  ...SENSITIVE_EXTRA_SCOPES,
+  ...RESTRICTED_SCOPES,
+]);
+
+/** The named consent modes the card offers, plus the one it can only observe. */
+export type GoogleScopeMode = 'standard' | 'full' | 'legacy';
+
+/**
+ * Which mode a GRANT is in — the highest mode whose required set is a subset
+ * of what Google actually granted.
+ *
+ * `legacy` is not a mode anyone can choose; it is what a grant taken before
+ * these sets existed looks like (the old read-only bundle satisfies neither
+ * required set). The card shows such a grant's services and parks the toggle
+ * at `standard` WITHOUT calling it a mismatch — a mismatch is an expression of
+ * user intent, and nobody expressed any.
+ *
+ * The client cannot compute this: `standardRequired` may be the tenant's
+ * `google_oauth_scopes` override, which is runtime config the browser never
+ * sees.
+ */
+export function computeScopeMode(
+  granted: readonly string[],
+  standardRequired: readonly string[] = STANDARD_SCOPES,
+): GoogleScopeMode {
+  const held = new Set(granted);
+  const covers = (required: readonly string[]): boolean => required.every((s) => held.has(s));
+  if (covers(FULL_SCOPES)) return 'full';
+  if (covers(standardRequired)) return 'standard';
+  return 'legacy';
+}
 
 // === Helpers ===
 
@@ -654,6 +816,19 @@ export class GoogleAuth {
   }
 
   /**
+   * True when this credential holds a Google client pair of its own.
+   *
+   * The absence IS the mode: a brokered tenant never resolves a pair, because
+   * the pair lives on the control plane. Callers use this to say something
+   * true about where the tenant can widen its grant — NOT to decide whether a
+   * refresh may run (that is `requireOwnPair`, which is about the token
+   * endpoint, and which brokered refreshes deliberately never reach).
+   */
+  hasOwnClientPair(): boolean {
+    return !!this.clientId && !!this.clientSecret;
+  }
+
+  /**
    * Set tokens directly from an external OAuth broker (e.g. managed control plane).
    * Validates token structure and saves to vault.
    */
@@ -973,6 +1148,24 @@ export class GoogleAuth {
         // Best-effort revocation
       }
     }
+    this.tokenData = null;
+    deleteTokenData(this.vault);
+  }
+
+  /**
+   * Drop the local grant WITHOUT revoking it at Google (D12).
+   *
+   * The switch-back path — a tenant giving up its own Google client for the
+   * managed one — must not revoke: the grant is the USER's, revoking is
+   * irreversible, and a leftover grant is harmless (Google keeps up to 100
+   * live refresh tokens per account and client). Revoking here would also
+   * destroy something on the strength of `broker_available`, which does not
+   * predict whether the broker consent will succeed.
+   *
+   * `revoke()` is still the right call for an explicit disconnect, where
+   * ending the grant IS what the user asked for.
+   */
+  disconnect(): void {
     this.tokenData = null;
     deleteTokenData(this.vault);
   }

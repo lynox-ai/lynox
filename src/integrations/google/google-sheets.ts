@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
+import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
@@ -47,7 +48,31 @@ const DRIVE_FILES_BASE = 'https://www.googleapis.com/drive/v3/files';
 // spreadsheet mutation, not cosmetics. It must be confirmed + flagged destructive
 // like write/append. (`create` only makes a NEW spreadsheet → left unconfirmed.)
 const CONFIRM_ACTIONS = new Set(['write', 'append', 'format']);
-const WRITE_ACTIONS = new Set(['write', 'append', 'create', 'format']);
+
+/**
+ * The scopes each action's own API call accepts — see `action-scopes.ts` for
+ * why this is one table per tool rather than a read gate beside a write gate.
+ *
+ * `list` is the odd one: it queries Drive (`files.list`) rather than Sheets,
+ * so it is authorised by Drive scopes and by no Sheets scope at all.
+ */
+const ACTION_SCOPES: Record<SheetsInput['action'], readonly string[]> = {
+  read: [SCOPES.SHEETS_READONLY, SCOPES.SHEETS],
+  list: [SCOPES.DRIVE_FILE, SCOPES.DRIVE_READONLY, SCOPES.DRIVE, SCOPES.DRIVE_METADATA_READONLY],
+  write: [SCOPES.SHEETS],
+  append: [SCOPES.SHEETS],
+  create: [SCOPES.SHEETS],
+  format: [SCOPES.SHEETS],
+};
+
+const ACTION_DESCRIPTIONS: Record<SheetsInput['action'], string> = {
+  read: 'Reading a spreadsheet',
+  list: 'Listing spreadsheets',
+  write: 'Overwriting a range',
+  append: 'Appending rows',
+  create: 'Creating a spreadsheet',
+  format: 'Applying batch changes',
+};
 
 // === Helpers ===
 
@@ -153,9 +178,13 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
       const auth = getAuth();
       if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
-        // Check write scope
-        if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.SHEETS)) {
-          return `Error: This action requires write permissions (${SCOPES.SHEETS}). Grant access in Settings → Channels → Google.`;
+        // `hasOwn`, not a truthiness check on the lookup: `input.action` is
+        // typed but arrives from the model, so an unrecognised value is
+        // reachable at runtime and must fall through to the unknown-action
+        // error below rather than be silently admitted.
+        if (Object.hasOwn(ACTION_SCOPES, input.action)) {
+          const refusal = refuseUnlessScoped(auth, ACTION_SCOPES[input.action], ACTION_DESCRIPTIONS[input.action]);
+          if (refusal) return refusal;
         }
 
         // Confirmation for destructive actions — fail-safe: block if no prompt available

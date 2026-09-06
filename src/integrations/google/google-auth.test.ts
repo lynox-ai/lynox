@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
-import { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES } from './google-auth.js';
+import { GoogleAuth, SCOPES, STANDARD_SCOPES, SENSITIVE_EXTRA_SCOPES, RESTRICTED_SCOPES, FULL_SCOPES, computeScopeMode } from './google-auth.js';
 // The fixture VALUE, not the fixture FILE: `node:fs` is mocked in this file, so
 // reading the JSON here would quietly yield the stub's `{}`. The mirror is
 // `satisfies`-welded to the contract type and proven byte-equal to the JSON in
@@ -97,7 +97,7 @@ describe('GoogleAuth', () => {
       expect(authUrl).toContain('redirect_uri=http%3A%2F%2Flocalhost%3A12345');
       expect(authUrl).toContain('response_type=code');
       expect(authUrl).toContain('access_type=offline');
-      expect(authUrl).toContain('gmail.readonly');
+      expect(authUrl).toContain('calendar.events');
       expect(typeof waitForCode).toBe('function');
 
       // Clean up server
@@ -803,26 +803,108 @@ describe('GoogleAuth', () => {
   });
 
   describe('scope defaults', () => {
-    it('READ_ONLY_SCOPES contains only readonly scopes', () => {
-      for (const scope of READ_ONLY_SCOPES) {
-        expect(scope).toMatch(/readonly/);
-      }
+    /** What `requestScope` accepts — the union of the three classification sets. */
+    const ACCEPTED: readonly string[] = [...STANDARD_SCOPES, ...SENSITIVE_EXTRA_SCOPES, ...RESTRICTED_SCOPES];
+
+    /**
+     * The claim in the PRD title: the default consent set is CASA-free.
+     * CASA attaches to RESTRICTED scopes only, so the assertion is an empty
+     * intersection — not "no scope contains the word readonly", which is what
+     * the removed READ_ONLY/WRITE pair asserted and which is a statement about
+     * spelling rather than about Google's classification.
+     */
+    it('the default set intersects the restricted set nowhere', () => {
+      const restricted = new Set<string>(RESTRICTED_SCOPES);
+      const overlap = STANDARD_SCOPES.filter((s) => restricted.has(s));
+      expect(overlap).toEqual([]);
+      // Positive control: the assertion CAN see an overlap. Without it, an
+      // empty STANDARD_SCOPES would pass just as quietly.
+      expect([...STANDARD_SCOPES, SCOPES.DRIVE].filter((s) => restricted.has(s)))
+        .toEqual([SCOPES.DRIVE]);
     });
 
-    it('WRITE_SCOPES contains no readonly scopes', () => {
-      for (const scope of WRITE_SCOPES) {
-        expect(scope).not.toMatch(/readonly/);
+    /**
+     * The allowlist may not NARROW. `requestScope` throws on anything outside
+     * `VALID_SCOPES`, so a tenant whose `google_oauth_scopes` names a scope
+     * that used to be accepted breaks on its next re-consent — and no test
+     * that only looks at the new sets would ever see it. The twelve are
+     * pinned as literals, not derived from the sets they are checking.
+     */
+    it('still accepts every scope that was valid before the sets were re-cut', async () => {
+      const TWELVE_AS_OF_2026_09_06 = [
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/gmail.modify',
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/drive',
+        'https://www.googleapis.com/auth/calendar.readonly',
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/documents.readonly',
+        'https://www.googleapis.com/auth/documents',
+      ];
+      expect(TWELVE_AS_OF_2026_09_06).toHaveLength(12);
+      for (const scope of TWELVE_AS_OF_2026_09_06) {
+        // ACCEPTED, not FULL_SCOPES: the question is what `requestScope` still
+        // takes, which is the union of the classification sets. The request
+        // bundle is narrower on purpose and would answer a different question.
+        expect(ACCEPTED).toContain(scope);
       }
+      // And the throw is real: an unknown scope still refuses, so the loop
+      // above is not passing against a `requestScope` that validates nothing.
+      await expect(auth.requestScope(['https://www.googleapis.com/auth/not-a-scope']))
+        .rejects.toThrow(/Unknown Google OAuth scope/);
     });
 
-    it('default auth URL contains only readonly scopes', async () => {
+    it('the three classification sets are disjoint', () => {
+      expect(new Set(ACCEPTED).size).toBe(ACCEPTED.length);
+      // The request bundle is a STRICT subset — if the two ever became equal
+      // again, `full` would be asking for scopes nothing exercises.
+      expect(FULL_SCOPES.length).toBeLessThan(ACCEPTED.length);
+      for (const s of FULL_SCOPES) expect(ACCEPTED).toContain(s);
+    });
+
+    it('default auth URL requests the standard set and no restricted scope', async () => {
       const { authUrl } = await auth.startLocalAuth();
-      expect(authUrl).toContain('gmail.readonly');
-      expect(authUrl).toContain('drive.readonly');
-      expect(authUrl).toContain('spreadsheets.readonly');
-      expect(authUrl).not.toContain('gmail.send');
+      expect(authUrl).toContain('calendar.events');
+      expect(authUrl).toContain('drive.file');
+      // The scopes that make an app pay for CASA — none of them is requested.
+      expect(authUrl).not.toContain('gmail.readonly');
+      expect(authUrl).not.toContain('drive.readonly');
       expect(authUrl).not.toContain('gmail.modify');
+      // `drive.file` is a substring-neighbour of `drive`; assert the encoded
+      // scope parameter does not carry bare `/auth/drive` as its own entry.
+      expect(decodeURIComponent(authUrl).split(' ')).not.toContain('https://www.googleapis.com/auth/drive');
       mockServerInstance.close.mockImplementation(() => {});
+    });
+
+    describe('computeScopeMode', () => {
+      it('reports full only when every full scope is granted', () => {
+        expect(computeScopeMode([...FULL_SCOPES])).toBe('full');
+        expect(computeScopeMode(FULL_SCOPES.slice(1))).not.toBe('full');
+      });
+
+      it('reports standard for exactly the standard grant', () => {
+        expect(computeScopeMode([...STANDARD_SCOPES])).toBe('standard');
+      });
+
+      it('reports legacy for a grant that satisfies neither set', () => {
+        // The old read-only bundle: it is not a mode anyone can choose today.
+        expect(computeScopeMode([
+          SCOPES.GMAIL_READONLY, SCOPES.SHEETS_READONLY, SCOPES.DRIVE_READONLY,
+          SCOPES.CALENDAR_READONLY, SCOPES.DOCS_READONLY,
+        ])).toBe('legacy');
+      });
+
+      it('treats a per-tenant scope override as the required standard set', () => {
+        const override = [SCOPES.CALENDAR_EVENTS];
+        // Would be `legacy` against the built-in standard set, because it is
+        // missing openid/userinfo/freebusy/drive.file.
+        expect(computeScopeMode([SCOPES.CALENDAR_EVENTS])).toBe('legacy');
+        expect(computeScopeMode([SCOPES.CALENDAR_EVENTS], override)).toBe('standard');
+      });
     });
 
     it('custom scopes override defaults', async () => {
