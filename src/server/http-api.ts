@@ -1760,8 +1760,11 @@ export class LynoxHTTPApi {
   async shutdown(): Promise<void> {
     if (this.rateGcTimer) clearInterval(this.rateGcTimer);
     this.sessionStore.stopEviction();
-    // Expire all pending prompts in SQLite on shutdown
-    this.engine?.getPromptStore()?.expireAll();
+    // Expire pending prompts in SQLite on shutdown — except a trigger's parked
+    // question, which must survive the restart it is waiting across. The boot
+    // side skips the same rows; if either side expired them the other's
+    // exception would be pointless.
+    this.engine?.getPromptStore()?.expireUnparked();
     this.server?.close();
     // Release the client-error lookup. Module state is last-writer-wins, so a
     // second instance in the same process (tests do this) would otherwise leave

@@ -236,7 +236,7 @@ export class PromptStore {
   private _stmtGetPending: Database.Statement | undefined;
   private _stmtGetById: Database.Statement | undefined;
   private _stmtExpireOld: Database.Statement | undefined;
-  private _stmtExpireAll: Database.Statement | undefined;
+  private _stmtExpireUnparked: Database.Statement | undefined;
   private _stmtSetPartial: Database.Statement | undefined;
 
   constructor(db: Database.Database) {
@@ -531,23 +531,71 @@ export class PromptStore {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
-  /** Transition prompts past expires_at to 'expired'. Safe to call anytime. */
+  /**
+   * Time-based housekeeping: expire pending prompts past `expires_at`, and
+   * detach an ANSWERED prompt whose answer nobody ever came for.
+   *
+   * The second half is what bounds the durable pointer. Once the re-arm pass
+   * makes a trigger due, the row is `answered` with `trigger_id` still set,
+   * waiting for the next dispatch to read it — and `waiting_until` is already
+   * gone, so the trigger side no longer bounds anything. If that dispatch never
+   * happens (the trigger is disabled, its consent revoked, or it is deleted —
+   * `deleteTrigger` does not touch this table, there is no FK across the two
+   * databases) the pointer would otherwise live forever, and the day the trigger
+   * became due again through some unrelated path, a fresh run would be handed a
+   * stale question and answer as if it had just asked them.
+   *
+   * Bounded by the row's own `expires_at`, which is the same clock everything
+   * else here uses. The row stays `answered` — it was answered — and only stops
+   * being a trigger's business.
+   */
   expireOld(): number {
     const rows = this.db
       .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND expires_at <= datetime('now')`)
       .all() as { id: string }[];
     const result = this._getExpireOldStmt().run();
+    // Detach answered-but-unclaimed pointers on the same pass and the same clock.
+    this.db
+      .prepare(
+        `UPDATE pending_prompts SET trigger_id = NULL
+         WHERE status = 'answered' AND trigger_id IS NOT NULL AND expires_at <= datetime('now')`,
+      )
+      .run();
     // Emit for each so pending waiters return promptly.
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
   }
 
-  /** Expire ALL pending prompts (used on engine restart). */
-  expireAll(): number {
+  /**
+   * Expire every pending prompt EXCEPT the ones a trigger is parked on
+   * (§0 A1/A2). Called at both process lifecycle boundaries — boot and
+   * shutdown — and the exception has to hold at both, or the one that runs
+   * first defeats the other.
+   *
+   * Named for what it does rather than for what it used to do. It was
+   * `expireAll`, and it really did expire all: a prompt is bound to a live SSE
+   * connection that a restart has already severed, so keeping one meant keeping
+   * a question nobody could answer. A trigger's question is the exception,
+   * because the answer does not have to arrive in the same process — the run
+   * that asked is gone, and the trigger is what remembers.
+   *
+   * The predicate is purely local (`trigger_id IS NULL`), which is the whole
+   * reason §0 put the pointer on this side: `triggers` lives in engine.db, this
+   * table in history.db, and there is no ATTACH anywhere in the tree.
+   *
+   * What keeps a surviving prompt from living forever is its own `expires_at`.
+   * While it is `pending`, `expireOld()` expires it on that clock and the
+   * trigger's `waiting_until` ends the wait on the tick's. Once it is ANSWERED
+   * neither of those applies — `expireOld` only expired pending rows and
+   * `endWait` has already cleared the deadline — so `expireOld` detaches the
+   * pointer on the same `expires_at`. Both states are bounded; an earlier
+   * version of this comment claimed the first bound covered the second.
+   */
+  expireUnparked(): number {
     const rows = this.db
-      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending'`)
+      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND trigger_id IS NULL`)
       .all() as { id: string }[];
-    const result = this._getExpireAllStmt().run();
+    const result = this._getExpireUnparkedStmt().run();
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
   }
@@ -576,6 +624,61 @@ export class PromptStore {
       .run(triggerId);
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
+  }
+
+  /**
+   * The answered question a trigger is still parked on (§0 A10), if there is one.
+   *
+   * This single row carries everything the re-armed run needs and is the reason
+   * no third column was added for it (§0 E4 forbids a speculative resume
+   * column): `session_id` is the thread the question was asked in, `question`
+   * and `answer` are what the new run has to be told. Answering updates a
+   * database row and nothing else — `prompt-store.ts` writes to `pending_prompts`
+   * and to no other table — so a thread does NOT carry the answer by itself, and
+   * a run that only reused the thread id would see its own old question with no
+   * reply under it.
+   *
+   * Newest first. A trigger should never have two answered rows attached — every
+   * consumer releases the pointer as it reads — but "should never" is a claim
+   * about other code, and picking an arbitrary row when it turns out false would
+   * hand a run an answer to a question it did not ask.
+   */
+  getAnsweredForTrigger(triggerId: string): PendingPromptRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM pending_prompts WHERE trigger_id = ? AND status = 'answered'
+         ORDER BY answered_at DESC LIMIT 1`,
+      )
+      .get(triggerId) as PendingPromptRow | undefined;
+  }
+
+  /**
+   * Detach a prompt from its trigger — the answer has been handed to a run and
+   * is that trigger's business no longer.
+   *
+   * Conditional on the pointer still being set, so it claims the answer exactly
+   * once, the same shape `TriggerStore.endWait` uses for the same reason. Without
+   * it the row stays `answered` with a live pointer and every later scheduled run
+   * of that trigger would be handed the same stale reply. The status is left
+   * `answered` because it was answered; what changes is only whose business it is.
+   *
+   * ⚠ And conditional on the row being SETTLED, which is the half that cannot be
+   * left to the caller. The caller is a `finally`, so it runs on every exit
+   * including the ones where settling the row FAILED — the abort path drains its
+   * row with `expirePrompt` and swallows a throw, naming SQLITE_BUSY and schema
+   * drift as reasons. A detach that fired there would orphan a question that is
+   * still `pending` and still answerable: nothing would ever hand its answer to a
+   * run again, which is the exact loss §0 A2 exists to prevent. Expressed here
+   * rather than as a re-check at the call site, because a re-check is another
+   * duty a later caller can forget and has a window this does not.
+   */
+  releaseTrigger(promptId: string): boolean {
+    return this.db
+      .prepare(
+        `UPDATE pending_prompts SET trigger_id = NULL
+         WHERE id = ? AND trigger_id IS NOT NULL AND status != 'pending'`,
+      )
+      .run(promptId).changes > 0;
   }
 
   /** Expire a single pending prompt by id. Used when a /run handler is
@@ -710,11 +813,11 @@ export class PromptStore {
     `));
   }
 
-  private _getExpireAllStmt(): Database.Statement {
-    return (this._stmtExpireAll ??= this.db.prepare(`
+  private _getExpireUnparkedStmt(): Database.Statement {
+    return (this._stmtExpireUnparked ??= this.db.prepare(`
       UPDATE pending_prompts
       SET status = 'expired'
-      WHERE status = 'pending'
+      WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }
 }

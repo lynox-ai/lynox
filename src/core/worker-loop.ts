@@ -16,6 +16,7 @@ import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, PromptText } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
+import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
@@ -287,6 +288,36 @@ export class WorkerLoop {
       // never got its answer, so it did not succeed. `endWait` is conditional on
       // the row still being `waiting`, so this and a live run's own un-park can
       // race without either needing to check first.
+      // §0 A10 — an ANSWER ends a wait too, and long before the deadline would.
+      // Scanned separately from the expiry below and FIRST, because when both
+      // apply the answer is the better outcome: a question that was answered a
+      // minute before its deadline should produce a run, not a failure.
+      //
+      // Two queries rather than a join: `triggers` is in engine.db and
+      // `pending_prompts` in history.db, and the tree has no ATTACH. The per-row
+      // lookup is affordable because the outer set is parked triggers, i.e.
+      // bounded by simultaneously unanswered questions.
+      //
+      // `endWait` gates it, so a trigger the run's own `finally` un-parked in
+      // the same moment is claimed once. Making it due is a second write and
+      // only happens for the winner.
+      try {
+        for (const parked of taskManager.getWaitingTriggers()) {
+          const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(parked.id);
+          if (!answered) continue;
+          if (taskManager.endWait(parked.id, 'open')) {
+            this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+            process.stderr.write(
+              `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
+            );
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] answer re-arm failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
       //
       // Fenced off from the dispatch below. Collecting abandoned waits is
       // housekeeping; firing due triggers is the loop's job. A store error here
@@ -619,8 +650,26 @@ export class WorkerLoop {
 
   /** Execute a standard or scheduled task via headless Session. */
   private async executeStandard(task: TriggerRecord): Promise<void> {
+    // §0 A10 — is this run happening BECAUSE a question was answered?
+    //
+    // The answered row carries both halves the new run needs: the thread the
+    // question was asked in, and the question and answer themselves. Reusing the
+    // thread alone would not be enough, and that is a measured claim rather than
+    // a cautious one: answering updates a `pending_prompts` row and nothing else
+    // — `prompt-store.ts` writes to that table and to no other — so the reply
+    // reaches a thread only through the run that was waiting for it, and after a
+    // restart there is no such run. A new turn in the old thread would see its
+    // own unanswered question.
+    //
+    // Not a resumption. Nothing about the paused run is restored; the answer is
+    // read out of a row and handed to a fresh turn as input, which is why §0 E3's
+    // objection — that "continuing" would promise a state restoration that does
+    // not exist — does not apply to it.
+    const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
     const session = this.engine.createSession({
       autonomy: 'autonomous',
+      // Same thread, so the run's own history shows the exchange it continues.
+      ...(answered ? { sessionId: answered.session_id } : {}),
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       // Per-run cost ceiling: without this an autonomous background task could
       // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
@@ -631,6 +680,19 @@ export class WorkerLoop {
     // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
     const workerProfile = this.engine.getUserConfig().worker_profile;
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
+
+    // §0 A7 — did every question this run asked actually get an answer?
+    //
+    // `DISMISSED_ANSWER` is a RETURN VALUE, not an exception: an unanswered
+    // question hands the agent the string `'__dismissed__'` and it carries on
+    // reasoning as if that were a reply. Whatever it then produces was built on
+    // an answer nobody gave, and reporting that as `success` is the failure this
+    // whole arc started from — a trigger that says it did its job after asking
+    // something and hearing nothing.
+    //
+    // Set from every path that fabricates an answer, not just the expiry: an
+    // aborted wait and a missing prompt store produce the same fiction.
+    let questionWentUnanswered = false;
 
     // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
     // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
@@ -663,11 +725,12 @@ export class WorkerLoop {
       // Already cancelled: `waitForSettled` would settle 'aborted' at once, but
       // only AFTER this inserted a row and pushed a high-priority question at a
       // user whose task is gone. Refuse before either side effect.
-      if (active?.controller.signal.aborted === true) return DISMISSED_ANSWER;
+      if (active?.controller.signal.aborted === true) { questionWentUnanswered = true; return DISMISSED_ANSWER; }
       if (!promptStore) {
         // No store: no durable park and no way to answer. The canonical marker
         // is the honest outcome — hanging would be worse, and a prose sentence
         // would land in the slot an answer occupies.
+        questionWentUnanswered = true;
         return DISMISSED_ANSWER;
       }
       const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id);
@@ -752,8 +815,30 @@ export class WorkerLoop {
             `[lynox:worker] prompt drain failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
           );
         }
+        questionWentUnanswered = true;
         return DISMISSED_ANSWER;
       } finally {
+        // Detach the prompt from the trigger — once, here, for every way this
+        // wait can end.
+        //
+        // Put on each consuming branch first, and that was the wrong shape: an
+        // obligation every exit has to remember is one some exit will not. The
+        // answered branch got it, and then the review found the abort branch,
+        // where a reply committing concurrently with an abort leaves the row
+        // `answered` with the pointer live and `expirePrompt` a silent no-op.
+        // Enumerating exits does not end; owning the row does.
+        //
+        // Reaching this line at all means the wait is over IN THIS PROCESS, so a
+        // later one must not re-arm on it. A question that outlives the process
+        // never gets here — that path is a crash, which is exactly the case §0 A2
+        // keeps the pointer for.
+        try {
+          promptStore.releaseTrigger(promptId);
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] prompt detach failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
         // §0 A6 — END the wait, however it ended: answered, expired, aborted, or
         // thrown. Conditional on the row still being `waiting`, so this and the
         // expiry sweep can both fire for the same trigger and only one takes.
@@ -785,9 +870,47 @@ export class WorkerLoop {
       }
     };
 
-    const prompt = task.description && task.description.trim() !== task.title.trim()
+    const base = task.description && task.description.trim() !== task.title.trim()
       ? `Task: ${task.title}\n\n${task.description}`
       : `Task: ${task.title}`;
+    // §0 A10: the answer goes into the INPUT, named alongside the question it
+    // answers. Without this the re-armed run asks the same thing again and parks
+    // again — a loop on the wait's own period, which is a worse outcome than the
+    // single fabricated answer this arc set out to remove.
+    //
+    // The pointer is released as soon as it is read, not after the run finishes.
+    // A crash between the two loses the answer and the trigger simply runs on
+    // schedule next time; releasing only on success would leave the pointer live
+    // after a crash, and every later scheduled run would be handed the same stale
+    // reply forever. Losing it once beats carrying it always.
+    let prompt = base;
+    if (answered) {
+      // MASKED and DELIMITED, both for the same reason the live path does it.
+      //
+      // On the in-process path this exact answer comes back as a `tool_result`
+      // block — structurally marked as data — and `agent.ts` runs it through
+      // `maskSecretPatterns` first, because an `ask_user` reply is where someone
+      // pastes an API key. Here the same text becomes part of the opening task
+      // prose of an autonomous turn, which is the strongest position in the
+      // prompt, so it needs at least what the weaker position already got.
+      // Without the mask a secret-shaped answer reaches the model where the live
+      // path would have caught it; without the fences a crafted answer can open
+      // what reads as a second operator-authored task.
+      // `maskAll` — known VALUES and known SHAPES in ONE pass over the original.
+      // Shapes alone was the first attempt and left a stored secret with no
+      // recognisable shape (a generic token, a database URL, a password) in
+      // cleartext. Not the sequence `agent.ts` uses either: `secret-store.ts`
+      // documents that running the two maskers in series is unsafe in BOTH
+      // orders, because each pass rewrites what the next one reads. `maskAll`
+      // reads the original twice and redacts the union once.
+      const store = this.engine.getSecretStore();
+      const mask = (t: string): string => store ? store.maskAll(t) : maskSecretPatterns(t);
+      const q = mask(answered.question);
+      const a = mask(answered.answer ?? '');
+      prompt = `${base}\n\nA question you asked earlier has been answered.\n`
+        + `<asked>\n${q}\n</asked>\n<answer>\n${a}\n</answer>`;
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+    }
 
     // Attribute the run to its trigger source (P1, DEF-0097) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
@@ -798,7 +921,12 @@ export class WorkerLoop {
 
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      taskManager.recordTaskRun(task.id, truncatedResult, 'success');
+      // §0 A7. `failed` rather than `timeout`: the run itself did not run out of
+      // time, it ran to completion on an answer that was never given. The two
+      // paths that can end this run without one — the expiry sweep and this —
+      // now agree on the status instead of overwriting each other with different
+      // verdicts.
+      taskManager.recordTaskRun(task.id, truncatedResult, questionWentUnanswered ? 'failed' : 'success');
     }
 
     if (this.notificationRouter.hasChannels()) {

@@ -675,6 +675,22 @@ export class TriggerStore {
   }
 
   /**
+   * Every PARKED trigger, regardless of deadline (§0 A10). The expiry sweep asks
+   * "whose wait ran out"; this asks "who is waiting at all", because an ANSWER
+   * can end a wait long before its deadline and the tick has to notice.
+   *
+   * Bounded by the number of simultaneously unanswered questions, which is what
+   * makes a per-row prompt lookup by the caller affordable — the two tables are
+   * in different SQLite files, so there is no join to do it in one query.
+   */
+  getWaiting(): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS} FROM triggers WHERE status = ? ORDER BY updated_at ASC`,
+    ).all(WAITING) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
    * The other half of the partition {@link getDue} opens (§0 E5/A12): every PARKED
    * trigger whose wait has run out. After the wait gate above, `getDue` is blind to
    * a waiting trigger — so without this query no loop in the engine would ever see
