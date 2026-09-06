@@ -792,6 +792,107 @@ describe('GoogleAuth', () => {
     });
   });
 
+  /**
+   * §3.10's hook, driven through the REAL credential.
+   *
+   * ⚠ The boot test proves the engine HANDS IN a hook. That is not the same
+   * claim, and the difference is measurable: with only the boot test, deleting
+   * the `_announceTokenChange` call from either funnel survived every suite —
+   * the engine test replaces `createGoogleAuth` with a mock and then calls the
+   * captured hook itself, so the credential never fires it. Handed in ≠ called.
+   */
+  describe('onTokenChange — the credential announces its own writes', () => {
+    function vaultStub() {
+      const store = new Map<string, string>();
+      return {
+        store,
+        get: vi.fn((key: string) => store.get(key) ?? null),
+        set: vi.fn((key: string, value: string) => { store.set(key, value); }),
+        delete: vi.fn((key: string) => store.delete(key)),
+      };
+    }
+    type Change = { reason: string; tokenData: { scopes: readonly string[]; email?: string | undefined } | null };
+
+    it('fires `grant` on a claim, with the scopes and the address', async () => {
+      const seen: Change[] = [];
+      const vault = vaultStub();
+      const a = new GoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => { seen.push(e as Change); },
+      });
+      await a.setTokens({
+        access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000,
+        scopes: ['https://www.googleapis.com/auth/calendar.events'], email: 'a@b.c',
+      });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.reason).toBe('grant');
+      expect(seen[0]?.tokenData?.email).toBe('a@b.c');
+      expect(seen[0]?.tokenData?.scopes).toEqual(['https://www.googleapis.com/auth/calendar.events']);
+      // The vault write happened too — the announcement is a mirror of a real
+      // write, not a substitute for one.
+      expect(vault.store.has('GOOGLE_OAUTH_TOKENS')).toBe(true);
+    });
+
+    it('fires `disconnect` with a null payload, AFTER the vault delete', async () => {
+      const seen: Change[] = [];
+      const vault = vaultStub();
+      const a = new GoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => {
+          seen.push(e as Change);
+          // Observed from inside the hook: the material is already gone when
+          // the mirror is told. A consumer that re-reads the vault here must
+          // not find a token this event says is removed.
+          expect(vault.store.has('GOOGLE_OAUTH_TOKENS')).toBe(false);
+        },
+      });
+      await a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] });
+      seen.length = 0;
+      a.disconnect();
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.reason).toBe('disconnect');
+      expect(seen[0]?.tokenData).toBeNull();
+    });
+
+    it('a throwing hook does not fail the token write', async () => {
+      const vault = vaultStub();
+      const a = new GoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: () => { throw new Error('mirror is down'); },
+      });
+      // Row = metadata, vault = material. Failing a consent that Google already
+      // granted because a bookkeeping row could not be written trades the one
+      // for the other.
+      await expect(a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] }))
+        .resolves.toBeUndefined();
+      expect(vault.store.has('GOOGLE_OAUTH_TOKENS')).toBe(true);
+      expect(a.isAuthenticated()).toBe(true);
+    });
+
+    it('is forwarded by `createGoogleAuth`, not dropped on the way through', async () => {
+      // The factory used to name every option by hand. A field omitted there is
+      // silent: the credential builds, the hook never arrives, and the boot
+      // test still passes because it inspects the options it PASSED IN.
+      const { createGoogleAuth } = await import('./index.js');
+      const seen: Change[] = [];
+      const vault = vaultStub();
+      const a = createGoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => { seen.push(e as Change); },
+      });
+      await a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] });
+      expect(seen.map((e) => e.reason)).toEqual(['grant']);
+    });
+
+    it('says nothing when no hook was given', async () => {
+      // The control: a credential built without one must not throw on write.
+      const vault = vaultStub();
+      const a = new GoogleAuth({ vault: vault as unknown as import('../../core/secret-vault.js').SecretVault });
+      await expect(a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] }))
+        .resolves.toBeUndefined();
+    });
+  });
+
   describe('SCOPES', () => {
     it('exports all scope constants', () => {
       expect(SCOPES.GMAIL_READONLY).toBe('https://www.googleapis.com/auth/gmail.readonly');
