@@ -173,11 +173,20 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // failed skipped it — leaving a live handle for the NEXT test's teardown to
     // close under, which is the exact hazard this block exists to prevent, just
     // moved onto an unrelated test.
+    // All three lists are SNAPSHOTTED before the wait, not spliced inside the
+    // `finally`. vitest's hook timeout does not cancel the hook body: on a hang
+    // it fails the test and moves on while this continues as a zombie, and a
+    // zombie that spliced the shared arrays later would close the NEXT test's
+    // freshly-registered handles. Taking the snapshot up front means it can only
+    // ever clean up its own.
+    const runs = inFlight.splice(0);
+    const toClose = closers.splice(0);
+    const toRemove = tmpDirs.splice(0);
     try {
-      await Promise.all(inFlight.splice(0));
+      await Promise.all(runs);
     } finally {
-      for (const c of closers.splice(0)) c();
-      for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+      for (const c of toClose) c();
+      for (const dir of toRemove) rmSync(dir, { recursive: true, force: true });
     }
   });
 
