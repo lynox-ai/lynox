@@ -3,6 +3,7 @@ import {
 	grantedServices,
 	scopeMismatch,
 	toggleForServerMode,
+	driveIsAppFilesOnly,
 } from './google-scope-labels.js';
 
 /** The set the managed broker actually asks for (PRD Stage 1 §3.1). */
@@ -56,6 +57,35 @@ describe('grantedServices — the card must not over-claim', () => {
 	it('matches scopes exactly, so a look-alike string grants nothing', () => {
 		expect(grantedServices(['https://evil.example.org/auth/drive'])).toEqual([]);
 		expect(grantedServices(['https://www.googleapis.com/auth/drive.appdata'])).toEqual([]);
+	});
+});
+
+describe('driveIsAppFilesOnly — three conditions, each one wrong in a draft', () => {
+	const FILE = 'https://www.googleapis.com/auth/drive.file';
+	const FULL = 'https://www.googleapis.com/auth/drive';
+	const READ = 'https://www.googleapis.com/auth/drive.readonly';
+
+	it('is true for exactly the Stage-1 Drive grant', () => {
+		expect(driveIsAppFilesOnly(STAGE_1_GRANT)).toBe(true);
+		expect(driveIsAppFilesOnly([FILE])).toBe(true);
+	});
+
+	it('is FALSE with no Drive access at all', () => {
+		// Dropping the `drive.file` requirement survived every other test: the
+		// note then appears on a connection that has no Drive to qualify.
+		expect(driveIsAppFilesOnly([])).toBe(false);
+		expect(driveIsAppFilesOnly(['https://www.googleapis.com/auth/calendar.events'])).toBe(false);
+	});
+
+	it('is FALSE when the grant really does reach the whole Drive', () => {
+		// Any of the three is enough to make the note untrue. `drive.metadata.readonly`
+		// is the one lynox never REQUESTS — it is only accepted — and it still sees
+		// every file's metadata, so a "only files lynox created" note would be false.
+		const META = 'https://www.googleapis.com/auth/drive.metadata.readonly';
+		expect(driveIsAppFilesOnly([FILE, FULL])).toBe(false);
+		expect(driveIsAppFilesOnly([FILE, READ])).toBe(false);
+		expect(driveIsAppFilesOnly([FILE, META])).toBe(false);
+		expect(driveIsAppFilesOnly([FULL])).toBe(false);
 	});
 });
 

@@ -206,7 +206,9 @@ describe('the broker set: every action either works or refuses with a remedy', (
 
     // …and it must NOT appear on a grant that really does reach the whole
     // Drive, or the sentence becomes noise the model learns to ignore.
-    for (const wide of [SCOPES.DRIVE, SCOPES.DRIVE_READONLY]) {
+    // `drive.metadata.readonly` is accepted but never requested, and it sees
+    // every file's metadata — the note would be false on such a grant.
+    for (const wide of [SCOPES.DRIVE, SCOPES.DRIVE_READONLY, SCOPES.DRIVE_METADATA_READONLY]) {
       mockFetch.mockReset();
       mockFetch.mockResolvedValue({ ok: true, json: async () => ({ files: [] }) });
       const r = await (createDriveTool(() => auth([wide])) as ToolEntry)

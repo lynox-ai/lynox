@@ -49,7 +49,7 @@ export interface DeviceFlow {
 }
 
 export type { ScopeMode, ServerScopeMode, ServiceGrant } from './google-scope-labels.js';
-export { grantedServices } from './google-scope-labels.js';
+export { grantedServices, driveIsAppFilesOnly } from './google-scope-labels.js';
 
 // ---------------------------------------------------------------------------
 // State

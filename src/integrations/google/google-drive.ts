@@ -259,7 +259,12 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
  * by the model, not by the person who could act on it. The card carries it.
  */
 function withScopeNote(auth: GoogleAuth, result: string): string {
-  if (auth.hasScope(SCOPES.DRIVE) || auth.hasScope(SCOPES.DRIVE_READONLY)) return result;
+  // Every scope that reaches beyond what this app created. `drive.metadata.readonly`
+  // belongs here even though lynox never REQUESTS it: it is accepted, it sees
+  // every file's metadata, and a "only files lynox created" note on such a grant
+  // would be false.
+  if (auth.hasScope(SCOPES.DRIVE) || auth.hasScope(SCOPES.DRIVE_READONLY)
+    || auth.hasScope(SCOPES.DRIVE_METADATA_READONLY)) return result;
   if (result.startsWith('Error:') || result.startsWith('Drive error:')) return result;
   return `${result}\n\n(Searched only files lynox created — this connection does not have access to the rest of your Drive.)`;
 }

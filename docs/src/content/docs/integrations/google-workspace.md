@@ -188,8 +188,9 @@ IMAP as well, that is the switch to be aware of.
 Switching levels requires re-authorising with Google. A connection made before these two levels existed
 keeps working and shows as *legacy* — nothing changes until you pick a level.
 
-For advanced use, scopes can be set directly. The union of the sets above is the accepted list; anything
-outside it is rejected:
+For advanced use, scopes can be set directly. The **accepted** list is wider than the two levels above —
+it also holds scopes lynox no longer asks for, so a connection made under an older set keeps working —
+but anything outside it is rejected:
 
 ```json
 {
@@ -223,21 +224,29 @@ Standard grants no Sheets access. A read on a Standard connection is refused nam
 - *"Add a row to my expenses tracker"*
 - *"Compare last month's numbers with this month"*
 
-### Google Drive
+### Google Drive — files lynox created, unless you go Full
 
-- *"Find the proposal document from last week"*
-- *"Summarize the PDF in my Drive called [name]"*
+Standard grants `drive.file`, which reaches only what lynox itself created or you explicitly picked.
+Searches say so in their result rather than reporting an empty Drive.
 
-### Google Calendar
+- *"Find the proposal document from last week"* (only if lynox created it)
+- *"Summarize the PDF in my Drive called [name]"* (same)
+
+### Google Calendar — in the Standard set
+
+Creating, moving and deleting events needs **no** upgrade: `calendar.events` is part of Standard. Each
+change is confirmed before it happens.
 
 - *"What meetings do I have tomorrow?"*
-- *"Schedule a call with [name] next Tuesday at 10am"* (requires write scope)
-- *"Block 2 hours for deep work this afternoon"* (requires write scope)
+- *"Schedule a call with [name] next Tuesday at 10am"*
+- *"Block 2 hours for deep work this afternoon"*
 
-### Google Docs
+### Google Docs — only on a **Full** connection
+
+Standard grants no Docs access at all, reading included.
 
 - *"Summarize the meeting notes in [document]"*
-- *"Update the project status section"* (requires write scope)
+- *"Update the project status section"*
 
 ## Token Storage
 

@@ -29,6 +29,7 @@
 		isScopeMismatch,
 		getServerScopeMode,
 		grantedServices,
+		driveIsAppFilesOnly,
 		loadGoogleStatus,
 		saveGoogleCredentials,
 		startGoogleAuth,
@@ -62,16 +63,12 @@
 	}
 
 	/**
-	 * Drive is granted, but only for the files lynox itself creates.
-	 * `drive.file` is a WRITE scope that reaches nothing else, so a card that
-	 * says "Drive" without this reads as access to the whole Drive.
+	 * `drive.file` is a WRITE scope that reaches nothing but what lynox created,
+	 * so a card that says "Drive" without this reads as access to the whole one.
+	 * The rule lives in the store, where it can be tested — an inline `$derived`
+	 * is a rule nobody can drive.
 	 */
-	const driveIsAppFilesOnly = $derived.by(() => {
-		const scopes = getGoogleStatus()?.scopes ?? [];
-		return scopes.includes('https://www.googleapis.com/auth/drive.file')
-			&& !scopes.includes('https://www.googleapis.com/auth/drive')
-			&& !scopes.includes('https://www.googleapis.com/auth/drive.readonly');
-	});
+	const showDriveAppFilesNote = $derived(driveIsAppFilesOnly(getGoogleStatus()?.scopes ?? []));
 
 	let showAdvancedCredentials = $state(false);
 
@@ -309,7 +306,7 @@
 					</button>
 					<p class="text-xs text-warning">{t('integrations.scope_change_hint')}</p>
 				{/if}
-				{#if driveIsAppFilesOnly}
+				{#if showDriveAppFilesNote}
 					<!-- The remedy for a narrow Drive grant lives on the CARD, not in the
 					     tool string: it differs per tenant, and a tool string is read by
 					     the model rather than by the person who can act on it. Branched on
