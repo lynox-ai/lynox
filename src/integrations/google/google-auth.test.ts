@@ -836,14 +836,18 @@ describe('GoogleAuth', () => {
     it('fires `disconnect` with a null payload, AFTER the vault delete', async () => {
       const seen: Change[] = [];
       const vault = vaultStub();
+      // ⚠ RECORDED inside the hook, asserted OUTSIDE it. `_announceTokenChange`
+      // swallows what the hook throws — by design, so a metadata mirror cannot
+      // fail a token write — which means an `expect` in here is not an
+      // assertion at all: it is caught and logged. Measured: with the assert
+      // inline, moving the announcement in front of the vault delete SURVIVED
+      // the whole suite.
+      let tokenStillInVaultAtAnnounce: boolean | undefined;
       const a = new GoogleAuth({
         vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
         onTokenChange: (e) => {
           seen.push(e as Change);
-          // Observed from inside the hook: the material is already gone when
-          // the mirror is told. A consumer that re-reads the vault here must
-          // not find a token this event says is removed.
-          expect(vault.store.has('GOOGLE_OAUTH_TOKENS')).toBe(false);
+          tokenStillInVaultAtAnnounce = vault.store.has('GOOGLE_OAUTH_TOKENS');
         },
       });
       await a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] });
@@ -852,6 +856,10 @@ describe('GoogleAuth', () => {
       expect(seen).toHaveLength(1);
       expect(seen[0]?.reason).toBe('disconnect');
       expect(seen[0]?.tokenData).toBeNull();
+      // The material is already gone when the mirror is told, so a consumer
+      // that re-reads the vault from the hook cannot find a token this event
+      // says is removed.
+      expect(tokenStillInVaultAtAnnounce, 'announced before the vault delete').toBe(false);
     });
 
     it('a throwing hook does not fail the token write', async () => {
