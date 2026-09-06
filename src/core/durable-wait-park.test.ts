@@ -912,20 +912,33 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(secondPrompt).toContain('Which password?');
   });
 
-  it('a PENDING question is never detached, even by the unconditional teardown', async () => {
-    // The `finally` detaches on every exit, including the ones where settling
-    // the row failed — the abort path swallows a throw from `expirePrompt` and
-    // names SQLITE_BUSY as a reason. Detaching there would orphan a question that
-    // is still pending and still answerable: no run could ever be handed its
-    // answer, which is precisely what §0 A2 keeps the pointer for.
+  it('a question whose settle FAILED keeps its pointer through the teardown', async () => {
+    // Driven, not restated. Calling `releaseTrigger` directly and asserting
+    // `false` is satisfied by a stub that always returns false; what has to hold
+    // is that the real abort path cannot orphan a row.
+    //
+    // The scenario: `stop()` aborts the wait, the closure's abort branch drains
+    // its row with `expirePrompt` — which throws here, exactly as the swallowed
+    // catch there anticipates (it names SQLITE_BUSY and schema drift) — and then
+    // the `finally` runs its unconditional detach. The row is still `pending` and
+    // still answerable, so it must keep its pointer or no run can ever be handed
+    // its answer, which is what §0 A2 keeps the pointer for.
     const h = makeHarness();
     await h.parked;
     const promptId = h.promptIdOf()!;
     expect(h.prompts.getById(promptId)?.status).toBe('pending');   // fixture guard
+    const settleFails = vi.spyOn(h.prompts, 'expirePrompt').mockImplementation(() => {
+      throw new Error('database is locked');
+    });
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
-    expect(h.prompts.releaseTrigger(promptId)).toBe(false);
+    h.loop.stop();
+    await waitUntil('the aborted run to finish', () => h.dispatches() > 0 && h.history.getTrigger('trg-1')?.status !== 'waiting');
 
+    expect(h.prompts.getById(promptId)?.status, 'the settle really did fail').toBe('pending');
     expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    settleFails.mockRestore();
+    stderr.mockRestore();
   });
 
   // ── Auflage 1: recurring is OUT of wave 1, and the test pins today's shape ──
