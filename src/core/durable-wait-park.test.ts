@@ -157,14 +157,23 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // still be inside `recordTaskRun` when a test body ends; closing the sqlite
     // handle under it produces an unhandled rejection that belongs to no test
     // and shows up as a non-zero exit with every test reported green.
+    // The timeout resolves to a SENTINEL, not to an empty list. Returning `[]`
+    // made the assertion below pass trivially in exactly the case it exists for:
+    // a run still in flight past the budget: `[].filter(...)` is empty, the
+    // expectation holds, and the handles then close under the run anyway. The
+    // timeout is the finding, so it has to be able to fail.
+    const TIMED_OUT = Symbol('drain-timeout');
     const drained = await Promise.race([
       Promise.allSettled(inFlight.splice(0)),
-      new Promise<PromiseSettledResult<unknown>[]>(r => setTimeout(() => r([]), 3000)),
+      new Promise<typeof TIMED_OUT>(r => setTimeout(() => r(TIMED_OUT), 10_000)),
     ]);
+    expect(drained, 'a dispatched run had not finished 10s after the test body — the '
+      + 'sqlite handles are about to close under it').not.toBe(TIMED_OUT);
     // `allSettled` discards outcomes, so an unguarded drain turns a genuine
     // failure inside a dispatched run into a green suite. The drain runs BEFORE
     // the handles close, so a rejection here is a real one, not teardown noise.
-    const rejected = drained.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    const rejected = (drained as PromiseSettledResult<unknown>[])
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     expect(rejected.map(r => String(r.reason))).toEqual([]);
     for (const c of closers.splice(0)) c();
     for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -458,11 +467,15 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.parked;
     h.history.updateTrigger('trg-1', { waitingUntil: '2020-01-01T00:00:00.000Z' });
 
+    // Both spies DELEGATE. A recording no-op would have left the prompt pending,
+    // so the run never resolves and hangs to the end of the suite — invisible
+    // until the teardown drain started asserting that runs actually finish.
     const calls: string[] = [];
+    const realSettle = PromptStore.prototype.expirePendingForTrigger;
     const settle = vi.spyOn(h.prompts, 'expirePendingForTrigger');
     settle.mockImplementation((id: string) => {
       calls.push('settle');
-      return settle.getMockImplementation() === undefined ? 0 : 0;
+      return realSettle.call(h.prompts, id);
     });
     const end = vi.spyOn(h.manager, 'endWait');
     const realEnd = TaskManager.prototype.endWait;
