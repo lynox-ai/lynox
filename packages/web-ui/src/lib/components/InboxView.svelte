@@ -414,7 +414,12 @@
 	  full-width triage pane (one-mail-at-a-time). Toggle via the rail button
 	  or `t` shortcut. Esc exits.
 -->
-<div class="flex h-full" role="region" aria-label={t('inbox.title')}>
+<!-- `data-owns-scroll`: this page scrolls itself (list pane, reading pane and
+	triage pane each have their own overflow-y-auto) and pins interactive
+	chrome to the bottom edge (the triage footer). AppShell's page slot must
+	therefore not be a scroll container here — same iOS displacement class as
+	the chat composer; see [data-app-shell-slot]:has(…) in app.css. -->
+<div data-owns-scroll class="flex h-full" role="region" aria-label={t('inbox.title')}>
 	<InboxZoneRail
 		{zone}
 		onZoneChange={(z) => (zone = z)}
