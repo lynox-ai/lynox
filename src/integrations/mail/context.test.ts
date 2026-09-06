@@ -1111,6 +1111,28 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     } finally { await restarted.close(); }
   });
 
+  it('names the account in the log without printing the address', async () => {
+    // This is the only place in the engine where a real mailbox address could
+    // reach stdout, and a container log on a managed instance is not where it
+    // belongs. The line still has to identify WHICH account, or it is useless
+    // to the operator it is written for.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      const lines = warn.mock.calls.map(a => String(a[0]));
+      const mine = lines.filter(l => l.includes('[lynox:mail]'));
+      expect(mine, 'the skip must say something at all').toHaveLength(1);
+      expect(mine[0]).toContain('goog');
+      expect(mine[0], 'the address must not reach the log').not.toContain(GOOGLE_ROW.address);
+      expect(mine[0]).not.toContain('@');
+    } finally {
+      warn.mockRestore();
+      await c.close();
+    }
+  });
+
   it('tells the card WHY the account is there and does nothing', async () => {
     stateDb.upsertAccount(GOOGLE_ROW);
     const c = ctxWith(STAGE_1);
