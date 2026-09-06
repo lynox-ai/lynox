@@ -57,7 +57,7 @@ describe('fetchIcsFeed', () => {
     // calendar; the surface argument is the only thing that decides it, and nothing else here
     // would notice if it changed.
     await fetchIcsFeed(SECRET_URL);
-    expect(fetchWithValidatedRedirects.mock.calls[0]?.[2]).toBe('discovery');
+    expect(fetchWithValidatedRedirects.mock.calls[0]?.[2]).toEqual({ surface: 'discovery' });
   });
 
   it('reads at most MAX_ICS_BYTES', async () => {

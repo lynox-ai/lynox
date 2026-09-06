@@ -38,6 +38,7 @@ import {
 import type { MailStateDb, MailFollowup } from './state.js';
 import { createMailTools, InMemoryMailRegistry } from './tools/index.js';
 import { MailWatcher, type MailWatcherHandler } from './watch.js';
+import { googleFetch } from '../../core/connector-egress.js';
 
 export interface AddAccountInput {
   config: MailAccountConfig;
@@ -499,10 +500,10 @@ export class MailContext {
     if (!this.googleAuth) return null;
     try {
       const token = await this.googleAuth.getAccessToken();
-      const res = await globalThis.fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+      const res = await googleFetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(10_000),
-      });
+      }, this.googleAuth.hostPolicy);
       if (!res.ok) return null;
       const profile = await res.json() as { emailAddress?: string };
       return profile.emailAddress ?? null;

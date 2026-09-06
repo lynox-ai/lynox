@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Changed — BREAKING (operators): `network_policy` now covers Google
+
+- **A tenant on `network_policy = deny-all` loses their connected Google account,
+  including Gmail over OAuth.** Until now every authenticated Google Workspace
+  call — Drive, Sheets, Docs, Calendar, Gmail-over-OAuth, the token refresh, the
+  revoke, and the Drive backup upload — went out through a bare `fetch()` and
+  was invisible to `network_policy`. The setting's own documentation named
+  Google and the backup upload as *outside* its scope, so an operator who chose
+  `deny-all` had Google traffic leaving the box anyway and no way to see or stop
+  it. That is now closed: those calls ride a third egress surface (`connector`)
+  and obey the policy like every other one.
+
+  **This takes something away from a setting a customer chose deliberately, and
+  it is not visible in a diff** — hence a release note rather than a line in the
+  changelog's usual sense. What changes, per policy:
+
+  | `network_policy` | before | now |
+  |---|---|---|
+  | `allow-all` (default) | Google reachable | unchanged |
+  | `guarded` | Google reachable, unpoliced | Google reachable — admitted by its own fixed host set |
+  | `allow-list` | Google reachable, unpoliced | reachable **only** if you list the Google API hosts |
+  | `deny-all` | Google reachable, unpoliced | **blocked**, Gmail-over-OAuth included |
+
+  **If you are on `deny-all` and use Google:** switch to `guarded`, which admits
+  a connected integration to its own provider while still gating the surfaces a
+  prompt-injected agent can aim.
+
+  **On `allow-list`**, add `www.googleapis.com`, `sheets.googleapis.com`,
+  `docs.googleapis.com`, `gmail.googleapis.com` and `oauth2.googleapis.com` to
+  `network_allowed_hosts`.
+
+  ⚠ **On a lynox-hosted instance, add your control plane's hostname as well.**
+  `allow-list` is uniform across every egress surface by design — it consults
+  only your list, never an integration's own hosts — and a hosted instance
+  refreshes its Google token through the control plane, not through Google. List
+  the five Google hosts and nothing else and everything keeps working until the
+  access token expires, typically within the hour; after that the refresh is
+  refused and Google stops working with a network-policy error. The token itself
+  is not lost: a policy-blocked refresh fails before the response is read, so
+  nothing is classified as revoked.
+
+  A refresh blocked by policy fails *before* the response is read, so no token
+  is classified as revoked and nothing is deleted — a policy change cannot cost
+  you a grant.
+
 ### Changed — BREAKING (library consumers)
 - **`createGoogleTools` no longer builds the credential, and its signature changed.**
   It was `createGoogleTools(options) → { tools, auth }`; it is now

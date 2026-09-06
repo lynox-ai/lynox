@@ -594,25 +594,49 @@ export interface LynoxUserConfig {
   /** Block plain HTTP requests (except localhost). Default: false */
   enforce_https?: boolean | undefined;
   /**
-   * Outbound egress policy for the agent's GENERAL-PURPOSE network tools:
+   * Outbound egress policy for the agent's GENERAL-PURPOSE network tools —
    * `http_request`, the `api_setup` probe, and `web_research` (both the search
-   * query AND the page/content fetch). Default 'allow-all' = today's behaviour,
-   * unchanged. 'deny-all' = those tools cannot reach the network. 'allow-list' =
-   * they may reach ONLY the hosts in `network_allowed_hosts`.
+   * query AND the page/content fetch) — AND for the connected-integration
+   * surface: every authenticated Google Workspace call made on behalf of your
+   * grant, plus a managed instance's calls to its own control plane. Default
+   * 'allow-all' = today's behaviour, unchanged. 'deny-all' = none of them can
+   * reach the network. 'allow-list' = they may reach ONLY the hosts in
+   * `network_allowed_hosts`.
    *
    * 'guarded' = surface-aware lockdown: the full-control surfaces (`http_request`
    * any method, `api_setup fetch_token`) may reach ONLY baseline vetted hosts ∪
    * the `network_allowed_hosts` operator floor ∪ the hosts a connected api_profile
-   * was human-accepted for (`custom_endpoint_ack`), while the discovery surfaces
+   * was human-accepted for (`custom_endpoint_ack`); the discovery surfaces
    * (`web_research` read/search, `api_setup` bootstrap) stay open (still SSRF- and
-   * enforce_https-gated). Blocks credential-free active egress to off-baseline
-   * hosts a prompt-injected agent could steer, without breaking "connect any API".
+   * enforce_https-gated); and a connected integration reaches ONLY its own
+   * provider's fixed host set ∪ the operator floor — never the vetted baseline,
+   * which is a data-processing-agreement list, and never another integration's
+   * hosts. Blocks credential-free active egress to off-baseline hosts a
+   * prompt-injected agent could steer, without breaking "connect any API" and
+   * without taking away an integration the user connected themselves.
    *
-   * SCOPE — this is NOT a full process air-gap. It gates the agent-driven HTTP
-   * tool surface only. It does NOT gate: the LLM provider call (separate client),
-   * mail IMAP/SMTP, push notifications, Google Workspace, voice transcribe/TTS,
-   * backup upload, or error reporting — each is its own separately-configured
+   * SCOPE — this is NOT a full process air-gap, and the scope WIDENED: Google
+   * Workspace and the Drive backup upload used to be outside it and are now
+   * inside. It does NOT gate: the LLM provider call (separate client), push
+   * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
+   * anything a shell command starts — each is its own separately-configured
    * egress surface. A cross-integration air-gap is a separate control.
+   *
+   * ⚠ What that costs you if you have already set 'deny-all': a connected
+   * Google account stops working, INCLUDING Gmail read/send over OAuth, which
+   * an earlier version of this comment named as out of scope. Under
+   * 'deny-all' there is no lever — switch to 'guarded', which admits a
+   * connected integration to its own provider while still gating the surfaces a
+   * prompt-injected agent can aim.
+   *
+   * Under 'allow-list' you restore it by listing the Google API hosts — AND, on
+   * a lynox-hosted instance, the control plane's own hostname. 'allow-list' is
+   * uniform across surfaces: it consults only this list, never an integration's
+   * own host set. A hosted instance refreshes its Google token through the
+   * control plane rather than through Google, so a list carrying only the
+   * Google hosts works until the access token expires and then stops, with a
+   * network-policy error rather than an auth one. The refresh fails before the
+   * response is read, so the grant is not touched.
    *
    * The allow-list is AUTHORITATIVE: it is NOT auto-extended by configured API
    * profiles, because `api_setup` is agent-callable and auto-trusting profile

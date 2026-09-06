@@ -24,6 +24,12 @@
     "incremental": false
   },
   "include": ["tests/security", "tests/contract-env.test.ts",
+    // The pinned-fetch bridge, which adapts fetchPinned's transport back onto a
+    // `globalThis.fetch` stub for the suites whose subject moved to the
+    // connector surface. It calls into the network guard, so it has exactly the
+    // property this project exists for: a signature change there must fail at
+    // compile time rather than at runtime inside a catch.
+    "tests/helpers",
     // The probe-freshness pair, so `probe-freshness.d.mts` binds SOMEWHERE. Before this,
     // `tests/eval` was in no tsc project and the declaration was checked by nothing at all.
     //

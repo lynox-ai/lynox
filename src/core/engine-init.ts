@@ -89,12 +89,21 @@ export function configureBudgetAndRateLimits(
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
-  // Outbound egress policy for the agent's HTTP tool surface. Default
-  // 'allow-all' = unchanged behaviour. 'allow-list'/'deny-all' are opt-in
-  // operator/CP controls enforced in http.ts assertHostPolicy + the web-search
-  // egress gate (assertEgressAllowed) — covering http_request, api_setup, and
-  // web_research (query + content). Other egress surfaces (LLM, mail, push,
-  // backup, Google, voice) are out of scope — see the network_policy doc.
+  // Outbound egress policy. Default 'allow-all' = unchanged behaviour.
+  // 'allow-list'/'deny-all'/'guarded' are opt-in operator/CP controls enforced
+  // in the network-guard SSOT (assertHostPolicy), reached from http.ts, the
+  // web-search egress gate (assertEgressAllowed) and core/connector-egress.ts.
+  //
+  // ⚠ Scope WIDENED by PRD Stage 1 §3.8 — this sentence used to name Google and
+  // backup as out of scope and no longer can. Covered: http_request, api_setup,
+  // web_research (query + content), every authenticated Google Workspace call
+  // (incl. Gmail-over-OAuth and the Drive backup upload), and this instance's
+  // control-plane calls. Still out of scope: the LLM provider call, push
+  // notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, and
+  // anything a shell command starts. The same list is stated in
+  // network-guard.ts's deny-all case and in the `network_policy` doc comment.
+  // The three move together: whoever edits one and not the others leaves two
+  // statements behind that claim the opposite.
   const resolvedPolicy = userConfig.network_policy ?? 'allow-all';
   applyNetworkPolicy(
     toolContext,

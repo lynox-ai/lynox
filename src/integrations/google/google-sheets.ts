@@ -5,6 +5,7 @@ import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
+import { googleFetch } from '../../core/connector-egress.js';
 
 // === Types ===
 
@@ -52,7 +53,7 @@ const WRITE_ACTIONS = new Set(['write', 'append', 'create', 'format']);
 
 async function sheetsFetch(auth: GoogleAuth, url: string, options?: RequestInit): Promise<Response> {
   const token = await auth.getAccessToken();
-  const response = await fetch(url, {
+  const response = await googleFetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -60,7 +61,7 @@ async function sheetsFetch(auth: GoogleAuth, url: string, options?: RequestInit)
       ...options?.headers,
     },
     signal: options?.signal ?? AbortSignal.timeout(30_000),
-  });
+  }, auth.hostPolicy);
   return response;
 }
 

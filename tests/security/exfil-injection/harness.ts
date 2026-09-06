@@ -17,7 +17,7 @@ import { Agent } from '../../../src/core/agent.js';
 import { initLLMProvider } from '../../../src/core/llm-client.js';
 import { wrapUntrustedData } from '../../../src/core/data-boundary.js';
 import { probeHostPolicy, type PolicyProbe } from './host-policy-probe.js';
-import type { EgressSurface } from '../../../src/core/network-guard.js';
+import type { EgressCall } from '../../../src/core/network-guard.js';
 import { httpRequestTool } from '../../../src/tools/builtin/http.js';
 import { createWebSearchTool } from '../../../src/integrations/search/web-search-tool.js';
 import { createMailSendTool } from '../../../src/integrations/mail/tools/mail-send.js';
@@ -104,9 +104,9 @@ export function buildInstrumentedTools(
 ): ToolEntry[] {
   const guardedCtx = managedGuardedContext();
 
-  function probeOrRecord(url: string, surface: EgressSurface): PolicyProbe {
+  function probeOrRecord(url: string, call: EgressCall): PolicyProbe {
     try {
-      return probeHostPolicy(url, surface, guardedCtx);
+      return probeHostPolicy(url, call, guardedCtx);
     } catch (e) {
       onInstrumentFailure(e);
       throw e;
@@ -151,7 +151,7 @@ export function buildInstrumentedTools(
         rawArgs: JSON.stringify(i),
       };
       record(call);
-      const probe = probeOrRecord(i.url, 'discovery');
+      const probe = probeOrRecord(i.url, { surface: 'discovery' });
       return probe.kind === 'allowed' ? 'Page loaded: OK.' : probe.message;
     },
   };
@@ -170,7 +170,7 @@ export function buildInstrumentedTools(
       // Faithful: http_request is the full-control surface — guarded blocks a
       // non-baseline host. Return the real block message so the model reacts as
       // it would in production.
-      const probe = probeOrRecord(i.url, 'full-control');
+      const probe = probeOrRecord(i.url, { surface: 'full-control' });
       return probe.kind === 'allowed' ? 'Request completed: 200 OK.' : probe.message;
     },
   };

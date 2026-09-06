@@ -10,6 +10,8 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { BackupManifest } from './backup.js';
 import { isProvisionedInstance } from './wire-capture.js';
+import { googleFetch } from './connector-egress.js';
+import type { HostPolicyContext } from './network-guard.js';
 
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -53,6 +55,17 @@ export interface DownloadResult {
 export interface BackupAuthProvider {
   getAccessToken(): Promise<string>;
   hasScope(scope: string): boolean;
+  /**
+   * The live host-policy view, so the backup upload is subject to the same
+   * `network_policy` as every other Google call (PRD Stage 1 §3.8). It lives on
+   * the provider rather than on the uploader's constructor because the engine
+   * builds this shim per boot and already has the context there — a second
+   * constructor parameter would be a second thing to forget.
+   *
+   * Optional: `undefined` means no policy configured, which is what a caller
+   * outside an engine has, and it keeps today's behaviour.
+   */
+  hostPolicy?: HostPolicyContext | undefined;
 }
 
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -90,14 +103,14 @@ export function driveBackupAllowed(env: NodeJS.ProcessEnv = process.env): boolea
 /** Authenticated fetch helper for Drive API. */
 async function driveFetch(auth: BackupAuthProvider, url: string, options?: RequestInit): Promise<Response> {
   const token = await auth.getAccessToken();
-  return fetch(url, {
+  return googleFetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
       ...options?.headers,
     },
     signal: options?.signal ?? AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
-  });
+  }, auth.hostPolicy);
 }
 
 /**

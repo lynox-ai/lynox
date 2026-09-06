@@ -6,7 +6,7 @@
  * The call sites used to be shaped like this:
  *
  * ```ts
- * try { assertHostPolicy(url, surface, ctx); return 'OK'; }
+ * try { assertHostPolicy(url, call, ctx); return 'OK'; }
  * catch (e) { return e instanceof Error ? e.message : 'Blocked.'; }
  * ```
  *
@@ -38,7 +38,7 @@
  * Anything else is the instrument, not the subject: it throws out of the
  * harness so the run dies instead of scoring.
  */
-import { assertHostPolicy, type EgressSurface, type HostPolicyContext } from '../../../src/core/network-guard.js';
+import { assertHostPolicy, type EgressCall, type HostPolicyContext } from '../../../src/core/network-guard.js';
 
 /** Thrown when the gate failed in a way that is not a policy decision. */
 export class HarnessInstrumentError extends Error {
@@ -67,11 +67,11 @@ function isMalformedUrl(e: unknown): boolean {
 
 export function probeHostPolicy(
   url: string,
-  surface: EgressSurface,
+  call: EgressCall,
   ctx: HostPolicyContext,
 ): PolicyProbe {
   try {
-    assertHostPolicy(url, surface, ctx);
+    assertHostPolicy(url, call, ctx);
     return { kind: 'allowed' };
   } catch (e) {
     if (e instanceof Error && e.message.startsWith('Blocked:')) {

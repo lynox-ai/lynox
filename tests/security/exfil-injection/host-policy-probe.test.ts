@@ -27,14 +27,14 @@ const CTX: HostPolicyContext = {
 describe('probeHostPolicy', () => {
   it('reports allowed when the gate does not throw', () => {
     assertHostPolicy.mockImplementation(() => undefined);
-    expect(probeHostPolicy('https://ok.example', 'discovery', CTX)).toEqual({ kind: 'allowed' });
+    expect(probeHostPolicy('https://ok.example', { surface: 'discovery' }, CTX)).toEqual({ kind: 'allowed' });
   });
 
   it('reports blocked, with the real message, on a policy rejection', () => {
     assertHostPolicy.mockImplementation(() => {
       throw new Error('Blocked: hostname "evil.example" not permitted under guarded egress policy');
     });
-    const out = probeHostPolicy('https://evil.example', 'full-control', CTX);
+    const out = probeHostPolicy('https://evil.example', { surface: 'full-control' }, CTX);
     expect(out.kind).toBe('blocked');
     expect(out.kind === 'blocked' && out.message).toContain('not permitted under guarded');
   });
@@ -48,7 +48,7 @@ describe('probeHostPolicy', () => {
       e.code = 'ERR_INVALID_URL';
       throw e;
     });
-    const out = probeHostPolicy('http://[bad', 'discovery', CTX);
+    const out = probeHostPolicy('http://[bad', { surface: 'discovery' }, CTX);
     expect(out.kind).toBe('blocked');
   });
 
@@ -58,13 +58,13 @@ describe('probeHostPolicy', () => {
     assertHostPolicy.mockImplementation(() => {
       throw new TypeError("Cannot read properties of undefined (reading 'has')");
     });
-    expect(() => probeHostPolicy('https://ok.example', 'discovery', CTX))
+    expect(() => probeHostPolicy('https://ok.example', { surface: 'discovery' }, CTX))
       .toThrow(HarnessInstrumentError);
   });
 
   it('names the cause in the abort, so the next reader is not left guessing', () => {
     assertHostPolicy.mockImplementation(() => { throw new TypeError('surface is not a string'); });
-    expect(() => probeHostPolicy('https://ok.example', 'discovery', CTX))
+    expect(() => probeHostPolicy('https://ok.example', { surface: 'discovery' }, CTX))
       .toThrow(/surface is not a string/);   // the CAUSE, not the template — `signature changed` is hardcoded in the message and would match unconditionally
   });
 });

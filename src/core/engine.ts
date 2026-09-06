@@ -88,7 +88,7 @@ import {
   mediaProcessTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
-import { createToolContext } from './tool-context.js';
+import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
   configureBudgetAndRateLimits,
   generateInitBriefing,
@@ -1597,6 +1597,11 @@ export class Engine {
           serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
           vault: this.secretVault ?? undefined,
           scopes: this.userConfig.google_oauth_scopes,
+          // The live host-policy view (§3.8). `_toolContext` is created once in
+          // the constructor and mutated in place, so this reference keeps
+          // seeing the CURRENT policy — a snapshot would freeze the value this
+          // credential was built under.
+          hostPolicy: hostPolicyOf(this._toolContext),
         });
       } catch {
         // Google Workspace init failed — non-critical, continue without it
@@ -1986,6 +1991,9 @@ export class Engine {
               return auth.getAccessToken();
             },
             hasScope: (scope: string) => this._googleAuth?.hasScope(scope) ?? false,
+            // §3.8: the backup upload is a Google call like any other and is
+            // subject to `network_policy`. Same live context as the credential.
+            hostPolicy: hostPolicyOf(this._toolContext),
           }));
         }
       } catch {
@@ -2163,6 +2171,7 @@ export class Engine {
         serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
         vault: this.secretVault ?? undefined,
         scopes: this.userConfig.google_oauth_scopes,
+        hostPolicy: hostPolicyOf(this._toolContext),
       });
       return this._googleAuth;
     } catch {
@@ -2234,6 +2243,7 @@ export class Engine {
         serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
         vault: this.secretVault ?? undefined,
         scopes: this.userConfig.google_oauth_scopes,
+        hostPolicy: hostPolicyOf(this._toolContext),
       });
       return true;
     } catch {

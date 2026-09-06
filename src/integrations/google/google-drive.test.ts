@@ -1,7 +1,21 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { createDriveTool } from './google-drive.js';
 import type { IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+
+// §3.8 moved this module's calls onto the connector egress surface, so they now
+// go through the pinned transport instead of `globalThis.fetch`. The bridge
+// hands them back to the stub these tests already install; the policy gate is
+// NOT bypassed. See the helper for why this is adapted rather than rewritten.
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);

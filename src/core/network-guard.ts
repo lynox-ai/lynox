@@ -112,10 +112,13 @@ export function isPrivateIP(ip: string): boolean {
 //
 // The single implementation of the configurable outbound `network_policy` gate,
 // shared by every agent HTTP surface: `http_request` + `api_setup fetch_token`
-// (full-control) and `web_research` read/search + `api_setup` bootstrap
-// (discovery). Previously duplicated in tools/builtin/http.ts (applyHostPolicy)
-// and integrations/search/content-extractor.ts (assertEgressAllowed); they now
-// delegate here so a policy change is made in one place.
+// (full-control), `web_research` read/search + `api_setup` bootstrap
+// (discovery), and — since PRD Stage 1 §3.8 — every authenticated Google
+// Workspace call plus this instance's control-plane calls (connector, via
+// core/connector-egress.ts). Previously duplicated in tools/builtin/http.ts
+// (applyHostPolicy) and integrations/search/content-extractor.ts
+// (assertEgressAllowed); they now delegate here so a policy change is made in
+// one place.
 //
 // This is the USER-POLICY layer that runs BEFORE the SSRF / IP-pinning layer
 // (fetchPinned) — protocol + enforce_https + policy + a cheap private-IP
@@ -123,19 +126,49 @@ export function isPrivateIP(ip: string): boolean {
 // happen in fetchPinned() at connect time.
 
 /**
- * Which egress surface a request rides. Only the `guarded` policy branches on
- * it; `allow-all`/`allow-list`/`deny-all` treat every surface uniformly per
- * host. REQUIRED at every call site — no default is safe (default-open would
- * fail `http_request` open; default-gated would break `web_research`/search).
+ * Which egress surface a request rides, TOGETHER with the allowance that
+ * surface is entitled to. One discriminated argument, not a surface plus a
+ * loose extra parameter: an allowance that belongs to another surface then
+ * cannot be handed to this one — the mismatch is a compile error rather than a
+ * runtime property somebody has to remember to test.
  *
- *  - 'full-control'  — arbitrary-target, credential-capable: `http_request`
- *                      (any method) and `api_setup fetch_token`. Gated under
- *                      `guarded` (the prompt-injection egress surface).
+ * Only the `guarded` policy branches on the surface; `allow-all`/`allow-list`/
+ * `deny-all` treat every surface uniformly per host. REQUIRED at every call
+ * site — no default is safe (default-open would fail `http_request` open;
+ * default-gated would break `web_research`/search).
+ *
  *  - 'discovery'     — credential-free reads used to explore: `web_research`
  *                      read/search, `api_setup` bootstrap (openapi/docs GET).
  *                      Open under `guarded` (still SSRF/enforce_https gated).
+ *  - 'full-control'  — arbitrary-target, credential-capable: `http_request`
+ *                      (any method) and `api_setup fetch_token`. Gated under
+ *                      `guarded` (the prompt-injection egress surface).
+ *                      `ackHosts` is the union of connected api_profiles'
+ *                      human-accepted egress hosts (`custom_endpoint_ack`,
+ *                      incl. an OAuth token_url), computed in the handler
+ *                      where the ApiStore resolves.
+ *  - 'connector'     — a connected integration calling ITS OWN provider with
+ *                      the tenant's own grant: every Google Workspace API call
+ *                      (`googleFetch`) and the control-plane calls (`cpFetch`).
+ *                      Admitted under `guarded` by the call's OWN constant host
+ *                      set — never by the baseline, which is a DPA list that is
+ *                      also consulted for LLM endpoints, and never by the ack
+ *                      set, which belongs to full-control.
+ *
+ * Why a credentialed surface may pass under `guarded` at all: the axis
+ * `guarded` protects is *can a prompt-injected agent steer the target and spend
+ * a credential*. A connector call can do neither — the host set is a module
+ * constant, the URL is built by the integration, and the credential is the
+ * tenant's own grant. The residual risk is CONTENT (an injected agent calling
+ * `delete_event`), and that is held by the per-action confirm gate, not here.
  */
-export type EgressSurface = 'full-control' | 'discovery';
+export type EgressCall =
+  | { surface: 'discovery' }
+  | { surface: 'full-control'; ackHosts?: ReadonlySet<string> | undefined }
+  | { surface: 'connector'; hosts: ReadonlySet<string> };
+
+/** The surface names alone. Derived so the two can never drift apart. */
+export type EgressSurface = EgressCall['surface'];
 
 /**
  * Structural subset of ToolContext the host-policy gate reads. Kept structural
@@ -164,16 +197,14 @@ function hostInFloor(hostname: string, ctx: HostPolicyContext): boolean {
  * policy forbids it. Called BEFORE fetchPinned, and re-invoked per redirect hop
  * so an allowed host can't 302 to a forbidden one.
  *
- * `guardedAckHosts` is the union of connected api_profiles' human-accepted
- * egress hosts (`custom_endpoint_ack.hosts`, incl. an OAuth token_url). Computed
- * in the handler where the ApiStore resolves and passed in — only consulted for
- * a full-control surface under the `guarded` policy.
+ * The allowance rides inside `call`: `ackHosts` for full-control, the
+ * integration's own constant `hosts` for connector. Both are consulted only
+ * under `guarded`, and neither can reach the other's branch.
  */
 export function assertHostPolicy(
   rawUrl: string,
-  surface: EgressSurface,
+  call: EgressCall,
   ctx: HostPolicyContext | undefined,
-  guardedAckHosts?: ReadonlySet<string> | undefined,
 ): void {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -194,15 +225,35 @@ export function assertHostPolicy(
     case 'allow-all':
       break;
     case 'deny-all':
-      // Blocks EVERY surface this policy reaches, incl. discovery (web_research),
-      // unlike guarded. The wording says "for this tool" deliberately, and the
-      // reason is not cosmetic: `network_policy` gates `http_request`, `api_setup`
-      // and `web_research` — and nothing else (engine-init.ts states the scope).
-      // The engine's own outbound paths (LLM, mail, push, backup) and anything a
-      // shell command starts are outside it. The previous text, "air-gapped
-      // isolation", claimed the machine had no network; that is a stronger promise
-      // than the policy makes, and it is the phrase this string is graded against.
-      // `deny-all` is the mapping key in http.ts's friendlyBlockMessage.
+      // Blocks EVERY surface this policy reaches, incl. discovery (web_research)
+      // and connector, unlike guarded. The wording says "for this tool"
+      // deliberately, and the reason is not cosmetic: it is graded against the
+      // scope the policy actually has.
+      //
+      // ⚠ That scope CHANGED with PRD Stage 1 §3.8, and this comment moves with
+      // it. `network_policy` now gates `http_request`, `api_setup`,
+      // `web_research` AND the connector surface — every authenticated Google
+      // Workspace call plus this instance's control-plane calls
+      // (engine-init.ts and the `network_policy` doc in types/config.ts state
+      // the same scope; all three move together or two of them lie).
+      // Still outside it: the LLM provider call, push notifications, error
+      // reporting, IMAP/SMTP mail, voice transcribe/TTS, and anything a shell
+      // command starts. This list is
+      // stated identically in engine-init.ts and types/config.ts; a review found
+      // all three carrying DIFFERENT lists in the very change that introduced
+      // the sentence claiming they move together.
+      //
+      // The user-visible consequence is a release note, not a diff line: a
+      // tenant on `deny-all` newly loses Google — INCLUDING Gmail-over-OAuth,
+      // which the previous scope named as outside. A customer who chose
+      // `deny-all` deliberately cannot see that change in a diff, which is why
+      // it is written into CHANGELOG.md rather than left here.
+      //
+      // The text before "for this tool" was "air-gapped isolation", which
+      // claimed the machine had no network; that is a stronger promise than the
+      // policy makes even now, and it is the phrase this string is graded
+      // against. `deny-all` is the mapping key in http.ts's
+      // friendlyBlockMessage.
       throw new Error('Blocked: network access denied for this tool (network_policy=deny-all)');
     case 'allow-list':
       // Authoritative operator allow-list, uniform across surfaces.
@@ -211,20 +262,48 @@ export function assertHostPolicy(
       }
       break;
     case 'guarded': {
-      // Discovery surfaces stay open (still SSRF/enforce_https gated below).
-      if (surface === 'discovery') break;
-      // Full-control: reach only baseline ∪ operator floor ∪ human-accepted
-      // profile egress hosts. isGuardedBaselineHost is the EXACT vetted-host set
-      // (deliberately stricter than isAllowlistedEndpoint — it excludes the
-      // attacker-registerable *.openai.azure.com wildcard + LAN patterns, which
-      // must go through the floor/ack instead); the floor is the operator escape
-      // hatch; guardedAckHosts admits a connected API's accepted host(s).
-      const allowed =
-        isGuardedBaselineHost(rawUrl) ||
-        (ctx !== undefined && hostInFloor(hostname, ctx)) ||
-        (guardedAckHosts?.has(hostname) ?? false);
-      if (!allowed) {
-        throw new Error(`Blocked: hostname "${hostname}" not permitted under guarded egress policy`);
+      switch (call.surface) {
+        case 'discovery':
+          // Credential-free reads stay open (still SSRF/enforce_https gated below).
+          break;
+        case 'full-control': {
+          // Reach only baseline ∪ operator floor ∪ human-accepted profile egress
+          // hosts. isGuardedBaselineHost is the EXACT vetted-host set
+          // (deliberately stricter than isAllowlistedEndpoint — it excludes the
+          // attacker-registerable *.openai.azure.com wildcard + LAN patterns,
+          // which must go through the floor/ack instead); the floor is the
+          // operator escape hatch; ackHosts admits a connected API's accepted
+          // host(s).
+          const allowed =
+            isGuardedBaselineHost(rawUrl) ||
+            (ctx !== undefined && hostInFloor(hostname, ctx)) ||
+            (call.ackHosts?.has(hostname) ?? false);
+          if (!allowed) {
+            throw new Error(`Blocked: hostname "${hostname}" not permitted under guarded egress policy`);
+          }
+          break;
+        }
+        case 'connector': {
+          // Reach only the call's OWN constant host set ∪ the operator floor.
+          // The baseline is NOT consulted: it is a DPA list, also read for LLM
+          // endpoints, so widening it to admit Google would assert a contract
+          // nobody signed and would quietly permit a model endpoint there.
+          const allowed =
+            call.hosts.has(hostname) ||
+            (ctx !== undefined && hostInFloor(hostname, ctx));
+          if (!allowed) {
+            throw new Error(`Blocked: hostname "${hostname}" not permitted under guarded egress policy`);
+          }
+          break;
+        }
+        default: {
+          // Exhaustiveness over the SURFACE. Without it, a new surface value
+          // compiles clean and lands in no branch — which under `guarded` is a
+          // silent deny, the failure mode that is hardest to attribute.
+          const _exhaustiveSurface: never = call;
+          void _exhaustiveSurface;
+          throw new Error('Blocked: network access denied (unrecognised egress surface)');
+        }
       }
       break;
     }
