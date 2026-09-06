@@ -17,19 +17,27 @@
 import type { ClientPairSource } from '../../core/google-client-pair.js';
 
 /**
- * Whether this process is a tenant the control plane provisioned.
+ * Whether this process carries a control-plane instance id.
+ *
+ * ⚠ Deliberately NOT named `isProvisionedInstance` and deliberately not that
+ * function: `wire-capture.ts › isProvisionedInstance` reads THREE markers and
+ * fails closed on a partial env, which is right for a capture gate and wrong
+ * here. The broker flow needs the id ITSELF — `/oauth/google/start` takes an
+ * `instance_id` and the claim posts one — so a container carrying only
+ * `LYNOX_BILLING_TIER` is provisioned for that gate's purposes and useless for
+ * this one. Two questions, two predicates; one name for both would be the trap.
  *
  * ⚠ An EMPTY marker is not a marker. `LYNOX_MANAGED_INSTANCE_ID=''` is what a
  * half-written env file produces, and `!== undefined` would read it as "yes,
  * managed" — putting a self-host box with an empty variable into broker mode,
  * where `/auth` refuses and the card offers a button that goes nowhere.
  */
-export function isProvisionedInstance(): boolean {
+export function hasControlPlaneInstanceId(): boolean {
   const id = process.env['LYNOX_MANAGED_INSTANCE_ID'];
   return typeof id === 'string' && id.length > 0;
 }
 
 /** A provisioned instance on which no client pair resolves. */
 export function isBrokerMode(clientSource: ClientPairSource | null): boolean {
-  return isProvisionedInstance() && clientSource === null;
+  return hasControlPlaneInstanceId() && clientSource === null;
 }

@@ -69,7 +69,7 @@ import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoi
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
-import { isBrokerMode, isProvisionedInstance } from '../integrations/google/broker-mode.js';
+import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -1381,32 +1381,36 @@ export class LynoxHTTPApi {
    * configured. A card that offers a button which cannot work is worse than
    * one that says the connection is still being set up.
    */
-  private _brokerProbe: { at: number; value: boolean } | null = null;
+  private _brokerProbe: { at: number; inFlight: Promise<boolean> } | null = null;
   private static readonly BROKER_PROBE_TTL_MS = 60_000;
 
   private async _probeBrokerAvailable(engine: Engine): Promise<boolean> {
     const now = Date.now();
     const cached = this._brokerProbe;
-    if (cached && now - cached.at < LynoxHTTPApi.BROKER_PROBE_TTL_MS) return cached.value;
+    // The PROMISE is cached, not only the settled value. Caching the value
+    // alone leaves the cold-cache moment unprotected: a page load and the 3 s
+    // auth-poll, or two open tabs, each see an empty cache and each fetch —
+    // spending the rate-limit budget at exactly the busiest instant, which is
+    // the one this cache exists for.
+    if (cached && now - cached.at < LynoxHTTPApi.BROKER_PROBE_TTL_MS) return cached.inFlight;
 
+    const inFlight = this._runBrokerProbe(engine);
+    this._brokerProbe = { at: now, inFlight };
+    return inFlight;
+  }
+
+  private async _runBrokerProbe(engine: Engine): Promise<boolean> {
     const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
-    if (!controlPlaneUrl) {
-      this._brokerProbe = { at: now, value: false };
-      return false;
-    }
-    let value = false;
+    if (!controlPlaneUrl) return false;
     try {
       const probeRes = await cpFetch(controlPlaneUrl, '/oauth/google/status', { method: 'GET' },
         hostPolicyOf(engine.getToolContext()));
-      if (probeRes.ok) {
-        const data = (await probeRes.json()) as { configured?: unknown };
-        value = data.configured === true;
-      }
+      if (!probeRes.ok) return false;
+      const data = (await probeRes.json()) as { configured?: unknown };
+      return data.configured === true;
     } catch {
-      value = false;
+      return false;
     }
-    this._brokerProbe = { at: now, value };
-    return value;
   }
 
   private _signOAuthStateCookie(state: string, secret: string): string {
@@ -6727,7 +6731,7 @@ export class LynoxHTTPApi {
       // a managed tenant on its OWN client needs this answer too, because the
       // switch-back confirm (D12) destroys that client pair and the broker is
       // what it lands on.
-      const brokerAvailable = isProvisionedInstance()
+      const brokerAvailable = hasControlPlaneInstanceId()
         ? await this._probeBrokerAvailable(engine)
         : false;
 

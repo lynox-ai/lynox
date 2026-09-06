@@ -284,7 +284,21 @@ export class Engine {
     return this._googleClientSource;
   }
 
-  /** True when the resolved pair is lynox's shared broker client, not the tenant's own. */
+  /**
+   * True when an ENV-supplied pair sits on a provisioned instance.
+   *
+   * ⚠ It no longer answers "is this tenant on the shared broker", which is
+   * what it used to be called and used for. PRD Stage 1 §3.2 decided a
+   * brokered tenant holds NO pair at all, so this predicate is false exactly
+   * where that question is asked. The live one is
+   * `integrations/google/broker-mode.ts › isBrokerMode`.
+   *
+   * ⚠ And it has no production caller since W3 replaced the `managed_broker`
+   * field's source. It stays because removing a public Engine method and
+   * re-cutting the six assertions in `engine-client-pair-boot.test.ts` is
+   * §3.2's cleanup, not this wave's — recorded rather than left to be
+   * rediscovered. See `DEF-managed-broker-signal-permanently-false`.
+   */
   isGoogleManagedBroker(): boolean {
     return isManagedBrokerPair(this._googleClientSource);
   }

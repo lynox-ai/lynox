@@ -7241,7 +7241,13 @@ describe('LynoxHTTPApi', () => {
     });
     afterEach(() => {
       for (const r of restore) r();
-      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+      // BOTH envs, not just the instance id: the control-plane URL stubbed in
+      // `beforeEach` would otherwise stand for every later describe in this
+      // file, and the next test added after this one would inherit it.
+      vi.unstubAllEnvs();
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+      vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
     });
 
     it('answers the brokered tenant that has not claimed yet — every field, not `available:false`', async () => {
@@ -7296,6 +7302,29 @@ describe('LynoxHTTPApi', () => {
       // IPs, so an uncached probe spends the fleet's budget on one card.
       expect(mockCpFetch).toHaveBeenCalledTimes(1);
       expect(mockCpFetch.mock.calls[0]?.[1]).toBe('/oauth/google/status');
+    });
+
+    it('collapses CONCURRENT status calls onto one probe', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      // Caching the settled VALUE leaves the cold-cache moment unprotected:
+      // three requests in flight together each find an empty cache and each
+      // fetch. The sequential test above passes either way, which is why this
+      // one exists — it is the only one that observes the promise cache.
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((r) => { release = r; });
+      mockCpFetch.mockImplementation(async () => {
+        await gate;
+        return { ok: true, json: async () => ({ configured: true }) };
+      });
+
+      const inFlight = [jsonFetch('/api/google/status'), jsonFetch('/api/google/status'), jsonFetch('/api/google/status')];
+      // Give all three a chance to reach the probe before any can finish.
+      await new Promise((r) => setTimeout(r, 30));
+      release?.();
+      const bodies = await Promise.all((await Promise.all(inFlight)).map((r) => r.json() as Promise<Record<string, unknown>>));
+
+      expect(mockCpFetch).toHaveBeenCalledTimes(1);
+      for (const b of bodies) expect(b['broker_available']).toBe(true);
     });
 
     it('answers 200 with broker_available:false when the probe fails', async () => {

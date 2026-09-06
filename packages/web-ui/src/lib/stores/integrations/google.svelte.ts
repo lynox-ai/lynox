@@ -20,6 +20,7 @@ import {
 	type ScopeMode,
 	type ServerScopeMode,
 } from './google-scope-labels.js';
+import { deleteClientPair, performSwitchToManaged } from './google-switch.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -304,27 +305,10 @@ export async function revokeGoogle(): Promise<void> {
 	await loadGoogleStatus();
 }
 
-/**
- * Delete the stored client pair, checking BOTH deletions.
- *
- * `fetch` rejects only on a network error, so the previous `Promise.all` with
- * no `res.ok` check reported success when one DELETE answered 500 and the
- * other 200 — leaving a half-deleted pair behind and telling the user it was
- * gone. Returns whether the pair is actually gone; callers must not proceed on
- * `false`.
- */
-async function deleteClientPair(): Promise<boolean> {
-	const [id, secret] = await Promise.all([
-		fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, { method: 'DELETE' }),
-		fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, { method: 'DELETE' }),
-	]);
-	return id.ok && secret.ok;
-}
-
 export async function resetGoogleCredentials(): Promise<void> {
 	try {
-		if (!(await deleteClientPair())) {
-			addToast(t('integrations.google_switch_failed'), 'error', 10000);
+		if (!(await deleteClientPair(fetch, getApiBase()))) {
+			addToast(t('integrations.google_pair_delete_failed'), 'error', 10000);
 			await loadGoogleStatus();
 			return;
 		}
@@ -340,31 +324,30 @@ export async function resetGoogleCredentials(): Promise<void> {
 /**
  * D12 — give up this tenant's own Google client and land on the managed one.
  *
- * Order matters and is the whole safety argument: the local tokens go first
- * (they are worthless once the pair they were minted under is gone), then the
- * vault pair, and BOTH deletions are checked. Nothing is revoked at Google —
- * see `GoogleAuth.disconnect`. The confirm that names the two costs lives in
- * the card; this function is the destructive half and must not be reachable
- * without it.
+ * The order and the checks live in `google-switch.ts`; this owns the state and
+ * the message. The two failure stages get DIFFERENT messages on purpose: after
+ * the disconnect has already run, "nothing was switched over" is false — the
+ * grant is gone and the user has to re-authenticate.
  */
 export async function switchToManagedGoogle(): Promise<boolean> {
 	switchingToManaged = true;
 	try {
-		const dropped = await fetch(`${getApiBase()}/google/disconnect`, { method: 'POST' });
-		if (!dropped.ok) {
-			addToast(t('integrations.google_switch_failed'), 'error', 10000);
+		const outcome = await performSwitchToManaged(fetch, getApiBase());
+		if (!outcome.ok) {
+			addToast(
+				t(outcome.stage === 'disconnect'
+					? 'integrations.google_switch_aborted'
+					: 'integrations.google_switch_half_done'),
+				'error',
+				12000,
+			);
 			return false;
 		}
-		if (!(await deleteClientPair())) {
-			addToast(t('integrations.google_switch_failed'), 'error', 10000);
-			return false;
-		}
-		await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
 		flow = null;
 		googleCredSaved = false;
 		return true;
 	} catch {
-		addToast(t('integrations.google_switch_failed'), 'error', 10000);
+		addToast(t('integrations.google_switch_aborted'), 'error', 12000);
 		return false;
 	} finally {
 		switchingToManaged = false;

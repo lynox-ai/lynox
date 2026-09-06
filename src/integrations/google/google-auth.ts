@@ -206,9 +206,9 @@ export const SCOPES = {
 /**
  * The default consent set — every scope in it is NON-SENSITIVE or SENSITIVE,
  * none is RESTRICTED, so it needs app verification but no annual CASA
- * assessment. Measured in the Google Cloud Console (project `lynox-494508`,
- * Data Access, 2026-08-20) and cross-checked against Google's published
- * Gmail/Drive/Sheets/Docs scope pages on 2026-08-26.
+ * assessment. Read off the Google Cloud Console's Data Access page on
+ * 2026-08-20 — Google publishes no such list — and cross-checked against its
+ * published Gmail/Drive/Sheets/Docs scope pages on 2026-08-26.
  *
  * `calendar.freebusy` is the one entry whose class was never read off the
  * Console; it is carried here because `calendar.events` is already sensitive,
@@ -259,33 +259,90 @@ export const RESTRICTED_SCOPES = [
 ] as const;
 
 /**
- * The `full` consent set a tenant with its OWN Google client can ask for.
+ * ⚠ THE THREE SETS ABOVE AND THIS ONE ANSWER TWO DIFFERENT QUESTIONS. Do not
+ * merge them back together.
  *
- * ⚠ This is a WIDENING against the set `full` requested before this change,
- * and the added scopes are the heaviest ones Google publishes
- * (`mail.google.com/`, `gmail.compose`, `gmail.metadata`,
- * `drive.metadata.readonly`, `calendar`, `calendar.calendarlist.readonly`).
- * It follows the PRD, which specifies `full` as all three sets. No lynox tool
- * consumes the four Gmail entries today; they are requested because the mode
- * means "everything this client may ever need without a second consent".
+ *  - The three sets are a CLASSIFICATION. They exist so `VALID_SCOPES` can
+ *    accept everything a tenant might legitimately already hold, and so the
+ *    "no restricted scope in the default set" claim is checkable. They must
+ *    stay complete.
+ *  - `FULL_SCOPES` is a REQUEST BUNDLE — what a consent screen actually asks a
+ *    human for. It must stay MINIMAL, because Google's verification requires
+ *    "the least amount of access … necessary", and a scope no lynox code path
+ *    exercises is by definition not necessary.
+ *
+ * The PRD's sentence "`full` = all three sets" collapses the two, and building
+ * it literally would have put `mail.google.com/` — read, send and permanently
+ * delete the whole mailbox — on the consent screen of a mode whose Gmail half
+ * D7 removed from this stage. Every entry below names the code path that
+ * exercises it; `FULL_SCOPE_CONSUMERS` is that list, and a test holds the two
+ * in step so a scope cannot return to the bundle without one.
  */
 export const FULL_SCOPES: readonly string[] = [
   ...STANDARD_SCOPES,
-  ...SENSITIVE_EXTRA_SCOPES,
-  ...RESTRICTED_SCOPES,
+  SCOPES.SHEETS,
+  SCOPES.SHEETS_READONLY,
+  SCOPES.DOCS,
+  SCOPES.DOCS_READONLY,
+  SCOPES.CALENDAR_READONLY,
+  SCOPES.GMAIL_SEND,
+  SCOPES.GMAIL_READONLY,
+  SCOPES.GMAIL_MODIFY,
+  SCOPES.DRIVE,
+  SCOPES.DRIVE_READONLY,
 ];
+
+/**
+ * What `full` adds over the standard set, and the code path that exercises
+ * each addition. Checked against the real tree by a test, so a stale entry
+ * fails instead of reassuring.
+ *
+ * The standard set itself is not listed: it is decided in the PRD and defended
+ * by its own tests (nothing restricted, hence CASA-free). `openid` and
+ * `userinfo.email` are in it and have no `hasScope` reader yet — §3.5's
+ * `email` field is W5 — which is exactly why they belong to the decided set
+ * and not to this table.
+ *
+ * The scopes deliberately absent, and what would put them back:
+ *  - `gmail.compose`, `gmail.metadata`, `mail.google.com/` — nothing drafts,
+ *    reads metadata-only, or needs delete rights. `gmail.readonly` and
+ *    `gmail.modify` already cover what `OAuthGmailProvider` does.
+ *  - `calendar.calendarlist.readonly` — D9 dropped `list_calendars`; the
+ *    calendar id stays a parameter the user names.
+ *  - `drive.metadata.readonly` — accepted if a tenant already holds it, but
+ *    `drive.file` and `drive.readonly` authorise every Drive call lynox makes.
+ *  - `calendar` — the blanket scope adds nothing over `calendar.events`,
+ *    `calendar.readonly` and `calendar.freebusy` together.
+ */
+export const FULL_SCOPE_CONSUMERS: Readonly<Record<string, { file: string; evidence: string }>> = {
+  [SCOPES.SHEETS]: { file: 'src/integrations/google/google-sheets.ts', evidence: 'SCOPES.SHEETS' },
+  [SCOPES.SHEETS_READONLY]: { file: 'src/integrations/google/google-sheets.ts', evidence: 'SCOPES.SHEETS_READONLY' },
+  [SCOPES.DOCS]: { file: 'src/integrations/google/google-docs.ts', evidence: 'SCOPES.DOCS' },
+  [SCOPES.DOCS_READONLY]: { file: 'src/integrations/google/google-docs.ts', evidence: 'SCOPES.DOCS_READONLY' },
+  [SCOPES.CALENDAR_READONLY]: { file: 'src/integrations/google/google-calendar.ts', evidence: 'SCOPES.CALENDAR_READONLY' },
+  [SCOPES.DRIVE]: { file: 'src/integrations/google/google-drive.ts', evidence: 'SCOPES.DRIVE' },
+  [SCOPES.DRIVE_READONLY]: { file: 'src/integrations/google/google-drive.ts', evidence: 'SCOPES.DRIVE_READONLY' },
+  [SCOPES.GMAIL_SEND]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: "gmailPost<GmailSendResponse>('messages/send'" },
+  [SCOPES.GMAIL_READONLY]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: 'gmailGet<GmailListResponse>' },
+  [SCOPES.GMAIL_MODIFY]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: 'gmailGet<GmailListResponse>' },
+};
 
 /** Default scopes for initial auth — the CASA-free standard set. */
 const DEFAULT_SCOPES: readonly string[] = STANDARD_SCOPES;
 
 /**
- * All known valid Google OAuth scopes.
+ * All known valid Google OAuth scopes — the ACCEPTANCE allowlist.
  *
- * This is an ACCEPTANCE allowlist, not a request bundle: `requestScope` throws
- * on anything outside it, so narrowing it breaks tenants whose stored
- * `google_oauth_scopes` names a scope that used to be fine.
+ * Built from the three CLASSIFICATION sets, deliberately not from
+ * `FULL_SCOPES`: `requestScope` throws on anything outside this set, so
+ * narrowing it breaks a tenant whose stored `google_oauth_scopes` names a
+ * scope that used to be fine. Accepting is cheap; requesting is not.
  */
-const VALID_SCOPES = new Set<string>(FULL_SCOPES);
+const VALID_SCOPES = new Set<string>([
+  ...STANDARD_SCOPES,
+  ...SENSITIVE_EXTRA_SCOPES,
+  ...RESTRICTED_SCOPES,
+]);
 
 /** The named consent modes the card offers, plus the one it can only observe. */
 export type GoogleScopeMode = 'standard' | 'full' | 'legacy';

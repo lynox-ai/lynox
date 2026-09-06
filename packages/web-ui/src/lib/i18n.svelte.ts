@@ -1647,7 +1647,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_invalid_credentials': { de: 'Ungültige Client-ID. Bitte prüfe, ob die Client-ID korrekt aus der Google Cloud Console kopiert wurde.', en: 'Invalid Client ID. Please verify you copied the Client ID correctly from the Google Cloud Console.' },
 	'integrations.change_credentials': { de: 'Credentials ändern', en: 'Change credentials' },
 	'integrations.access_level': { de: 'Zugriffsebene', en: 'Access level' },
-	'integrations.scope_readonly': { de: 'Nur lesen', en: 'Read only' },
 	'integrations.scope_full': { de: 'Voller Zugriff', en: 'Full access' },
 	'integrations.scope_full_desc': { de: 'Mails senden, Termine erstellen, Sheets bearbeiten, Dateien hochladen.', en: 'Send emails, create events, edit sheets, upload files.' },
 	'integrations.reconnect_google': { de: 'Erneut verbinden', en: 'Reconnect' },
@@ -1675,7 +1674,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_switch_confirm_title': { de: 'Eigenen Google-Client entfernen?', en: 'Remove your own Google client?' },
 	'integrations.google_switch_confirm_body': { de: 'Deine Client-ID und dein Client-Secret werden gelöscht, danach verbindest du dich über lynox. Zwei Dinge davor: die Zustimmung über lynox kann fehlschlagen, solange die App noch nicht verifiziert ist (Google lässt dann höchstens 100 Konten zu). Und zurück geht es nur, indem du das Client-Paar erneut aus der Google Console einträgst und die Zustimmung wiederholst.', en: 'Your Client ID and Client Secret are deleted, and you then connect through lynox. Two things first: the lynox consent can fail while the app is unverified (Google allows at most 100 accounts until then). And getting back means re-entering the client pair from the Google Console and consenting again.' },
 	'integrations.google_switch_confirm_yes': { de: 'Wechseln', en: 'Switch' },
-	'integrations.google_switch_failed': { de: 'Der Wechsel ist unvollständig — mindestens ein Löschvorgang ist fehlgeschlagen. Die Verbindung wurde NICHT umgestellt.', en: 'The switch is incomplete — at least one deletion failed. The connection was NOT switched over.' },
+	// Three failures, three sentences. One string for all of them told a user
+	// whose grant was already gone that nothing had changed.
+	'integrations.google_switch_aborted': { de: 'Der Wechsel wurde abgebrochen — die bestehende Verbindung ist unverändert.', en: 'The switch was aborted — your existing connection is unchanged.' },
+	'integrations.google_switch_half_done': { de: 'Die Verbindung wurde getrennt, aber dein Client-Paar konnte nicht gelöscht werden. Verbinde dich neu, oder versuche den Wechsel noch einmal.', en: 'Your connection was disconnected, but your client pair could not be deleted. Reconnect, or try the switch again.' },
+	'integrations.google_pair_delete_failed': { de: 'Mindestens ein Löschvorgang ist fehlgeschlagen — die Credentials sind möglicherweise noch gespeichert.', en: 'At least one deletion failed — the credentials may still be stored.' },
 	'integrations.google_grant_stays': { de: 'Deine Google-Freigabe für lynox bleibt bestehen. Du kannst sie jederzeit unter myaccount.google.com/permissions entfernen.', en: 'Your Google grant for lynox stays in place. You can remove it any time at myaccount.google.com/permissions.' },
 
 	// Push Notifications

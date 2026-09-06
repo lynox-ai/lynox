@@ -803,6 +803,9 @@ describe('GoogleAuth', () => {
   });
 
   describe('scope defaults', () => {
+    /** What `requestScope` accepts — the union of the three classification sets. */
+    const ACCEPTED: readonly string[] = [...STANDARD_SCOPES, ...SENSITIVE_EXTRA_SCOPES, ...RESTRICTED_SCOPES];
+
     /**
      * The claim in the PRD title: the default consent set is CASA-free.
      * CASA attaches to RESTRICTED scopes only, so the assertion is an empty
@@ -844,7 +847,10 @@ describe('GoogleAuth', () => {
       ];
       expect(TWELVE_AS_OF_2026_09_06).toHaveLength(12);
       for (const scope of TWELVE_AS_OF_2026_09_06) {
-        expect(FULL_SCOPES).toContain(scope);
+        // ACCEPTED, not FULL_SCOPES: the question is what `requestScope` still
+        // takes, which is the union of the classification sets. The request
+        // bundle is narrower on purpose and would answer a different question.
+        expect(ACCEPTED).toContain(scope);
       }
       // And the throw is real: an unknown scope still refuses, so the loop
       // above is not passing against a `requestScope` that validates nothing.
@@ -852,10 +858,12 @@ describe('GoogleAuth', () => {
         .rejects.toThrow(/Unknown Google OAuth scope/);
     });
 
-    it('the three sets are disjoint', () => {
-      const all = [...STANDARD_SCOPES, ...SENSITIVE_EXTRA_SCOPES, ...RESTRICTED_SCOPES];
-      expect(new Set(all).size).toBe(all.length);
-      expect(FULL_SCOPES).toHaveLength(all.length);
+    it('the three classification sets are disjoint', () => {
+      expect(new Set(ACCEPTED).size).toBe(ACCEPTED.length);
+      // The request bundle is a STRICT subset — if the two ever became equal
+      // again, `full` would be asking for scopes nothing exercises.
+      expect(FULL_SCOPES.length).toBeLessThan(ACCEPTED.length);
+      for (const s of FULL_SCOPES) expect(ACCEPTED).toContain(s);
     });
 
     it('default auth URL requests the standard set and no restricted scope', async () => {

@@ -25,13 +25,15 @@
   verification but no annual CASA assessment. **Existing connections are not
   touched** — the change applies to the next consent.
 
-- **The `full` mode now requests more than it did**: standard plus every
-  sensitive and restricted scope, which adds `mail.google.com/`,
+- **The `full` mode requests three scopes more than it did**: `openid`,
+  `userinfo.email` and `calendar.freebusy`. Everything it asked for before, it
+  still asks for. The bundle is deliberately NOT the union of the three
+  classification sets — a request bundle has to stay minimal, because Google's
+  verification requires "the least amount of access … necessary" and a scope no
+  code path exercises is by definition not necessary. `mail.google.com/`,
   `gmail.compose`, `gmail.metadata`, `drive.metadata.readonly`, `calendar` and
-  `calendar.calendarlist.readonly`. Users choosing `full` will see a heavier
-  consent screen than before. No lynox tool consumes the four Gmail entries
-  today; the mode means "everything this client may ever need without a second
-  consent".
+  `calendar.calendarlist.readonly` are therefore **accepted** if a connection
+  already holds them and **not requested**.
 
 ### Changed: every Google tool action is gated on the scope it actually calls with
 

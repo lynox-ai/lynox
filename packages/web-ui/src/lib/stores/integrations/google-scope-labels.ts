@@ -10,7 +10,7 @@
 // `drive.file` satisfies — so a Stage-1 grant of "files lynox creates" was
 // rendered as "Drive — Read & Write" right next to the consent screen that
 // says otherwise.
-const S = {
+export const GOOGLE_SCOPE_IDS = {
 	GMAIL_READONLY: 'https://www.googleapis.com/auth/gmail.readonly',
 	GMAIL_SEND: 'https://www.googleapis.com/auth/gmail.send',
 	GMAIL_MODIFY: 'https://www.googleapis.com/auth/gmail.modify',
@@ -28,6 +28,8 @@ const S = {
 	CALENDAR_FREEBUSY: 'https://www.googleapis.com/auth/calendar.freebusy',
 	CALENDAR: 'https://www.googleapis.com/auth/calendar',
 } as const;
+
+const S = GOOGLE_SCOPE_IDS;
 
 export interface ServiceGrant {
 	/** The product name, shown verbatim. */
