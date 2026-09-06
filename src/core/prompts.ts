@@ -210,6 +210,39 @@ export function providerFamilyLabel(provider: string | undefined | null): string
   return PROVIDER_LABELS[safeProviderKey] ?? safeProviderKey.slice(0, 24);
 }
 
+/** Language codes the product offers, mapped to the English name a model
+ *  reliably understands. An allow-list on purpose — see
+ *  {@link languageOverrideSuffix}. */
+const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
+  de: 'German', en: 'English', fr: 'French', it: 'Italian',
+  es: 'Spanish', nl: 'Dutch', pt: 'Portuguese', sv: 'Swedish',
+};
+
+/**
+ * The `**Language override**` line for an explicitly configured language, or
+ * `''` when none is set or the code is not one we offer.
+ *
+ * It exists as a function because it had TWO callers that must agree and did
+ * not: `Session.run` built it into the prompt SNAPSHOT, while `_createAgent` —
+ * which assembles the prompt the model actually receives — never added it at
+ * all. So `LYNOX_LANGUAGE` was recorded as if it had been sent and was not.
+ * That is worse than an unimplemented setting: the run history showed a line
+ * that was never on the wire, so the evidence agreed with the bug.
+ *
+ * Unknown codes yield `''` rather than being interpolated. The old inline
+ * version fell back to `?? config.language`, putting a user-controlled string
+ * straight into the system prompt — harmless only for as long as the suffix
+ * reached no model, which is exactly what is being fixed here. Same reasoning
+ * as {@link providerFamilyLabel}: this value is user-controllable on managed
+ * tier, and a prompt is not the place to find out.
+ */
+export function languageOverrideSuffix(language: string | undefined | null): string {
+  const name = LANGUAGE_NAMES[String(language ?? '').toLowerCase()];
+  return name === undefined
+    ? ''
+    : `\n\n**Language override**: Respond in ${name}. The user has explicitly set this preference.`;
+}
+
 /** One resolved capability tier for {@link modelIdentityContext}. Carries ONLY
  *  the fields safe to render — the tier name, the concrete model id, and a
  *  provider-family label. It deliberately has NO `api_key` / `api_base_url`
