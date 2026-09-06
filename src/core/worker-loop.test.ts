@@ -97,6 +97,11 @@ function makeTask(overrides?: Partial<TriggerRecord>): TriggerRecord {
 function makeTaskManager(tasks: TriggerRecord[] = []): TaskManager {
   return {
     getDueTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue(tasks),
+    // The tick's SECOND query (durable wait state). Empty by default: these
+    // tests are about dispatch, and a mock that simply lacked the method used to
+    // make every one of them fail for a reason none of them was about.
+    getExpiredWaitingTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue([]),
+    endWait: vi.fn<(id: string, to: string) => boolean>().mockReturnValue(false),
     // runTriggerNow resolves the trigger by id (or id-prefix) before dispatch.
     getTrigger: vi.fn<(id: string) => TriggerRecord | undefined>(
       (id) => tasks.find((t) => t.id === id || t.id.startsWith(id)),

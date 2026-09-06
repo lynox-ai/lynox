@@ -7,7 +7,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
-import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
@@ -2919,6 +2919,14 @@ export class RunHistory {
     waitingUntil?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
+  }
+
+  /** Durable wait state (§0 A6): end a wait, exactly once. Conditional on the
+   *  row still being `waiting`, so the run's own un-park and the expiry sweep can
+   *  both fire and only one of them takes. Returns false when the wait was
+   *  already ended — which is an outcome, not an error. */
+  endTriggerWait(id: string, to: Exclude<TriggerStatus, 'waiting'>): boolean {
+    return this._triggerStore?.endWait(id, to) ?? false;
   }
 
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The

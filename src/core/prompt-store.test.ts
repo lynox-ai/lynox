@@ -6,53 +6,39 @@ import Database from 'better-sqlite3';
 import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson, originWireFields } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 
-/** Build a fresh SQLite instance with just the pending_prompts schema the
- * PromptStore depends on. Mirrors migrations v25 + v27 + v29 + v33 + v43
- * (post-rewrite — connect_mail in the CHECK + payload_json column). */
-function makeDb(): Database.Database {
-  const db = new Database(':memory:');
-  const stmts = [
-    `CREATE TABLE pending_prompts (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-      question TEXT NOT NULL,
-      options_json TEXT,
-      questions_json TEXT,
-      segments_json TEXT,
-      partial_answers_json TEXT,
-      secret_name TEXT,
-      secret_key_type TEXT,
-      answer TEXT,
-      answer_saved INTEGER,
-      answer_error TEXT,
-      multi_select INTEGER,
-      payload_json TEXT,
-      origin_json TEXT,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      answered_at TEXT,
-      expires_at TEXT NOT NULL
-    )`,
-    `CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`,
-    `CREATE UNIQUE INDEX idx_pending_prompts_session_unique
-      ON pending_prompts(session_id) WHERE status = 'pending'`,
-  ];
-  for (const s of stmts) db.prepare(s).run();
-  return db;
+/**
+ * A fresh in-memory database carrying the REAL `pending_prompts` schema.
+ *
+ * This used to hand-roll the DDL, mirroring "migrations v25 + v27 + v29 + v33 +
+ * v43" in a comment. That copy drifted the moment a migration added a column —
+ * and it drifts SILENTLY in the safe-looking direction: the fixture keeps
+ * passing against a schema production does not have, until an insert names the
+ * missing column and 56 tests fail at once for one reason. `RunHistory` runs the
+ * ladder in its constructor and accepts `:memory:`, so there is no second copy
+ * to keep in step.
+ *
+ * ⚠ Five more hand-rolled copies remain, all in `src/server/http-api.test.ts`.
+ * They were left alone here on purpose — that file is the known full-run-flaky
+ * one, and rewriting six fixtures inside it does not belong in a change about
+ * triggers.
+ */
+function makeDb(): { db: Database.Database; close: () => void } {
+  const history = new RunHistory(':memory:');
+  return { db: history.getDb(), close: () => { history.close(); } };
 }
 
 describe('PromptStore', () => {
   let db: Database.Database;
   let store: PromptStore;
+  let closeDb: () => void;
 
   beforeEach(() => {
-    db = makeDb();
+    ({ db, close: closeDb } = makeDb());
     store = new PromptStore(db);
   });
 
   afterEach(() => {
-    db.close();
+    closeDb();
   });
 
   describe('single-question ask_user', () => {

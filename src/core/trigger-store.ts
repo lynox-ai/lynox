@@ -613,6 +613,31 @@ export class TriggerStore {
   }
 
   /**
+   * End a wait — the ONE way a trigger leaves `waiting`, and the reason A6's
+   * "exactly once" needs no check in front of it.
+   *
+   * The `status = 'waiting'` in the WHERE is the whole mechanism. Two callers
+   * race by construction: the run's own `finally`, which un-parks when its wait
+   * settles, and the expiry sweep, which ends a trigger a dead process left
+   * parked. Both may fire for the same row; the second one to arrive matches no
+   * row and reports false. A read-then-write would have a window between the two
+   * halves, and the two callers do not share a transaction — they may not even
+   * share a process.
+   *
+   * `waiting_until` is cleared in the same statement rather than left behind: a
+   * deadline outliving its status would make the row look parked to anything
+   * that keys on the column alone.
+   *
+   * The target status excludes `waiting` at the type level, because "ending" a
+   * wait into another wait is not a thing this method can mean.
+   */
+  endWait(id: string, to: Exclude<TriggerStatus, 'waiting'>): boolean {
+    return this.db.prepare(
+      "UPDATE triggers SET status = ?, waiting_until = NULL, updated_at = datetime('now') WHERE id = ? AND status = ?",
+    ).run(to, id, WAITING).changes > 0;
+  }
+
+  /**
    * The other half of the partition {@link getDue} opens (§0 E5/A12): every PARKED
    * trigger whose wait has run out. After the wait gate above, `getDue` is blind to
    * a waiting trigger — so without this query no loop in the engine would ever see

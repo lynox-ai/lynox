@@ -33,6 +33,10 @@ import { WallClockBudget } from '../server/wall-clock-budget.js';
  *  because it would edit http-api.ts (held by core#1196). */
 const DISMISSED_ANSWER = '__dismissed__';
 
+/** What a swept run's result reads as. It is a RESULT, not a status: the status
+ *  the sweep writes is `failed`, and this is the line a human sees next to it. */
+const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
+
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
@@ -265,6 +269,70 @@ export class WorkerLoop {
       if (!taskManager) return;
 
       const dueTasks = taskManager.getDueTriggers();
+
+      // §0 E5/A12 — the SECOND query, and the only thing in the engine that can
+      // still see a parked trigger. `getDueTriggers` excludes `waiting` by
+      // design (T3, or every tick would re-fire a trigger whose question is
+      // still open), which means after that gate no existing loop would ever
+      // look at one again. A trigger parked by a process that died mid-question
+      // would wait forever; this is what collects it.
+      //
+      // Ordered per §0 E6: settle the prompt row BEST-EFFORT first, then end the
+      // wait unconditionally. A prompt left pending stays answerable for its full
+      // TTL, and an answer arriving after the sweep would revive a trigger the
+      // sweep had just ended. The reverse order trades a dead prompt row — which
+      // costs nothing — for a zombie trigger.
+      //
+      // `failed` is the honest terminal status: the run asked a question and
+      // never got its answer, so it did not succeed. `endWait` is conditional on
+      // the row still being `waiting`, so this and a live run's own un-park can
+      // race without either needing to check first.
+      //
+      // Fenced off from the dispatch below. Collecting abandoned waits is
+      // housekeeping; firing due triggers is the loop's job. A store error here
+      // must degrade to "waits not collected this tick", never to "nothing ran" —
+      // and before this fence it did exactly that, because the throw escaped
+      // straight past the dispatch loop.
+      try {
+        for (const parked of taskManager.getExpiredWaitingTriggers()) {
+          try {
+            this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
+          } catch (err: unknown) {
+            process.stderr.write(
+              `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+          if (taskManager.endWait(parked.id, 'failed')) {
+            // Ending the wait is not the whole job, and getting this wrong is a
+            // LOOP rather than a stall. `next_run_at` still points at the run that
+            // parked — a moment in the past — and `getDue`'s denylist deliberately
+            // keeps a FAILED trigger due while it has a cron schedule (that is the
+            // auto-recovery). So a swept cron trigger is due again on the very next
+            // tick: it re-asks immediately instead of at its next occurrence.
+            //
+            // Recording it as the failed run it was puts it back through the same
+            // branch logic that schedules every other outcome — next occurrence for
+            // cron, interval for watch, `next_run_at = NULL` for a one-shot. Ordered
+            // AFTER `endWait` on purpose: `recordTaskRun` withholds status writes
+            // from a parked trigger (§0 T1), so calling it first would skip the very
+            // scheduling this needs.
+            try {
+              taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
+            } catch (err: unknown) {
+              process.stderr.write(
+                `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
+            process.stderr.write(
+              `[lynox:worker] "${parked.title}" (${parked.id}) waited past ${parked.waiting_until ?? '?'} without an answer — ended\n`,
+            );
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] wait sweep failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
 
       // Missed run detection: warn about tasks that were due >10min ago
       const now = Date.now();
@@ -587,7 +655,32 @@ export class WorkerLoop {
         // would land in the slot an answer occupies.
         return DISMISSED_ANSWER;
       }
-      const promptId = promptStore.insertAskUser(session.sessionId, question, options);
+      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id);
+      // §0 A8/A11 — PARK the trigger. Until now the pairing between this trigger
+      // and the question it is waiting on existed only in a notification payload
+      // and in this closure's stack frame, neither of which survives the process.
+      //
+      // The deadline is READ BACK off the prompt row rather than computed here,
+      // and that is the requirement, not an implementation taste: two independent
+      // numbers would be a defect in both directions — a wait that ends first
+      // kills a still-answerable question, a prompt that expires first leaves the
+      // trigger waiting for an answer nobody can give. One source, read back.
+      //
+      // If the row cannot be read back there is no deadline to park against, and
+      // a trigger parked without one is INVISIBLE to the expiry sweep — it would
+      // wait forever. Not parking is the safe direction: the run still waits in
+      // memory exactly as it did before this slice, and the trigger stays where
+      // the ordinary status writers can reach it.
+      const parkedUntil = promptStore.getById(promptId)?.expires_at;
+      if (parkedUntil !== undefined) {
+        try {
+          this.engine.getRunHistory()?.updateTrigger(task.id, { status: 'waiting', waitingUntil: parkedUntil });
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] park failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
       if (active) {
         active.pendingPromptId = promptId;
         // Park the execution deadline: from here until the prompt settles the
@@ -646,6 +739,24 @@ export class WorkerLoop {
         }
         return DISMISSED_ANSWER;
       } finally {
+        // §0 A6 — END the wait, however it ended: answered, expired, aborted, or
+        // thrown. Conditional on the row still being `waiting`, so this and the
+        // expiry sweep can both fire for the same trigger and only one takes.
+        //
+        // Back to `open` rather than a terminal state: the run is resuming, and
+        // the status it deserves is the one `recordTaskRun` will write when the
+        // run actually ends. Swallowed for the same reason the prompt drain above
+        // is — this can run during `Engine.shutdown()`, against a history DB that
+        // is already closing, and a throw here would turn a clean teardown into a
+        // failed tool call. A wait left standing by a failure here is exactly what
+        // the sweep exists to collect, so the cost is bounded by `waiting_until`.
+        try {
+          this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] un-park failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
         if (active) {
           active.pendingPromptId = undefined;
           // Only re-arm while this entry is still the live one. `stop()` clears
