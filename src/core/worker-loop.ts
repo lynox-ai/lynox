@@ -319,10 +319,18 @@ export class WorkerLoop {
             // writes from a parked trigger and would otherwise skip the scheduling.
             // That was false: the guard withholds only the STATUS, and `next_run_at`
             // is written either way, so both orders leave the same row. The real
-            // reason is exactly-once — `endWait` resolves the race against a live
-            // run's own un-park, so only the caller that WON it may write a run
-            // result. Recording first would stamp a failed run onto a trigger
+            // reason is exactly-once FOR THIS CALLER: `endWait` resolves the race
+            // against a live run's own un-park, so the sweep only stamps a result
+            // when it won. Recording first would stamp a failed run onto a trigger
             // another party had already finished.
+            //
+            // ⚠ Not a system-wide guarantee, and an earlier draft of this comment
+            // said it was. A run whose wait the sweep expired is NOT aborted — its
+            // `promptUser` returns the dismissal marker and the agent turn carries
+            // on — so `executeStandard` can still reach its own `recordTaskRun`
+            // afterwards and overwrite what the sweep wrote. That a run which never
+            // got its answer still reports success is §0 A7, which this wave does
+            // not build; the overwrite is the same defect seen from the other end.
             try {
               taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
             } catch (err: unknown) {

@@ -157,10 +157,15 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // still be inside `recordTaskRun` when a test body ends; closing the sqlite
     // handle under it produces an unhandled rejection that belongs to no test
     // and shows up as a non-zero exit with every test reported green.
-    await Promise.race([
+    const drained = await Promise.race([
       Promise.allSettled(inFlight.splice(0)),
-      new Promise(r => setTimeout(r, 3000)),
+      new Promise<PromiseSettledResult<unknown>[]>(r => setTimeout(() => r([]), 3000)),
     ]);
+    // `allSettled` discards outcomes, so an unguarded drain turns a genuine
+    // failure inside a dispatched run into a green suite. The drain runs BEFORE
+    // the handles close, so a rejection here is a real one, not teardown noise.
+    const rejected = drained.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(rejected.map(r => String(r.reason))).toEqual([]);
     for (const c of closers.splice(0)) c();
     for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
@@ -270,6 +275,26 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.history.getTrigger('trg-1')?.waiting_until).toBeDefined(); // fixture guard
 
     h.manager.complete('trg-1');
+
+    const after = h.history.getTrigger('trg-1');
+    expect(after?.status).toBe('completed');
+    expect(after?.waiting_until).toBeUndefined();
+
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    await h.run;
+  });
+
+  it('a terminal status WINS over a deadline supplied in the same write', async () => {
+    // The combination no caller makes today and the type has always allowed.
+    // Expressed as a second `waiting_until = NULL` in the status branch it
+    // produced `SET waiting_until = NULL, waiting_until = ?`, and SQLite applies
+    // the textually last clause — so the clear lost and the row came out
+    // `completed` WITH a deadline. The invariant held only because nobody
+    // combined them.
+    const h = makeHarness();
+    await h.parked;
+
+    h.history.updateTrigger('trg-1', { status: 'completed', waitingUntil: '2030-01-01T00:00:00.000Z' });
 
     const after = h.history.getTrigger('trg-1');
     expect(after?.status).toBe('completed');

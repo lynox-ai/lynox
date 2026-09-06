@@ -493,17 +493,33 @@ export class TriggerStore {
     if (params.status !== undefined) {
       sets.push('status = ?');
       values.push(params.status);
-      // A status write that is not `waiting` ENDS a wait as far as this row is
-      // concerned, so the deadline goes with it. Without this, `complete()` and
-      // `update()` — which write a status unconditionally and have no way to pass
-      // `waitingUntil` — leave `waiting_until` set on a row that is no longer
-      // parked. Nothing sweeps such a row (the sweep keys on the status), so it is
-      // inert rather than dangerous; it is still a row whose two columns disagree,
-      // and anything later keying on the deadline alone would read it as parked.
-      if (params.status !== WAITING) sets.push('waiting_until = NULL');
     }
     if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
-    if (params.waitingUntil !== undefined) { sets.push('waiting_until = ?'); values.push(params.waitingUntil || null); }
+    // `waiting_until` is assigned AT MOST ONCE, and that is not tidiness.
+    //
+    // A status write that is not `waiting` ENDS a wait as far as this row is
+    // concerned, so the deadline has to go with it: `complete()`, `reopen()` and
+    // `update()` write a status unconditionally and have no way to pass a
+    // deadline, and without this they leave `waiting_until` set on a row that is
+    // no longer parked. Nothing sweeps such a row — the sweep keys on the status —
+    // so it is inert rather than dangerous, but the two columns disagree and
+    // anything later keying on the deadline alone would read it as parked.
+    //
+    // An earlier version expressed that as a SECOND `waiting_until = NULL` in the
+    // status branch, which produced `SET waiting_until = NULL, waiting_until = ?`
+    // whenever a caller supplied both. SQLite applies the textually LAST clause,
+    // so the clear lost — measured, not assumed. No caller combines them today, so
+    // the invariant held by coincidence rather than by construction, which is the
+    // kind of thing that stops being true when someone adds a caller.
+    //
+    // Which one wins when both are given: the clear. A deadline asked for
+    // alongside a terminal status is a contradiction, and the safe reading of a
+    // contradiction is the one that cannot leave a row looking parked.
+    const clearsWait = params.status !== undefined && params.status !== WAITING;
+    if (clearsWait || params.waitingUntil !== undefined) {
+      sets.push('waiting_until = ?');
+      values.push(clearsWait ? null : (params.waitingUntil || null));
+    }
     if (params.scheduleCron !== undefined) {
       sets.push("condition_json = json_set(condition_json, '$.schedule_cron', ?)");
       values.push(params.scheduleCron || null);
