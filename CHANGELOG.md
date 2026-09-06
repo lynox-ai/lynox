@@ -35,6 +35,13 @@
   `calendar.calendarlist.readonly` are therefore **accepted** if a connection
   already holds them and **not requested**.
 
+- **An existing connection will now describe itself as `legacy`**, and that is
+  accurate rather than a downgrade: a grant taken before these sets existed
+  satisfies neither named set, because it holds no `openid`, `userinfo.email`
+  or `calendar.freebusy`. Nothing about the connection changes; the card states
+  it and parks the toggle at *Standard* without calling it a mismatch. Picking
+  a mode and re-consenting moves it onto the named set.
+
 ### Changed: every Google tool action is gated on the scope it actually calls with
 
 - Read actions were gated by nothing. That was invisible while the default set
