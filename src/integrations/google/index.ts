@@ -1,4 +1,4 @@
-export { GoogleAuth, SCOPES, STANDARD_SCOPES, SENSITIVE_EXTRA_SCOPES, RESTRICTED_SCOPES, FULL_SCOPES } from './google-auth.js';
+export { GoogleAuth, VAULT_TOKEN_KEY, SCOPES, STANDARD_SCOPES, SENSITIVE_EXTRA_SCOPES, RESTRICTED_SCOPES, FULL_SCOPES } from './google-auth.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult, GoogleTokenChange, GoogleTokenChangeReason } from './google-auth.js';
 import type { GoogleAuthOptions } from './google-auth.js';
 // Gmail no longer ships as a standalone tool — it surfaces via the unified

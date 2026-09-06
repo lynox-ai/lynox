@@ -112,6 +112,7 @@ import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
+import { VAULT_TOKEN_KEY as GOOGLE_VAULT_TOKEN_KEY } from '../integrations/google/google-auth.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -2235,16 +2236,34 @@ export class Engine {
     const store = this._connectionStore;
     if (!store) return;
     if (event.reason === 'disconnect' || event.tokenData === null) {
+      // Kind-scoped, so a foreign row that happens to sit on this id is not
+      // deleted along with a Google disconnect.
       store.remove('google', 'google');
+      return;
+    }
+
+    const existing = store.get('google');
+    // ⚠ `connections.id` is a GLOBAL primary key (`engine-db.ts`), not scoped by
+    // kind, and `upsert` conflicts on `id` alone. An `api` profile's id comes
+    // from `slugify(title)`, so a user who sets up an API called "Google" owns
+    // this id first — and an unconditional upsert would silently replace their
+    // kind, name, endpoints, auth shape and vault keys, and repoint any trigger
+    // that references the row. Nothing here is worth that: the Google row is a
+    // slot nothing reads yet.
+    //
+    // Skipping is the small half of the fix. The structural half — scoping the
+    // key by `(id, kind)` — is a schema migration on a table three kinds share,
+    // and it is filed rather than smuggled in here.
+    if (existing && existing.kind !== 'google') {
+      console.warn(`[lynox] connection id "google" is held by a ${existing.kind} connection — leaving it alone and not registering the Google row`);
       return;
     }
     // `granted_at` marks the CONSENT, so a refresh must not rewrite it — a
     // refresh replaces an access token under an authorisation that already
     // exists, and a timestamp that moves on every refresh answers "when was
     // this last used", which is a different question nobody asked.
-    const existing = event.reason === 'refresh' ? store.get('google') : undefined;
     const grantedAt = (() => {
-      if (!existing) return new Date().toISOString();
+      if (!existing || event.reason !== 'refresh') return new Date().toISOString();
       try {
         const prev = JSON.parse(existing.configJson) as { granted_at?: unknown };
         return typeof prev.granted_at === 'string' ? prev.granted_at : new Date().toISOString();
@@ -2255,7 +2274,11 @@ export class Engine {
     store.upsert({
       id: 'google',
       kind: 'google',
-      name: event.tokenData.email ?? 'Google',
+      // Capped: the address comes from the control plane's reading of the
+      // consent and is only presence-checked on the way in. It used to live
+      // solely inside the encrypted vault blob; this row is plaintext, so an
+      // unbounded value would be a new place for a long or odd one to land.
+      name: (event.tokenData.email ?? 'Google').slice(0, 320) || 'Google',
       subjectId: null,
       direction: 'outbound',
       configJson: JSON.stringify({
@@ -2263,7 +2286,9 @@ export class Engine {
         client_source: this._googleClientSource,
         granted_at: grantedAt,
       }),
-      vaultKeys: ['GOOGLE_OAUTH_TOKENS'],
+      // The constant, not a copy of its value: a rename would otherwise
+      // desync the row from the slot it names, with no signal anywhere.
+      vaultKeys: [GOOGLE_VAULT_TOKEN_KEY],
       status: 'active',
     });
   }

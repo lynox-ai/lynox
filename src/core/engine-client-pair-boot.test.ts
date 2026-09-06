@@ -211,6 +211,45 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     expect(store.get('google')?.name).toBe('second@x.y');
   });
 
+  it('leaves a FOREIGN connection sitting on the same id completely alone', async () => {
+    // `connections.id` is a global primary key and an `api` profile's id is
+    // `slugify(title)`, so a user who sets up an API called "Google" owns this
+    // id first. An unconditional upsert would replace their kind, name,
+    // endpoints, auth shape and vault keys — and repoint any trigger that
+    // references the row — for a slot nothing reads yet.
+    freshDataDir('cp-row-collision');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('GOOGLE_CLIENT_ID', 'env-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    const engine = await boot();
+    const hook = captured.calls.at(-1)?.['onTokenChange'] as
+      ((e: { reason: string; tokenData: { scopes: string[]; email?: string; expires_at: number } | null }) => void);
+    const store = (engine as unknown as { _connectionStore: {
+      get(id: string): { kind: string; name: string; configJson: string; vaultKeys: string[] } | undefined;
+      upsert(row: Record<string, unknown>): void;
+    } | null })._connectionStore!;
+
+    const theirs = {
+      id: 'google', kind: 'api', name: 'Google Custom Search', subjectId: null,
+      direction: 'outbound', configJson: JSON.stringify({ base_url: 'https://example.test' }),
+      vaultKeys: ['THEIR_API_KEY'], status: 'active',
+    };
+    store.upsert(theirs);
+
+    hook({ reason: 'grant', tokenData: { scopes: ['s'], email: 'a@b.c', expires_at: 1 } });
+    const afterGrant = store.get('google');
+    expect(afterGrant?.kind, 'their row must survive a Google grant').toBe('api');
+    expect(afterGrant?.name).toBe('Google Custom Search');
+    expect(afterGrant?.vaultKeys).toEqual(['THEIR_API_KEY']);
+
+    hook({ reason: 'refresh', tokenData: { scopes: ['s'], expires_at: 2 } });
+    expect(store.get('google')?.kind).toBe('api');
+
+    hook({ reason: 'disconnect', tokenData: null });
+    // `remove` is kind-scoped, so a Google disconnect must not delete it either.
+    expect(store.get('google')?.kind, 'their row must survive a Google disconnect').toBe('api');
+  });
+
   it('a disconnect removes the row even if the event still carries a grant', async () => {
     freshDataDir('cp-row-stale');
     setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
