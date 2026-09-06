@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Changed: the docs and the card now describe the connection you actually get
+
+- The Google docs still described a product from before the scope re-cut: a
+  setup that "applies to all deployments", an access toggle called *Read only* /
+  *Full access*, and a default level said to read "Gmail, Sheets, Drive, Calendar,
+  Docs". None of that is true — the default asks for calendar events, free/busy
+  and the Drive files lynox creates, and nothing else. Rewritten, with the cost
+  of each level named (verification vs. an annual CASA assessment) rather than
+  implied.
+- **The full-access description now says that it moves your inbox.** Full
+  includes a Gmail read scope, and lynox then reads that mailbox over the Google
+  connection instead of over IMAP. Every other item in that list is a capability;
+  that one changes something already working, and the copy did not mention it.
+- "Credentials saved. Restarting engine…" said something the route does not do —
+  it reloads the Google credential in the running engine. A user watching for a
+  restart was waiting for nothing.
+- **Drive results say which Drive they came from.** Under `drive.file` Google
+  returns only files lynox created, so an empty answer is honest and looks
+  exactly like "you have no such file". Searches and listings now carry one
+  sentence saying so, and the card carries the way out — which differs by
+  connection, because a managed connection through lynox's own Google client has
+  no toggle that widens it.
+
 ### Fixed: a Google connection without Gmail access no longer looks like a broken mailbox
 
 - A Google *connection* and a Google *mailbox* are two different things, and

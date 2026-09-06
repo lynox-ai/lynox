@@ -277,6 +277,10 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | Path to Google service account JSON key file (headless/Docker) |
 
+On **lynox.cloud** these are optional: an instance with no client pair of its own connects through
+lynox's shared Google client, and the card offers that as one button. Setting them switches the instance
+to your own client — see [Google Workspace](/integrations/google-workspace/).
+
 ## Editing Config
 
 You can edit config in two ways:

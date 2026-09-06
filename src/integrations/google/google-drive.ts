@@ -230,11 +230,11 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
         }
 
         switch (input.action) {
-          case 'search': return await handleSearch(auth, input);
+          case 'search': return withScopeNote(auth, await handleSearch(auth, input));
           case 'read': return await handleRead(auth, input);
           case 'upload': return await handleUpload(auth, input);
           case 'create_doc': return await handleCreateDoc(auth, input);
-          case 'list': return await handleList(auth, input);
+          case 'list': return withScopeNote(auth, await handleList(auth, input));
           case 'move': return await handleMove(auth, input);
           case 'share': return await handleShare(auth, input);
           default: return `Error: Unknown action "${input.action}".`;
@@ -244,6 +244,24 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
       }
     },
   };
+}
+
+/**
+ * Say which Drive the result came from.
+ *
+ * Under `drive.file` Google returns ONLY files this app created or the user
+ * explicitly picked — an empty or short answer is then the honest one, and
+ * indistinguishable from "you have no such file". Without this sentence the
+ * model reports the absence as fact and the user believes it.
+ *
+ * The remedy is deliberately NOT here: it differs per tenant (a brokered
+ * connection cannot widen its grant from this card), and a tool string is read
+ * by the model, not by the person who could act on it. The card carries it.
+ */
+function withScopeNote(auth: GoogleAuth, result: string): string {
+  if (auth.hasScope(SCOPES.DRIVE) || auth.hasScope(SCOPES.DRIVE_READONLY)) return result;
+  if (result.startsWith('Error:') || result.startsWith('Drive error:')) return result;
+  return `${result}\n\n(Searched only files lynox created — this connection does not have access to the rest of your Drive.)`;
 }
 
 // === Action Handlers ===

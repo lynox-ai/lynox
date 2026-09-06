@@ -194,6 +194,46 @@ describe('the broker set: every action either works or refuses with a remedy', (
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('says which Drive a search looked in, when it is only the app half', async () => {
+    // Under `drive.file` Google returns ONLY files this app created. An empty
+    // answer is then honest and indistinguishable from "you have no such file"
+    // — without the sentence the model reports the absence as fact.
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ files: [] }) });
+    const narrow = await (createDriveTool(() => auth([SCOPES.DRIVE_FILE])) as ToolEntry)
+      .handler({ action: 'search', query: 'q' }, agent()) as string;
+    expect(narrow).toContain('only files lynox created');
+
+    // …and it must NOT appear on a grant that really does reach the whole
+    // Drive, or the sentence becomes noise the model learns to ignore.
+    for (const wide of [SCOPES.DRIVE, SCOPES.DRIVE_READONLY]) {
+      mockFetch.mockReset();
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ files: [] }) });
+      const r = await (createDriveTool(() => auth([wide])) as ToolEntry)
+        .handler({ action: 'search', query: 'q' }, agent()) as string;
+      expect(r, `${wide} reaches the whole Drive`).not.toContain('only files lynox created');
+    }
+  });
+
+  it('appends it to `list` too, and to nothing that failed', async () => {
+    // `list` is the other read that returns a file set. A note on one and not
+    // the other is the shape that makes a caveat look conditional on something
+    // it is not.
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ files: [] }) });
+    const listed = await (createDriveTool(() => auth([SCOPES.DRIVE_FILE])) as ToolEntry)
+      .handler({ action: 'list' }, agent()) as string;
+    expect(listed).toContain('only files lynox created');
+
+    // A refusal or an error is not a result to qualify — appending a scope note
+    // to "Error: …" reads as though the error were about coverage.
+    mockFetch.mockReset();
+    const refused = await (createDriveTool(() => auth([])) as ToolEntry)
+      .handler({ action: 'search', query: 'q' }, agent()) as string;
+    expect(refused).toContain('requires one of these Google permissions');
+    expect(refused).not.toContain('only files lynox created');
+  });
+
   it('an unknown action is not silently admitted by the gate', async () => {
     mockFetch.mockReset();
     const r = await (createSheetsTool(() => auth([])) as ToolEntry)

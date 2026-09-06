@@ -1236,7 +1236,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.mail_desc': { de: 'IMAP/SMTP-Konten verwalten, App-Passwörter, Postfach-Regeln', en: 'Manage IMAP/SMTP accounts, app passwords, inbox rules' },
 	'settings.channels.mail_rules_link': { de: 'Regeln', en: 'Rules' },
 	'settings.channels.google': { de: 'Google Workspace', en: 'Google Workspace' },
-	'settings.channels.google_desc': { de: 'Gmail, Drive, Calendar, Sheets und Docs verbinden', en: 'Connect Gmail, Drive, Calendar, Sheets and Docs' },
+	'settings.channels.google_desc': { de: 'Kalender und Drive verbinden — Gmail, Sheets und Docs auf Wunsch', en: 'Connect Calendar and Drive — Gmail, Sheets and Docs on request' },
 	'settings.channels.notifications': { de: 'Push-Benachrichtigungen', en: 'Push notifications' },
 	'settings.channels.notifications_desc': { de: 'Browser-Push für Workflow-Ende, Alerts und Deal-Hinweise', en: 'Browser push for workflow completion, alerts, and deal nudges' },
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
@@ -1619,7 +1619,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.api_key_saved': { de: 'API-Key gespeichert.', en: 'API key saved.' },
 	'integrations.api_key_update': { de: 'Key aktualisieren', en: 'Update key' },
 	'integrations.google_workspace': { de: 'Google Workspace', en: 'Google Workspace' },
-	'integrations.google_services': { de: 'Gmail, Drive, Calendar, Sheets, Docs', en: 'Gmail, Drive, Calendar, Sheets, Docs' },
+	// Names what the DEFAULT consent grants. Listing five products next to a
+	// consent screen that asks for two is the over-claim this wave exists against.
+	'integrations.google_services': { de: 'Kalender, Drive — Gmail, Sheets und Docs bei vollem Zugriff', en: 'Calendar, Drive — Gmail, Sheets and Docs with full access' },
 	'integrations.connected': { de: 'Verbunden', en: 'Connected' },
 	'integrations.not_connected': { de: 'Nicht verbunden', en: 'Not connected' },
 	'integrations.not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
@@ -1636,7 +1638,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_connected_managed': { de: 'Google Workspace verbunden!', en: 'Google Workspace connected!' },
 	'integrations.google_oauth_unavailable': { de: 'Google-Verbindung konnte nicht hergestellt werden.', en: 'Could not establish Google connection.' },
 	'integrations.google_code_copied': { de: 'Code kopiert — im geöffneten Tab einfügen', en: 'Code copied — paste in the opened tab' },
-	'integrations.credentials_saved': { de: 'Credentials gespeichert. Engine wird neu gestartet...', en: 'Credentials saved. Restarting engine...' },
+	// NOT a restart: `POST /api/google/reload` rebuilds the Google credential in
+	// the running engine and answers `{ ok }`. The old wording promised something
+	// the route does not do, and a user watching for a restart waits for nothing.
+	'integrations.credentials_saved': { de: 'Credentials gespeichert. Google-Verbindung wird neu geladen …', en: 'Credentials saved. Reloading the Google connection…' },
 	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },
 	'integrations.google_setup_guide': { de: 'Folge der Einrichtungsanleitung', en: 'Follow the setup guide' },
 	'integrations.google_setup_guide_suffix': { de: 'Du brauchst ein Google-Cloud-Projekt mit aktivierten APIs und OAuth-Credentials', en: 'You need a Google Cloud project with APIs enabled and OAuth credentials' },
@@ -1648,7 +1653,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.change_credentials': { de: 'Credentials ändern', en: 'Change credentials' },
 	'integrations.access_level': { de: 'Zugriffsebene', en: 'Access level' },
 	'integrations.scope_full': { de: 'Voller Zugriff', en: 'Full access' },
-	'integrations.scope_full_desc': { de: 'Mails senden, Termine erstellen, Sheets bearbeiten, Dateien hochladen.', en: 'Send emails, create events, edit sheets, upload files.' },
+	// ⚠ Names the mailbox switch, which is the half users were never told about:
+	// full access includes a Gmail READ scope, and lynox then reads that mailbox
+	// over the Google connection instead of over IMAP. Everything else here is a
+	// capability; that one is a change to something already working.
+	'integrations.scope_full_desc': { de: 'Sheets und Docs bearbeiten, Mails senden — und Gmail lesen: dein Posteingang läuft dann über die Google-Verbindung statt über IMAP.', en: 'Edit sheets and docs, send email — and read Gmail: your inbox then runs over the Google connection instead of IMAP.' },
 	'integrations.reconnect_google': { de: 'Erneut verbinden', en: 'Reconnect' },
 	'integrations.scope_change_hint': { de: 'Erneute Google-Autorisierung nötig, um die Berechtigungen zu ändern.', en: 'Re-authorization with Google required to change permissions.' },
 	'integrations.scope_label_read': { de: 'Lesen', en: 'Read' },
@@ -1662,6 +1671,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.scope_label_freebusy': { de: 'Frei/Belegt', en: 'Free/busy' },
 	'integrations.scope_standard': { de: 'Standard', en: 'Standard' },
 	'integrations.scope_mode_legacy': { de: 'Diese Verbindung wurde mit einem älteren Berechtigungssatz erteilt.', en: 'This connection was granted with an older permission set.' },
+
+	// Drive honesty: `drive.file` reaches only what lynox created. Two remedies,
+	// because a brokered connection has no control here to widen the grant with.
+	'integrations.drive_app_files_only_broker': { de: 'Drive-Suchen finden nur Dateien, die lynox angelegt hat. Für den Rest deiner Ablage brauchst du einen eigenen Google-Cloud-Client (unter „Erweitert").', en: 'Drive searches only find files lynox created. Reaching the rest of your Drive needs your own Google Cloud client (under “Advanced”).' },
+	'integrations.drive_app_files_only_byo': { de: 'Drive-Suchen finden nur Dateien, die lynox angelegt hat. Für den Rest deiner Ablage auf „Voller Zugriff" wechseln.', en: 'Drive searches only find files lynox created. Switch to Full access to reach the rest of your Drive.' },
 
 	// Managed broker card
 	'integrations.google_broker_connect': { de: 'Mit Google verbinden', en: 'Connect with Google' },
