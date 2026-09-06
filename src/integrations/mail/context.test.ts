@@ -1127,6 +1127,12 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
       expect(mine[0]).toContain('goog');
       expect(mine[0], 'the address must not reach the log').not.toContain(GOOGLE_ROW.address);
       expect(mine[0]).not.toContain('@');
+
+      // ONE line, at init — not one per read. §3.7 asks for exactly this, and
+      // the difference is a quiet log versus a line for every card refresh.
+      c.listAccounts(); c.listAccounts(); c.listAccounts();
+      expect(warn.mock.calls.map(a => String(a[0])).filter(l => l.includes('[lynox:mail]')),
+        'reading the accounts must not log').toHaveLength(1);
     } finally {
       warn.mockRestore();
       await c.close();
