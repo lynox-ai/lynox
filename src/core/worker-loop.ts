@@ -778,21 +778,7 @@ export class WorkerLoop {
       });
       try {
         const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
-        if (outcome.status === 'answered') {
-          // The answer has been consumed HERE, by the run that was waiting for
-          // it, so it is this trigger's business no longer — exactly as when the
-          // re-arm path hands one to a new run.
-          //
-          // Not symmetry for its own sake. A run may ask more than once, and each
-          // ask re-parks the trigger. Leaving this row attached means the tick's
-          // re-arm pass finds an ANSWERED row for a trigger that is parked on the
-          // NEXT question, ends that wait while the run is still genuinely waiting
-          // on it, and stamps the trigger due. `activeTasks` stops a duplicate
-          // dispatch, but the row is then `open` rather than `waiting`, so a
-          // restart before the second question settles loses its answer for good.
-          promptStore.releaseTrigger(promptId);
-          return outcome.row.answer ?? DISMISSED_ANSWER;
-        }
+        if (outcome.status === 'answered') return outcome.row.answer ?? DISMISSED_ANSWER;
         // An ABORTED wait leaves the row `pending` — `waitForSettled` resolves
         // off the signal without touching it. Two consequences, both real: the
         // row keeps this session's slot in the partial unique index
@@ -832,6 +818,27 @@ export class WorkerLoop {
         questionWentUnanswered = true;
         return DISMISSED_ANSWER;
       } finally {
+        // Detach the prompt from the trigger — once, here, for every way this
+        // wait can end.
+        //
+        // Put on each consuming branch first, and that was the wrong shape: an
+        // obligation every exit has to remember is one some exit will not. The
+        // answered branch got it, and then the review found the abort branch,
+        // where a reply committing concurrently with an abort leaves the row
+        // `answered` with the pointer live and `expirePrompt` a silent no-op.
+        // Enumerating exits does not end; owning the row does.
+        //
+        // Reaching this line at all means the wait is over IN THIS PROCESS, so a
+        // later one must not re-arm on it. A question that outlives the process
+        // never gets here — that path is a crash, which is exactly the case §0 A2
+        // keeps the pointer for.
+        try {
+          promptStore.releaseTrigger(promptId);
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] prompt detach failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
         // §0 A6 — END the wait, however it ended: answered, expired, aborted, or
         // thrown. Conditional on the row still being `waiting`, so this and the
         // expiry sweep can both fire for the same trigger and only one takes.
@@ -889,8 +896,17 @@ export class WorkerLoop {
       // Without the mask a secret-shaped answer reaches the model where the live
       // path would have caught it; without the fences a crafted answer can open
       // what reads as a second operator-authored task.
-      const q = maskSecretPatterns(answered.question);
-      const a = maskSecretPatterns(answered.answer ?? '');
+      // `maskAll` — known VALUES and known SHAPES in ONE pass over the original.
+      // Shapes alone was the first attempt and left a stored secret with no
+      // recognisable shape (a generic token, a database URL, a password) in
+      // cleartext. Not the sequence `agent.ts` uses either: `secret-store.ts`
+      // documents that running the two maskers in series is unsafe in BOTH
+      // orders, because each pass rewrites what the next one reads. `maskAll`
+      // reads the original twice and redacts the union once.
+      const store = this.engine.getSecretStore();
+      const mask = (t: string): string => store ? store.maskAll(t) : maskSecretPatterns(t);
+      const q = mask(answered.question);
+      const a = mask(answered.answer ?? '');
       prompt = `${base}\n\nA question you asked earlier has been answered.\n`
         + `<asked>\n${q}\n</asked>\n<answer>\n${a}\n</answer>`;
       this.engine.getPromptStore()?.releaseTrigger(answered.id);

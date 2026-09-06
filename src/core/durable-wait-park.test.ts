@@ -7,6 +7,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { PromptStore } from './prompt-store.js';
 import { TaskManager } from './task-manager.js';
+import { maskSecretsAndPatterns } from './secret-store.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
@@ -57,7 +58,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[] }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -117,6 +118,14 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       },
       getPromptStore: () => prompts,
       getRunHistory: () => history,
+      // `null` is a real production shape (an engine with no vault), and the
+      // masking path handles it by falling back to shape-only. A mock that
+      // simply LACKED the method made `executeStandard` throw before it ever
+      // dispatched, and the only symptom was a test timing out waiting for a
+      // run that never started.
+      getSecretStore: () => opts?.secretValues
+        ? ({ maskAll: (t: string) => maskSecretsAndPatterns(t, opts.secretValues!) } as unknown as ReturnType<Engine['getSecretStore']>)
+        : null,
       getUserConfig: () => ({}),
       escalateToUser: () => null,
     } as unknown as Engine;
@@ -865,6 +874,37 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
     expect(secondPrompt).not.toContain(key);
     expect(secondPrompt).toContain('***AAAA');   // masked, not dropped
+  });
+
+  it('the answer lookup is scoped to ITS trigger, not just the newest answered row', async () => {
+    // Every other test here has exactly one answered row, so an implementation
+    // that dropped `WHERE trigger_id = ?` and simply took the newest answered
+    // prompt would pass all of them — measured. Two triggers, two answers, and
+    // the newer one belongs to the OTHER trigger.
+    const h = makeHarness();
+    await h.parked;
+    seedAnsweredPark(h, 'trg-mine', 'thread-mine', 'Which client?', 'Acme');
+    // Answered second, so it is the newest by `answered_at`.
+    seedAnsweredPark(h, 'trg-other', 'thread-other', 'Which colour?', 'Teal');
+
+    expect(h.prompts.getAnsweredForTrigger('trg-mine')?.answer).toBe('Acme');
+    expect(h.prompts.getAnsweredForTrigger('trg-other')?.answer).toBe('Teal');
+  });
+
+  it('a masked VALUE is caught too, not only a recognisable shape', async () => {
+    // Shapes alone was the first attempt. A stored secret with no shape — a
+    // generic token, a database URL, a password — would have shipped in
+    // cleartext to the re-armed model.
+    const h = makeHarness({ secretValues: ['hunter2-correct-horse'] });
+    await h.parked;
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which password?', 'it is hunter2-correct-horse ok');
+
+    await h.loop.tick();
+    await h.loop.tick();
+    await waitUntil('the second run to start', () => h.dispatches() >= 2);
+
+    const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
+    expect(secondPrompt).not.toContain('hunter2-correct-horse');
   });
 
   // ── Auflage 1: recurring is OUT of wave 1, and the test pins today's shape ──
