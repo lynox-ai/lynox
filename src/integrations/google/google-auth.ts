@@ -25,6 +25,16 @@ interface TokenData {
    */
   refresh_handle?: string;
   /**
+   * The Google account this grant belongs to, as the control plane read it
+   * from the `openid email` scopes at consent.
+   *
+   * Absent means UNKNOWN, not "no account": grants made before Stage 1
+   * requested those scopes carry nothing, and the card names the connection
+   * without an address rather than showing an empty one. Nothing may key on
+   * it — addresses change and differ in case and dots for one mailbox.
+   */
+  email?: string;
+  /**
    * The OAuth client id this token was minted under — recorded ONLY where this
    * process performed the exchange itself and Google accepted that id.
    *
@@ -637,6 +647,15 @@ export class GoogleAuth {
      * later, at the first expiry, with nothing pointing back to the claim.
      */
     refresh_handle?: string;
+    /**
+     * The Google account the grant belongs to (contract `OAuthClaimResponse`).
+     *
+     * Optional because a grant made before Stage 1 asked for `openid email` has
+     * none, and absent means UNKNOWN rather than "no account". Stored so the
+     * card can name the connection; NOTHING may key on it — addresses change,
+     * and the connection row is what identifies a connection (§3.10).
+     */
+    email?: string;
   }): Promise<void> {
     if (typeof data.access_token !== 'string' || data.access_token.length < 10) {
       throw new Error('Invalid token data: access_token must be a string of at least 10 characters');
@@ -656,6 +675,7 @@ export class GoogleAuth {
       expires_at: data.expires_at,
       scopes: data.scopes,
       ...(data.refresh_handle ? { refresh_handle: data.refresh_handle } : {}),
+      ...(data.email ? { email: data.email } : {}),
     };
     // A fresh grant ends the suppression. The cool-down exists so a fleet-wide
     // bad client secret cannot make every instance hammer Google forever; it is

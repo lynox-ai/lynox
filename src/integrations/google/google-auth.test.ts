@@ -1322,6 +1322,34 @@ describe('setTokens — OAuth claim fixture (contract §2.3 #5)', () => {
     expect(stored).toEqual(fixture);
   });
 
+  it('a claim WITHOUT an email stores no email key — absent means unknown', async () => {
+    // The contract calls `email` optional, and optional here means a grant made
+    // before Stage 1 asked for `openid email`.
+    //
+    // ⚠ What this assert can and cannot see, measured rather than assumed: it
+    // reads the SERIALISED blob, and `JSON.stringify` drops an `undefined`
+    // value. So writing `email: data.email` unconditionally leaves this test
+    // GREEN — the key never reaches the JSON. It is the next test, with an
+    // empty string, that kills that mutation, because `''` survives the
+    // serialisation. Both are kept: this one pins the blob shape a later reader
+    // will diff against, the other one does the catching.
+    const { auth: vaultAuth, vault } = makeVaultAuth();
+    const { email: _dropped, ...withoutEmail } = fixture as Record<string, unknown>;
+    await vaultAuth.setTokens(withoutEmail as unknown as Parameters<GoogleAuth['setTokens']>[0]);
+    const stored = JSON.parse(vault.set.mock.calls[0]![1] as string) as Record<string, unknown>;
+    expect('email' in stored, 'no email in the claim ⇒ no email key in the blob').toBe(false);
+  });
+
+  it('an EMPTY email is unknown too, not an address that happens to be blank', async () => {
+    // `''` reaches here the same way any other value does. Storing it would put
+    // an empty string on the card where an address belongs; treating it as
+    // unknown keeps the fallback that already handles the absent case.
+    const { auth: vaultAuth, vault } = makeVaultAuth();
+    await vaultAuth.setTokens({ ...(fixture as Record<string, unknown>), email: '' } as unknown as Parameters<GoogleAuth['setTokens']>[0]);
+    const stored = JSON.parse(vault.set.mock.calls[0]![1] as string) as Record<string, unknown>;
+    expect('email' in stored, 'an empty address is not an address').toBe(false);
+  });
+
   it('records NO minting client id — the control plane minted these, not this instance', async () => {
     // The assertion above already fails if a `client_id` appears here, but it
     // fails as "the blob is not the claim" and invites the repair of adding the

@@ -284,6 +284,20 @@ export interface OAuthClaimResponse {
   /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
   expires_at: number;
   scopes: string[];
+  /**
+   * The Google account the grant belongs to, so the card can say WHOSE it is.
+   *
+   * Optional, and the optionality is the contract rather than caution: the
+   * control plane learns the address from the `openid email` scopes at consent,
+   * and a grant made before Stage 1 requested them has none. Absent therefore
+   * means UNKNOWN — never "no account" — and the card falls back to naming the
+   * connection without an address rather than showing an empty one.
+   *
+   * ⚠ It is NOT an identifier. Google addresses change, and two grants for the
+   * same mailbox can differ in case and dots; nothing may key on this. The one
+   * thing that identifies a connection is the connection row itself (§3.10).
+   */
+  email?: string;
 }
 
 // === OAuth refresh — POST /internal/oauth/google/refresh (engine → CP) ===
