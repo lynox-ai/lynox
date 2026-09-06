@@ -188,9 +188,15 @@ IMAP as well, that is the switch to be aware of.
 Switching levels requires re-authorising with Google. A connection made before these two levels existed
 keeps working and shows as *legacy* — nothing changes until you pick a level.
 
-For advanced use, scopes can be set directly. The **accepted** list is wider than the two levels above —
-it also holds scopes lynox no longer asks for, so a connection made under an older set keeps working —
-but anything outside it is rejected:
+For advanced use, scopes can be set directly. The **accepted** list is wider than the two levels above,
+for two different reasons — and only the first is about you:
+
+- **Scopes lynox used to request.** A connection made before the levels existed keeps working; nothing
+  it was granted is rejected now.
+- **Scopes lynox has never requested but Google classifies**, such as `gmail.metadata` or the blanket
+  `calendar`. They are accepted if your grant already carries them; lynox will not ask for them.
+
+Anything outside that list is rejected:
 
 ```json
 {

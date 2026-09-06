@@ -70,7 +70,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Activity Bar** — Every tool call streams live with its current sub-phase (e.g. "Reading API docs..." → "Extracting auth..."). No mysterious 30-second waits.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
 - **Mobile Access** — Voice input (Whisper or Voxtral STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
-- **Google Workspace** — Calendar and the Drive files lynox creates, via OAuth 2.0; Gmail, Sheets and Docs on an opt-in wider consent. Self-hosted needs your own Google Cloud project; on lynox.cloud it is one button.
+- **Google Workspace** — Calendar and the Drive files lynox creates, via OAuth 2.0; Gmail, Sheets and Docs on an opt-in wider consent. Self-hosted needs your own Google Cloud project; on lynox.cloud no Cloud project is needed.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it. Export a workflow to a versioned format and import it on another instance — secrets and trusted hosts are re-approved on import, never carried over implicitly.
 - **Model Choice** — Pick the model per chat, or set a named model strategy that maps each routing tier to a specific provider's model — with the backing host always disclosed.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
