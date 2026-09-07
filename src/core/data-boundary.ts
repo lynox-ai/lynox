@@ -495,12 +495,27 @@ ${safe}
  * it cannot say "you used one". The withdrawn script guard claimed that second
  * sentence and reported `0 hand-built` against three planted frames.
  *
- * And the enforcement is asymmetric in a way worth knowing before relying on it:
- * TypeScript rejects ASSIGNING a `Fence` where a string belongs — measured, 14
- * sites in 8 files — but accepts `` `${fence}` `` and `'a' + fence`, because
- * interpolating an object is legal. Those fail loudly at runtime as
- * `[object Object]` rather than silently, which is the improvement over a bare
- * string; making them fail at CI needs `@typescript-eslint/no-base-to-string`,
+ * The enforcement is asymmetric: TypeScript rejects ASSIGNING a `Fence` where a
+ * string belongs — that found 14 sites in 8 files — but accepts `` `${fence}` ``
+ * and `'a' + fence`, because interpolating an object is legal. Three of the 17
+ * call sites were invisible to it for that reason and were found by reading.
+ *
+ * Opacity softens exactly ONE of the two ways to bypass this, and it is worth
+ * saying which, because the reassuring reading is wrong. Measured, both cases:
+ *
+ *   A. A site that HAS a `Fence` and frames it by hand gets `[object Object]` —
+ *      the payload is not in the output at all. Broken, loudly, and no forgery.
+ *   B. A site that never calls `renderFence` and frames raw content gets a
+ *      working frame: payload intact, and a `</x_frame>` inside it leaves TWO
+ *      live closers, so the content closes the frame early. That is the same
+ *      security hole as before this type existed.
+ *
+ * B is also the likelier one. A site that does not know about `renderFence` has
+ * no `Fence` to interpolate, so it never reaches case A. Opacity turns the
+ * bypass-with-a-frame into a correctness bug; it does nothing for the
+ * bypass-without-one. `data-boundary.test.ts` pins both.
+ *
+ * Making the interpolation fail at CI needs `@typescript-eslint/no-base-to-string`,
  * which currently reports 17 unrelated pre-existing violations and so is its own
  * piece of work, not a rider on this one.
  */
