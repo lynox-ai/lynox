@@ -58,8 +58,38 @@ const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging
  * because listing it would demand the gate on nearly every PR and teach people
  * to type the word without doing the work. Relevance is judged by the change's
  * AXIS; this list only catches the axes that happen to have a fixed address.
+ *
+ * ⚠️ A FLOOR IS ASYMMETRIC, and the integrations entry is here because it was
+ * built symmetrically and failed in the direction that costs something. Too
+ * NARROW is fail-open: the gate is not demanded, and whether it runs depends on
+ * the author asking more of themselves than the tool does. Too BROAD costs one
+ * gate run — and sometimes buys a proof nobody would otherwise have written
+ * (a false demand on a comment-only diff was answered by stripping comments
+ * from both revisions and comparing checksums, which settled the question
+ * mechanically instead of by eye). So when in doubt this list reaches wider.
+ *
+ * That is why the entry below is the whole directory rather than a name
+ * pattern. It used to be `/^src\/integrations\/.*\/(auth|oauth)/`, and the
+ * numbers are the argument (core `d9fed2ac`, patterns executed against
+ * `git ls-tree`, not read):
+ *
+ *   · it reached **3 of 72** non-test integration modules, and **0 of the 24**
+ *     under `src/integrations/google/` — the whole Google credential path was
+ *     exempt, because the expression wants `auth` at the start of a segment
+ *     and the segment starts with `google-`;
+ *   · the file that decides it is `src/integrations/google/vault-keys.ts`,
+ *     whose entire content is the vault slot name the Google OAuth tokens are
+ *     stored under, imported by `engine.ts` and `google-auth.ts`. It contains
+ *     neither `auth` nor `oauth` in its path. **No name pattern can see it**,
+ *     and the next credential module named `broker-mode.ts` is the same story.
+ *
+ * The cost was measured rather than feared, because "it would be red too often"
+ * is the argument that keeps `src/core/agent.ts` off this list and it deserves
+ * the same evidence: over the last 60 merged PRs the old pattern fired on 2,
+ * the whole directory fires on 13. Twenty-two percent is a floor people can
+ * live with; it is not "nearly every PR".
  */
-const SECURITY_PATHS = [
+export const SECURITY_PATHS = [
   /^src\/core\/data-boundary\.ts$/,
   /^src\/core\/output-guard\.ts$/,
   /^src\/core\/secret-store\.ts$/,
@@ -68,7 +98,7 @@ const SECURITY_PATHS = [
   /^src\/tools\/permission-guard\.ts$/,
   /^src\/tools\/builtin\//,
   /^src\/server\//,
-  /^src\/integrations\/.*\/(auth|oauth)/,
+  /^src\/integrations\//,
 ];
 
 /** A diff touching only these needs no record at all. */

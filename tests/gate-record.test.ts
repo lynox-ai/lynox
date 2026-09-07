@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -203,6 +203,36 @@ describe('gate-record — which gates a diff requires', () => {
     }
   });
 
+  it('demands it for EVERY integration module, not for the ones named auth', () => {
+    // The entry used to be `/^src\\/integrations\\/.*\\/(auth|oauth)/`. Executed against
+    // `git ls-tree` at core d9fed2ac it reached 3 of 72 non-test integration modules and
+    // 0 of the 24 under `src/integrations/google/`, because it wants `auth` at the start
+    // of a path segment and that segment starts with `google-`.
+    for (const file of [
+      'src/integrations/google/google-auth.ts',
+      // The case that decides the SHAPE rather than the width: this file's entire
+      // content is the vault slot name the Google OAuth tokens are stored under, and
+      // it is imported by engine.ts and google-auth.ts. Its path contains neither
+      // `auth` nor `oauth`, so no name pattern can reach it — and the next credential
+      // module called `broker-mode.ts` is the same story.
+      'src/integrations/google/vault-keys.ts',
+      'src/integrations/google/broker-mode.ts',
+      'src/integrations/mail/auth/app-password.ts',
+      'src/integrations/mail/providers/imap-smtp.ts',
+    ]) {
+      expect(requiredGates([file]).has('security'), file).toBe(true);
+    }
+  });
+
+  it('anchors that entry at src/ — a settings PAGE about integrations is not one', () => {
+    // The control for the line above: without the `^src/` anchor the widened entry
+    // would swallow the web UI too. This path exists in the repository today.
+    expect(
+      requiredGates(['packages/web-ui/src/routes/app/settings/integrations/google/+page.ts'])
+        .has('security'),
+    ).toBe(false);
+  });
+
   it('does NOT demand it for ordinary code', () => {
     expect(requiredGates(['src/core/prompts.ts']).has('security')).toBe(false);
     expect(evaluate({ body: record(), head: HEAD, files: ['src/core/prompts.ts'] }).ok).toBe(true);
@@ -315,6 +345,32 @@ describe('gate-record — the shipped template does not answer its own questions
     fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)),
     'utf-8',
   );
+
+  /**
+   * The map is the mechanism; this template is where its INTENT is written down for
+   * a human, and the two drift apart silently. The register row that produced the
+   * `src/integrations/` widening records exactly that confusion: an earlier revision
+   * of it attributed the stated intent to the code comment, when the sentence lives
+   * here. So the list is derived from the source rather than typed out — adding an
+   * entry nobody documents turns this red.
+   */
+  it('names every path the security map enforces', () => {
+    /** The literal head of a regex, before its first metacharacter. */
+    const literal = (re: RegExp): string =>
+      re.source
+        .replace(/^\^/, '')
+        .replace(/\\(.)/g, '$1')
+        .split(/[.*+?^$(){}|[\]]/)[0] ?? '';
+    const tokens = (SECURITY_PATHS as RegExp[]).map((re) => {
+      const lit = literal(re);
+      // A single-file entry (`src/core/output-guard.ts`) is named by its basename in
+      // the prose; a directory entry (`src/server/`) is named in full.
+      return lit.endsWith('/') ? lit : (lit.split('/').pop() ?? lit);
+    });
+    expect(tokens.length).toBe(SECURITY_PATHS.length);
+    expect(tokens.every((t) => t.length > 0)).toBe(true); // the extractor is the suspect
+    for (const t of tokens) expect(TEMPLATE, t).toContain(t);
+  });
 
   it('is REJECTED as shipped', () => {
     const v = evaluate({ body: TEMPLATE, head: HEAD, files: CODE });
