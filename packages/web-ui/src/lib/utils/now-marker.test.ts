@@ -53,17 +53,50 @@ describe('stripLoadedContext', () => {
 		expect(stripLoadedContext(raw)).toBe('Add a step that emails the summary.');
 	});
 
-	it('strips a mail preamble that contains its OWN blank line (the case a \\n\\n anchor would break)', () => {
-		// The mail kind writes `Message:\n<body>\n\n` inside the preamble, so a
-		// naive "cut at the first blank line" would leave the reply instructions
-		// in the bubble. The explicit end sentinel is what makes this exact.
+	it('strips a mail preamble whose body sits inside an <untrusted_data> block', () => {
+		// This fixture mirrors what core actually composes (chat-context.ts, the
+		// `mail` kind): the sender-authored fields live inside an
+		// `<untrusted_data source=…>` block, and a blank line separates it from the
+		// reply instruction — so a naive "cut at the first blank line" would leave
+		// the instruction in the bubble. The explicit end sentinel is what makes
+		// this exact.
+		//
+		// The assertion that matters is the SECOND one: the untrusted-data frame is
+		// engine framing like the rest of the preamble, and a user replaying the
+		// thread must never see `<untrusted_data source=…>` in their own bubble.
+		// The frame is safe INSIDE the block because the interpolated fields are
+		// newline-free (core `oneLine`), so nothing in it can close the block early.
 		const raw =
 			'[Loaded mail for reply — item: item-1]\n' +
-			'From: Markus <markus@acme.example>\nSubject: "Angebot"\n' +
-			'Message:\nHallo, koennt ihr ein Angebot schicken?\n\n' +
+			'<untrusted_data source="mail:acme:markus@acme.example">\n' +
+			'From: Markus <markus@acme.example>\nSubject: Angebot\n' +
+			'Message: Hallo, koennt ihr ein Angebot schicken?\n' +
+			'</untrusted_data>\n\n' +
 			'To reply, call mail_reply with uid: 42, account: "acme". Draft a reply, confirm the send with the user, then send it.' +
 			END + 'Antworte freundlich und frag nach dem Budget.';
-		expect(stripLoadedContext(raw)).toBe('Antworte freundlich und frag nach dem Budget.');
+		const stripped = stripLoadedContext(raw);
+		expect(stripped).toBe('Antworte freundlich und frag nach dem Budget.');
+		expect(stripped).not.toContain('untrusted_data');
+	});
+
+	it('strips a mail-batch preamble carrying SEVERAL untrusted blocks', () => {
+		// The batch kind emits one wrapper per item, so the preamble contains
+		// repeated `</untrusted_data>` lines. The matcher is lazy and anchors on the
+		// sentinel, not on the last tag — a naive "cut at the last closing tag"
+		// would eat into the user's text on a thread that mentions one.
+		const item = (n: number, addr: string): string =>
+			`${String(n)}. account "acme", uid ${String(100 + n)}\n` +
+			`<untrusted_data source="mail:acme:${addr}">\n` +
+			`From: Sender ${String(n)} <${addr}>\nSubject: Betreff ${String(n)}\nSnippet: kurzer Text\n` +
+			'</untrusted_data>';
+		const raw =
+			'[Loaded 2 mails for batch triage]\n' +
+			item(1, 'a@acme.example') + '\n' + item(2, 'b@acme.example') + '\n\n' +
+			'Work through these with the user one at a time.' +
+			END + 'Fang mit der ersten an.';
+		const stripped = stripLoadedContext(raw);
+		expect(stripped).toBe('Fang mit der ersten an.');
+		expect(stripped).not.toContain('untrusted_data');
 	});
 
 	it('composes after stripNowMarker: [Now:] then [Loaded …] then user text', () => {

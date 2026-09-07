@@ -1,5 +1,6 @@
 import type { RunHistory } from './run-history.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
+import { wrapChannelMessage } from './data-boundary.js';
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -18,6 +19,34 @@ import type { InboxItem, PlannedPipeline } from '../types/index.js';
 export type ChatContextRef =
   | { kind: 'workflow' | 'run' | 'mail'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
+
+/**
+ * Every `kind` {@link resolveChatContext} accepts, as a runtime list.
+ *
+ * It exists for ONE reason, and the reason is mechanical rather than
+ * descriptive: the untrusted-content sweep (`chat-context-untrusted-sweep.test.ts`)
+ * drives *this* list, not a hand-written list of the kinds that happen to read
+ * mail today. `satisfies Record<Kind, true>` makes the record fail to compile
+ * when a new member joins {@link ChatContextRef} — so a future `mail-thread`
+ * kind cannot be added without entering the sweep, and the sweep then decides
+ * whether its output is wrapped. The alternative — a list in the test — is a
+ * list somebody has to REMEMBER to extend, which is the failure mode this row
+ * was filed for.
+ *
+ * It has to live here, in `src/`, and not in the test: `src/**\/*.test.ts` is in
+ * no tsc project (the main tsconfig excludes it, `tsconfig.tests.json` re-excludes
+ * it), so a `satisfies` weld inside a test file is checked by nothing.
+ */
+const CHAT_CONTEXT_KIND_SET = {
+  workflow: true,
+  run: true,
+  mail: true,
+  'mail-batch': true,
+} as const satisfies Record<ChatContextRef['kind'], true>;
+
+export const CHAT_CONTEXT_KINDS = Object.keys(
+  CHAT_CONTEXT_KIND_SET,
+) as ReadonlyArray<ChatContextRef['kind']>;
 
 /**
  * Boundary sentinel the http-api seam appends AFTER a resolved preamble and
@@ -150,12 +179,32 @@ export function resolveChatContext(
     if (!inboxState) return null;
     const item = inboxState.getItem(ref.id);
     if (!item) return null;
-    // From/subject/body are the MOST untrusted fields in the app (an external
-    // sender authored them) — always oneLine() to neutralise injected
-    // pseudo-system lines, same as the workflow/run fields.
+    // From/subject/body/message-id are the MOST untrusted fields in the app (an
+    // external sender authored them). TWO defences, and they do DIFFERENT jobs —
+    // the second one was missing until core#1333, which is what made this path
+    // weaker than the tool path that shows the same body:
+    //
+    //  (1) oneLine() — collapses the line break a crafted field needs in order to
+    //      start its own pseudo-directive line, and (the part that is easy to
+    //      drop by accident) keeps the `[/loaded-context]` sentinel unforgeable.
+    //      Both http-api.ts and the web-ui strip rest on the interpolated fields
+    //      being newline-free; removing it here silently invalidates them.
+    //  (2) wrapChannelMessage() — the SAME boundary `mail_read` puts the same
+    //      body behind (`integrations/mail/tools/mail-read.ts:78`): the
+    //      `<untrusted_data source=…>` frame, the injection scan, the ⚠ warning
+    //      line, and the `injection_detected` security event. Before it, the same
+    //      mail reached the model with a frame through the tool and without one
+    //      here — and an incident on THIS path left no trace at all, because the
+    //      event is emitted by the wrapper and nothing else.
+    //
+    // The two compose rather than overlap: collapsing whitespace INSIDE the
+    // wrapper is what the mail triage path already does
+    // (`integrations/mail/triage/envelope.ts:89`), so this is the house shape,
+    // not a local invention. What it costs is stated at the call site below.
+    const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
     const from = item.fromName
-      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${oneLine(item.fromAddress, MAX_NAME_CHARS)}>`
-      : oneLine(item.fromAddress, MAX_NAME_CHARS);
+      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+      : fromAddr;
     // The cached body can be an EMPTY string (body-refresh persists '' for an
     // all-markup/redacted mail), so `??` would leave a blank Message line — fall
     // back to the snippet on empty, not just on null/undefined.
@@ -173,13 +222,28 @@ export function resolveChatContext(
       ? `To reply, call mail_reply with uid: ${uidRow.uid}, account: "${acct}"` +
         `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}. `
       : `To reply, first locate this message with mail_search ` +
-        `(by sender/subject${item.messageId ? ` or message-id "${oneLine(item.messageId, MAX_NAME_CHARS)}"` : ''}) ` +
+        `(by the sender, the subject${item.messageId ? `, or the Message-ID shown above` : ''}) ` +
         `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
+    // What stays OUTSIDE the boundary is engine-generated operational metadata —
+    // the item id, the account, the IMAP uid/folder — exactly the split
+    // `mail-read.ts:91-93` states for the tool path ("engine-generated … stays in
+    // the trusted framing above the wrapped envelope"). The Message-ID does NOT
+    // qualify: the header is written by the SENDER, so it moves inside with the
+    // other sender-authored fields and the instruction points at it instead of
+    // quoting it. Same field set as before, different side of the line.
     return (
       `[Loaded mail for reply — item: ${item.id}]\n` +
-      `From: ${from}\n` +
-      `Subject: "${oneLine(item.subject, MAX_NAME_CHARS)}"\n` +
-      `Message:\n${oneLine(bodyMd, MAX_MAIL_BODY_CHARS)}\n\n` +
+      `${wrapChannelMessage({
+        source: `mail:${acct}:${fromAddr}`,
+        fields: {
+          From: from,
+          Subject: oneLine(item.subject, MAX_NAME_CHARS),
+          ...(uidRow || !item.messageId
+            ? {}
+            : { 'Message-ID': oneLine(item.messageId, MAX_NAME_CHARS) }),
+          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS),
+        },
+      })}\n\n` +
       replyLine +
       `Draft a reply, confirm the send with the user, then send it.`
     );
@@ -189,28 +253,53 @@ export function resolveChatContext(
     // N inbox items the user bulk-selected to work through in one chat (the
     // "💬 N im Chat" bulk affordance). Same untrusted-content rules as the
     // single 'mail' kind — every sender-authored field passes through oneLine()
-    // so a crafted From/Subject/snippet can't inject a pseudo-system line. The
-    // item count is capped so a huge selection can't blow up the preamble.
+    // AND lands inside a per-item `<untrusted_data>` block. The item count is
+    // capped so a huge selection can't blow up the preamble.
+    //
+    // ONE wrapper per item, not one for the whole list, and not one per field:
+    // that is the shape `integrations/mail/triage/envelope.ts:84-95` already uses
+    // for the same job (a numbered list of envelopes). It buys the right
+    // provenance — the `source` attribute names THIS item's sender — and keeps
+    // the injection scan running once per item over the joined fields, so a
+    // pattern that straddles subject→snippet within one mail is still caught.
+    // What it does not catch is a pattern split across TWO senders' items; that
+    // is not a coherent threat (two independent senders would have to
+    // coordinate), and merging the list into one block to cover it would cost
+    // the per-item source label.
     if (!inboxState) return null;
     const lines: string[] = [];
     for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
       const item = inboxState.getItem(id);
       if (!item) continue;
+      const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
       const from = item.fromName
-        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${oneLine(item.fromAddress, MAX_NAME_CHARS)}>`
-        : oneLine(item.fromAddress, MAX_NAME_CHARS);
+        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+        : fromAddr;
       const acct = oneLine(item.accountId, MAX_NAME_CHARS);
       const uidRow = item.messageId
         ? inboxState.getUidByMessageId(item.accountId, item.messageId)
         : null;
+      // Operational header — engine-generated, NOT sender-controlled, so it stays
+      // in the trusted framing above the wrapped block (envelope.ts:83-84 states
+      // the same split in the same words).
       const locator = uidRow
         ? `account "${acct}", uid ${uidRow.uid}` +
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
-          `${item.messageId ? ` (message-id "${oneLine(item.messageId, MAX_NAME_CHARS)}")` : ''}`;
+          `${item.messageId ? ` (by the Message-ID below)` : ''}`;
       lines.push(
-        `${lines.length + 1}. From: ${from} — Subject: "${oneLine(item.subject, MAX_NAME_CHARS)}" — ${locator}\n` +
-        `   ${oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS)}`,
+        `${lines.length + 1}. ${locator}\n` +
+        wrapChannelMessage({
+          source: `mail:${acct}:${fromAddr}`,
+          fields: {
+            From: from,
+            Subject: oneLine(item.subject, MAX_NAME_CHARS),
+            ...(uidRow || !item.messageId
+              ? {}
+              : { 'Message-ID': oneLine(item.messageId, MAX_NAME_CHARS) }),
+            Snippet: oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS),
+          },
+        }),
       );
     }
     if (lines.length === 0) return null;
