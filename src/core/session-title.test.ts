@@ -48,17 +48,19 @@ describe('generateThreadTitle', () => {
     // preamble closed by the sentinel, then the user's own words. The nav title
     // must be the user's words — not "[Loaded mail for reply — …]".
     //
-    // The fixture mirrors what chat-context.ts actually composes: the
-    // sender-authored fields inside an `<untrusted_data>` block. It is hand-built
-    // (this file must not depend on the inbox reader), which is exactly why it
-    // has to be kept honest — the previous version carried the pre-wrapper shape
-    // and stayed green while the thing it described no longer existed.
+    // The fixture mirrors what chat-context.ts composes: the sender-authored
+    // fields inside an `<untrusted_data>` block. It is hand-built — this file
+    // must not depend on the inbox reader — so it CAN drift, and it already had:
+    // the previous version carried the pre-wrapper shape and stayed green against
+    // a premise that no longer existed.
     //
-    // The pair below is deliberate: the INPUT must be shown to carry the frame,
-    // and the OUTPUT must be shown not to. Asserting the output twice is a
-    // tautology — `.toBe(exact)` already implies `.not.toContain(anything else)`,
-    // so no implementation can pass the first and fail the second. (It shipped
-    // that way for one round, with a comment calling it "the one with teeth".)
+    // What guards the fidelity is `chat-context.test.ts`, which runs the REAL
+    // composed preamble of every kind through the REAL strip. Here we assert only
+    // the outcome that belongs to this file: the title is the user's words. Two
+    // earlier attempts at a second assertion were both tautologies — first
+    // `.not.toContain('untrusted_data')` beside the exact `.toBe(...)` (nothing
+    // can pass one and fail the other), then `expect(first).toContain(…)` on a
+    // literal three lines below it.
     const preamble =
       '[Loaded mail for reply — item: item-1]\n' +
       '<untrusted_data source="mail:acme:markus@acme.example">\n' +

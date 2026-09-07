@@ -263,7 +263,7 @@ describe('resolveChatContext (kind: mail)', () => {
     expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!).toContain('account: "work-imap"');
   });
 
-  it('a pre-v11 row with empty sender fields renders placeholders, not an EMPTY block', () => {
+  it('a pre-v11 row with empty sender fields states the absence in the ENGINE framing', () => {
     // `types/inbox.ts:77-82` documents pre-v11 rows as `''` for fromAddress AND
     // subject until the operator-driven backfill runs. `wrapChannelMessage` skips
     // a value that is empty after trim — so without placeholders such a row
@@ -276,7 +276,7 @@ describe('resolveChatContext (kind: mail)', () => {
     );
     const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!;
     // Absence is stated in the ENGINE's framing line, where no sender can write.
-    expect(out).toContain('[Loaded mail for reply — item: item-1 — no from, subject, body]');
+    expect(out).toContain('[Loaded mail for reply — item: item-1 — no from, subject, message]');
     // ...and NOT as a value inside the block, where a sender setting their
     // subject to the literal string "(no subject)" would be byte-identical to it.
     const block = out.slice(out.indexOf('<untrusted_data'), out.indexOf('</untrusted_data>'));
@@ -401,6 +401,17 @@ describe('resolveChatContext (kind: mail-batch)', () => {
     expect(resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] })).toBeNull();
   });
 
+  it('states a batch item\'s absent fields on its locator line, not inside the block', () => {
+    // Same rule as the single 'mail' kind, and it needs its own test: a mutation
+    // that drops the note from the BATCH path survived the round that added it,
+    // because every other assertion here is about the single-mail path.
+    const items = [makeInboxItem({ id: 'a', fromAddress: '', fromName: undefined, subject: '', snippet: undefined, messageId: '<a@x>' })];
+    const out = resolveChatContext(null, { kind: 'mail-batch', ids: ['a'] }, makeMultiReader(items))!;
+    expect(out).toMatch(/1\. account "acc-1", uid 100 — no from, subject, snippet\n/);
+    const block = out.slice(out.indexOf('<untrusted_data'), out.indexOf('</untrusted_data>'));
+    expect(block).not.toContain('no from');
+  });
+
   it('sanitises sender-authored fields in every batch line (injection)', () => {
     const items = [
       makeInboxItem({
@@ -458,19 +469,48 @@ describe('#6 loaded-context boundary \u2014 compose \u2194 strip round-trip', ()
     expect(webUiSrc).toMatch(/stripLoadedContext[\s\S]{0,200}LOADED_CONTEXT_AT_START/);
 
     // BEHAVIOURAL, not textual: build the matcher from the web-ui's own source
-    // and run a REAL composed preamble of every kind through it. This is what
+    // and run a REAL composed preamble of EVERY kind through it. This is what
     // catches a shape change on core's side that the byte-equality above cannot
     // see — the web-ui's fixtures are hand-built, so nothing else would.
-    const src = /^const LOADED_CONTEXT_AT_START = (\/.+\/)[a-z]*;$/.exec(line(webUi));
+    const src = /^const LOADED_CONTEXT_AT_START = \/(.+)\/([a-z]*);$/.exec(line(webUi));
     expect(src, 'could not extract a regex literal from the web-ui declaration').not.toBeNull();
-    const webUiMatcher = new RegExp(src![1]!.slice(1, -1));
-    const reader = makeReader(makeInboxItem(), { uid: { uid: 42, folder: 'INBOX' }, bodyMd: 'Bitte um Angebot.' });
-    for (const ref of [
-      { kind: 'mail', id: 'item-1' },
-      { kind: 'mail-batch', ids: ['item-1'] },
-    ] as const) {
-      const composed = closeLoadedContext(resolveChatContext(null, ref, reader)!) + 'Meine Frage.';
-      expect(composed.replace(webUiMatcher, ''), `web-ui matcher on kind ${ref.kind}`).toBe('Meine Frage.');
+    // Flags are carried, not discarded. The capture group exists precisely so a
+    // future flag on the web-ui literal changes the behaviour under test instead
+    // of being silently dropped by a `.slice(1, -1)`.
+    const webUiMatcher = new RegExp(src![1]!, src![2]!);
+
+    const dir = mkdtempSync(join(tmpdir(), 'chat-ctx-xpkg-'));
+    const history = new RunHistory(join(dir, 'h.db'));
+    const engineDb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engineDb);
+    history.insertPlannedPipeline(makePlanned());
+    history.insertPipelineRun({
+      id: 'run-1', manifestName: 'Monthly Report', status: 'failed',
+      manifestJson: JSON.stringify(makePlanned()), workflowId: 'wf-1', error: 'step timed out',
+    });
+    try {
+    const item = makeInboxItem();
+    const full = makeReader(item, { uid: { uid: 42, folder: 'INBOX' }, bodyMd: 'Bitte um Angebot.' });
+    // Also the EMPTY-field shape, because the absence note lives in the `[Loaded …]`
+    // line itself — a matcher anchored too tightly on that line would pass the
+    // populated case and fail the real one.
+    const empty = makeReader(
+      makeInboxItem({ fromAddress: '', fromName: undefined, subject: '', snippet: undefined, messageId: undefined }),
+      { uid: null, bodyMd: null },
+    );
+    const cases: Array<[string, string]> = [
+      ['mail', closeLoadedContext(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, full)!)],
+      ['mail (all fields empty)', closeLoadedContext(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, empty)!)],
+      ['mail-batch', closeLoadedContext(resolveChatContext(null, { kind: 'mail-batch', ids: ['item-1'] }, full)!)],
+      ['workflow', closeLoadedContext(resolveChatContext(history, { kind: 'workflow', id: 'wf-1' })!)],
+      ['run', closeLoadedContext(resolveChatContext(history, { kind: 'run', id: 'run-1' })!)],
+    ];
+    for (const [kind, preamble] of cases) {
+      expect((preamble + 'Meine Frage.').replace(webUiMatcher, ''), `web-ui matcher on kind ${kind}`)
+        .toBe('Meine Frage.');
+    }
+    } finally {
+      engineDb.close(); history.close(); rmSync(dir, { recursive: true, force: true });
     }
   });
 

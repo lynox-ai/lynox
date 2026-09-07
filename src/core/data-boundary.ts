@@ -27,16 +27,42 @@ interface InjectionResult {
  * like the engine's own numbered locator, so everything after it reads as
  * trusted framing.
  *
- * ## Shape, and why each piece is there
+ * ## The terminator is OPTIONAL, and that is the whole design
+ *
+ * The first repair kept demanding a closing `>` and merely allowed attributes in
+ * between, bounded at 200 characters. A third review round then produced a
+ * SEVENTH form — `</untrusted_data data-x="<230 chars>">` — which pads past the
+ * bound and passes untouched. That is not a missing case, it is the wrong cut:
+ * enumerating the shapes of a well-formed close tag never terminates, because
+ * the attacker picks the shape.
+ *
+ * `untrusted_data` is a COINED token. `</` followed by it is already the entire
+ * signal; whatever comes after is the attacker's choice and cannot be part of
+ * the recognition. So the terminator group is optional: a well-formed tag is
+ * consumed whole (its attributes go with it), and a tag we cannot see the end of
+ * still has its opening collapsed, which is what kills it either way.
+ *
+ * ⚠ A consequence worth stating, because it decides what a future edit may
+ * touch: once the terminator is optional, the terminator ALTERNATION
+ * (`>|&gt;|&#0*62;|&#x0*3e;`) no longer carries the security property. Measured —
+ * cutting it down to a literal `>` leaves detection identical on all six escape
+ * forms and leaves no live close tag in any of them; the only difference is a
+ * stray `&gt;` fragment left in the text. It governs how much of the tag is
+ * CONSUMED, not whether the tag is RECOGNISED. Recognition rests on the token,
+ * and that is the part no edit may weaken.
  *
  * Either delimiter may be literal, HTML-entity or numeric-entity, and they need
  * NOT match each other: a model is not a parser, and this defence exists exactly
- * for the case where it reads one anyway. `\b` after the coined token keeps
- * `</untrusted_datax>` out. The attribute gap is `[^>]{0,200}?` — BOUNDED, so a
- * lone `</untrusted_data` far from any `>` costs one bounded scan and cannot
- * backtrack super-linearly, the same discipline as the exfiltration patterns.
+ * for the case where it reads one anyway. `\b` after the token keeps
+ * `</untrusted_datax>` out — the one thing still being recognised rather than
+ * assumed.
+ *
+ * Cost, measured rather than reasoned: on 410 KB of attacker padding the
+ * optional form runs in **0.00 ms** against **0.13 ms** for the bounded-gap
+ * form. Dropping the requirement made it cheaper, because there is no gap left
+ * to walk.
  */
-const BOUNDARY_CLOSE_TAIL = '\\s*\\/\\s*untrusted_data\\b[^>]{0,200}?(?:>|&gt;|&#0*62;|&#x0*3e;)';
+const BOUNDARY_CLOSE_TAIL = '\\s*\\/\\s*untrusted_data\\b(?:[^>]{0,200}?(?:>|&gt;|&#0*62;|&#x0*3e;))?';
 const BOUNDARY_OPEN_ANY = '(?:<|&lt;|&#0*60;|&#x0*3c;)';
 const BOUNDARY_OPEN_ENCODED = '(?:&lt;|&#0*60;|&#x0*3c;)';
 /** Any encoding of the closing tag — the detector's single boundary-escape entry. */
@@ -69,7 +95,7 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
   { pattern: /<\|end\|>/i, label: 'end token injection' },
 
   // Boundary escape — the attacker tries to close the untrusted_data wrapper.
-  // ONE entry, built from {@link BOUNDARY_CLOSE_PATTERN}, which the neutralizer
+  // ONE entry, built from {@link BOUNDARY_CLOSE_ANY_SOURCE}, which the neutralizer
   // uses too. See that constant for why there used to be three here and why
   // three was the bug rather than the thoroughness it looked like.
   { pattern: new RegExp(BOUNDARY_CLOSE_ANY_SOURCE, 'i'), label: 'boundary escape' },
@@ -212,8 +238,11 @@ function neutralizeBoundaryTags(text: string): string {
     // with `&lt;` — cannot be re-matched by this one. (Same ordering as before;
     // the reason survives the rewrite even though the patterns did not.)
     .replace(new RegExp(`${BOUNDARY_OPEN_ENCODED}${BOUNDARY_CLOSE_TAIL}`, 'gi'), '[blocked:boundary_escape]')
-    // Literal opener last — rendered inert as the entity form rather than
-    // blanked, so the reader still sees what the sender wrote.
+    // Literal opener last — collapsed to the inert entity form rather than
+    // blanked. A well-formed tag goes WITH its attributes (they are part of the
+    // match); one whose end is out of reach loses only its opening, and the rest
+    // stays as plain text. Either way the tag is dead and the sender's prose
+    // around it survives.
     .replace(new RegExp(`<${BOUNDARY_CLOSE_TAIL}`, 'gi'), '&lt;/untrusted_data&gt;');
 }
 

@@ -295,7 +295,10 @@ export function resolveChatContext(
     // literal string `(no subject)`, and then an engine statement about absence
     // and a sender's text are byte-identical. Whatever the engine asserts, it
     // asserts in its own framing, where no sender can reach it.
-    const absent = missingFieldNote({ from, subject: oneLine(item.subject, MAX_NAME_CHARS), body: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) });
+    // Keys are the field LABELS lowercased, so the note and the block name the same
+    // things: "no subject, message" points at `Subject:` and `Message:`, not at
+    // internal variable names the model never sees.
+    const absent = missingFieldNote({ from: from, subject: oneLine(item.subject, MAX_NAME_CHARS), message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) });
     return (
       `[Loaded mail for reply — item: ${item.id}${absent}]\n` +
       `${wrapChannelMessage({
@@ -366,7 +369,7 @@ export function resolveChatContext(
       lines.push(
         // Absence rides on the locator line — engine framing, same reason as the
         // single 'mail' kind: a placeholder inside the block is forgeable.
-        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, preview: snippet })}\n` +
+        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, snippet })}\n` +
         wrapChannelMessage({
           source: `mail:${acct}:${fromAddr}`,
           fields: {
