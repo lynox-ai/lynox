@@ -25,6 +25,7 @@ import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling
 // http-api.ts, which core#1196 holds. `src/core/config.ts` already imports
 // across the same seam, so this is precedented rather than novel.
 import { WallClockBudget } from '../server/wall-clock-budget.js';
+import { compose, engineText, renderFence } from './data-boundary.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
  *  `http-api.ts` (which calls it "the canonical skip marker") and in
@@ -907,8 +908,11 @@ export class WorkerLoop {
       const mask = (t: string): string => store ? store.maskAll(t) : maskSecretPatterns(t);
       const q = mask(answered.question);
       const a = mask(answered.answer ?? '');
-      prompt = `${base}\n\nA question you asked earlier has been answered.\n`
-        + `<asked>\n${q}\n</asked>\n<answer>\n${a}\n</answer>`;
+      prompt = compose([
+        engineText(`${base}\n\nA question you asked earlier has been answered.`),
+        renderFence('asked', q),
+        renderFence('answer', a),
+      ], '\n');
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
     }
 

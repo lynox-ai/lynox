@@ -33,6 +33,7 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
+import { compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -1236,7 +1237,8 @@ export class Engine {
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
     for (const part of secretResult.briefingParts) {
-      this.briefing = this.briefing ? `${this.briefing}\n\n${part}` : part;
+      this.briefing = compose(
+        this.briefing ? [engineText(this.briefing), part] : [part], '\n\n');
     }
 
     // Recreate API client now that secrets are available (vault may hold ANTHROPIC_API_KEY)
@@ -1290,8 +1292,9 @@ export class Engine {
           if (kpiLines.length > 0) perfParts.push(`KPIs: ${kpiLines.join(', ')}`);
         }
         if (perfParts.length > 0) {
-          const perfBlock = `<agent_performance>\n${perfParts.join('\n')}\n</agent_performance>`;
-          this.briefing = this.briefing ? `${this.briefing}\n\n${perfBlock}` : perfBlock;
+          const perfBlock = renderFence('agent_performance', perfParts.join('\n'));
+          this.briefing = compose(
+            this.briefing ? [engineText(this.briefing), perfBlock] : [perfBlock], '\n\n');
         }
       } catch { /* non-critical */ }
     }

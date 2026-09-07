@@ -10,6 +10,7 @@ import { getActiveProvider, isCustomProvider, clientForTierSnapshot } from './ll
 import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget, isJunkPersonShape } from './kg-stopwords.js';
 import { calculateCost } from './pricing.js';
+import { compose, renderFence } from '../core/data-boundary.js';
 
 /**
  * Entity extracted by the v2 tool-call pipeline.
@@ -297,7 +298,7 @@ export async function extractEntitiesV2(
       messages: [
         {
           role: 'user',
-          content: `<source_text>\n${text.slice(0, 2000)}\n</source_text>`,
+          content: compose([renderFence('source_text', text.slice(0, 2000))]),
         },
       ],
     });

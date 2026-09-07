@@ -6,13 +6,21 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   detectProjectRoot,
-  generateBriefing,
+  generateBriefing as generateBriefingRaw,
   buildFileManifest,
   diffManifest,
   formatManifestDiff,
   saveManifest,
   loadManifest,
 } from './project.js';
+import { compose } from './data-boundary.js';
+
+// `generateBriefing` returns an opaque `Fence` (or nothing when there is
+// nothing to brief). These tests assert on the rendered text.
+const generateBriefing = (...args: Parameters<typeof generateBriefingRaw>): string => {
+  const brief = generateBriefingRaw(...args);
+  return brief ? compose([brief]) : '';
+};
 import { RunHistory } from './run-history.js';
 
 describe('detectProjectRoot', () => {

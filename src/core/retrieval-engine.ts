@@ -24,7 +24,7 @@ import type { MemoryGraphStore } from './memory-graph-store.js';
 import { entityTypeToSubjectKind } from './subject-store.js';
 import type { SubjectStore, SubjectRow } from './subject-store.js';
 import type { RunHistory } from './run-history.js';
-import { escapeXml, renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
+import { compose, engineText, type Part, escapeXml, renderProvenanceFact, detectInjectionAttempt, renderFence } from './data-boundary.js';
 import { channels } from './observability.js';
 import { appendRetrievalShadowLog } from './retrieval-shadow-log.js';
 
@@ -533,7 +533,7 @@ export class RetrievalEngine {
     contextGraph: string | undefined,
     flagged?: ReadonlySet<string> | undefined,
   ): string {
-    const sections: string[] = [];
+    const sections: Part[] = [];
     const scopeOrder: MemoryScopeType[] = ['user', 'context', 'global'];
     const grouped = new Map<MemoryScopeType, typeof memories>();
 
@@ -565,12 +565,12 @@ export class RetrievalEngine {
           ...(flagged?.has(m.id) ? { flagged: 'suspected_injection' } : {}),
         },
       })).join('\n');
-      sections.push(`<scope type="${escapeXml(scopeType)}">\n${entries}\n</scope>`);
+      sections.push(renderFence('scope', entries, { attrs: { type: scopeType } }));
     }
 
-    if (contextGraph) sections.push(contextGraph);
+    if (contextGraph) sections.push(engineText(contextGraph));
     if (sections.length === 0) return '';
-    return `<relevant_context>\n${sections.join('\n')}\n</relevant_context>`;
+    return compose([renderFence('relevant_context', compose(sections, '\n'))]);
   }
 
   // === Private Methods ===
@@ -874,6 +874,6 @@ export class RetrievalEngine {
     });
     const parts = [`Entities: ${entityLines.join(', ')}`];
 
-    return `<knowledge_graph>\n${parts.join('\n')}\n</knowledge_graph>`;
+    return compose([renderFence('knowledge_graph', parts.join('\n'))]);
   }
 }
