@@ -918,8 +918,11 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     const doNot = Array.isArray(cat['do_not_proactively_suggest']) ? cat['do_not_proactively_suggest'] as unknown[] : [];
 
     // Was assembled with the tag as the first array element and the close tag
-    // pushed at the end — the one fence in the repo built in pieces, and the
-    // one a template-literal rule would have missed silently.
+    // pushed at the end — a frame built in pieces, which a rule about template
+    // literals would have missed silently. (It used to say "the one fence in the
+    // repo built in pieces". That count came from the inventory of a source guard
+    // that was withdrawn for reporting clean against three planted frames, so the
+    // number it produced is not evidence of anything.)
     const lines: string[] = [];
     lines.push('You have the `api_setup` tool to bootstrap external APIs from their docs URL.');
     lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap.');

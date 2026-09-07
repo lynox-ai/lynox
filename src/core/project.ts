@@ -59,7 +59,10 @@ export function detectProjectRoot(cwd: string): ProjectInfo | null {
 
 /**
  * Query last N runs for this project from run history and format a brief summary.
- * Returns a human-readable briefing string suitable for injection into the system prompt.
+ * Returns a {@link Fence} — NOT a string. The caller declares it as a part and
+ * composes it; `undefined` means there was nothing to brief. This line used to
+ * promise "a human-readable briefing string suitable for injection into the
+ * system prompt", three lines above a signature that already said otherwise.
  */
 export function generateBriefing(
   projectDir: string, runHistory: RunHistory, limit = 5,

@@ -279,7 +279,9 @@ vi.mock('./embedding.js', () => ({
 
 vi.mock('./project.js', () => ({
   detectProjectRoot: vi.fn().mockReturnValue({ root: '/mock/project', id: 'abc123def456' }),
-  generateBriefing: vi.fn().mockReturnValue(''),
+  // `generateBriefing` returns `Fence | undefined`; `''` passed only because it
+  // is falsy, and a non-empty string would reach `compose` and throw.
+  generateBriefing: vi.fn().mockReturnValue(undefined),
   buildFileManifest: vi.fn().mockReturnValue(new Map()),
   diffManifest: vi.fn().mockReturnValue({ added: [], modified: [], removed: [] }),
   formatManifestDiff: vi.fn().mockReturnValue(''),
