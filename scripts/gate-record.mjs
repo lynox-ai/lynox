@@ -63,31 +63,41 @@ const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging
  * built symmetrically and failed in the direction that costs something. Too
  * NARROW is fail-open: the gate is not demanded, and whether it runs depends on
  * the author asking more of themselves than the tool does. Too BROAD costs one
- * gate run — and sometimes buys a proof nobody would otherwise have written
- * (a false demand on a comment-only diff was answered by stripping comments
- * from both revisions and comparing checksums, which settled the question
- * mechanically instead of by eye). So when in doubt this list reaches wider.
+ * gate run. So when in doubt this list reaches wider.
  *
  * That is why the entry below is the whole directory rather than a name
  * pattern. It used to be `/^src\/integrations\/.*\/(auth|oauth)/`, and the
  * numbers are the argument (core `d9fed2ac`, patterns executed against
  * `git ls-tree`, not read):
  *
- *   · it reached **3 of 72** non-test integration modules, and **0 of the 24**
- *     under `src/integrations/google/` — the whole Google credential path was
- *     exempt, because the expression wants `auth` at the start of a segment
- *     and the segment starts with `google-`;
- *   · the file that decides it is `src/integrations/google/vault-keys.ts`,
+ *   · it reached **2 of 72** non-test integration modules — `mail/auth/` and
+ *     `mail/providers/oauth-gmail.ts` — and **0 of the 24** under
+ *     `src/integrations/google/`, because the expression wants `auth` at the
+ *     start of a path segment and that segment starts with `google-`;
+ *   · the file that decides the SHAPE is `src/integrations/google/vault-keys.ts`,
  *     whose entire content is the vault slot name the Google OAuth tokens are
  *     stored under, imported by `engine.ts` and `google-auth.ts`. It contains
  *     neither `auth` nor `oauth` in its path. **No name pattern can see it**,
  *     and the next credential module named `broker-mode.ts` is the same story.
  *
- * The cost was measured rather than feared, because "it would be red too often"
- * is the argument that keeps `src/core/agent.ts` off this list and it deserves
- * the same evidence: over the last 60 merged PRs the old pattern fired on 2,
- * the whole directory fires on 13. Twenty-two percent is a floor people can
- * live with; it is not "nearly every PR".
+ * ⚠️ FREQUENCY IS NOT WHAT DISTINGUISHES THIS FROM `src/core/agent.ts`, and an
+ * earlier revision of this comment argued that it was. Measured over the last
+ * 60 / 150 / 300 commits on main (squash-merge, so one commit is one PR):
+ *
+ *     src/integrations/   13 (21.7%)   21 (14.0%)   29 ( 9.7%)
+ *     the old pattern      2 ( 3.3%)    5 ( 3.3%)    5 ( 1.7%)
+ *     src/core/agent.ts    6 (10.0%)   19 (12.7%)   36 (12.0%)
+ *
+ * The two land in the same band, and over the widest window the new entry fires
+ * LESS often than the file excluded for firing too often. So "it would be red on
+ * nearly every PR" is neither the real reason `agent.ts` is off this list nor an
+ * argument against this entry. What separates them is the AXIS: `agent.ts` is
+ * where ordinary orchestration lives and a trust boundary opens there only
+ * exceptionally (core#1099 is that exception, and it is recorded above precisely
+ * because a path map could not have caught it). Everything under
+ * `src/integrations/` talks to a third party on the user's behalf with the
+ * user's credentials — that is a fixed address, which is exactly what this list
+ * is for. Read the 21.7% as the recency-biased end of the range, not as the cost.
  */
 export const SECURITY_PATHS = [
   /^src\/core\/data-boundary\.ts$/,

@@ -368,7 +368,13 @@ describe('gate-record — the shipped template does not answer its own questions
       return lit.endsWith('/') ? lit : (lit.split('/').pop() ?? lit);
     });
     expect(tokens.length).toBe(SECURITY_PATHS.length);
-    expect(tokens.every((t) => t.length > 0)).toBe(true); // the extractor is the suspect
+    // The extractor is the suspect, and "non-empty" was not enough: `/^s/` yields
+    // `"s"` and `/^src\\//` yields `"src/"`, both of which `toContain` finds in any
+    // prose that mentions a path at all — coverage by substring accident. A token
+    // must be specific enough to BE documentation: two path segments, or a
+    // hyphenated module name.
+    const specific = (t: string) => t.split('/').filter(Boolean).length >= 2 || t.includes('-');
+    expect(tokens.filter((t) => !specific(t))).toEqual([]);
     for (const t of tokens) expect(TEMPLATE, t).toContain(t);
   });
 
