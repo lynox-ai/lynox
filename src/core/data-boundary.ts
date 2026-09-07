@@ -91,20 +91,39 @@ interface InjectionResult {
  *   no tail,   no terminator (today) 0.72 ms  (20 000 matches)
  *
  * Medians of three runs each. The first version of this table came from ONE run
- * per variant and put the first row at 10.93 ms — nearly double, because it ran
- * first and carried the warm-up. Written down here because that is the same
- * class of error this section is about: an instrument measured once tells you
- * about the run, not about the code.
+ * per variant and put the first row at 10.93 ms, nearly double. Written down
+ * because it is the same class of error this section is about: an instrument
+ * used once tells you about the run, not about the code. The obvious cause —
+ * that row ran first and carried the warm-up — is NOT established: an
+ * independent run put that row at 5.5–6.0 even when measured first, and all
+ * four rows moved between the two tables, not just the first. So the single-run
+ * table was unreliable; which of its numbers was wrong and why is not something
+ * this comment can claim.
  *
- * Like against like, the tail is the cost: 21× on the failing scan, 8.7× on the
- * matching one. The old `5.65 ms` figure was RIGHT for the bounded form's full
- * scan — 5.74 here — and only its partner was measured differently.
+ * Like against like, the tail is the cost — roughly 20× on the failing scan and
+ * 9–12× on the matching one. The range is not hedging: an independent
+ * measurement agreed within 5 % on three rows and came out 28 % LOWER on the
+ * last one, which is the row both ratios divide by. Treat the order of magnitude
+ * as the result and the second digit as noise.
+ *
+ * The old `5.65 ms` figure was RIGHT for what it timed — the pre-repair form's
+ * failure scan, 5.74 here — and only its partner was measured differently.
  *
  * ⚠ The figures this section carried before — "0.0003 ms against 5.65 ms" —
  * compared different things and are not reproduced above. They timed the FIRST
- * match, and the bounded form never matches this input, so its number was a full
- * failure scan while the other was an immediate success — which is why only one
- * half of that pair reproduces here. That pair therefore
+ * match of two forms that behave oppositely on this input: the PRE-REPAIR form
+ * (tail plus a MANDATORY terminator) matches nothing here, so its number is a
+ * full failure scan, while the form that replaced it matches immediately. Only
+ * one half of the pair therefore reproduces above.
+ *
+ * Say "pre-repair form", not "the bounded form": the bounded tail also stood in
+ * the code with an OPTIONAL terminator, and that one matches 20 000 times. The
+ * mandatory variant is not in this repo's history at all — it was replaced
+ * before the branch that introduced this file's current shape was squashed — so
+ * it is reconstructible but not readable, and a reader checking "the bounded
+ * form" against the code lands on the wrong row. That ambiguity is what a delta
+ * round caught here, at the third correction of this same paragraph. That pair
+ * therefore
  * measured "does it match early", not "does it backtrack", and it credited the
  * terminator's optionality with a cost the tail was paying. A delta round on this
  * very correction re-derived the old numbers and reported the attribution as
