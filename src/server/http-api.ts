@@ -69,6 +69,7 @@ import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoi
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
+import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.js';
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 
@@ -6934,16 +6935,40 @@ export class LynoxHTTPApi {
     });
 
     // Get Google OAuth start URL (managed instances — redirects via control plane)
+    //
+    // ⚠ The `token` is not optional and never was on the receiving end: the
+    // control plane answers `missing_token` without it, which reaches the user
+    // as a Connect button that fails instantly. `LYNOX_HTTP_SECRET` is the
+    // signing key because it is the SAME value the claim already authenticates
+    // with (`x-instance-secret`), which the control plane compares against
+    // `instances.instanceSecret` — the identical column the start route reads to
+    // verify this signature. No new distribution problem, then.
+    //
+    // ⚠ It is the FIFTH use of that one value, not the second. Three of the five
+    // DERIVE a key under a distinct label — the session cookie, the OAuth state,
+    // and this one — and that separation is what stops an attacker who sees one
+    // signature from forging another. **Two do not derive anything at all:** the
+    // bearer is compared raw, and `x-instance-secret` travels raw on the wire.
+    // Domain separation does nothing for those two; they are the same bytes, and
+    // whoever obtains them holds all three derived keys as well. The count is
+    // written out because "one secret, two uses" reads as a small surface, and
+    // the reason for writing the split out is that "each use is separated" reads
+    // as mutual protection that the raw pair does not have.
     this.addStatic('user', 'GET /api/google/oauth-url', async (_req, res) => {
       const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
       const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'];
 
-      if (!controlPlaneUrl || !instanceId) {
+      if (!controlPlaneUrl || !instanceId || !httpSecret) {
         errorResponse(res, 400, 'Not a managed instance');
         return;
       }
 
-      const url = `${controlPlaneUrl}/oauth/google/start?instance_id=${encodeURIComponent(instanceId)}`;
+      const token = mintBrokerStartToken(instanceId, httpSecret);
+      const url =
+        `${controlPlaneUrl}/oauth/google/start` +
+        `?instance_id=${encodeURIComponent(instanceId)}` +
+        `&token=${encodeURIComponent(token)}`;
       jsonResponse(res, 200, { url });
     });
 

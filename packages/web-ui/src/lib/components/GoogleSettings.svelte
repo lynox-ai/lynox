@@ -93,9 +93,11 @@
 
 		// A pending Google claim is PARKED here, not executed. The user confirms it.
 		//
-		// `/oauth/google/start` takes an `instance_id` and no auth, and the signed state binds
-		// only that id — nothing about the browser. So anyone who knows a tenant's instance id
-		// can run the consent themselves with THEIR Google account and hand the resulting
+		// `/oauth/google/start` now takes a signed start token as well as the `instance_id`
+		// (minted engine-side since 2026-09-07), so an arbitrary caller can no longer open the
+		// consent for a tenant whose id it merely knows. What the token does NOT do is bind the
+		// BROWSER: the signed state still names only the instance, so a tenant operator who can
+		// reach this route can still run the consent with THEIR Google account and hand the resulting
 		// link to the tenant. Claiming is authenticated, so it takes the tenant's own logged-in
 		// browser to finish — which auto-claiming supplied for free: opening the link was the
 		// whole attack, with no dialog, no gesture, and nothing on screen naming the account.

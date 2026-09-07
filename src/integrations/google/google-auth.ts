@@ -211,9 +211,10 @@ import { SCOPES } from './scopes.js';
  * 2026-08-20 — Google publishes no such list — and cross-checked against its
  * published Gmail/Drive/Sheets/Docs scope pages on 2026-08-26.
  *
- * `calendar.freebusy` is the one entry whose class was never read off the
- * Console; it is carried here because `calendar.events` is already sensitive,
- * so it cannot raise the set's class — only the table's completeness is open.
+ * `calendar.freebusy` is **non-sensitive**, read off the Console on 2026-09-07
+ * while configuring the broker client (project `verdant-lattice-492801-u4`). It
+ * was the one entry whose class had never been read; the prediction held, since
+ * `calendar.events` was already sensitive and set the class either way.
  */
 export const STANDARD_SCOPES = [
   SCOPES.OPENID,

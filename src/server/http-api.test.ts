@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
@@ -7494,6 +7495,69 @@ describe('LynoxHTTPApi', () => {
       await jsonFetch('/api/google/revoke', { method: 'POST' });
       expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
       expect(mockGoogleDisconnect).not.toHaveBeenCalled();
+    });
+  });
+
+  // The route had NO test at all, which is how it shipped building a start URL
+  // the control plane refuses. `pro#992` began requiring a signed token on
+  // 2026-09-07; nothing here minted one, and every brokered tenant's Connect
+  // button ended on `google_oauth_error=missing_token`.
+  describe('GET /api/google/oauth-url — the start URL the control plane will accept', () => {
+    beforeEach(() => {
+      vi.stubEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'https://cp.example.com');
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+      vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+    });
+
+    // Asserting the parameter EXISTS would pass on a token signed with the
+    // wrong key, which is the failure that costs a debugging afternoon. The
+    // signature is recomputed here from the contract's written derivation
+    // instead of by calling the minter, so the check cannot agree with a
+    // wrong-but-consistent implementation.
+    it('carries a token this test can verify against the contract derivation', async () => {
+      const res = await jsonFetch('/api/google/oauth-url');
+      expect(res.status).toBe(200);
+      const { url } = await res.json() as { url: string };
+
+      const parsedUrl = new URL(url);
+      expect(parsedUrl.origin + parsedUrl.pathname).toBe('https://cp.example.com/oauth/google/start');
+      expect(parsedUrl.searchParams.get('instance_id')).toBe('inst-42');
+
+      const token = parsedUrl.searchParams.get('token');
+      expect(token, 'no token — the control plane answers missing_token').toBeTruthy();
+      const parsed = parseBrokerStartToken(token!);
+      expect(parsed, 'token does not even parse as the contract framing').not.toBeNull();
+
+      const key = createHmac('sha256', TEST_SECRET).update('lynox-broker-start-v1').digest();
+      const expected = createHmac('sha256', key)
+        .update(`v1.inst-42.${parsed!.ts}.${parsed!.nonce}`)
+        .digest('hex');
+      expect(parsed!.sig, 'signed with the wrong key or over the wrong bytes').toBe(expected);
+    });
+
+    it('mints a fresh nonce per call — the control plane consumes each one', async () => {
+      const nonceOf = async () => {
+        const { url } = await (await jsonFetch('/api/google/oauth-url')).json() as { url: string };
+        return parseBrokerStartToken(new URL(url).searchParams.get('token')!)?.nonce;
+      };
+      expect(await nonceOf()).not.toBe(await nonceOf());
+    });
+
+    it('refuses when the signing secret is absent instead of emitting an unusable URL', async () => {
+      vi.stubEnv('LYNOX_HTTP_SECRET', '');
+      const res = await jsonFetch('/api/google/oauth-url');
+      expect(res.status).toBe(400);
+    });
+
+    it('still refuses a non-managed box', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+      expect((await jsonFetch('/api/google/oauth-url')).status).toBe(400);
     });
   });
 
