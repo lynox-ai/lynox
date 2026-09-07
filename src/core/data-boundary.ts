@@ -473,10 +473,77 @@ ${safe}
  *                because an attribute is the one place a stray quote breaks the
  *                frame in a way neutralising the close tag does not cover.
  */
+/**
+ * A rendered frame. Opaque on purpose: the string is behind a symbol this module
+ * does not export, so `compose` is the only way out of it.
+ *
+ * ## What this delivers
+ *
+ * Every fragment handed to {@link compose} is DECLARED — either a frame this
+ * module built, or text the author marked as engine-authored via
+ * {@link engineText}. The compiler enforces that, and it enforces that a `Fence`
+ * cannot be built by hand: no literal satisfies it, and there is no exported key
+ * to read or write. Four review rounds asked "which frames are exposed?" and each
+ * found one more, because that question needs dataflow and stays open. This asks
+ * a question the compiler can close instead.
+ *
+ * ## ⛔ What it does NOT deliver, stated because the last attempt claimed it did
+ *
+ * It does not stop a site from framing content WITHOUT ever calling
+ * `renderFence` — `` `<x>${payload}</x>` `` type-checks perfectly and always
+ * will. Provenance by construction says "if you use a frame, it is a real one";
+ * it cannot say "you used one". The withdrawn script guard claimed that second
+ * sentence and reported `0 hand-built` against three planted frames.
+ *
+ * And the enforcement is asymmetric in a way worth knowing before relying on it:
+ * TypeScript rejects ASSIGNING a `Fence` where a string belongs — measured, 14
+ * sites in 8 files — but accepts `` `${fence}` `` and `'a' + fence`, because
+ * interpolating an object is legal. Those fail loudly at runtime as
+ * `[object Object]` rather than silently, which is the improvement over a bare
+ * string; making them fail at CI needs `@typescript-eslint/no-base-to-string`,
+ * which currently reports 17 unrelated pre-existing violations and so is its own
+ * piece of work, not a rider on this one.
+ */
+const FENCE_TEXT = Symbol('fence.text');
+export interface Fence { readonly [FENCE_TEXT]: string }
+
+/** Engine-authored text. Not a security claim — a DECLARATION, visible in review. */
+export interface EngineText { readonly engine: string }
+
+/** A declared fragment of a model-facing string. */
+export type Part = Fence | EngineText;
+
+/** Mark a string as engine-authored so it can take part in a {@link compose}. */
+export function engineText(text: string): EngineText {
+  return { engine: text };
+}
+
+/**
+ * The only way to turn declared parts into a string a model will read.
+ *
+ * `sep` joins the parts; put separators here rather than smuggling them into an
+ * `engineText`, so the shape of the composition stays readable at the call site.
+ */
+export function compose(parts: readonly Part[], sep = ''): string {
+  return parts.map((p) => {
+    // Loud on a part that is neither. Test files are in no tsc project, so this
+    // runtime check is the only thing standing between a raw string and a
+    // composition — and a caller that swallows exceptions (engine-init does)
+    // would otherwise turn the mistake into a silently missing briefing.
+    if (typeof p === 'object' && p !== null && FENCE_TEXT in p) return p[FENCE_TEXT];
+    if (typeof p === 'object' && p !== null && 'engine' in p && typeof p.engine === 'string') {
+      return p.engine;
+    }
+    throw new TypeError(
+      'compose: part is neither a Fence nor engineText — a raw string cannot be composed',
+    );
+  }).join(sep);
+}
+
 export function renderFence(token: string, payload: string, opts?: {
   preamble?: string | undefined;
   attrs?: Record<string, string | number | null | undefined> | undefined;
-}): string {
+}): Fence {
   const attrs: string[] = [];
   for (const [k, v] of Object.entries(opts?.attrs ?? {})) {
     if (v === null || v === undefined) continue;
@@ -485,7 +552,7 @@ export function renderFence(token: string, payload: string, opts?: {
   const open = `<${token}${attrs.length ? ' ' + attrs.join(' ') : ''}>`;
   const safe = payload.replace(closeTagPattern(token), deadenOpener);
   const head = opts?.preamble ? `${opts.preamble}\n` : '';
-  return `${open}\n${head}${safe}\n</${token}>`;
+  return { [FENCE_TEXT]: `${open}\n${head}${safe}\n</${token}>` };
 }
 
 /**

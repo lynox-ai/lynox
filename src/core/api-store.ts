@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { wrapUntrustedData, renderFence } from './data-boundary.js';
+import { compose, wrapUntrustedData, renderFence } from './data-boundary.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
@@ -860,13 +860,13 @@ export class ApiStore {
       return `- ${p.name}: ${p.description} (${p.base_url}${auth}${endpoints}${shape})`;
     });
 
-    return renderFence('api_profiles', `${lines.join('\n')}
+    return compose([renderFence('api_profiles', `${lines.join('\n')}
 
 Maintain these profiles as you learn. If an API call returns an unexpected schema, hits a rate limit,
 or teaches you a new pitfall, update the profile via \`api_setup\` action=refine. For new APIs,
 prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.`, {
       preamble: 'Registered APIs (use \`api_setup\` action=view with the id to get full details BEFORE calling the API):',
-    });
+    })]);
   }
 
   /**
@@ -953,7 +953,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
       if (!name || !docsUrl) continue;
       lines.push(`- ${name} (${category}, auth=${auth}) — ${valueProp} Docs: ${docsUrl}`);
     }
-    return renderFence('api_bootstrap_hints', lines.join('\n'));
+    return compose([renderFence('api_bootstrap_hints', lines.join('\n'))]);
   }
 
   /**

@@ -2,7 +2,7 @@ import { existsSync, readdirSync, lstatSync, readFileSync, writeFileSync, mkdirS
 import { dirname, resolve, join, relative, sep } from 'node:path';
 import { sha256Short } from './utils.js';
 import type { RunHistory, RunRecord } from './run-history.js';
-import { detectInjectionAttempt, renderFence } from './data-boundary.js';
+import { compose, detectInjectionAttempt, renderFence, type Fence } from './data-boundary.js';
 
 const PROJECT_MARKERS = [
   '.git',
@@ -61,7 +61,9 @@ export function detectProjectRoot(cwd: string): ProjectInfo | null {
  * Query last N runs for this project from run history and format a brief summary.
  * Returns a human-readable briefing string suitable for injection into the system prompt.
  */
-export function generateBriefing(projectDir: string, runHistory: RunHistory, limit = 5): string {
+export function generateBriefing(
+  projectDir: string, runHistory: RunHistory, limit = 5,
+): Fence | undefined {
   const normalizedProjectDir = resolve(projectDir);
   const runs = runHistory.getRecentRuns(100)
     .filter((r: RunRecord) => {
@@ -73,7 +75,9 @@ export function generateBriefing(projectDir: string, runHistory: RunHistory, lim
     .slice(0, limit);
 
   if (runs.length === 0) {
-    return '';
+    // Nothing to brief. `undefined` rather than `''`: a frame is not a string,
+    // so emptiness has to be said outright instead of leaning on falsiness.
+    return undefined;
   }
 
   const lines = runs.map((r: RunRecord) => {
@@ -264,5 +268,5 @@ export function formatManifestDiff(diff: ManifestDiff, maxFiles = 20): string {
     lines.push(`  ... and ${remaining} more`);
   }
 
-  return renderFence('file_changes_since_last_session', lines.join('\n'));
+  return compose([renderFence('file_changes_since_last_session', lines.join('\n'))]);
 }

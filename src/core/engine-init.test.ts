@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { compose, renderFence } from './data-boundary.js';
 
 // Mock all heavy dependencies that generateInitBriefing needs
 const { memoryCtorSpy } = vi.hoisted(() => ({ memoryCtorSpy: vi.fn() }));
@@ -77,7 +78,7 @@ describe('generateInitBriefing', () => {
   it('caps briefing at 8000 chars', async () => {
     // Simulate a huge file manifest diff
     const hugeDiff = 'x'.repeat(20_000);
-    mockGenerateBriefing.mockReturnValue('<session_briefing>short run history</session_briefing>');
+    mockGenerateBriefing.mockReturnValue(renderFence('session_briefing', 'short run history'));
     mockLoadManifest.mockReturnValue(new Map([['a.ts', 1]]));
     mockFormatManifestDiff.mockReturnValue(hugeDiff);
 
@@ -89,7 +90,7 @@ describe('generateInitBriefing', () => {
 
   it('preserves run history when trimming manifest diff', async () => {
     const hugeDiff = 'y'.repeat(20_000);
-    const runHistory = '<session_briefing>important run context</session_briefing>';
+    const runHistory = renderFence('session_briefing', 'important run context');
     mockGenerateBriefing.mockReturnValue(runHistory);
     mockLoadManifest.mockReturnValue(new Map([['a.ts', 1]]));
     mockFormatManifestDiff.mockReturnValue(hugeDiff);
@@ -104,14 +105,14 @@ describe('generateInitBriefing', () => {
   });
 
   it('does not truncate small briefings', async () => {
-    const shortBriefing = '<session_briefing>short</session_briefing>';
+    const shortBriefing = renderFence('session_briefing', 'short');
     mockGenerateBriefing.mockReturnValue(shortBriefing);
     mockLoadManifest.mockReturnValue(null);
     mockFormatManifestDiff.mockReturnValue('');
 
     const result = await generateInitBriefing(cliContext, mockRunHistory, []);
 
-    expect(result.briefing).toBe(shortBriefing);
+    expect(result.briefing).toBe(compose([shortBriefing]));
     expect(result.briefing).not.toContain('truncated');
   });
 

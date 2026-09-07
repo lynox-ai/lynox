@@ -45,7 +45,7 @@ import {
   loadManifest,
 } from './project.js';
 import { getWorkspaceDir, isWorkspaceActive } from './workspace.js';
-import { renderFence } from './data-boundary.js';
+import { compose, engineText, renderFence, type Part } from './data-boundary.js';
 // setMemoryKnowledgeLayer removed — knowledgeLayer now on ToolContext
 
 // ── History + Budget + Subscriptions ────────────────────────────
@@ -188,7 +188,7 @@ export async function generateInitBriefing(
   }
 
   try {
-    const parts: string[] = [];
+    const parts: Part[] = [];
 
     // Run history briefing (highest priority — kept intact)
     if (runHistory) {
@@ -204,7 +204,7 @@ export async function generateInitBriefing(
     if (prevManifest) {
       const diff = diffManifest(prevManifest, manifest);
       diffText = formatManifestDiff(diff);
-      if (diffText) parts.push(diffText);
+      if (diffText) parts.push(engineText(diffText));
     }
 
     // Workspace awareness
@@ -220,7 +220,7 @@ export async function generateInitBriefing(
       return { briefing: undefined, manifest };
     }
 
-    let assembled = parts.join('\n\n');
+    let assembled = compose(parts, '\n\n');
 
     // Cap total briefing size — trim manifest diff first (most verbose, least critical)
     if (assembled.length > MAX_BRIEFING_CHARS && diffText && diffText.length > 200) {
@@ -228,10 +228,11 @@ export async function generateInitBriefing(
       const nonDiffLen = assembled.length - diffText.length; // other parts + separators
       const budgetForDiff = Math.max(200, MAX_BRIEFING_CHARS - nonDiffLen - suffix.length);
       const trimmedDiff = diffText.slice(0, budgetForDiff) + suffix;
-      const partsWithoutDiff = parts.filter(p => p !== diffText);
-      const diffIdx = parts.indexOf(diffText);
-      partsWithoutDiff.splice(diffIdx, 0, trimmedDiff);
-      assembled = partsWithoutDiff.join('\n\n');
+      const diffPart = parts.find(p => 'engine' in p && p.engine === diffText);
+      const diffIdx = diffPart ? parts.indexOf(diffPart) : -1;
+      const partsWithoutDiff = parts.filter(p => p !== diffPart);
+      partsWithoutDiff.splice(diffIdx < 0 ? partsWithoutDiff.length : diffIdx, 0, engineText(trimmedDiff));
+      assembled = compose(partsWithoutDiff, '\n\n');
     }
 
     // Hard cap if still over budget
@@ -254,7 +255,7 @@ export async function generateInitBriefing(
 export interface SecretResult {
   vault: SecretVault | null;
   store: SecretStore | null;
-  briefingParts: string[];
+  briefingParts: Part[];
 }
 
 /**
@@ -395,7 +396,7 @@ export function ensureVaultKey(): void {
 }
 
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
-  const parts: string[] = [];
+  const parts: Part[] = [];
   let vault: SecretVault | null = null;
   let store: SecretStore | null = null;
 
@@ -409,7 +410,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       vault = new SecretVault();
       const migrated = vault.migrateFromFile();
       if (migrated > 0) {
-        parts.push(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`);
+        parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
       }
 
       // Migrate secrets from plaintext config to vault

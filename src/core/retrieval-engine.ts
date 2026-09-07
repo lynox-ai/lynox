@@ -24,7 +24,7 @@ import type { MemoryGraphStore } from './memory-graph-store.js';
 import { entityTypeToSubjectKind } from './subject-store.js';
 import type { SubjectStore, SubjectRow } from './subject-store.js';
 import type { RunHistory } from './run-history.js';
-import { escapeXml, renderProvenanceFact, detectInjectionAttempt, renderFence } from './data-boundary.js';
+import { compose, engineText, type Part, escapeXml, renderProvenanceFact, detectInjectionAttempt, renderFence } from './data-boundary.js';
 import { channels } from './observability.js';
 import { appendRetrievalShadowLog } from './retrieval-shadow-log.js';
 
@@ -533,7 +533,7 @@ export class RetrievalEngine {
     contextGraph: string | undefined,
     flagged?: ReadonlySet<string> | undefined,
   ): string {
-    const sections: string[] = [];
+    const sections: Part[] = [];
     const scopeOrder: MemoryScopeType[] = ['user', 'context', 'global'];
     const grouped = new Map<MemoryScopeType, typeof memories>();
 
@@ -568,9 +568,9 @@ export class RetrievalEngine {
       sections.push(renderFence('scope', entries, { attrs: { type: scopeType } }));
     }
 
-    if (contextGraph) sections.push(contextGraph);
+    if (contextGraph) sections.push(engineText(contextGraph));
     if (sections.length === 0) return '';
-    return renderFence('relevant_context', sections.join('\n'));
+    return compose([renderFence('relevant_context', compose(sections, '\n'))]);
   }
 
   // === Private Methods ===
@@ -874,6 +874,6 @@ export class RetrievalEngine {
     });
     const parts = [`Entities: ${entityLines.join(', ')}`];
 
-    return renderFence('knowledge_graph', parts.join('\n'));
+    return compose([renderFence('knowledge_graph', parts.join('\n'))]);
   }
 }

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { detectInjectionAttempt, wrapUntrustedData, wrapChannelMessage, escapeXml, renderFence } from './data-boundary.js';
+import { detectInjectionAttempt, wrapUntrustedData, wrapChannelMessage, escapeXml, compose, engineText, renderFence as renderFenceRaw } from './data-boundary.js';
+
+// `renderFence` returns an opaque `Fence`; `compose` is the only way to a string.
+// These tests assert on the rendered text, so they compose a single part.
+const renderFence = (...args: Parameters<typeof renderFenceRaw>): string =>
+  compose([renderFenceRaw(...args)]);
 
 describe('detectInjectionAttempt', () => {
   describe('detects injection patterns', () => {
@@ -464,5 +469,45 @@ describe('neutralization preserves the payload around a dead tag', () => {
     const out = renderFence('raw_json', payload);
     expect(out).toContain(payload.replace('</raw_json', '&lt;/raw_json'));
     expect(out.match(/<\/raw_json>/g)).toHaveLength(1);
+  });
+});
+
+describe('Fence / Part / compose — provenance by construction', () => {
+  it('a Fence is opaque: stringifying one loses the payload LOUDLY', () => {
+    // This is the load-bearing claim. `renderFence` used to return a string, so
+    // `${fence}` spliced silently and correctly — and a site that skipped the
+    // helper looked exactly the same. Now the accident is visible: the payload
+    // is not in the interpolation at all.
+    const fence = renderFenceRaw('x_frame', 'SECRET_PAYLOAD');
+    expect(typeof fence).not.toBe('string');
+    expect(`${String(fence)}`).not.toContain('SECRET_PAYLOAD');
+    expect(String(fence)).toBe('[object Object]');
+    // ...and the one legitimate way out does carry it.
+    expect(compose([fence])).toContain('SECRET_PAYLOAD');
+  });
+
+  it('composes declared parts in order, with the separator at the call site', () => {
+    const out = compose(
+      [engineText('before'), renderFenceRaw('x_frame', 'body'), engineText('after')],
+      '\n--\n',
+    );
+    expect(out).toBe(`before\n--\n<x_frame>\nbody\n</x_frame>\n--\nafter`);
+    // Default separator joins with nothing rather than guessing a newline.
+    expect(compose([engineText('a'), engineText('b')])).toBe('ab');
+  });
+
+  it('refuses a raw string as a part, loudly', () => {
+    // Test files are in no tsc project, so nothing type-checks a mock or a
+    // fixture. Without this the mistake reaches a caller that swallows
+    // exceptions and turns into a silently missing briefing — which is exactly
+    // how it showed up while migrating engine-init's tests.
+    expect(() => compose(['plain' as unknown as ReturnType<typeof engineText>]))
+      .toThrow(/neither a Fence nor engineText/);
+    expect(() => compose([{ notAPart: true } as unknown as ReturnType<typeof engineText>]))
+      .toThrow(/neither a Fence nor engineText/);
+  });
+
+  it('engineText is a declaration, not an escape hatch that alters the text', () => {
+    expect(compose([engineText('<x>raw</x>')])).toBe('<x>raw</x>');
   });
 });
