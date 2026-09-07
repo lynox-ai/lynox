@@ -46,8 +46,10 @@ interface InjectionResult {
  * ⚠ An earlier version of this section said the terminator was merely OPTIONAL
  * and that a well-formed tag was "consumed whole, its attributes with it", and
  * it instructed future editors about a terminator ALTERNATION. Both were true of
- * a construct that no longer exists, and the text outlived it by one commit
- * while `:121` said the opposite twenty lines away. Reaching for a terminator
+ * a construct that no longer exists. The text outlived it by FOUR commits, with
+ * the neighbouring `closeTail` comment saying the opposite 79 lines below it the
+ * whole time — near enough to read in one screenful of scrolling, far enough that
+ * nobody did. Reaching for a terminator
  * was removed because it DELETED PAYLOAD: the reach ran to any `>` within 200
  * characters, and in JSON or in prose containing a `>` that terminator belongs
  * to something else. Measured before the removal: 76 characters in, 35 out.
@@ -79,11 +81,28 @@ interface InjectionResult {
  *
  * ## Cost — and this section previously measured the code it replaced
  *
- * Dropping the bounded attribute tail is what removed the ReDoS shape: on 20 000
- * repeated `</untrusted_data ` tokens, 0.0003 ms against 5.65 ms for the bounded
- * form. The measurement was taken while the tail was still present but optional;
- * the tail is gone now, so the pattern cannot backtrack into it at all and the
- * figure is an upper bound rather than the current cost.
+ * Dropping the bounded attribute tail is what removed the ReDoS shape. Measured
+ * on 20 000 repeated `</untrusted_data ` tokens, scanning the WHOLE input in
+ * every variant so the four are comparable:
+ *
+ *   with tail, terminator mandatory  10.93 ms  (matches nothing — a full failure scan)
+ *   with tail, terminator optional    6.82 ms  (20 000 matches)
+ *   no tail,   terminator mandatory   0.24 ms  (matches nothing)
+ *   no tail,   no terminator (today)  0.96 ms  (20 000 matches)
+ *
+ * Like against like, the tail is the cost: 45× on the failing scan, 7× on the
+ * matching one.
+ *
+ * ⚠ The figures this section carried before — "0.0003 ms against 5.65 ms" —
+ * compared different things and are not reproduced above. They timed the FIRST
+ * match, and the bounded form never matches this input, so its number was a full
+ * failure scan while the other was an immediate success. That pair therefore
+ * measured "does it match early", not "does it backtrack", and it credited the
+ * terminator's optionality with a cost the tail was paying. A delta round on this
+ * very correction re-derived the old numbers and reported the attribution as
+ * wrong; it had repeated the same first-match timing. Two measurements that
+ * disagree make the INSTRUMENT the suspect — noted here so the next reader does
+ * not restore the earlier wording from the earlier numbers.
  *
  * ⚠ The separator widening COSTS, and it took three measurements to say so
  * correctly — the first quoted numbers taken before it landed, and two review
