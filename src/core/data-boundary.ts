@@ -79,57 +79,29 @@ interface InjectionResult {
  * predates this file's bug by months: the fact was written down here in the repo
  * and applied to one caller instead of to the boundary itself.
  *
- * ## Cost — and this section previously measured the code it replaced
+ * ## Cost
  *
- * Dropping the bounded attribute tail is what removed the ReDoS shape. Measured
- * on 20 000 repeated `</untrusted_data ` tokens, scanning the WHOLE input in
- * every variant so the four are comparable:
+ * The bounded attribute tail was slow as well as lossy: on 20 000 repeated
+ * `</untrusted_data ` tokens it costs roughly an order of magnitude more than
+ * the form without it, whether the scan matches or fails. That range is what
+ * two independent measurements agree on; it is the part worth writing down.
  *
- *   with tail, terminator mandatory  5.74 ms  (matches nothing — a full failure scan)
- *   with tail, terminator optional   6.25 ms  (20 000 matches)
- *   no tail,   terminator mandatory  0.27 ms  (matches nothing)
- *   no tail,   no terminator (today) 0.72 ms  (20 000 matches)
+ * ⚠ This section used to carry a precise pair — "0.0003 ms against 5.65 ms" —
+ * as the measurement that justified the design, and it was not a comparison:
+ * the two forms behave oppositely on that input, one matching immediately and
+ * one never matching and therefore scanning all of it, so the pair timed
+ * "does it match early", not "does it backtrack".
  *
- * Medians of three runs each. The first version of this table came from ONE run
- * per variant and put the first row at 10.93 ms, nearly double. Written down
- * because it is the same class of error this section is about: an instrument
- * used once tells you about the run, not about the code. The obvious cause —
- * that row ran first and carried the warm-up — is NOT established: an
- * independent run put that row at 5.5–6.0 even when measured first, and all
- * four rows moved between the two tables, not just the first. So the single-run
- * table was unreliable; which of its numbers was wrong and why is not something
- * this comment can claim.
+ * Every attempt to restate it precisely was then wrong in a NEW way — four
+ * times, across three review rounds and two of my own re-measurements, each
+ * finding a different error in the previous correction. That is the signal
+ * that the text was claim-rich rather than inaccurate: a paragraph carrying a
+ * table, two ratios and a history claim needs all of them to stay true, and
+ * none of them decides anything this file does. So they are gone rather than
+ * corrected a fifth time.
  *
- * Like against like, the tail is the cost — roughly 20× on the failing scan and
- * 9–12× on the matching one. The range is not hedging: an independent
- * measurement agreed within 5 % on three rows and came out 28 % LOWER on the
- * last one, which is the row both ratios divide by. Treat the order of magnitude
- * as the result and the second digit as noise.
- *
- * The old `5.65 ms` figure was RIGHT for what it timed — the pre-repair form's
- * failure scan, 5.74 here — and only its partner was measured differently.
- *
- * ⚠ The figures this section carried before — "0.0003 ms against 5.65 ms" —
- * compared different things and are not reproduced above. They timed the FIRST
- * match of two forms that behave oppositely on this input: the PRE-REPAIR form
- * (tail plus a MANDATORY terminator) matches nothing here, so its number is a
- * full failure scan, while the form that replaced it matches immediately. Only
- * one half of the pair therefore reproduces above.
- *
- * Say "pre-repair form", not "the bounded form": the bounded tail also stood in
- * the code with an OPTIONAL terminator, and that one matches 20 000 times. The
- * mandatory variant is not in this repo's history at all — it was replaced
- * before the branch that introduced this file's current shape was squashed — so
- * it is reconstructible but not readable, and a reader checking "the bounded
- * form" against the code lands on the wrong row. That ambiguity is what a delta
- * round caught here, at the third correction of this same paragraph. That pair
- * therefore
- * measured "does it match early", not "does it backtrack", and it credited the
- * terminator's optionality with a cost the tail was paying. A delta round on this
- * very correction re-derived the old numbers and reported the attribution as
- * wrong; it had repeated the same first-match timing. Two measurements that
- * disagree make the INSTRUMENT the suspect — noted here so the next reader does
- * not restore the earlier wording from the earlier numbers.
+ * What must not come back is the tail itself, and the reason is above and is
+ * not about speed: it deleted payload.
  *
  * ⚠ The separator widening COSTS, and it took three measurements to say so
  * correctly — the first quoted numbers taken before it landed, and two review
