@@ -17,13 +17,24 @@
  *
  *     sig = HMAC-SHA256(key = HMAC-SHA256(secret, BROKER_START_PURPOSE), payload)
  *
- * in its own code, with its own timing-safe compare. ⚠ The golden fixture
- * `fixtures/broker-start-token.json` that pins those bytes across the repo
- * boundary does NOT exist yet: a fixture is generated from a real serializer
- * (`fixtures/README.md`), and the serializer is the minting route, which lands
- * with the engine half of this wave. Until then the only thing pinning the
- * format is the literal in `tests/contract-broker-start.test.ts`, which binds
- * ONE side. Saying so beats a comment that describes a pair test nobody wrote.
+ * in its own code, with its own timing-safe compare.
+ *
+ * ⚠ This comment used to promise a golden fixture at
+ * `fixtures/broker-start-token.json`, to land "with the engine half of this
+ * wave". The engine half landed on 2026-09-07
+ * (`src/integrations/google/broker-start-mint.ts`) and the fixture did NOT,
+ * because that directory cannot hold this kind of value: its rules require a
+ * typed mirror against an `http.ts` shape and string leaves that are
+ * "obviously fake" (S4), and a signature is by construction a value nobody
+ * chose. A fake one would pin nothing. The vector therefore lives beside its
+ * test, in `broker-start-mint.test.ts`.
+ *
+ * What that costs is real and is not papered over: the vector binds ONE side.
+ * This repo drives it against its own minter; the control plane recomputes the
+ * same derivation from its own code and checks no shared vector, so a
+ * divergence would go unseen until a tenant clicks Connect. Both repos hold a
+ * golden vector and they are DIFFERENT ones, picked independently — agreeing
+ * today by arithmetic, not by construction.
  * The split is not
  * cosmetic: what both sides MUST agree on byte-for-byte is the payload and the
  * framing, and that is what this file fixes. A shared HMAC helper would fix the

@@ -361,15 +361,19 @@ export async function startManagedGoogleOAuth(): Promise<void> {
 		if (!res.ok) throw new Error();
 		const data = (await res.json()) as { url: string };
 		if (data.url) {
-			// Validate the control plane URL is reachable before redirecting.
-			// no-cors HEAD always "succeeds" — we redirect and let the user see
-			// the result. This is the original IntegrationsView behaviour.
-			try {
-				await fetch(data.url, { method: 'HEAD', mode: 'no-cors' }).catch(() => null);
-				window.location.href = data.url;
-			} catch {
-				addToast(t('integrations.google_oauth_unavailable'), 'error');
-			}
+			// ⚠ Do NOT probe this URL before navigating. A `HEAD` preflight stood
+			// here to "validate the control plane URL is reachable" — and its own
+			// comment admitted it could not: `mode: 'no-cors'` always succeeds, the
+			// result was swallowed by `.catch(() => null)`, and the redirect ran
+			// either way. It decided nothing.
+			//
+			// Since the start URL carries a one-time start token it is worse than
+			// useless: the control plane's replay guard consumes the nonce on the
+			// FIRST request it answers, and Hono routes `HEAD` to the `GET`
+			// handler. Measured against staging 2026-09-07 — HEAD returns 302, and
+			// the navigation that follows lands on `google_oauth_error=replayed`.
+			// The probe would have turned one broken Connect button into another.
+			window.location.href = data.url;
 		}
 	} catch {
 		addToast(t('integrations.google_oauth_unavailable'), 'error');
