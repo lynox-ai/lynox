@@ -66,16 +66,23 @@ describe('startManagedGoogleOAuth must not touch the start URL before navigating
     expect(code).not.toMatch(/HEAD/);
   });
 
-  // ⚠ The three checks above all watch `fetch`, and a delta round pointed out
-  // that they are trivially side-stepped: `new Image().src = data.url`,
-  // `navigator.sendBeacon(data.url)` or an XHR burns the nonce exactly as the
-  // HEAD probe did and touches none of them. The pattern was the wrong size.
+  // ⚠ THIS GUARD IS A TRIPWIRE, NOT A FENCE — and three review rounds are the
+  // evidence. Round one: the checks above watched `fetch`, so
+  // `new Image().src = data.url` walked past them. Round two: the check below
+  // counted `data.url`, so `data['url']` walked past THAT. Each round found a
+  // new shape, which is the signature of a detector sized to syntax rather than
+  // to behaviour — and the list of ways a browser can fetch a URL is not one
+  // anybody finishes.
   //
-  // So this one inverts the question. Instead of listing the ways to reach the
-  // URL — a list that is never finished — it pins the ONE use that is allowed.
-  it('uses data.url exactly once, and only to navigate', () => {
-    const uses = code.match(/\bdata\.url\b/g) ?? [];
-    expect(uses).toHaveLength(2); // the `if (data.url)` guard, and the assignment
+  // What actually closes the class is server-side: the control plane must stop
+  // spending the nonce on the first request it answers. That is filed as
+  // `DEF-broker-start-nonce-dies-on-any-fetch` in the private repo, and this
+  // test is expected to become redundant when it lands — redundant, not wrong.
+  // Until then it catches the shape that actually occurred once, which is worth
+  // more than nothing and less than a guarantee.
+  it('reads the start URL exactly twice, in either notation, and only to navigate', () => {
+    const uses = code.match(/\bdata(?:\.url\b|\[\s*['"`]url['"`]\s*\])/g) ?? [];
+    expect(uses, 'a third read of the start URL is a second request against it').toHaveLength(2);
     expect(code).toMatch(/window\.location\.href\s*=\s*data\.url/);
     expect(code).toMatch(/if\s*\(data\.url\)/);
   });

@@ -44,10 +44,12 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   without a date cannot be told apart from a sign-off carried over from an earlier revision.
   `code-review` and `delta` are required for any code change. `security` is
   required when the diff touches one of the paths the check lists — every module
-  under `src/tools/builtin/`, `src/server/`, `data-boundary`, `output-guard`,
-  `input-guard`, `permission-guard`, `secret-store`, `migration-crypto`, or an
-  integration's auth/oauth. That list is a **floor**: a change can open a trust
-  boundary somewhere it does not name, and then the gate is still yours to run.
+  under `src/tools/builtin/`, `src/server/`, `src/integrations/`,
+  `data-boundary`, `output-guard`, `input-guard`, `permission-guard`,
+  `secret-store` or `migration-crypto`. That list is a **floor**: a change can
+  open a trust boundary somewhere it does not name, and then the gate is still
+  yours to run. It reaches wider than it strictly must, on purpose — too narrow
+  fails open, too broad costs one gate run.
 - `delta` — the verdict of the delta round ON THE FIXES. `clean` or don't merge.
   `clean` does **not** mean the round found nothing — a round that found things and
   handled them is clean. It means: nothing it found is left unhandled (fixed here, or
