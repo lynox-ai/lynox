@@ -77,21 +77,32 @@ interface InjectionResult {
  * `(?:…)?` IS greedy and does try the gap; what makes it fast is that the match
  * SUCCEEDS at the first candidate instead of failing at every one.
  *
- * ⚠ The separator widening COSTS, and a first version of this section hid that
- * by quoting numbers taken before it landed. Order-controlled, min of 30, both
- * fresh-compiled and pre-compiled, on the SHIPPED pattern against 410 KB with no
- * `<` and no `&`: **0.126–0.129 ms against 0.034–0.036 ms**, a ~3.6× regression
- * on the linear scan. Isolated, the class alone is 1.12 ms against 0.12 ms, so
- * the cost is located in it and not in the surrounding pattern.
+ * ⚠ The separator widening COSTS, and it took three measurements to say so
+ * correctly — the first quoted numbers taken before it landed, and two review
+ * rounds disagreed about whether the cost exists at all. What settles it is a
+ * SIZE SWEEP rather than a duel of single numbers, because a ratio that holds
+ * across input sizes is a throughput difference and a ratio at one size is not.
  *
- * A review round measured no difference here and argued it was structurally
- * impossible, the delimiter alternation being the pattern's only start-set. The
- * argument is reasonable and the measurement is not adopted: it reported exactly
- * 1.00, and measuring the SAME regex against itself on this machine gives 0.93 —
- * a perfect ratio between two different patterns is the signature of a
- * comparison that did not run. Both regexes here were checked to differ in the
- * property under test (the new one matches a NEL form, the old one does not)
- * before either was timed.
+ * Both patterns reconstructed from git (2e7ea12a vs HEAD), verified to differ in
+ * the property under test (the new one matches a NEL form, the old does not),
+ * interleaved on the same body object, min of 60 × 6 repeats, on content with no
+ * `<` and no `&`:
+ *
+ *     50 KB  0.0043 → 0.0157   110 KB 0.0094 → 0.0338   200 KB 0.0167 → 0.0604
+ *     410 KB 0.0346 → 0.1256   820 KB 0.0691 → 0.2510      ratio 3.61 – 3.63
+ *
+ * Constant ratio at every size, and the throughput says WHY: ~12 GB/s before,
+ * ~3.3 GB/s after. 12 GB/s is a SIMD scan for a single start byte — V8 can do
+ * that while the pattern's only entry is the `<`/`&` alternation, and the
+ * widened class defeats it. A review round called 12 GB/s implausible and read
+ * the old figure as a shorter input; it is neither, it is the fast path.
+ *
+ * Two things that round got RIGHT and are corrected here: the self-control on a
+ * tightened harness is **1.000**, not the 0.93 an earlier draft cited as grounds
+ * for doubting a 1.00 result — so 1.00 is the noise floor and that argument was
+ * wrong. And "isolated, the class alone costs 1.12 ms against 0.12 ms" is cut:
+ * isolating the class removes the delimiter alternation, which is the very thing
+ * whose optimisation is at issue, so it measured a different shape.
  *
  * The cost is bought deliberately, and the mitigation is smaller than a first
  * draft claimed: `detectInjectionAttempt` windows at SCAN_WINDOW (64 KB), which

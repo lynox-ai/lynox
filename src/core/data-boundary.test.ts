@@ -296,7 +296,7 @@ describe('boundary close tag — every encoding a model might read as a close', 
     expect(w.slice(0, w.lastIndexOf('</untrusted_data>'))).toContain('a&lt;/untrusted_data&gt;b');
   });
 
-  it('KNOWN OPEN: the zero-width family and the re-encodings are NOT caught', () => {
+  it('KNOWN OPEN: the zero-width family, the re-encodings and the homoglyphs are NOT caught', () => {
     // This test asserts a GAP, deliberately. Four review rounds each produced one
     // further encoding, so a comment saying "still open" would rot; a test says
     // it in a form that fails the moment someone closes the class — at which
