@@ -118,10 +118,37 @@ interface InjectionResult {
  *  `chat-context.ts`'s `oneLine`, which documents why. */
 const BOUNDARY_SEP = '[\\s\\x00-\\x1f\\x7f-\\x9f]*';
 const closeTail = (token: string): string =>
-  `${BOUNDARY_SEP}\\/${BOUNDARY_SEP}${token}\\b(?:[^>]{0,200}?(?:>|&gt;|&#0*62;|&#x0*3e;))?`;
+  // NO attribute tail. It used to consume `[^>]{0,200}?` up to any `>` in
+  // reach, so that a well-formed tag was replaced together with its attributes.
+  // That terminator usually belongs to something else: in JSON or in prose
+  // containing a `>`, the tail ate the bytes in between and the fixed-length
+  // replacement emitted nothing for them. Measured on this code: 76 chars in,
+  // 35 out — a url, an amount and two field names gone, leaving JSON that still
+  // parses and now says something the sender did not write.
+  // Dropping it costs no protection. The terminator was already optional, so
+  // recognition never rested on it, and the tag is equally dead whether its
+  // attributes are consumed or left standing as inert text.
+  `${BOUNDARY_SEP}\\/${BOUNDARY_SEP}${token}\\b`;
 const BOUNDARY_CLOSE_TAIL = closeTail('untrusted_data');
 const BOUNDARY_OPEN_ANY = '(?:<|&lt;|&#0*60;|&#x0*3c;)';
 const BOUNDARY_OPEN_ENCODED = '(?:&lt;|&#0*60;|&#x0*3c;)';
+
+/**
+ * Deaden a matched close tag by escaping ITS OWN opening delimiter, and change
+ * nothing else in the match.
+ *
+ * The previous form substituted a constant. That is wrong twice over. It made
+ * the replacement a different LENGTH from the match, which is how the attribute
+ * tail came to delete payload bytes; and for an entity-encoded opener it was an
+ * IDENTITY — `&lt;/x` was replaced by `&lt;/x`, so the tag was never neutralised
+ * at all. A test appeared to cover that: it asserted the raw closer did not
+ * survive, and passed only because the constant happened to differ from the
+ * input by the terminator it also ate. Remove the eating and the assertion fails
+ * and exposes the hole. `&` is escaped first, so `&lt;` becomes `&amp;lt;` and
+ * cannot be decoded back into `<` by a renderer downstream.
+ */
+const deadenOpener = (match: string, open: string): string =>
+  `${open.replace(/&/g, '&amp;').replace(/</g, '&lt;')}${match.slice(open.length)}`;
 /** Any encoding of the closing tag — the detector's single boundary-escape entry. */
 const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
 
@@ -164,7 +191,7 @@ const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
  * measured forms and weakens nothing; it does not close the class.
  */
 export function closeTagPattern(token: string, flags = 'gi'): RegExp {
-  return new RegExp(`${BOUNDARY_OPEN_ANY}${closeTail(token)}`, flags);
+  return new RegExp(`(${BOUNDARY_OPEN_ANY})${closeTail(token)}`, flags);
 }
 
 /**
@@ -338,11 +365,12 @@ function neutralizeBoundaryTags(text: string): string {
     // the reason survives the rewrite even though the patterns did not.)
     .replace(new RegExp(`${BOUNDARY_OPEN_ENCODED}${BOUNDARY_CLOSE_TAIL}`, 'gi'), '[blocked:boundary_escape]')
     // Literal opener last — collapsed to the inert entity form rather than
-    // blanked. A well-formed tag goes WITH its attributes (they are part of the
-    // match); one whose end is out of reach loses only its opening, and the rest
-    // stays as plain text. Either way the tag is dead and the sender's prose
-    // around it survives.
-    .replace(new RegExp(`<${BOUNDARY_CLOSE_TAIL}`, 'gi'), '&lt;/untrusted_data&gt;');
+    // blanked. The match now ends at the token, so ONLY the delimiter and any
+    // separators smuggled inside it are rewritten; every byte the sender wrote
+    // after the token survives verbatim. The previous wording here claimed that
+    // outcome while the code did the opposite, and the claim is why the defect
+    // stood through four review rounds: it was read as the measurement.
+    .replace(new RegExp(`(<)${BOUNDARY_CLOSE_TAIL}`, 'gi'), deadenOpener);
 }
 
 export function wrapUntrustedData(content: string, source: string): string {
@@ -387,8 +415,18 @@ ${safe}
  * frame early voids the promise for everything after it, and the escape leaves
  * no trace. Four review rounds tried to answer "which frames are exposed?" and
  * each found one more; the question needs dataflow and stays open. This inverts
- * it: every frame goes through one function, and `scripts/fence-guard.mjs`
- * forbids hand-built ones. The set is made EMPTY instead of counted.
+ * it: every frame goes through one function, so the set is made EMPTY instead of
+ * counted.
+ *
+ * What does NOT yet hold that up is a gate. A script guard shipped here first and
+ * was withdrawn: it reported `0 hand-built` against three planted frames — one
+ * built with `+`, one whose tags came from a helper, one with opener and closer
+ * in separate functions — and did not even count them in its inventory. It
+ * recognised three syntactic construction shapes, which is the same enumeration
+ * one level down, and a gate that reads clean for exactly the thing it exists to
+ * catch is worse than none: it takes the pressure off the root fix. The
+ * enforcement belongs in the type system, where composition can only accept
+ * declared parts — tracked as `DEF-boundary-recognition-enumerates-encodings`.
  *
  * ## The token may be a constant, and that is deliberate
  *
@@ -445,7 +483,7 @@ export function renderFence(token: string, payload: string, opts?: {
     attrs.push(`${escapeXml(k)}="${escapeXml(String(v))}"`);
   }
   const open = `<${token}${attrs.length ? ' ' + attrs.join(' ') : ''}>`;
-  const safe = payload.replace(closeTagPattern(token), `&lt;/${token}&gt;`);
+  const safe = payload.replace(closeTagPattern(token), deadenOpener);
   const head = opts?.preamble ? `${opts.preamble}\n` : '';
   return `${open}\n${head}${safe}\n</${token}>`;
 }

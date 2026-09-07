@@ -82,8 +82,9 @@ export function redactWireUserMessage(text: string): string {
     // `label` is computed here from a match count — nothing from the input
     // reaches it, so there is no payload that could close anything. Migrating it
     // changed the redaction's OUTPUT shape, which its tests and downstream wire
-    // consumers read. The fence-guard carries this as an exception with that
-    // reason rather than a path pattern.
+    // consumers read. (A script guard carried this as a named exception; it was
+    // withdrawn as false-clean, so the reason lives here, at the site it is
+    // about, rather than in a list somewhere else.)
     return `<secrets>${label} available (names+last4 redacted)</secrets>`;
   });
   return maskSecretPatterns(withoutCatalog);

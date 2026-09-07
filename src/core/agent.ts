@@ -58,7 +58,7 @@ import {
   routeCapturedFact,
 } from './capture-fallback.js';
 import { randomBytes } from 'node:crypto';
-import { detectInjectionAttempt, containsUntrustedMarker, closeTagPattern, renderFence } from './data-boundary.js';
+import { detectInjectionAttempt, containsUntrustedMarker, renderFence } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
 import { isToolSoftFailure } from './tool-soft-failure.js';

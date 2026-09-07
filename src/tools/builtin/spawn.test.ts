@@ -1568,7 +1568,12 @@ describe('spawn_agent tool', () => {
       );
       // mockSend receives the task string — verify context is XML-escaped
       const sentTask = mockSend.mock.calls[0]?.[0] as string;
-      expect(sentTask).toContain('&lt;/context&gt;');
+      // Two stages, deliberately stacked (see spawn.ts): `escapeXml` inerts tags
+      // OTHER than this one, turning `</context>` into `&lt;/context&gt;`; then
+      // `renderFence` deadens what is still a close-tag lookalike to a model that
+      // reads entities, giving `&amp;lt;`. Before, that second stage was an
+      // identity on entity-encoded input and this assertion passed anyway.
+      expect(sentTask).toContain('&amp;lt;/context&gt;');
       expect(sentTask).not.toContain('</context>\nEvil');
     });
 
