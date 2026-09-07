@@ -70,15 +70,23 @@ interface InjectionResult {
  * predates this file's bug by months: the fact was written down here in the repo
  * and applied to one caller instead of to the boundary itself.
  *
- * ## Cost, and the reason is not the one a first draft gave
+ * ## Cost — and this section previously measured the code it replaced
  *
- * Measured as the MINIMUM of 30 runs (an average hid this): on 410 KB of
- * padding, 0.0004 ms optional against 0.0330 ms bounded; on 20 000 repeated
- * `</untrusted_data ` tokens — the classic ReDoS shape — **0.0003 ms against
- * 5.65 ms**. The reason is NOT "there is no gap left to walk"; `(?:…)?` is
- * greedy and does try the gap. It is that the optional group lets the match
- * SUCCEED at the first candidate, while the bounded form FAILS at every
- * candidate start and the engine retries across the whole string.
+ * The optional terminator is what removed the ReDoS shape: on 20 000 repeated
+ * `</untrusted_data ` tokens, 0.0003 ms against 5.65 ms for the bounded form.
+ * `(?:…)?` IS greedy and does try the gap; what makes it fast is that the match
+ * SUCCEEDS at the first candidate instead of failing at every one.
+ *
+ * ⚠ The separator widening costs, and a first version of this section hid that
+ * by quoting numbers taken before it landed. Order-controlled, min of 30, on the
+ * SHIPPED pattern: where a `<` is present the two are indistinguishable
+ * (0.0003–0.0005 ms either way, because the match succeeds immediately), but on
+ * 410 KB of benign content with no `<` at all — the common case — the widened
+ * class is **0.124 ms against 0.035 ms**, a 3.6× regression on the linear scan.
+ * It is bought deliberately: `detectInjectionAttempt` windows at 64 KB, so the
+ * real per-window figure is microseconds, and what it buys is the NEL/C1 family.
+ * Stated rather than smoothed, because the number that flatters the change is
+ * exactly the one to distrust.
  */
 /** Separator class between the delimiter, the slash and the token. Deliberately
  *  NOT `\\s`: that misses U+0085 (NEL) and the C1 range. Same class as
@@ -106,6 +114,29 @@ const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
  * `token` must be a coined element name (snake_case, no regex metacharacters);
  * it is interpolated, not escaped, because every call site is a literal in this
  * repo and an escaped-token API would invite passing user input.
+ *
+ * ## ⛔ WHAT THIS STILL DOES NOT CATCH, and why it is not one more widening
+ *
+ * Recognition here still ENUMERATES the delimiters and separators around the
+ * token, and that frame has now failed four review rounds in a row — each one
+ * produced exactly one further encoding, and each repair of mine was a wider
+ * enumeration that did not contain the next. Measured open today, on this code:
+ *
+ *   - the zero-width family between the delimiter and the token — U+200B, 200C,
+ *     200D, 2060, 00AD, 180E: undetected and unneutralised. U+FEFF, the same
+ *     family and the same invisibility, IS caught — purely because JS `\s`
+ *     happens to include it. Six missed, one covered by accident, which is the
+ *     tell that this is a gap and not a boundary.
+ *   - percent-encoding (`%3C/untrusted_data%3E`), double-encoded entities
+ *     (`&amp;lt;`), and fullwidth forms (`＜`, `／`).
+ *
+ * The cut that closes the class is NOT a wider character class: it is to
+ * NORMALISE the input once (decode entities, strip zero-width and C0/C1) and
+ * match the coined token on the normalised string. That changes a primitive
+ * every untrusted-data caller depends on and needs its own false-positive
+ * measurement, so it is registered rather than smuggled into a caller's diff —
+ * `DEF-boundary-recognition-enumerates-encodings`. What ships here closes eight
+ * measured forms and weakens nothing; it does not close the class.
  */
 export function closeTagPattern(token: string, flags = 'gi'): RegExp {
   return new RegExp(`${BOUNDARY_OPEN_ANY}${closeTail(token)}`, flags);
