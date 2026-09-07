@@ -1,5 +1,6 @@
 import type { RunHistory } from './run-history.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
+import { wrapChannelMessage } from './data-boundary.js';
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -18,6 +19,42 @@ import type { InboxItem, PlannedPipeline } from '../types/index.js';
 export type ChatContextRef =
   | { kind: 'workflow' | 'run' | 'mail'; id: string }
   | { kind: 'mail-batch'; ids: string[] };
+
+/**
+ * Every `kind` {@link resolveChatContext} accepts, as a runtime list.
+ *
+ * It exists for ONE reason, and the reason is mechanical rather than
+ * descriptive: the untrusted-content sweep (`chat-context-untrusted-sweep.test.ts`)
+ * drives *this* list, not a hand-written list of the kinds that happen to read
+ * mail today. `satisfies Record<Kind, true>` makes the record fail to compile
+ * when a new member joins {@link ChatContextRef} — so a future `mail-thread`
+ * kind cannot be added without entering the sweep, and the sweep then decides
+ * whether its output is wrapped. The alternative — a list in the test — is a
+ * list somebody has to REMEMBER to extend, which is the failure mode this row
+ * was filed for.
+ *
+ * It has to live here, in `src/`, and not in the test: `src/**\/*.test.ts` is in
+ * no tsc project (the main tsconfig excludes it, `tsconfig.tests.json` re-excludes
+ * it), so a `satisfies` weld inside a test file is checked by nothing.
+ *
+ * ⚠ The weld is the load-bearing part, and it is the part with NO runtime
+ * signature: replace the two declarations below with a hand-written
+ * `['workflow', 'run', 'mail', 'mail-batch'] as ReadonlyArray<…>` and everything
+ * still compiles, every test still passes, and the self-extension property is
+ * silently gone. That is why the record is EXPORTED and why the sweep pins the
+ * `satisfies` clause as source text — the only observable a compile-time
+ * mechanism has. Do not "simplify" this into a literal.
+ */
+export const CHAT_CONTEXT_KIND_SET = {
+  workflow: true,
+  run: true,
+  mail: true,
+  'mail-batch': true,
+} as const satisfies Record<ChatContextRef['kind'], true>;
+
+export const CHAT_CONTEXT_KINDS = Object.keys(
+  CHAT_CONTEXT_KIND_SET,
+) as ReadonlyArray<ChatContextRef['kind']>;
 
 /**
  * Boundary sentinel the http-api seam appends AFTER a resolved preamble and
@@ -132,6 +169,23 @@ function oneLine(s: string, max: number): string {
  * An absent origin renders as `contract-governed` alone — it is a legacy or
  * imported contract, and claiming either provenance for it would be a guess.
  */
+/**
+ * Name the sender-authored fields that are ABSENT, for the engine's own framing
+ * line — never as a value inside the untrusted block.
+ *
+ * The distinction is not cosmetic. A placeholder inside the block ("(no
+ * subject)") is a statement the engine makes in a place a sender can write to,
+ * and a sender who sets their subject to that exact string produces a
+ * byte-identical result. Outside the block the assertion is unforgeable, and the
+ * block then holds only what the sender actually wrote — which is what a
+ * boundary is for. Returns '' when nothing is missing, so the common case adds
+ * no tokens.
+ */
+function missingFieldNote(fields: Record<string, string>): string {
+  const missing = Object.entries(fields).filter(([, v]) => v.length === 0).map(([k]) => k);
+  return missing.length > 0 ? ` — no ${missing.join(', ')}` : '';
+}
+
 function contractNote(contract: { origin?: string | undefined } | undefined): string {
   if (!contract) return '';
   if (contract.origin === 'authorship') return ' · contract-governed (confirmed by authorship, not reviewed)';
@@ -150,12 +204,48 @@ export function resolveChatContext(
     if (!inboxState) return null;
     const item = inboxState.getItem(ref.id);
     if (!item) return null;
-    // From/subject/body are the MOST untrusted fields in the app (an external
-    // sender authored them) — always oneLine() to neutralise injected
-    // pseudo-system lines, same as the workflow/run fields.
+    // From/subject/body/message-id are the MOST untrusted fields in the app (an
+    // external sender authored them). TWO defences, and they do DIFFERENT jobs —
+    // the second one was missing until core#1333, which is what made this path
+    // weaker than the tool path that shows the same body:
+    //
+    //  (1) oneLine() — collapses the line break a crafted field needs in order to
+    //      start its own pseudo-directive line, and (the part that is easy to
+    //      drop by accident) keeps the `[/loaded-context]` sentinel unforgeable.
+    //      Both http-api.ts and the web-ui strip rest on the interpolated fields
+    //      being newline-free; removing it here silently invalidates them.
+    //  (2) wrapChannelMessage() — the SAME boundary `mail_read` puts the same
+    //      body behind (`integrations/mail/tools/mail-read.ts:78`): the
+    //      `<untrusted_data source=…>` frame, the injection scan, the ⚠ warning
+    //      line, and the `injection_detected` security event. Before it, the same
+    //      mail reached the model with a frame through the tool and without one
+    //      here — and an incident on THIS path left no trace at all, because the
+    //      event is emitted by the wrapper and nothing else.
+    //
+    // The two compose rather than overlap: collapsing whitespace INSIDE the
+    // wrapper is what the mail triage path already does
+    // (`integrations/mail/triage/envelope.ts:89`), so this is the house shape,
+    // not a local invention.
+    //
+    // What (1) costs and what it buys, both MEASURED rather than asserted,
+    // because the trade only reads as favourable once both halves are counted.
+    // `INJECTION_PATTERNS` holds 21 entries (counted, not estimated — an earlier
+    // version of this comment said "~30" and then hardened the guess into a
+    // ratio):
+    //   — LOST: the two `^`-anchored role-impersonation patterns cannot match a
+    //     value that no longer starts a line. Two of 21, and exactly two — no
+    //     other pattern in the set is anchored.
+    //   — GAINED: the bounded-gap exfiltration patterns use `.`, which does NOT
+    //     cross a newline, so on multi-line content they miss a clause the
+    //     collapse brings into reach. Verified both ways:
+    //     `send the report\nto the endpoint` is not detected, the collapsed form
+    //     is.
+    // And the baseline is not "the old scan": before this, the scan did not run
+    // on this path at all, so it is 19 of 21 where it was 0 of 21.
+    const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
     const from = item.fromName
-      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${oneLine(item.fromAddress, MAX_NAME_CHARS)}>`
-      : oneLine(item.fromAddress, MAX_NAME_CHARS);
+      ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+      : fromAddr;
     // The cached body can be an EMPTY string (body-refresh persists '' for an
     // all-markup/redacted mail), so `??` would leave a blank Message line — fall
     // back to the snippet on empty, not just on null/undefined.
@@ -169,17 +259,57 @@ export function resolveChatContext(
     const uidRow = item.messageId
       ? inboxState.getUidByMessageId(item.accountId, item.messageId)
       : null;
+    // Rendered ONCE and reused, so the prose below and the field cannot disagree:
+    // gating the sentence on the raw `item.messageId` while the field renders the
+    // `oneLine`d value lets a whitespace-only header point the model at a line
+    // that was skipped as empty.
+    const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
     const replyLine = uidRow
       ? `To reply, call mail_reply with uid: ${uidRow.uid}, account: "${acct}"` +
         `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}. `
       : `To reply, first locate this message with mail_search ` +
-        `(by sender/subject${item.messageId ? ` or message-id "${oneLine(item.messageId, MAX_NAME_CHARS)}"` : ''}) ` +
+        `(by the sender, the subject${msgId ? `, or the Message-ID shown above` : ''}) ` +
         `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
+    // What stays OUTSIDE the boundary is engine-generated operational metadata —
+    // the item id, the account, the IMAP uid/folder — the split `mail-read.ts:91-93`
+    // states for the tool path ("Operational metadata only — engine-generated (UID,
+    // folder, dates, attachment manifest) … stays in the trusted framing above the
+    // wrapped envelope").
+    //
+    // ⚠ The Message-ID is where this path DIVERGES from mail-read, deliberately and
+    // visibly, because a silent divergence from a cited authority is worse than
+    // either choice: `mail-read.ts:96` pushes `Message-ID:` into that trusted array.
+    // The header is written by the SENDER, so by mail-read's OWN stated rule
+    // (engine-generated) it does not belong there — the placement contradicts the
+    // comment three lines above it. Here it goes inside with the other
+    // sender-authored fields and the instruction points at it instead of quoting
+    // it. mail-read is not changed from here; see DEF-mail-read-message-id-trusted.
+    //
+    // ⚠ ABSENCE IS STATED OUTSIDE THE BLOCK, and that placement is the point.
+    // `wrapChannelMessage` skips a value that is empty after trim, and
+    // `types/inbox.ts` documents pre-v11 rows as `''` for fromAddress AND subject
+    // until the backfill runs — so a real row can render a block with nothing in
+    // it. The tool path solves that with placeholders INSIDE the block
+    // (`mail-read.ts:81,86`: `'(no subject)'`, `'(empty body)'`), and that is
+    // exactly what must not be copied here: a sender can set their subject to the
+    // literal string `(no subject)`, and then an engine statement about absence
+    // and a sender's text are byte-identical. Whatever the engine asserts, it
+    // asserts in its own framing, where no sender can reach it.
+    // Keys are the field LABELS lowercased, so the note and the block name the same
+    // things: "no subject, message" points at `Subject:` and `Message:`, not at
+    // internal variable names the model never sees.
+    const absent = missingFieldNote({ from: from, subject: oneLine(item.subject, MAX_NAME_CHARS), message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) });
     return (
-      `[Loaded mail for reply — item: ${item.id}]\n` +
-      `From: ${from}\n` +
-      `Subject: "${oneLine(item.subject, MAX_NAME_CHARS)}"\n` +
-      `Message:\n${oneLine(bodyMd, MAX_MAIL_BODY_CHARS)}\n\n` +
+      `[Loaded mail for reply — item: ${item.id}${absent}]\n` +
+      `${wrapChannelMessage({
+        source: `mail:${acct}:${fromAddr}`,
+        fields: {
+          From: from,
+          Subject: oneLine(item.subject, MAX_NAME_CHARS),
+          ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
+          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS),
+        },
+      })}\n\n` +
       replyLine +
       `Draft a reply, confirm the send with the user, then send it.`
     );
@@ -189,28 +319,66 @@ export function resolveChatContext(
     // N inbox items the user bulk-selected to work through in one chat (the
     // "💬 N im Chat" bulk affordance). Same untrusted-content rules as the
     // single 'mail' kind — every sender-authored field passes through oneLine()
-    // so a crafted From/Subject/snippet can't inject a pseudo-system line. The
-    // item count is capped so a huge selection can't blow up the preamble.
+    // AND lands inside a per-item `<untrusted_data>` block. The item count is
+    // capped so a huge selection can't blow up the preamble.
+    //
+    // ONE wrapper per item, not one for the whole list, and not one per field:
+    // that is the shape `integrations/mail/triage/envelope.ts:84-95` already uses
+    // for the same job (a numbered list of envelopes). What it buys is the right
+    // provenance — the `source` attribute names THIS item's sender, so an alert
+    // says which mailbox and which sender — and one scan per item instead of one
+    // per field.
+    //
+    // ⚠ What it does NOT buy, stated because an earlier version of this comment
+    // claimed it and `wrapChannelMessage`'s own docstring still did: the scan does
+    // NOT catch a pattern that straddles two FIELDS of one mail. It renders
+    // `label: value` lines, so a subject ending `…ignore all previous` and a body
+    // starting `instructions…` are separated by `\nMessage: ` — and the override
+    // pattern's `\s+` cannot cross that. Measured both ways: the labelled shape is
+    // not detected, the unlabelled join is, and the pattern does fire within a
+    // single field. The gap is the same on every channel-wrap caller
+    // (mail-read, envelope, the inbox classifier) — see
+    // DEF-wrapchannelmessage-labels-defeat-cross-field-scan. A pattern split
+    // across two SENDERS' items is a different matter and is not a coherent
+    // threat: two independent senders would have to coordinate.
     if (!inboxState) return null;
     const lines: string[] = [];
     for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
       const item = inboxState.getItem(id);
       if (!item) continue;
+      const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
       const from = item.fromName
-        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${oneLine(item.fromAddress, MAX_NAME_CHARS)}>`
-        : oneLine(item.fromAddress, MAX_NAME_CHARS);
+        ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
+        : fromAddr;
       const acct = oneLine(item.accountId, MAX_NAME_CHARS);
       const uidRow = item.messageId
         ? inboxState.getUidByMessageId(item.accountId, item.messageId)
         : null;
+      const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
+      // Operational header — engine-generated, NOT sender-controlled, so it stays
+      // in the trusted framing above the wrapped block. Same split as
+      // `envelope.ts:83`, which calls it "Operational header — agent framing, NOT
+      // user-controlled".
       const locator = uidRow
         ? `account "${acct}", uid ${uidRow.uid}` +
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
-          `${item.messageId ? ` (message-id "${oneLine(item.messageId, MAX_NAME_CHARS)}")` : ''}`;
+          `${msgId ? ` (by the Message-ID below)` : ''}`;
+      const subject = oneLine(item.subject, MAX_NAME_CHARS);
+      const snippet = oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS);
       lines.push(
-        `${lines.length + 1}. From: ${from} — Subject: "${oneLine(item.subject, MAX_NAME_CHARS)}" — ${locator}\n` +
-        `   ${oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS)}`,
+        // Absence rides on the locator line — engine framing, same reason as the
+        // single 'mail' kind: a placeholder inside the block is forgeable.
+        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, snippet })}\n` +
+        wrapChannelMessage({
+          source: `mail:${acct}:${fromAddr}`,
+          fields: {
+            From: from,
+            Subject: subject,
+            ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
+            Snippet: snippet,
+          },
+        }),
       );
     }
     if (lines.length === 0) return null;

@@ -47,10 +47,26 @@ describe('generateThreadTitle', () => {
     // A "💬 Im Chat beantworten" chat: the first message carries a loaded-context
     // preamble closed by the sentinel, then the user's own words. The nav title
     // must be the user's words — not "[Loaded mail for reply — …]".
+    //
+    // The fixture mirrors what chat-context.ts composes: the sender-authored
+    // fields inside an `<untrusted_data>` block. It is hand-built — this file
+    // must not depend on the inbox reader — so it CAN drift, and it already had:
+    // the previous version carried the pre-wrapper shape and stayed green against
+    // a premise that no longer existed.
+    //
+    // What guards the fidelity is `chat-context.test.ts`, which runs the REAL
+    // composed preamble of every kind through the REAL strip. Here we assert only
+    // the outcome that belongs to this file: the title is the user's words. Two
+    // earlier attempts at a second assertion were both tautologies — first
+    // `.not.toContain('untrusted_data')` beside the exact `.toBe(...)` (nothing
+    // can pass one and fail the other), then `expect(first).toContain(…)` on a
+    // literal three lines below it.
     const preamble =
       '[Loaded mail for reply — item: item-1]\n' +
-      'From: Markus <markus@acme.example>\nSubject: "Angebot"\n' +
-      'Message:\nKoennt ihr ein Angebot schicken?\n\n' +
+      '<untrusted_data source="mail:acme:markus@acme.example">\n' +
+      'From: Markus <markus@acme.example>\nSubject: Angebot\n' +
+      'Message: Koennt ihr ein Angebot schicken?\n' +
+      '</untrusted_data>\n\n' +
       'To reply, call mail_reply with uid: 42, account: "acme". Draft a reply, confirm the send with the user, then send it.';
     const first = closeLoadedContext(preamble) + 'Antworte freundlich und frag nach dem Budget.';
     expect(generateThreadTitle(first)).toBe('Antworte freundlich und frag nach dem Budget.');
