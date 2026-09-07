@@ -85,18 +85,26 @@ interface InjectionResult {
  * on 20 000 repeated `</untrusted_data ` tokens, scanning the WHOLE input in
  * every variant so the four are comparable:
  *
- *   with tail, terminator mandatory  10.93 ms  (matches nothing — a full failure scan)
- *   with tail, terminator optional    6.82 ms  (20 000 matches)
- *   no tail,   terminator mandatory   0.24 ms  (matches nothing)
- *   no tail,   no terminator (today)  0.96 ms  (20 000 matches)
+ *   with tail, terminator mandatory  5.74 ms  (matches nothing — a full failure scan)
+ *   with tail, terminator optional   6.25 ms  (20 000 matches)
+ *   no tail,   terminator mandatory  0.27 ms  (matches nothing)
+ *   no tail,   no terminator (today) 0.72 ms  (20 000 matches)
  *
- * Like against like, the tail is the cost: 45× on the failing scan, 7× on the
- * matching one.
+ * Medians of three runs each. The first version of this table came from ONE run
+ * per variant and put the first row at 10.93 ms — nearly double, because it ran
+ * first and carried the warm-up. Written down here because that is the same
+ * class of error this section is about: an instrument measured once tells you
+ * about the run, not about the code.
+ *
+ * Like against like, the tail is the cost: 21× on the failing scan, 8.7× on the
+ * matching one. The old `5.65 ms` figure was RIGHT for the bounded form's full
+ * scan — 5.74 here — and only its partner was measured differently.
  *
  * ⚠ The figures this section carried before — "0.0003 ms against 5.65 ms" —
  * compared different things and are not reproduced above. They timed the FIRST
  * match, and the bounded form never matches this input, so its number was a full
- * failure scan while the other was an immediate success. That pair therefore
+ * failure scan while the other was an immediate success — which is why only one
+ * half of that pair reproduces here. That pair therefore
  * measured "does it match early", not "does it backtrack", and it credited the
  * terminator's optionality with a cost the tail was paying. A delta round on this
  * very correction re-derived the old numbers and reported the attribution as
