@@ -47,13 +47,24 @@ describe('generateThreadTitle', () => {
     // A "💬 Im Chat beantworten" chat: the first message carries a loaded-context
     // preamble closed by the sentinel, then the user's own words. The nav title
     // must be the user's words — not "[Loaded mail for reply — …]".
+    //
+    // The fixture mirrors what chat-context.ts actually composes: the
+    // sender-authored fields inside an `<untrusted_data>` block. It is hand-built
+    // (this file must not depend on the inbox reader), which is exactly why it
+    // has to be kept honest — the previous version carried the pre-wrapper shape
+    // and stayed green while the thing it described no longer existed. The second
+    // assertion is the one with teeth: engine framing, wrapper included, must
+    // never become the thread title a user sees in the nav.
     const preamble =
       '[Loaded mail for reply — item: item-1]\n' +
-      'From: Markus <markus@acme.example>\nSubject: "Angebot"\n' +
-      'Message:\nKoennt ihr ein Angebot schicken?\n\n' +
+      '<untrusted_data source="mail:acme:markus@acme.example">\n' +
+      'From: Markus <markus@acme.example>\nSubject: Angebot\n' +
+      'Message: Koennt ihr ein Angebot schicken?\n' +
+      '</untrusted_data>\n\n' +
       'To reply, call mail_reply with uid: 42, account: "acme". Draft a reply, confirm the send with the user, then send it.';
     const first = closeLoadedContext(preamble) + 'Antworte freundlich und frag nach dem Budget.';
     expect(generateThreadTitle(first)).toBe('Antworte freundlich und frag nach dem Budget.');
+    expect(generateThreadTitle(first)).not.toContain('untrusted_data');
   });
 
   it('still strips the onboarding prefix (regression)', () => {

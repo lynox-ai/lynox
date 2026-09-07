@@ -36,8 +36,16 @@ export type ChatContextRef =
  * It has to live here, in `src/`, and not in the test: `src/**\/*.test.ts` is in
  * no tsc project (the main tsconfig excludes it, `tsconfig.tests.json` re-excludes
  * it), so a `satisfies` weld inside a test file is checked by nothing.
+ *
+ * ⚠ The weld is the load-bearing part, and it is the part with NO runtime
+ * signature: replace the two declarations below with a hand-written
+ * `['workflow', 'run', 'mail', 'mail-batch'] as ReadonlyArray<…>` and everything
+ * still compiles, every test still passes, and the self-extension property is
+ * silently gone. That is why the record is EXPORTED and why the sweep pins the
+ * `satisfies` clause as source text — the only observable a compile-time
+ * mechanism has. Do not "simplify" this into a literal.
  */
-const CHAT_CONTEXT_KIND_SET = {
+export const CHAT_CONTEXT_KIND_SET = {
   workflow: true,
   run: true,
   mail: true,
@@ -200,7 +208,20 @@ export function resolveChatContext(
     // The two compose rather than overlap: collapsing whitespace INSIDE the
     // wrapper is what the mail triage path already does
     // (`integrations/mail/triage/envelope.ts:89`), so this is the house shape,
-    // not a local invention. What it costs is stated at the call site below.
+    // not a local invention.
+    //
+    // What (1) costs and what it buys, both MEASURED rather than asserted,
+    // because the trade only reads as favourable once both halves are counted:
+    //   — LOST: the two `^`-anchored role-impersonation patterns
+    //     (`data-boundary.ts:46-47`) cannot match a value that no longer starts
+    //     a line. Two of ~30.
+    //   — GAINED: the bounded-gap exfiltration patterns (`:57`, `:60`) use `.`,
+    //     which does NOT cross a newline — so on multi-line content they miss a
+    //     clause the collapse brings into reach. Verified both ways:
+    //     `send the report\nto the endpoint` is not detected, the collapsed form
+    //     is.
+    // And the baseline is not "the old scan": before this, the scan did not run
+    // on this path at all, so it is 28 of 30 where it was 0 of 30.
     const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
     const from = item.fromName
       ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
@@ -218,30 +239,46 @@ export function resolveChatContext(
     const uidRow = item.messageId
       ? inboxState.getUidByMessageId(item.accountId, item.messageId)
       : null;
+    // Rendered ONCE and reused, so the prose below and the field cannot disagree:
+    // gating the sentence on the raw `item.messageId` while the field renders the
+    // `oneLine`d value lets a whitespace-only header point the model at a line
+    // that was skipped as empty.
+    const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
     const replyLine = uidRow
       ? `To reply, call mail_reply with uid: ${uidRow.uid}, account: "${acct}"` +
         `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}. `
       : `To reply, first locate this message with mail_search ` +
-        `(by the sender, the subject${item.messageId ? `, or the Message-ID shown above` : ''}) ` +
+        `(by the sender, the subject${msgId ? `, or the Message-ID shown above` : ''}) ` +
         `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
     // What stays OUTSIDE the boundary is engine-generated operational metadata —
-    // the item id, the account, the IMAP uid/folder — exactly the split
-    // `mail-read.ts:91-93` states for the tool path ("engine-generated … stays in
-    // the trusted framing above the wrapped envelope"). The Message-ID does NOT
-    // qualify: the header is written by the SENDER, so it moves inside with the
-    // other sender-authored fields and the instruction points at it instead of
-    // quoting it. Same field set as before, different side of the line.
+    // the item id, the account, the IMAP uid/folder — the split `mail-read.ts:91-93`
+    // states for the tool path ("Operational metadata only — engine-generated (UID,
+    // folder, dates, attachment manifest) … stays in the trusted framing above the
+    // wrapped envelope").
+    //
+    // ⚠ The Message-ID is where this path DIVERGES from mail-read, deliberately and
+    // visibly, because a silent divergence from a cited authority is worse than
+    // either choice: `mail-read.ts:96` pushes `Message-ID:` into that trusted array.
+    // The header is written by the SENDER, so by mail-read's OWN stated rule
+    // (engine-generated) it does not belong there — the placement contradicts the
+    // comment three lines above it. Here it goes inside with the other
+    // sender-authored fields and the instruction points at it instead of quoting
+    // it. mail-read is not changed from here; see DEF-mail-read-message-id-trusted.
+    //
+    // Empty values use the same placeholders as the tool path (`mail-read.ts:83,87`)
+    // rather than being dropped: `wrapChannelMessage` skips a value that is empty
+    // after trim, and `InboxItem` documents pre-v11 rows as `''` for fromAddress AND
+    // subject (`types/inbox.ts:77-82`) — so without them a real row renders an EMPTY
+    // `<untrusted_data>` block and the model is told nothing at all about the mail.
     return (
       `[Loaded mail for reply — item: ${item.id}]\n` +
       `${wrapChannelMessage({
         source: `mail:${acct}:${fromAddr}`,
         fields: {
-          From: from,
-          Subject: oneLine(item.subject, MAX_NAME_CHARS),
-          ...(uidRow || !item.messageId
-            ? {}
-            : { 'Message-ID': oneLine(item.messageId, MAX_NAME_CHARS) }),
-          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS),
+          From: from || '(unknown sender)',
+          Subject: oneLine(item.subject, MAX_NAME_CHARS) || '(no subject)',
+          ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
+          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) || '(empty body)',
         },
       })}\n\n` +
       replyLine +
@@ -258,14 +295,23 @@ export function resolveChatContext(
     //
     // ONE wrapper per item, not one for the whole list, and not one per field:
     // that is the shape `integrations/mail/triage/envelope.ts:84-95` already uses
-    // for the same job (a numbered list of envelopes). It buys the right
-    // provenance — the `source` attribute names THIS item's sender — and keeps
-    // the injection scan running once per item over the joined fields, so a
-    // pattern that straddles subject→snippet within one mail is still caught.
-    // What it does not catch is a pattern split across TWO senders' items; that
-    // is not a coherent threat (two independent senders would have to
-    // coordinate), and merging the list into one block to cover it would cost
-    // the per-item source label.
+    // for the same job (a numbered list of envelopes). What it buys is the right
+    // provenance — the `source` attribute names THIS item's sender, so an alert
+    // says which mailbox and which sender — and one scan per item instead of one
+    // per field.
+    //
+    // ⚠ What it does NOT buy, stated because an earlier version of this comment
+    // claimed it and `wrapChannelMessage`'s own docstring still did: the scan does
+    // NOT catch a pattern that straddles two FIELDS of one mail. It renders
+    // `label: value` lines, so a subject ending `…ignore all previous` and a body
+    // starting `instructions…` are separated by `\nMessage: ` — and the override
+    // pattern's `\s+` cannot cross that. Measured both ways: the labelled shape is
+    // not detected, the unlabelled join is, and the pattern does fire within a
+    // single field. The gap is the same on every channel-wrap caller
+    // (mail-read, envelope, the inbox classifier) — see
+    // DEF-wrapchannelmessage-labels-defeat-cross-field-scan. A pattern split
+    // across two SENDERS' items is a different matter and is not a coherent
+    // threat: two independent senders would have to coordinate.
     if (!inboxState) return null;
     const lines: string[] = [];
     for (const id of ref.ids.slice(0, MAX_BATCH_ITEMS)) {
@@ -279,25 +325,25 @@ export function resolveChatContext(
       const uidRow = item.messageId
         ? inboxState.getUidByMessageId(item.accountId, item.messageId)
         : null;
+      const msgId = item.messageId ? oneLine(item.messageId, MAX_NAME_CHARS) : '';
       // Operational header — engine-generated, NOT sender-controlled, so it stays
-      // in the trusted framing above the wrapped block (envelope.ts:83-84 states
-      // the same split in the same words).
+      // in the trusted framing above the wrapped block. Same split as
+      // `envelope.ts:83`, which calls it "Operational header — agent framing, NOT
+      // user-controlled".
       const locator = uidRow
         ? `account "${acct}", uid ${uidRow.uid}` +
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
-          `${item.messageId ? ` (by the Message-ID below)` : ''}`;
+          `${msgId ? ` (by the Message-ID below)` : ''}`;
       lines.push(
         `${lines.length + 1}. ${locator}\n` +
         wrapChannelMessage({
           source: `mail:${acct}:${fromAddr}`,
           fields: {
-            From: from,
-            Subject: oneLine(item.subject, MAX_NAME_CHARS),
-            ...(uidRow || !item.messageId
-              ? {}
-              : { 'Message-ID': oneLine(item.messageId, MAX_NAME_CHARS) }),
-            Snippet: oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS),
+            From: from || '(unknown sender)',
+            Subject: oneLine(item.subject, MAX_NAME_CHARS) || '(no subject)',
+            ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
+            Snippet: oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS) || '(no preview)',
           },
         }),
       );

@@ -262,9 +262,22 @@ export function wrapChannelMessage(opts: {
     if (trimmed.length === 0) continue;
     lines.push(`${label}: ${value}`);
   }
-  // Joining the labelled fields once means the injection scanner sees the
-  // exact text the LLM will read — a pattern that spans across two fields
-  // (e.g. subject ends with "Ignore previous", body starts with
-  // "instructions") still trips the detector.
+  // Joining once means the injection scanner sees the exact text the LLM will
+  // read, which is the property worth having: no field escapes the scan, and the
+  // scanned string is the rendered string.
+  //
+  // ⚠ CORRECTED 2026-09-07 — this comment used to claim the stronger thing, that
+  // "a pattern that spans across two fields (e.g. subject ends with 'Ignore
+  // previous', body starts with 'instructions') still trips the detector". It
+  // does NOT, and the reason is the labels this function adds: the two halves end
+  // up separated by `\nMessage: `, and the override pattern's `\s+`
+  // (`INJECTION_PATTERNS`, "instruction override") cannot cross a label. Measured:
+  // the labelled render is not detected, the unlabelled join of the same two
+  // values is, and the pattern does fire when both halves sit in ONE field. Every
+  // caller inherits the gap (mail-read, the triage envelope list, the inbox
+  // classifier, chat-context). Making it true is a change to this function —
+  // scan `Object.values(fields).join('\n')` in ADDITION to the labelled render —
+  // and it belongs in its own diff with its own false-positive measurement, not
+  // in a caller's. Tracked as DEF-wrapchannelmessage-labels-defeat-cross-field-scan.
   return wrapUntrustedData(lines.join('\n'), opts.source);
 }

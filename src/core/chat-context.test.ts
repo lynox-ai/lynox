@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveChatContext, LOADED_CONTEXT_END, closeLoadedContext, stripLoadedContext, type ChatInboxReader } from './chat-context.js';
@@ -263,6 +263,35 @@ describe('resolveChatContext (kind: mail)', () => {
     expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!).toContain('account: "work-imap"');
   });
 
+  it('a pre-v11 row with empty sender fields renders placeholders, not an EMPTY block', () => {
+    // `types/inbox.ts:77-82` documents pre-v11 rows as `''` for fromAddress AND
+    // subject until the operator-driven backfill runs. `wrapChannelMessage` skips
+    // a value that is empty after trim — so without placeholders such a row
+    // produces `<untrusted_data source="mail:acc-1:">\n\n</untrusted_data>` and
+    // the model is told nothing whatever about the mail it is meant to answer.
+    // Same placeholders the tool path uses (`mail-read.ts:83,87`).
+    const reader = makeReader(
+      makeInboxItem({ fromAddress: '', fromName: undefined, subject: '', snippet: undefined, messageId: undefined }),
+      { uid: null, bodyMd: null },
+    );
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!;
+    expect(out).toContain('From: (unknown sender)');
+    expect(out).toContain('Subject: (no subject)');
+    expect(out).toContain('Message: (empty body)');
+    // The block carries content — not an opener immediately followed by a closer.
+    expect(out).not.toMatch(/<untrusted_data source="[^"]*">\s*<\/untrusted_data>/);
+  });
+
+  it('does not point the model at a Message-ID that was skipped as empty', () => {
+    // The prose and the field must be gated on the SAME value. A whitespace-only
+    // header is truthy on `item.messageId` but empty after `oneLine`, so gating
+    // the sentence on the raw field would promise a line the wrapper dropped.
+    const reader = makeReader(makeInboxItem({ messageId: '   ' }), { uid: null });
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!;
+    expect(out).toContain('mail_search');
+    expect(out).not.toContain('Message-ID');
+  });
+
   it('returns null for an unknown item id and a null reader', () => {
     expect(resolveChatContext(null, { kind: 'mail', id: 'ghost' }, makeReader(makeInboxItem()))).toBeNull();
     expect(resolveChatContext(null, { kind: 'mail', id: 'item-1' }, null)).toBeNull();
@@ -387,6 +416,25 @@ describe('resolveChatContext (kind: mail-batch)', () => {
 describe('#6 loaded-context boundary \u2014 compose \u2194 strip round-trip', () => {
   it('sentinel value is the exact literal the web-ui matcher expects', () => {
     expect(LOADED_CONTEXT_END).toBe('[/loaded-context]');
+  });
+
+  it('the web-ui carries a BYTE-IDENTICAL copy of the matcher, not just the sentinel', () => {
+    // The web-ui cannot import across the package boundary, so it hand-duplicates
+    // `LOADED_CONTEXT_AT_START`. Until now only the SENTINEL was pinned (the test
+    // above) — the regex around it could drift on either side with both suites
+    // green, and the web-ui's fixtures are hand-built, so nothing would have
+    // caught it. Core can read both files, so the equality is checkable here
+    // rather than being a comment asking two people to stay in sync.
+    const line = (path: string): string => {
+      const src = readFileSync(new URL(path, import.meta.url), 'utf8');
+      const m = /^const LOADED_CONTEXT_AT_START = .+$/m.exec(src);
+      // Positive control: a null here means the shape moved, not that the copies
+      // agree — the failure mode this whole file exists to avoid.
+      expect(m, `no LOADED_CONTEXT_AT_START declaration found in ${path}`).not.toBeNull();
+      return m![0];
+    };
+    expect(line('../../packages/web-ui/src/lib/utils/now-marker.ts'))
+      .toBe(line('./chat-context.ts'));
   });
 
   it('strips back a workflow preamble to recover the user text', () => {
