@@ -363,11 +363,23 @@ function neutralizeBoundaryTags(text: string): string {
     // Pre-encoded OPENER first, so the literal pass below — whose output starts
     // with `&lt;` — cannot be re-matched by this one. (Same ordering as before;
     // the reason survives the rewrite even though the patterns did not.)
-    .replace(new RegExp(`${BOUNDARY_OPEN_ENCODED}${BOUNDARY_CLOSE_TAIL}`, 'gi'), '[blocked:boundary_escape]')
+    //
+    // This used to substitute a constant, `[blocked:boundary_escape]`. That was
+    // the one place left in this module still doing what `deadenOpener`'s own
+    // docstring calls wrong, and it had a reachable consequence: content that is
+    // wrapped TWICE — `spawn.ts` wraps a sub-agent result that may itself carry
+    // wrapped output — had its already-neutralised tag replaced by the marker on
+    // the second pass, so the sender's bytes were gone and the ⚠ warning appeared
+    // twice. Escaping the opener instead keeps every byte and converges: run 2
+    // turns `&lt;` into `&amp;lt;`, and run 3 changes nothing, because `&amp;lt;`
+    // is not an opener. The blocked-escape SIGNAL is not lost — it is the ⚠
+    // warning that `detectInjectionAttempt` raises for the same input.
+    .replace(new RegExp(`(${BOUNDARY_OPEN_ENCODED})${BOUNDARY_CLOSE_TAIL}`, 'gi'), deadenOpener)
     // Literal opener last — collapsed to the inert entity form rather than
-    // blanked. The match now ends at the token, so ONLY the delimiter and any
-    // separators smuggled inside it are rewritten; every byte the sender wrote
-    // after the token survives verbatim. The previous wording here claimed that
+    // blanked. The match now ends at the token, so ONLY the delimiter is
+    // rewritten — separators smuggled inside the tag are handed back verbatim
+    // along with everything after it, because `deadenOpener` slices the match
+    // after the opener and does not touch the rest. The previous wording here claimed that
     // outcome while the code did the opposite, and the claim is why the defect
     // stood through four review rounds: it was read as the measurement.
     .replace(new RegExp(`(<)${BOUNDARY_CLOSE_TAIL}`, 'gi'), deadenOpener);
@@ -430,13 +442,18 @@ ${safe}
  *
  * ## The token may be a constant, and that is deliberate
  *
- * `token` is a plain string, so a caller may pass a module constant
- * (`renderFence(PROVENANCE_FACT_TAG, …)`) rather than a literal. That matters:
- * a signature demanding a literal would have made `renderProvenanceFact`
- * unmigratable, and it would then have become an exception born of a SIGNATURE
- * GAP rather than of evidence — exactly the kind the guard's exception rule
- * exists to keep out. The guard resolves such a constant in the same file and
- * fails loudly when it cannot, rather than assuming compliance.
+ * `token` is a plain string, so a caller may pass a module constant rather than
+ * a literal. The reason is to keep the signature from deciding who can migrate:
+ * `renderProvenanceFact` builds its `<fact …>` frame from `PROVENANCE_FACT_TAG`,
+ * and a signature demanding a literal would have excluded it for a reason about
+ * SPELLING rather than about the frame.
+ *
+ * It has NOT been migrated — it still assembles that frame by hand. An earlier
+ * version of this paragraph read as though it had, and cited a
+ * `renderFence(PROVENANCE_FACT_TAG, …)` call that does not exist; it also
+ * described a script guard resolving such constants, which was withdrawn. Both
+ * were removed rather than softened: text that survives the decision not to
+ * build the thing is how a reader ends up trusting a frame nobody built.
  *
  * ## ⛔ WHAT IT GUARANTEES, AND WHAT IT DOES NOT
  *
@@ -450,7 +467,7 @@ ${safe}
  * different frame than the one the payload sits in.
  *
  * Say which of the two you mean when you cite this function. Measured on the
- * migration that introduced it: **18 of 19 call sites rely on renderFence
+ * migration that introduced it: **18 call sites rely on renderFence
  * alone** — only `spawn.ts` adds `escapeXml`, which is why that call keeps it
  * even though the close tag is covered here. Do not drop an escaper at a call
  * site on the grounds that "renderFence handles it": it handles the close tag.
@@ -497,7 +514,7 @@ ${safe}
  *
  * The enforcement is asymmetric: TypeScript rejects ASSIGNING a `Fence` where a
  * string belongs — that found 14 sites in 8 files — but accepts `` `${fence}` ``
- * and `'a' + fence`, because interpolating an object is legal. Three of the 17
+ * and `'a' + fence`, because interpolating an object is legal. Three of the 18
  * call sites were invisible to it for that reason and were found by reading.
  *
  * Opacity softens exactly ONE of the two ways to bypass this, and it is worth

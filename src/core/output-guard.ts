@@ -112,10 +112,15 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  * and the audit table, so it was loudest exactly where a real escape would be.
  *
  * It costs no detection the body could have produced: `neutralizeBoundaryTags`
- * runs BEFORE wrapping and rewrites a literal closing tag in the body to
- * `&lt;/untrusted_data&gt;`, the entity forms to `[blocked:boundary_escape]`. So
- * in a well-formed block the terminal tag is the only literal one, and a
- * complete tag anywhere earlier stays inside the scanned region.
+ * runs BEFORE wrapping and escapes the OPENING delimiter of any closing tag in
+ * the body — a literal `<` becomes `&lt;`, an entity `&lt;` becomes `&amp;lt;` —
+ * leaving every other byte alone. What this guard needs from that is unchanged
+ * and is the only thing it relies on: in a well-formed block the terminal tag is
+ * the only LITERAL one, and a complete tag anywhere earlier stays inside the
+ * scanned region. (The wording here previously named the exact replacement
+ * strings, which stopped being true when the replacement became a function of
+ * the match; the property is stated instead, because the property is what is
+ * load-bearing.)
  *
  * One thing it does NOT claim, measured:
  *  - This is a SHAPE check, not a provenance check. A tool returning raw
