@@ -16,7 +16,7 @@ import { resolveProviderApiKey } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
-import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
+import { escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
@@ -581,7 +581,9 @@ async function executeThinker(
 
   // Context injection (XML-escaped to prevent tag injection)
   const task = spec.context
-    ? `<context>${escapeXml(spec.context)}</context>\n\n${spec.task}`
+    // escapeXml stays: it also inerts tags OTHER than this one. renderFence adds
+    // the close-tag neutralisation in every encoding, from one place.
+    ? `${renderFence('context', escapeXml(spec.context))}\n\n${spec.task}`
     : spec.task;
 
   // Isolated memory

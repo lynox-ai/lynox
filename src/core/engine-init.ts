@@ -45,6 +45,7 @@ import {
   loadManifest,
 } from './project.js';
 import { getWorkspaceDir, isWorkspaceActive } from './workspace.js';
+import { renderFence } from './data-boundary.js';
 // setMemoryKnowledgeLayer removed — knowledgeLayer now on ToolContext
 
 // ── History + Budget + Subscriptions ────────────────────────────
@@ -208,7 +209,7 @@ export async function generateInitBriefing(
 
     // Workspace awareness
     if (isWorkspaceActive()) {
-      parts.push(`<workspace>\nYour workspace directory is ${getWorkspaceDir()}. All file operations (read_file, write_file, batch_files) are sandboxed to this directory and /tmp. Bash commands default to this directory. The workspace persists across container restarts.\n</workspace>`);
+      parts.push(renderFence('workspace', `Your workspace directory is ${getWorkspaceDir()}. All file operations (read_file, write_file, batch_files) are sandboxed to this directory and /tmp. Bash commands default to this directory. The workspace persists across container restarts.`));
     }
 
     // NB: the `<task_overview>` summary moved OUT of this CLI-gated function to
@@ -497,7 +498,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     const visibleNames = store.listAgentVisibleNames();
     if (visibleNames.length > 0) {
       const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
-      parts.push(`<secrets>${names}</secrets>`);
+      parts.push(renderFence('secrets', names));
     }
   } catch {
     store = null;

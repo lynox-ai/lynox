@@ -1174,6 +1174,10 @@ describe('spawn_agent tool', () => {
     expect(toolNames).toEqual(['bash']);
   });
 
+  // The `<context>` frame is built by renderFence since the fence migration, so
+  // it carries newlines around the payload. That is a shape change, not a
+  // behaviour one: `spec.context` comes from the MODEL, so the frame is a real
+  // fence and the payload's close tag is now neutralised in every encoding.
   it('context is prepended to task (and the spawn path adds a [Now] time anchor)', async () => {
     const agent = makeAgent();
     await spawnAgentTool.handler(
@@ -1186,7 +1190,7 @@ describe('spawn_agent tool', () => {
     // + 5 min, not session-start + 5 min. See prompts.ts:withCurrentTimePrefix.
     expect(mockSend).toHaveBeenCalledWith(
       expect.stringMatching(
-        /^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\n<context>The codebase uses TypeScript\.<\/context>\n\nAnalyze this$/,
+        /^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\n<context>\nThe codebase uses TypeScript\.\n<\/context>\n\nAnalyze this$/,
       ),
     );
   });

@@ -377,6 +377,80 @@ ${safe}
 }
 
 /**
+ * Render a fenced block the MODEL reads: `<token …>payload</token>`, with the
+ * payload neutralised so it cannot close the frame.
+ *
+ * ## Why this exists at all, and why it is not a count
+ *
+ * Frames like `<memory_blocks>`, `<retrieved_context>` or `<task_overview>`
+ * promise the model something about their contents. A payload that closes the
+ * frame early voids the promise for everything after it, and the escape leaves
+ * no trace. Four review rounds tried to answer "which frames are exposed?" and
+ * each found one more; the question needs dataflow and stays open. This inverts
+ * it: every frame goes through one function, and `scripts/fence-guard.mjs`
+ * forbids hand-built ones. The set is made EMPTY instead of counted.
+ *
+ * ## The token may be a constant, and that is deliberate
+ *
+ * `token` is a plain string, so a caller may pass a module constant
+ * (`renderFence(PROVENANCE_FACT_TAG, …)`) rather than a literal. That matters:
+ * a signature demanding a literal would have made `renderProvenanceFact`
+ * unmigratable, and it would then have become an exception born of a SIGNATURE
+ * GAP rather than of evidence — exactly the kind the guard's exception rule
+ * exists to keep out. The guard resolves such a constant in the same file and
+ * fails loudly when it cannot, rather than assuming compliance.
+ *
+ * ## ⛔ WHAT IT GUARANTEES, AND WHAT IT DOES NOT
+ *
+ * It guarantees ONE thing: **the payload cannot close its own frame.** Every
+ * encoding of `</token>` is neutralised before interpolation.
+ *
+ * It does **not** guarantee that the payload cannot fake OTHER engine framing. A
+ * payload that OPENS `<task_overview>` or `<untrusted_data>` passes through
+ * untouched, and from there the rest reads to the model as the engine's own
+ * frame — the same damage the original finding describes, arriving through a
+ * different frame than the one the payload sits in.
+ *
+ * Say which of the two you mean when you cite this function. Measured on the
+ * migration that introduced it: **18 of 19 call sites rely on renderFence
+ * alone** — only `spawn.ts` adds `escapeXml`, which is why that call keeps it
+ * even though the close tag is covered here. Do not drop an escaper at a call
+ * site on the grounds that "renderFence handles it": it handles the close tag.
+ *
+ * Why the stronger property is not simply added here: frames legitimately NEST —
+ * `<relevant_context>` carries `<scope>` blocks this same function produced.
+ * Neutralising every coined opening tag in a payload would destroy those, so the
+ * stronger property needs engine-provenance for nested frames, which is the same
+ * hard problem one level down. Tracked as
+ * DEF-renderfence-does-not-stop-foreign-framing.
+ *
+ * @param token   Coined element name. A literal or a module constant — never
+ *                attacker-influenced; it names the frame, it is not content.
+ * @param payload The content. Neutralised here; the caller does not have to
+ *                remember, which is the whole point.
+ * @param opts.preamble  Engine text placed INSIDE the frame above the payload
+ *                (the do-not-follow line, a ⚠ warning). Engine-authored: it is
+ *                interpolated as given.
+ * @param opts.attrs  Attributes for the opening tag. Values are XML-escaped,
+ *                because an attribute is the one place a stray quote breaks the
+ *                frame in a way neutralising the close tag does not cover.
+ */
+export function renderFence(token: string, payload: string, opts?: {
+  preamble?: string | undefined;
+  attrs?: Record<string, string | number | null | undefined> | undefined;
+}): string {
+  const attrs: string[] = [];
+  for (const [k, v] of Object.entries(opts?.attrs ?? {})) {
+    if (v === null || v === undefined) continue;
+    attrs.push(`${escapeXml(k)}="${escapeXml(String(v))}"`);
+  }
+  const open = `<${token}${attrs.length ? ' ' + attrs.join(' ') : ''}>`;
+  const safe = payload.replace(closeTagPattern(token), `&lt;/${token}&gt;`);
+  const head = opts?.preamble ? `${opts.preamble}\n` : '';
+  return `${open}\n${head}${safe}\n</${token}>`;
+}
+
+/**
  * The opening marker of a {@link wrapUntrustedData} / {@link wrapChannelMessage} block.
  * A tool result carrying it came from wrapped, untrusted external content.
  */

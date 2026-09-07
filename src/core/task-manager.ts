@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
+import { renderFence } from '../core/data-boundary.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -510,7 +511,7 @@ export class TaskManager {
       }
     }
 
-    return `<task_overview>\n${parts.join('\n')}\n</task_overview>`;
+    return renderFence('task_overview', parts.join('\n'));
   }
 
   getOverdueCount(scopes?: MemoryScopeRef[]): number {

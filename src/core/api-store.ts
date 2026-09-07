@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { wrapUntrustedData } from './data-boundary.js';
+import { wrapUntrustedData, renderFence } from './data-boundary.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
@@ -860,14 +860,13 @@ export class ApiStore {
       return `- ${p.name}: ${p.description} (${p.base_url}${auth}${endpoints}${shape})`;
     });
 
-    return `<api_profiles>
-Registered APIs (use \`api_setup\` action=view with the id to get full details BEFORE calling the API):
-${lines.join('\n')}
+    return renderFence('api_profiles', `${lines.join('\n')}
 
 Maintain these profiles as you learn. If an API call returns an unexpected schema, hits a rate limit,
 or teaches you a new pitfall, update the profile via \`api_setup\` action=refine. For new APIs,
-prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.
-</api_profiles>`;
+prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.`, {
+      preamble: 'Registered APIs (use \`api_setup\` action=view with the id to get full details BEFORE calling the API):',
+    });
   }
 
   /**
@@ -918,7 +917,10 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     const notSupported = Array.isArray(cat['not_supported_auth_flows']) ? cat['not_supported_auth_flows'] as unknown[] : [];
     const doNot = Array.isArray(cat['do_not_proactively_suggest']) ? cat['do_not_proactively_suggest'] as unknown[] : [];
 
-    const lines: string[] = ['<api_bootstrap_hints>'];
+    // Was assembled with the tag as the first array element and the close tag
+    // pushed at the end — the one fence in the repo built in pieces, and the
+    // one a template-literal rule would have missed silently.
+    const lines: string[] = [];
     lines.push('You have the `api_setup` tool to bootstrap external APIs from their docs URL.');
     lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap.');
     lines.push('');
@@ -951,9 +953,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
       if (!name || !docsUrl) continue;
       lines.push(`- ${name} (${category}, auth=${auth}) — ${valueProp} Docs: ${docsUrl}`);
     }
-    lines.push('</api_bootstrap_hints>');
-
-    return lines.join('\n');
+    return renderFence('api_bootstrap_hints', lines.join('\n'));
   }
 
   /**

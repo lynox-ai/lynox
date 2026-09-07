@@ -2,7 +2,7 @@ import { existsSync, readdirSync, lstatSync, readFileSync, writeFileSync, mkdirS
 import { dirname, resolve, join, relative, sep } from 'node:path';
 import { sha256Short } from './utils.js';
 import type { RunHistory, RunRecord } from './run-history.js';
-import { detectInjectionAttempt } from './data-boundary.js';
+import { detectInjectionAttempt, renderFence } from './data-boundary.js';
 
 const PROJECT_MARKERS = [
   '.git',
@@ -109,10 +109,9 @@ export function generateBriefing(projectDir: string, runHistory: RunHistory, lim
     }
   }
 
-  return `<session_briefing>
-Recent runs in this project:
-${lines.join('\n')}
-</session_briefing>`;
+  return renderFence('session_briefing', lines.join('\n'), {
+    preamble: 'Recent runs in this project:',
+  });
 }
 
 /**
@@ -265,7 +264,5 @@ export function formatManifestDiff(diff: ManifestDiff, maxFiles = 20): string {
     lines.push(`  ... and ${remaining} more`);
   }
 
-  return `<file_changes_since_last_session>
-${lines.join('\n')}
-</file_changes_since_last_session>`;
+  return renderFence('file_changes_since_last_session', lines.join('\n'));
 }

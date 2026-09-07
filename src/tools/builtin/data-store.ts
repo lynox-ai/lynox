@@ -3,6 +3,7 @@ import { parseScopeString } from '../../core/scope-resolver.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
+import { renderFence } from '../../core/data-boundary.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
@@ -293,7 +294,9 @@ export const dataStoreQueryTool: ToolEntry<QueryInput> = {
 
       // Append raw JSON for precision
       const rawJson = JSON.stringify(rows);
-      return `${meta}\n\n${table}\n\n<raw_json>${rawJson}</raw_json>`;
+      // JSON.stringify escapes `"` but NOT `<` — a row value containing
+      // `</raw_json>` closed this block before renderFence neutralised it.
+      return `${meta}\n\n${table}\n\n${renderFence('raw_json', rawJson)}`;
     } catch (err) {
       return `Error working with data table: ${getErrorMessage(err)}`;
     }

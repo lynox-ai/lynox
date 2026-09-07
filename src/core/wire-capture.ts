@@ -78,6 +78,12 @@ export function redactWireUserMessage(text: string): string {
   const withoutCatalog = text.replace(/<\s*secrets\s*>([\s\S]*?)<\s*\/\s*secrets\s*>/gi, (_m, inner: string) => {
     const count = (inner.match(/secret:/gi) ?? []).length;
     const label = count === 1 ? '1 secret' : `${count} secrets`;
+    // NOT renderFence: this is a REPLACEMENT, not a frame carrying a payload.
+    // `label` is computed here from a match count — nothing from the input
+    // reaches it, so there is no payload that could close anything. Migrating it
+    // changed the redaction's OUTPUT shape, which its tests and downstream wire
+    // consumers read. The fence-guard carries this as an exception with that
+    // reason rather than a path pattern.
     return `<secrets>${label} available (names+last4 redacted)</secrets>`;
   });
   return maskSecretPatterns(withoutCatalog);
