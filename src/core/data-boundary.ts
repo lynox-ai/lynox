@@ -77,16 +77,30 @@ interface InjectionResult {
  * `(?:…)?` IS greedy and does try the gap; what makes it fast is that the match
  * SUCCEEDS at the first candidate instead of failing at every one.
  *
- * ⚠ The separator widening costs, and a first version of this section hid that
- * by quoting numbers taken before it landed. Order-controlled, min of 30, on the
- * SHIPPED pattern: where a `<` is present the two are indistinguishable
- * (0.0003–0.0005 ms either way, because the match succeeds immediately), but on
- * 410 KB of benign content with no `<` at all — the common case — the widened
- * class is **0.124 ms against 0.035 ms**, a 3.6× regression on the linear scan.
- * It is bought deliberately: `detectInjectionAttempt` windows at 64 KB, so the
- * real per-window figure is microseconds, and what it buys is the NEL/C1 family.
- * Stated rather than smoothed, because the number that flatters the change is
- * exactly the one to distrust.
+ * ⚠ The separator widening COSTS, and a first version of this section hid that
+ * by quoting numbers taken before it landed. Order-controlled, min of 30, both
+ * fresh-compiled and pre-compiled, on the SHIPPED pattern against 410 KB with no
+ * `<` and no `&`: **0.126–0.129 ms against 0.034–0.036 ms**, a ~3.6× regression
+ * on the linear scan. Isolated, the class alone is 1.12 ms against 0.12 ms, so
+ * the cost is located in it and not in the surrounding pattern.
+ *
+ * A review round measured no difference here and argued it was structurally
+ * impossible, the delimiter alternation being the pattern's only start-set. The
+ * argument is reasonable and the measurement is not adopted: it reported exactly
+ * 1.00, and measuring the SAME regex against itself on this machine gives 0.93 —
+ * a perfect ratio between two different patterns is the signature of a
+ * comparison that did not run. Both regexes here were checked to differ in the
+ * property under test (the new one matches a NEL form, the old one does not)
+ * before either was timed.
+ *
+ * The cost is bought deliberately, and the mitigation is smaller than a first
+ * draft claimed: `detectInjectionAttempt` windows at SCAN_WINDOW (64 KB), which
+ * caps the cost PER PASS, not in total — 410 KB is seven overlapping windows, so
+ * it scales with input rather than flattening. And the `.replace` in `agent.ts`
+ * is not windowed at all. In absolute terms this is still tenths of a
+ * millisecond on inputs orders of magnitude larger than a mail body, and what it
+ * buys is the NEL/C1 family — but the number is stated rather than smoothed,
+ * because the number that flatters the change is exactly the one to distrust.
  */
 /** Separator class between the delimiter, the slash and the token. Deliberately
  *  NOT `\\s`: that misses U+0085 (NEL) and the C1 range. Same class as

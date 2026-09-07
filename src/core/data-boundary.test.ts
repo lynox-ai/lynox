@@ -311,6 +311,7 @@ describe('boundary close tag — every encoding a model might read as a close', 
       '%3C/untrusted_data%3E',
       '&amp;lt;/untrusted_data&amp;gt;',
       '＜/untrusted_data＞',
+      '<／untrusted_data>',   // Vollbreiten-Solidus
     ];
     for (const form of open) {
       expect(detectInjectionAttempt(form).patterns, `unexpectedly caught: ${JSON.stringify(form)} — `

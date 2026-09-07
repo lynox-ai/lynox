@@ -201,14 +201,22 @@ describe('Agent', () => {
           // Exactly one live closing tag: the fence's own, at the end.
           expect(fence!.match(new RegExp(`</${token}>`, 'g')), `form ${JSON.stringify(form)}`).toHaveLength(1);
           expect(fence!.slice(0, fence!.lastIndexOf(`</${token}>`))).not.toContain(form);
+          // ESCAPED, not deleted — and this is the assertion that says so. Without
+          // it, `replace(…, '')` passes both this test AND the benign control
+          // below, because the benign payload carries no close tag of THIS token.
+          expect(fence!, `form ${JSON.stringify(form)} was removed, not escaped`)
+            .toContain(`&lt;/${token}&gt;`);
         }
       });
 
       it(`leaves benign ${token} content untouched (positive control)`, () => {
-        // Without this the escape test above passes under four broken
-        // implementations — an empty payload, deleting the match, or stripping
-        // every `<`/`>`. The last one is not hypothetical: it would silently eat
-        // `<markus@acme.example>` out of a remembered fact.
+        // What this control actually kills, stated precisely because an earlier
+        // comment over-claimed: implementations that damage BENIGN text — an
+        // empty payload, or stripping every `<`/`>`, which would silently eat
+        // `<markus@acme.example>` out of a remembered fact. It does NOT kill
+        // "delete the match": this payload carries no close tag of the fenced
+        // token, so deleting the match is a no-op here. That case is killed by
+        // the `&lt;/token&gt;` assertion in the escape test above.
         const benign = 'Kontakt: Markus <markus@acme.example>, Budget 5 > 3, Notiz zu </other_tag>';
         const fence = buildFences(benign, which);
         expect(fence).toBeDefined();
