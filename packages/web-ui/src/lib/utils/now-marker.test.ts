@@ -64,8 +64,13 @@ describe('stripLoadedContext', () => {
 		// The assertion that matters is the SECOND one: the untrusted-data frame is
 		// engine framing like the rest of the preamble, and a user replaying the
 		// thread must never see `<untrusted_data source=…>` in their own bubble.
-		// The frame is safe INSIDE the block because the interpolated fields are
-		// newline-free (core `oneLine`), so nothing in it can close the block early.
+		//
+		// ⚠ This test says nothing about whether the block can be closed from
+		// inside — an earlier comment here claimed it could not, reasoning that the
+		// fields are newline-free. That is a non-sequitur: a close tag needs no
+		// newline. Un-splittability is core's property, enforced by
+		// `neutralizeBoundaryTags` and proven in core's own suite over every
+		// encoding of the closing tag. Here we only strip.
 		const raw =
 			'[Loaded mail for reply — item: item-1]\n' +
 			'<untrusted_data source="mail:acme:markus@acme.example">\n' +

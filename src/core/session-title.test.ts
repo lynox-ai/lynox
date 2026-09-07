@@ -52,9 +52,13 @@ describe('generateThreadTitle', () => {
     // sender-authored fields inside an `<untrusted_data>` block. It is hand-built
     // (this file must not depend on the inbox reader), which is exactly why it
     // has to be kept honest — the previous version carried the pre-wrapper shape
-    // and stayed green while the thing it described no longer existed. The second
-    // assertion is the one with teeth: engine framing, wrapper included, must
-    // never become the thread title a user sees in the nav.
+    // and stayed green while the thing it described no longer existed.
+    //
+    // The pair below is deliberate: the INPUT must be shown to carry the frame,
+    // and the OUTPUT must be shown not to. Asserting the output twice is a
+    // tautology — `.toBe(exact)` already implies `.not.toContain(anything else)`,
+    // so no implementation can pass the first and fail the second. (It shipped
+    // that way for one round, with a comment calling it "the one with teeth".)
     const preamble =
       '[Loaded mail for reply — item: item-1]\n' +
       '<untrusted_data source="mail:acme:markus@acme.example">\n' +
@@ -63,8 +67,8 @@ describe('generateThreadTitle', () => {
       '</untrusted_data>\n\n' +
       'To reply, call mail_reply with uid: 42, account: "acme". Draft a reply, confirm the send with the user, then send it.';
     const first = closeLoadedContext(preamble) + 'Antworte freundlich und frag nach dem Budget.';
+    expect(first).toContain('<untrusted_data source=');   // the input really carries it
     expect(generateThreadTitle(first)).toBe('Antworte freundlich und frag nach dem Budget.');
-    expect(generateThreadTitle(first)).not.toContain('untrusted_data');
   });
 
   it('still strips the onboarding prefix (regression)', () => {

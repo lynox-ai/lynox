@@ -7,6 +7,42 @@ interface InjectionResult {
 }
 
 /**
+ * The untrusted-data CLOSING tag, in every encoding a model might still read as
+ * a close. ONE source, used by the detector AND the neutralizer.
+ *
+ * ## Why one, when there were three
+ *
+ * There used to be three patterns in each mechanism — literal, HTML-entity,
+ * numeric-entity — six declarations that had to stay in agreement, and the
+ * thoroughness was the bug: each pattern required BOTH delimiters in the SAME
+ * encoding and nothing between the token and the `>`. Six real forms therefore
+ * passed both mechanisms untouched, so a body could close the block with no
+ * `⚠ WARNING` and no `injection_detected` event:
+ *
+ *     </untrusted_data foo>      </untrusted_data/>      </untrusted_data bar="1">
+ *     </untrusted_data&gt;       &lt;/untrusted_data>     (and mixed numeric forms)
+ *
+ * Found by the security gate on core#1335, constructed end-to-end in the
+ * mail-batch preamble: a snippet closes the block and then emits a line shaped
+ * like the engine's own numbered locator, so everything after it reads as
+ * trusted framing.
+ *
+ * ## Shape, and why each piece is there
+ *
+ * Either delimiter may be literal, HTML-entity or numeric-entity, and they need
+ * NOT match each other: a model is not a parser, and this defence exists exactly
+ * for the case where it reads one anyway. `\b` after the coined token keeps
+ * `</untrusted_datax>` out. The attribute gap is `[^>]{0,200}?` — BOUNDED, so a
+ * lone `</untrusted_data` far from any `>` costs one bounded scan and cannot
+ * backtrack super-linearly, the same discipline as the exfiltration patterns.
+ */
+const BOUNDARY_CLOSE_TAIL = '\\s*\\/\\s*untrusted_data\\b[^>]{0,200}?(?:>|&gt;|&#0*62;|&#x0*3e;)';
+const BOUNDARY_OPEN_ANY = '(?:<|&lt;|&#0*60;|&#x0*3c;)';
+const BOUNDARY_OPEN_ENCODED = '(?:&lt;|&#0*60;|&#x0*3c;)';
+/** Any encoding of the closing tag — the detector's single boundary-escape entry. */
+const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
+
+/**
  * Patterns that indicate an indirect prompt injection attempt.
  * These detect text in external data that tries to manipulate the agent.
  */
@@ -32,15 +68,11 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
   { pattern: /<\|endoftext\|>/i, label: 'end-of-text token injection' },
   { pattern: /<\|end\|>/i, label: 'end token injection' },
 
-  // Boundary escape — attacker tries to close untrusted_data wrapper (literal + entity encoded)
-  // `\s*` mirrors the entity variants below. Without it `</untrusted_data >`
-  // — which HTML accepts as a closing tag — passed both this detector and the
-  // neutralizer. Reachable since web_research began surfacing <meta> attribute
-  // values: `content="&lt;/untrusted_data &gt;"` is entity-decoded by the
-  // extractor into the literal form, landing at the TOP of the wrapped block.
-  { pattern: /<\s*\/\s*untrusted_data\s*>/i, label: 'boundary escape' },
-  { pattern: /&lt;\s*\/\s*untrusted_data\s*&gt;/i, label: 'boundary escape (entity)' },
-  { pattern: /(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/i, label: 'boundary escape (numeric entity)' },
+  // Boundary escape — the attacker tries to close the untrusted_data wrapper.
+  // ONE entry, built from {@link BOUNDARY_CLOSE_PATTERN}, which the neutralizer
+  // uses too. See that constant for why there used to be three here and why
+  // three was the bug rather than the thoroughness it looked like.
+  { pattern: new RegExp(BOUNDARY_CLOSE_ANY_SOURCE, 'i'), label: 'boundary escape' },
 
   // Role impersonation — assistant:/human: always flagged (rare in data), system:/user: only with instruction-like follow-up
   { pattern: /^(assistant|human):\s/im, label: 'role impersonation' },
@@ -176,15 +208,13 @@ export function renderProvenanceFact(opts: {
  */
 function neutralizeBoundaryTags(text: string): string {
   return text
-    // Pre-encoded variants first (before literal replacement creates entity-encoded output)
-    // HTML entity encoded: &lt;/untrusted_data&gt;
-    .replace(/&lt;\s*\/\s*untrusted_data\s*&gt;/gi, '[blocked:boundary_escape]')
-    // Numeric entity encoded: &#60;/untrusted_data&#62; or &#x3c;/untrusted_data&#x3e;
-    .replace(/(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/gi, '[blocked:boundary_escape]')
-    // Literal closing tag last — produces entity-escaped output that won't be
-    // re-matched. `\s*` mirrors the entity patterns above; without it the
-    // whitespace form `</untrusted_data >` escaped the wrapper untouched.
-    .replace(/<\s*\/\s*untrusted_data\s*>/gi, '&lt;/untrusted_data&gt;');
+    // Pre-encoded OPENER first, so the literal pass below — whose output starts
+    // with `&lt;` — cannot be re-matched by this one. (Same ordering as before;
+    // the reason survives the rewrite even though the patterns did not.)
+    .replace(new RegExp(`${BOUNDARY_OPEN_ENCODED}${BOUNDARY_CLOSE_TAIL}`, 'gi'), '[blocked:boundary_escape]')
+    // Literal opener last — rendered inert as the entity form rather than
+    // blanked, so the reader still sees what the sender wrote.
+    .replace(new RegExp(`<${BOUNDARY_CLOSE_TAIL}`, 'gi'), '&lt;/untrusted_data&gt;');
 }
 
 export function wrapUntrustedData(content: string, source: string): string {

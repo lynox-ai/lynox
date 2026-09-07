@@ -169,6 +169,23 @@ function oneLine(s: string, max: number): string {
  * An absent origin renders as `contract-governed` alone — it is a legacy or
  * imported contract, and claiming either provenance for it would be a guess.
  */
+/**
+ * Name the sender-authored fields that are ABSENT, for the engine's own framing
+ * line — never as a value inside the untrusted block.
+ *
+ * The distinction is not cosmetic. A placeholder inside the block ("(no
+ * subject)") is a statement the engine makes in a place a sender can write to,
+ * and a sender who sets their subject to that exact string produces a
+ * byte-identical result. Outside the block the assertion is unforgeable, and the
+ * block then holds only what the sender actually wrote — which is what a
+ * boundary is for. Returns '' when nothing is missing, so the common case adds
+ * no tokens.
+ */
+function missingFieldNote(fields: Record<string, string>): string {
+  const missing = Object.entries(fields).filter(([, v]) => v.length === 0).map(([k]) => k);
+  return missing.length > 0 ? ` — no ${missing.join(', ')}` : '';
+}
+
 function contractNote(contract: { origin?: string | undefined } | undefined): string {
   if (!contract) return '';
   if (contract.origin === 'authorship') return ' · contract-governed (confirmed by authorship, not reviewed)';
@@ -211,17 +228,20 @@ export function resolveChatContext(
     // not a local invention.
     //
     // What (1) costs and what it buys, both MEASURED rather than asserted,
-    // because the trade only reads as favourable once both halves are counted:
-    //   — LOST: the two `^`-anchored role-impersonation patterns
-    //     (`data-boundary.ts:46-47`) cannot match a value that no longer starts
-    //     a line. Two of ~30.
-    //   — GAINED: the bounded-gap exfiltration patterns (`:57`, `:60`) use `.`,
-    //     which does NOT cross a newline — so on multi-line content they miss a
-    //     clause the collapse brings into reach. Verified both ways:
+    // because the trade only reads as favourable once both halves are counted.
+    // `INJECTION_PATTERNS` holds 21 entries (counted, not estimated — an earlier
+    // version of this comment said "~30" and then hardened the guess into a
+    // ratio):
+    //   — LOST: the two `^`-anchored role-impersonation patterns cannot match a
+    //     value that no longer starts a line. Two of 21, and exactly two — no
+    //     other pattern in the set is anchored.
+    //   — GAINED: the bounded-gap exfiltration patterns use `.`, which does NOT
+    //     cross a newline, so on multi-line content they miss a clause the
+    //     collapse brings into reach. Verified both ways:
     //     `send the report\nto the endpoint` is not detected, the collapsed form
     //     is.
     // And the baseline is not "the old scan": before this, the scan did not run
-    // on this path at all, so it is 28 of 30 where it was 0 of 30.
+    // on this path at all, so it is 19 of 21 where it was 0 of 21.
     const fromAddr = oneLine(item.fromAddress, MAX_NAME_CHARS);
     const from = item.fromName
       ? `${oneLine(item.fromName, MAX_NAME_CHARS)} <${fromAddr}>`
@@ -265,20 +285,26 @@ export function resolveChatContext(
     // sender-authored fields and the instruction points at it instead of quoting
     // it. mail-read is not changed from here; see DEF-mail-read-message-id-trusted.
     //
-    // Empty values use the same placeholders as the tool path (`mail-read.ts:83,87`)
-    // rather than being dropped: `wrapChannelMessage` skips a value that is empty
-    // after trim, and `InboxItem` documents pre-v11 rows as `''` for fromAddress AND
-    // subject (`types/inbox.ts:77-82`) — so without them a real row renders an EMPTY
-    // `<untrusted_data>` block and the model is told nothing at all about the mail.
+    // ⚠ ABSENCE IS STATED OUTSIDE THE BLOCK, and that placement is the point.
+    // `wrapChannelMessage` skips a value that is empty after trim, and
+    // `types/inbox.ts` documents pre-v11 rows as `''` for fromAddress AND subject
+    // until the backfill runs — so a real row can render a block with nothing in
+    // it. The tool path solves that with placeholders INSIDE the block
+    // (`mail-read.ts:81,86`: `'(no subject)'`, `'(empty body)'`), and that is
+    // exactly what must not be copied here: a sender can set their subject to the
+    // literal string `(no subject)`, and then an engine statement about absence
+    // and a sender's text are byte-identical. Whatever the engine asserts, it
+    // asserts in its own framing, where no sender can reach it.
+    const absent = missingFieldNote({ from, subject: oneLine(item.subject, MAX_NAME_CHARS), body: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) });
     return (
-      `[Loaded mail for reply — item: ${item.id}]\n` +
+      `[Loaded mail for reply — item: ${item.id}${absent}]\n` +
       `${wrapChannelMessage({
         source: `mail:${acct}:${fromAddr}`,
         fields: {
-          From: from || '(unknown sender)',
-          Subject: oneLine(item.subject, MAX_NAME_CHARS) || '(no subject)',
+          From: from,
+          Subject: oneLine(item.subject, MAX_NAME_CHARS),
           ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
-          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS) || '(empty body)',
+          Message: oneLine(bodyMd, MAX_MAIL_BODY_CHARS),
         },
       })}\n\n` +
       replyLine +
@@ -335,15 +361,19 @@ export function resolveChatContext(
           `${uidRow.folder && uidRow.folder !== 'INBOX' ? ` (folder "${oneLine(uidRow.folder, MAX_FOLDER_CHARS)}")` : ''}`
         : `account "${acct}" — locate via mail_search` +
           `${msgId ? ` (by the Message-ID below)` : ''}`;
+      const subject = oneLine(item.subject, MAX_NAME_CHARS);
+      const snippet = oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS);
       lines.push(
-        `${lines.length + 1}. ${locator}\n` +
+        // Absence rides on the locator line — engine framing, same reason as the
+        // single 'mail' kind: a placeholder inside the block is forgeable.
+        `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, preview: snippet })}\n` +
         wrapChannelMessage({
           source: `mail:${acct}:${fromAddr}`,
           fields: {
-            From: from || '(unknown sender)',
-            Subject: oneLine(item.subject, MAX_NAME_CHARS) || '(no subject)',
+            From: from,
+            Subject: subject,
             ...(uidRow || !msgId ? {} : { 'Message-ID': msgId }),
-            Snippet: oneLine(item.snippet ?? '', MAX_MAIL_SNIPPET_CHARS) || '(no preview)',
+            Snippet: snippet,
           },
         }),
       );

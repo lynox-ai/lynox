@@ -275,11 +275,25 @@ describe('resolveChatContext (kind: mail)', () => {
       { uid: null, bodyMd: null },
     );
     const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!;
-    expect(out).toContain('From: (unknown sender)');
-    expect(out).toContain('Subject: (no subject)');
-    expect(out).toContain('Message: (empty body)');
-    // The block carries content — not an opener immediately followed by a closer.
-    expect(out).not.toMatch(/<untrusted_data source="[^"]*">\s*<\/untrusted_data>/);
+    // Absence is stated in the ENGINE's framing line, where no sender can write.
+    expect(out).toContain('[Loaded mail for reply — item: item-1 — no from, subject, body]');
+    // ...and NOT as a value inside the block, where a sender setting their
+    // subject to the literal string "(no subject)" would be byte-identical to it.
+    const block = out.slice(out.indexOf('<untrusted_data'), out.indexOf('</untrusted_data>'));
+    expect(block).not.toContain('(no subject)');
+    expect(block).not.toContain('(empty body)');
+    expect(block).not.toContain('(unknown sender)');
+  });
+
+  it('a sender cannot forge the engine\'s absence note from inside the block', () => {
+    // The reason the placeholders moved out. A sender writes the exact string the
+    // engine would use for "absent"; it must land inside the block as their text,
+    // and the engine's own line must not claim absence for a field that is there.
+    const reader = makeReader(makeInboxItem({ subject: '(no subject)' }), { uid: { uid: 1, folder: 'INBOX' }, bodyMd: 'echt' });
+    const out = resolveChatContext(null, { kind: 'mail', id: 'item-1' }, reader)!;
+    expect(out).toContain('[Loaded mail for reply — item: item-1]'); // no absence note
+    const block = out.slice(out.indexOf('<untrusted_data'), out.indexOf('</untrusted_data>'));
+    expect(block).toContain('Subject: (no subject)');               // theirs, inside
   });
 
   it('does not point the model at a Message-ID that was skipped as empty', () => {
@@ -433,8 +447,31 @@ describe('#6 loaded-context boundary \u2014 compose \u2194 strip round-trip', ()
       expect(m, `no LOADED_CONTEXT_AT_START declaration found in ${path}`).not.toBeNull();
       return m![0];
     };
-    expect(line('../../packages/web-ui/src/lib/utils/now-marker.ts'))
-      .toBe(line('./chat-context.ts'));
+    const webUi = '../../packages/web-ui/src/lib/utils/now-marker.ts';
+    expect(line(webUi)).toBe(line('./chat-context.ts'));
+
+    // Pinning the DECLARATION is not enough on its own: a `stripLoadedContext`
+    // rewritten to an inline regex, leaving the const in place, would keep this
+    // green, and the web-ui has no `noUnusedLocals` to catch the orphan. So also
+    // assert the function USES it, and then run the real thing.
+    const webUiSrc = readFileSync(new URL(webUi, import.meta.url), 'utf8');
+    expect(webUiSrc).toMatch(/stripLoadedContext[\s\S]{0,200}LOADED_CONTEXT_AT_START/);
+
+    // BEHAVIOURAL, not textual: build the matcher from the web-ui's own source
+    // and run a REAL composed preamble of every kind through it. This is what
+    // catches a shape change on core's side that the byte-equality above cannot
+    // see — the web-ui's fixtures are hand-built, so nothing else would.
+    const src = /^const LOADED_CONTEXT_AT_START = (\/.+\/)[a-z]*;$/.exec(line(webUi));
+    expect(src, 'could not extract a regex literal from the web-ui declaration').not.toBeNull();
+    const webUiMatcher = new RegExp(src![1]!.slice(1, -1));
+    const reader = makeReader(makeInboxItem(), { uid: { uid: 42, folder: 'INBOX' }, bodyMd: 'Bitte um Angebot.' });
+    for (const ref of [
+      { kind: 'mail', id: 'item-1' },
+      { kind: 'mail-batch', ids: ['item-1'] },
+    ] as const) {
+      const composed = closeLoadedContext(resolveChatContext(null, ref, reader)!) + 'Meine Frage.';
+      expect(composed.replace(webUiMatcher, ''), `web-ui matcher on kind ${ref.kind}`).toBe('Meine Frage.');
+    }
   });
 
   it('strips back a workflow preamble to recover the user text', () => {
