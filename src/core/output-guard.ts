@@ -117,11 +117,7 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  * in a well-formed block the terminal tag is the only literal one, and a
  * complete tag anywhere earlier stays inside the scanned region.
  *
- * Two things it does NOT claim, both measured:
- *  - An UNTERMINATED `&lt;/untrusted_data` (no `&gt;`) passes the neutralizer
- *    untouched and is not detected in the region either. That is a pre-existing
- *    gap in the neutralizer's own pattern, not one this opens — and what it
- *    removes here is the always-on warning, not information.
+ * One thing it does NOT claim, measured:
  *  - This is a SHAPE check, not a provenance check. A tool returning raw
  *    external text can forge an envelope and buy the exemption. Contained by
  *    construction: the head test is strictly stronger than

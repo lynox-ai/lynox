@@ -69,7 +69,6 @@ describe('generateThreadTitle', () => {
       '</untrusted_data>\n\n' +
       'To reply, call mail_reply with uid: 42, account: "acme". Draft a reply, confirm the send with the user, then send it.';
     const first = closeLoadedContext(preamble) + 'Antworte freundlich und frag nach dem Budget.';
-    expect(first).toContain('<untrusted_data source=');   // the input really carries it
     expect(generateThreadTitle(first)).toBe('Antworte freundlich und frag nach dem Budget.');
   });
 

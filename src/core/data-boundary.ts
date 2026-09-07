@@ -57,16 +57,59 @@ interface InjectionResult {
  * `</untrusted_datax>` out — the one thing still being recognised rather than
  * assumed.
  *
- * Cost, measured rather than reasoned: on 410 KB of attacker padding the
- * optional form runs in **0.00 ms** against **0.13 ms** for the bounded-gap
- * form. Dropping the requirement made it cheaper, because there is no gap left
- * to walk.
+ * ## The HEAD had the same defect as the tail, one round later
+ *
+ * Relaxing the tail left `\s*` between the delimiter and the token, and `\s` in
+ * JavaScript does NOT cover U+0085 (NEL) or the rest of the C1 range. So a
+ * close tag carrying a NEL between the `<` and the `/` — or between the
+ * `/` and the token — was an EIGHTH bypass, neither detected nor
+ * neutralised. The escape forms live in `data-boundary.test.ts`, built with
+ * `String.fromCharCode` rather than pasted, so no source file carries a raw
+ * control character. The separator class is now the same one {@link oneLine} in
+ * `chat-context.ts` uses and documents for exactly this reason. That comment
+ * predates this file's bug by months: the fact was written down here in the repo
+ * and applied to one caller instead of to the boundary itself.
+ *
+ * ## Cost, and the reason is not the one a first draft gave
+ *
+ * Measured as the MINIMUM of 30 runs (an average hid this): on 410 KB of
+ * padding, 0.0004 ms optional against 0.0330 ms bounded; on 20 000 repeated
+ * `</untrusted_data ` tokens — the classic ReDoS shape — **0.0003 ms against
+ * 5.65 ms**. The reason is NOT "there is no gap left to walk"; `(?:…)?` is
+ * greedy and does try the gap. It is that the optional group lets the match
+ * SUCCEED at the first candidate, while the bounded form FAILS at every
+ * candidate start and the engine retries across the whole string.
  */
-const BOUNDARY_CLOSE_TAIL = '\\s*\\/\\s*untrusted_data\\b(?:[^>]{0,200}?(?:>|&gt;|&#0*62;|&#x0*3e;))?';
+/** Separator class between the delimiter, the slash and the token. Deliberately
+ *  NOT `\\s`: that misses U+0085 (NEL) and the C1 range. Same class as
+ *  `chat-context.ts`'s `oneLine`, which documents why. */
+const BOUNDARY_SEP = '[\\s\\x00-\\x1f\\x7f-\\x9f]*';
+const closeTail = (token: string): string =>
+  `${BOUNDARY_SEP}\\/${BOUNDARY_SEP}${token}\\b(?:[^>]{0,200}?(?:>|&gt;|&#0*62;|&#x0*3e;))?`;
+const BOUNDARY_CLOSE_TAIL = closeTail('untrusted_data');
 const BOUNDARY_OPEN_ANY = '(?:<|&lt;|&#0*60;|&#x0*3c;)';
 const BOUNDARY_OPEN_ENCODED = '(?:&lt;|&#0*60;|&#x0*3c;)';
 /** Any encoding of the closing tag — the detector's single boundary-escape entry. */
 const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
+
+/**
+ * The closing tag of ANY coined fence element, in every encoding above.
+ *
+ * It is exported because this defect class has now been found in THREE places —
+ * the untrusted-data detector, the untrusted-data neutralizer, and `agent.ts`'s
+ * `</memory_blocks>` fence, whose comment says it mirrors the neutralizer and
+ * which carried the pre-repair shape (literal delimiters only, `\s*`, a
+ * mandatory `>`). Three instances of one pattern is the signal that the fix
+ * belongs to the CLASS, not to each site: a fourth fence should call this rather
+ * than hand-roll a fourth regex that is correct on the day it is written.
+ *
+ * `token` must be a coined element name (snake_case, no regex metacharacters);
+ * it is interpolated, not escaped, because every call site is a literal in this
+ * repo and an escaped-token API would invite passing user input.
+ */
+export function closeTagPattern(token: string, flags = 'gi'): RegExp {
+  return new RegExp(`${BOUNDARY_OPEN_ANY}${closeTail(token)}`, flags);
+}
 
 /**
  * Patterns that indicate an indirect prompt injection attempt.
