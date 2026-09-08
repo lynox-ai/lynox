@@ -239,12 +239,21 @@ export function dayIndex(now: Date): number {
 /**
  * Pick a deterministic quote for a given moment.
  *
- * `nowMs` is required and deliberately has no default. These picks are rendered
- * inside a Svelte block with no reactive dependency of its own, so a function
- * that read the clock itself froze at first render and showed the wrong slot
- * for as long as the page stayed open. Making the clock an argument means a
- * caller has to name where the time comes from, and the compiler asks.
- * The intended source is `wallClockNow()` from stores/wall-clock.svelte.ts.
+ * `nowMs` is required and deliberately has no default.
+ *
+ * A Svelte expression is compiled to a derived: it re-runs when a signal it
+ * READ changes, and never otherwise. A picker that read the clock itself read
+ * no signal at all, so it answered once and kept that answer for as long as the
+ * page stayed open — `$.derived(getTodaysQuote)`, with an empty dependency set.
+ * (The greeting was one step less frozen: its expression read the locale, so a
+ * language switch refreshed it. Nothing else did. The invariant that matters is
+ * "the expression reads no signal that changes with time" — NOT "the block is
+ * never re-evaluated", which is a different and wrong diagnosis that points at
+ * `{#key}` as the repair.)
+ *
+ * Making the clock an argument means the caller has to name where time comes
+ * from, and the compiler asks. In the UI that caller is `currentQuote()` in
+ * stores/wall-clock.svelte.ts, which reads the reactive cell.
  */
 export function getTodaysQuote(nowMs: number): { text: string; author: string } {
 	const now = new Date(nowMs);

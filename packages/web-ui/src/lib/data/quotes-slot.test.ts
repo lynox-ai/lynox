@@ -11,56 +11,75 @@ import {
  *
  * Reported 2026-09-08 from rafael's instance: at 12:01 local the screen read
  * "Die Welt schläft, du nicht" over a `night` quote. Both pickers read
- * `new Date()` from inside a `{#if true}` block — a block with no reactive
- * dependency, created once and never re-evaluated — so the slot was frozen at
- * first render and the page had been open since the previous evening.
+ * `new Date()` from inside a Svelte expression that read no signal changing
+ * with time, so the derived never invalidated and the slot froze at first
+ * render. (The quote's expression compiled to `$.derived(getTodaysQuote)` —
+ * an empty dependency set. The greeting's read the locale, so a language switch
+ * refreshed it; nothing else did.)
  *
- * The picks are indexed by day-of-year, which makes them self-dating: under the
- * formula that was running, greeting index 5 (`% 7`) and quote index 2 (`% 31`)
- * both resolve to day 250, and the `night` slot narrows that to 2026-09-07
- * 23:00–01:00. That is the forensic record, not something these tests can
- * re-assert, because the day index itself is corrected below.
+ * The picks are indexed by day-of-year, which dates them: under the formula
+ * then running, greeting index 5 (`% 7`) and quote index 2 (`% 31`) both
+ * resolve to day 250, and the `night` slot narrows that to six hours in two
+ * pieces — 2026-09-07 01:00–05:00 and 23:00–2026-09-08 01:00. That is the
+ * forensic record, not something these tests re-assert: the day index itself is
+ * corrected below, and `lcm(7, 31) = 217` means the index PAIR repeats once a
+ * year, so it dates the render only together with the report's own date.
  */
 
 /** Local-time construction: `new Date(y, m, d, h)` and `getHours()` round-trip in ANY zone. */
 const at = (y: number, m: number, d: number, h: number, min = 0): number =>
 	new Date(y, m, d, h, min).getTime();
 
+/**
+ * The hour→pool mapping, all twenty-four hours, written out by hand.
+ *
+ * An earlier revision listed only the boundary hours and called itself "the full
+ * table". It was 13 of 24 for greetings and 9 of 24 for quotes, and it let a
+ * mutation that sent hours 1–3 to `morning` pass untouched — the reported
+ * symptom is precisely "wrong slot for this hour", so every hour is the test.
+ */
+const GREETING_SLOTS: readonly string[] = [
+	'night', 'night', 'night', 'night', 'night',        // 00–04
+	'early', 'early', 'early',                          // 05–07
+	'morning', 'morning', 'morning', 'morning',         // 08–11
+	'lunch', 'lunch',                                   // 12–13
+	'afternoon', 'afternoon', 'afternoon', 'afternoon', // 14–17
+	'evening', 'evening', 'evening', 'evening', 'evening', // 18–22
+	'night',                                            // 23
+];
+
+const QUOTE_MOODS: readonly string[] = [
+	'night', 'night', 'night', 'night', 'night',        // 00–04
+	'morning', 'morning', 'morning', 'morning', 'morning', 'morning', 'morning', // 05–11
+	'afternoon', 'afternoon', 'afternoon', 'afternoon', 'afternoon', 'afternoon', // 12–17
+	'evening', 'evening', 'evening', 'evening', 'evening', // 18–22
+	'night',                                            // 23
+];
+
 describe('time-of-day slot mapping', () => {
-	it('has a pool for every hour of the day, in both catalogues', () => {
-		// A mapping that returned an unknown key would make every other assertion
-		// here vacuous — the pickers would throw, not silently mis-pick.
+	it('the expected tables cover the whole day exactly once', () => {
+		// A table that quietly lost an entry would make the loops below skip an
+		// hour and still look exhaustive.
+		expect(GREETING_SLOTS).toHaveLength(24);
+		expect(QUOTE_MOODS).toHaveLength(24);
+	});
+
+	for (let hour = 0; hour < 24; hour++) {
+		const hh = String(hour).padStart(2, '0');
+		it(`greets from "${GREETING_SLOTS[hour]}" at ${hh}:00`, () => {
+			expect(slotForHour(hour)).toBe(GREETING_SLOTS[hour]);
+		});
+		it(`quotes from "${QUOTE_MOODS[hour]}" at ${hh}:00`, () => {
+			expect(moodForHour(hour)).toBe(QUOTE_MOODS[hour]);
+		});
+	}
+
+	it('every slot the mapping can name has a pool behind it', () => {
 		for (let h = 0; h < 24; h++) {
 			expect(QUOTES[moodForHour(h)], `mood for hour ${h}`).toBeDefined();
 			expect(GREETINGS[slotForHour(h)], `slot for hour ${h}`).toBeDefined();
 		}
 	});
-
-	// The full table, written out. The reported defect was a slot that did not
-	// match the hour, so the hour→slot edges are the thing under test; asserting
-	// a couple of samples would leave the boundaries inferred.
-	const GREETING_TABLE: ReadonlyArray<[number, string]> = [
-		[0, 'night'], [4, 'night'], [5, 'early'], [7, 'early'],
-		[8, 'morning'], [11, 'morning'], [12, 'lunch'], [13, 'lunch'],
-		[14, 'afternoon'], [17, 'afternoon'], [18, 'evening'], [22, 'evening'],
-		[23, 'night'],
-	];
-	for (const [hour, slot] of GREETING_TABLE) {
-		it(`greets from "${slot}" at ${String(hour).padStart(2, '0')}:00`, () => {
-			expect(slotForHour(hour)).toBe(slot);
-		});
-	}
-
-	const MOOD_TABLE: ReadonlyArray<[number, string]> = [
-		[0, 'night'], [4, 'night'], [5, 'morning'], [11, 'morning'],
-		[12, 'afternoon'], [17, 'afternoon'], [18, 'evening'], [22, 'evening'],
-		[23, 'night'],
-	];
-	for (const [hour, mood] of MOOD_TABLE) {
-		it(`quotes from "${mood}" at ${String(hour).padStart(2, '0')}:00`, () => {
-			expect(moodForHour(hour)).toBe(mood);
-		});
-	}
 });
 
 describe('the reported regression: a page open across a slot boundary', () => {
@@ -87,7 +106,6 @@ describe('the reported regression: a page open across a slot boundary', () => {
 	});
 
 	it('answers differently for the two moments — the pickers are not frozen', () => {
-		// The whole defect in one line: same module, same process, two timestamps.
 		expect(getGreeting('de', LOOKED_AT).text).not.toBe(getGreeting('de', RENDERED).text);
 		expect(getTodaysQuote(LOOKED_AT).text).not.toBe(getTodaysQuote(RENDERED).text);
 	});
@@ -101,13 +119,13 @@ describe('the reported regression: a page open across a slot boundary', () => {
 });
 
 /**
- * The day index must turn at local midnight.
+ * The day index must turn at local midnight, and it must count from the start
+ * of the YEAR.
  *
  * Pinned to a DST zone on purpose. The old form divided an elapsed-millisecond
  * span by a fixed 24 h, which is not a calendar-day count — under CEST it first
  * reported the new day at 01:00. Under UTC both forms agree, so a test that
- * inherited the runner's zone would pass against the broken code on CI and
- * assert nothing.
+ * inherited the runner's zone would pass against the broken code on CI.
  */
 describe('day index turns at local midnight', () => {
 	const legacyDayIndex = (now: Date): number =>
@@ -126,12 +144,15 @@ describe('day index turns at local midnight', () => {
 		else process.env['TZ'] = saved;
 	});
 
-	it('actually runs in Europe/Zurich — positive control for the TZ pin', () => {
-		// Node re-reads process.env.TZ per Date operation, but if that ever stops
-		// being true this suite would quietly degrade into a UTC run, where the
-		// assertions below hold for the broken implementation too.
-		expect(new Date(2026, 8, 8).getTimezoneOffset()).toBe(-120); // CEST = UTC+2
-		expect(new Date(2026, 0, 15).getTimezoneOffset()).toBe(-60); // CET  = UTC+1
+	it('the TZ pin is what sets the zone — not the machine that happens to run this', () => {
+		// Asserting "we are in Zurich" is not a control on a developer machine
+		// that IS in Zurich: it passes with the pin removed. What has to be shown
+		// is that assigning process.env.TZ still moves the clock at runtime.
+		expect(new Date(2026, 8, 8).getTimezoneOffset()).toBe(-120); // CEST
+		process.env['TZ'] = 'UTC';
+		expect(new Date(2026, 8, 8).getTimezoneOffset()).toBe(0);
+		process.env['TZ'] = 'Europe/Zurich';
+		expect(new Date(2026, 0, 15).getTimezoneOffset()).toBe(-60);  // CET
 	});
 
 	it('reports one index for all 24 hours of a summer day', () => {
@@ -145,6 +166,14 @@ describe('day index turns at local midnight', () => {
 	it('is stable in winter too, where the old form happened to be right', () => {
 		expect(hoursOf(2026, 0, 15, dayIndex).size).toBe(1);
 		expect(hoursOf(2026, 0, 15, legacyDayIndex).size).toBe(1);
+	});
+
+	it('counts from the start of the YEAR, not of the month', () => {
+		// An absolute value, because every other assertion here is a difference
+		// and a difference has two operands: re-anchoring the count on the first
+		// of the current month keeps every delta intact and survives.
+		expect(dayIndex(new Date(2026, 8, 8, 12))).toBe(250);
+		expect(dayIndex(new Date(2026, 11, 31, 12))).toBe(364);
 	});
 
 	it('counts from 0 on 1 January and advances by one per day', () => {
@@ -168,7 +197,7 @@ describe('day index turns at local midnight', () => {
  */
 describe('quotes.ts reads no ambient clock', () => {
 	const SRC = readFileSync(fileURLToPath(new URL('./quotes.ts', import.meta.url)), 'utf-8');
-	const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+	const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
 
 	it('has source to scan — the comment strip did not eat the file', () => {
 		expect(CODE).toContain('export function getGreeting');

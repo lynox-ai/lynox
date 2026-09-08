@@ -1,64 +1,55 @@
 /*
- * Wall clock — a shared, reactive "what time is it now" for surfaces whose
- * content is picked by time of day.
+ * Wall clock — the reactive cell behind the welcome screen's greeting and quote.
  *
- * Why this exists. The welcome screen's greeting and quote are chosen from a
- * time-of-day slot, and both used to read `new Date()` from inside a
- * `{#if true}` block in ChatView. That block has no reactive dependency, so it
- * is created once and never re-evaluated: the slot froze at the moment the
- * empty-chat screen first rendered, and a page left open across a boundary kept
- * greeting you for the slot it was opened in.
+ * Why this exists. Both are picked from a time-of-day slot, and both used to
+ * read `new Date()` inside a Svelte expression that reads no signal changing
+ * with time. Such an expression is evaluated once and then only re-evaluated
+ * when something it reads changes — for the quote that was never, and for the
+ * greeting only on a language switch. The slot therefore froze at first render.
  *
  * Observed on rafael's instance 2026-09-08: at 12:01 local the screen read
  * "Die Welt schläft, du nicht" under a `night` quote. The picks are indexed by
  * day-of-year, so they date themselves — under the formula then running,
  * greeting index 5 (`% 7`) and quote index 2 (`% 31`) both resolve to day 250,
- * and the `night` slot narrows that to a two-hour window the previous evening.
+ * and the `night` slot narrows that to a two-hour window the evening before.
  *
- * The fix is not "recompute more often": `getGreeting`/`getTodaysQuote` no
- * longer have a clock to read, they take a timestamp, and this store is the one
- * reactive source they are fed from.
+ * This file is deliberately almost empty. It cannot be imported in vitest (a
+ * top-level `$state` throws `$state is not defined` without the svelte plugin),
+ * so everything here is guarded only by a source-text comparison — which is a
+ * string count, not a test. Scheduling, resume handling and the browser host
+ * all live in utils/wall-clock-core.ts where they are driven by real
+ * assertions. What is left is the reactive cell and the wiring, and the
+ * whole body is pinned byte-for-byte by wall-clock-core.test.ts.
  *
- * All the scheduling lives in utils/wall-clock-core.ts, where it can be tested.
- * This file is the adapter: the reactive cell plus the real browser. Pattern
- * follows theme.svelte.ts — module-level $state with getters, no $effect here.
+ * `currentGreeting`/`currentQuote` exist so the call site has no timestamp to
+ * get wrong: `getGreeting(locale, Date.now())` type-checks and restores the bug
+ * exactly, and no regex over a 4000-line component reliably catches it.
  */
 
-import { createWallClock, type WallClockHost } from '../utils/wall-clock-core.js';
+import { getGreeting, getTodaysQuote } from '../data/quotes.js';
+import { createBrowserHost, createWallClock } from '../utils/wall-clock-core.js';
 
 let _now = $state(Date.now());
 
-const host: WallClockHost = {
-	now: () => Date.now(),
-	clockParts: () => {
-		const d = new Date();
-		return { minutes: d.getMinutes(), seconds: d.getSeconds(), millis: d.getMilliseconds() };
-	},
-	setTimer: (fn, ms) => setTimeout(fn, ms),
-	clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-	onVisible: (handler) => {
-		const listener = (): void => {
-			if (document.visibilityState === 'visible') handler();
-		};
-		document.addEventListener('visibilitychange', listener);
-		return () => document.removeEventListener('visibilitychange', listener);
-	},
-};
+const clock = createWallClock(
+	createBrowserHost(() => document, {
+		setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+		clearTimeout: (handle) => window.clearTimeout(handle as number),
+	}),
+	(ms) => { _now = ms; },
+);
 
-const clock = createWallClock(host, (ms) => { _now = ms; });
-
-/** Current wall-clock reading. Reactive: reading this in markup re-renders on tick. */
-export function wallClockNow(): number {
-	return _now;
-}
-
-/** Start the clock. Returns a teardown; safe to call from onMount. Idempotent. */
+/** Start the clock; returns a disposer for this start. Reference-counted. */
 export function startWallClock(): () => void {
-	clock.start();
-	return stopWallClock;
+	return clock.start();
 }
 
-/** Stop the clock and drop its listener. */
-export function stopWallClock(): void {
-	clock.stop();
+/** The greeting for the current moment. Reactive: re-reads on every tick. */
+export function currentGreeting(locale: string): { text: string; punct: string } {
+	return getGreeting(locale, _now);
+}
+
+/** The quote for the current moment. Reactive: re-reads on every tick. */
+export function currentQuote(): { text: string; author: string } {
+	return getTodaysQuote(_now);
 }
