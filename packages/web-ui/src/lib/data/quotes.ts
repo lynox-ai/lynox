@@ -192,33 +192,70 @@ export const GREETINGS: Record<string, Array<{ de: string; en: string; punct?: s
 	],
 };
 
-/** Pick a deterministic quote based on day-of-year and time-of-day mood. */
-export function getTodaysQuote(): { text: string; author: string } {
-	const h = new Date().getHours();
-	let mood: string;
-	if (h >= 5 && h < 12) mood = 'morning';
-	else if (h >= 12 && h < 18) mood = 'afternoon';
-	else if (h >= 18 && h < 23) mood = 'evening';
-	else mood = 'night';
-
-	const pool = QUOTES[mood]!;
-	const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
-	return pool[dayOfYear % pool.length]!;
+/**
+ * Which quote pool an hour of the local day belongs to.
+ *
+ * Takes the hour as a number rather than a Date so the mapping is pure and
+ * carries no timezone — a test can walk all 24 hours without pinning TZ, and
+ * the boundaries are asserted rather than inferred from wherever CI happens to
+ * run.
+ */
+export function moodForHour(hour: number): string {
+	if (hour >= 5 && hour < 12) return 'morning';
+	if (hour >= 12 && hour < 18) return 'afternoon';
+	if (hour >= 18 && hour < 23) return 'evening';
+	return 'night';
 }
 
-/** Pick a deterministic greeting based on day-of-year and time slot. */
-export function getGreeting(locale: string): { text: string; punct: string } {
-	const h = new Date().getHours();
-	let slot: string;
-	if (h >= 23 || h < 5) slot = 'night';
-	else if (h < 8) slot = 'early';
-	else if (h < 12) slot = 'morning';
-	else if (h < 14) slot = 'lunch';
-	else if (h < 18) slot = 'afternoon';
-	else slot = 'evening';
+/** Which greeting pool an hour of the local day belongs to. Pure, see moodForHour. */
+export function slotForHour(hour: number): string {
+	if (hour >= 23 || hour < 5) return 'night';
+	if (hour < 8) return 'early';
+	if (hour < 12) return 'morning';
+	if (hour < 14) return 'lunch';
+	if (hour < 18) return 'afternoon';
+	return 'evening';
+}
 
-	const pool = GREETINGS[slot]!;
-	const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
-	const pick = pool[dayOfYear % pool.length]!;
+/**
+ * Index of the local calendar day within its year, counted from 0.
+ *
+ * The previous form divided an elapsed-millisecond span by a fixed 24 h
+ * (`(Date.now() - new Date(year, 0, 0)) / 86_400_000`), which is not a calendar
+ * day count: a DST transition shifts the whole scale, so the rollover walks off
+ * midnight. Measured in Europe/Zurich on 2026-09-08, the old form still
+ * returned 250 at 00:30 and first returned 251 at 01:00 — the "day" turned an
+ * hour late, all summer long.
+ *
+ * Differencing two local midnights and rounding is DST-proof: the span between
+ * them is 23 h or 25 h on a transition day, and rounding absorbs it.
+ */
+export function dayIndex(now: Date): number {
+	const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+	const startOfYear = new Date(now.getFullYear(), 0, 1);
+	return Math.round((startOfDay.getTime() - startOfYear.getTime()) / 86_400_000);
+}
+
+/**
+ * Pick a deterministic quote for a given moment.
+ *
+ * `nowMs` is required and deliberately has no default. These picks are rendered
+ * inside a Svelte block with no reactive dependency of its own, so a function
+ * that read the clock itself froze at first render and showed the wrong slot
+ * for as long as the page stayed open. Making the clock an argument means a
+ * caller has to name where the time comes from, and the compiler asks.
+ * The intended source is `wallClockNow()` from stores/wall-clock.svelte.ts.
+ */
+export function getTodaysQuote(nowMs: number): { text: string; author: string } {
+	const now = new Date(nowMs);
+	const pool = QUOTES[moodForHour(now.getHours())]!;
+	return pool[dayIndex(now) % pool.length]!;
+}
+
+/** Pick a deterministic greeting for a given moment. `nowMs`: see getTodaysQuote. */
+export function getGreeting(locale: string, nowMs: number): { text: string; punct: string } {
+	const now = new Date(nowMs);
+	const pool = GREETINGS[slotForHour(now.getHours())]!;
+	const pick = pool[dayIndex(now) % pool.length]!;
 	return { text: locale === 'de' ? pick.de : pick.en, punct: pick.punct ?? '.' };
 }
