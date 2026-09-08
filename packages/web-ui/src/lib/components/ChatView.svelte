@@ -100,7 +100,7 @@
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
-	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
+	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
@@ -461,9 +461,15 @@
 		};
 		window.addEventListener('beforeunload', onUnload);
 		document.addEventListener('visibilitychange', onVisibilityChange);
+		// Wall clock for the welcome screen's time-of-day greeting and quote.
+		// Without it those two are picked once, when this screen first renders,
+		// and a page left open overnight still greets you for the slot it was
+		// opened in.
+		const stopClock = startWallClock();
 		return () => {
 			window.removeEventListener('beforeunload', onUnload);
 			document.removeEventListener('visibilitychange', onVisibilityChange);
+			stopClock();
 			releaseMicNow();
 		};
 	});
@@ -2512,7 +2518,7 @@
 						{:else}
 							<!-- Greeting -->
 							{#if true}
-								{@const greeting = getGreeting(getLocale())}
+								{@const greeting = currentGreeting(getLocale())}
 								<div class="text-center mb-8">
 									<div class="icon-entrance mb-4 sonar-wrap">
 										<div class="pulse-ring pulse-ring-1"></div>
@@ -2660,7 +2666,7 @@
 								</div>
 							{:else}
 								<!-- Daily quote (shown after onboarding or for returning users) -->
-								{@const quote = getTodaysQuote()}
+								{@const quote = currentQuote()}
 								<blockquote class="text-center mt-2">
 									<p class="text-sm italic text-text-muted leading-relaxed">&ldquo;{quote.text}&rdquo;</p>
 									<footer class="mt-1.5 text-xs text-text-subtle">&mdash; {quote.author}</footer>
