@@ -36,7 +36,8 @@ set -uo pipefail
 # lines is the exact failure it was written to prevent, and this one did it silently.
 #
 # So each pattern demands the shape of the real trailer:
-#   Co-Authored-By: Claude … <someone@somewhere>   → must end in an email in angle brackets
+#   Co-Authored-By: Claude … <someone@somewhere>   → must start the line and end in an email
+#                                                    in angle brackets
 #   Claude-Session: https://…                      → must be a bare URL
 #   🤖 Generated with [Claude Code](…)             → must start the line
 # Prose that merely mentions or quotes them does not match.
