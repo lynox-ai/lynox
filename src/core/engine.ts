@@ -1498,23 +1498,38 @@ export class Engine {
       this._dataStore = new DataStore();
       this._toolContext.dataStore = this._dataStore;
       // Drop empty CRM-shaped collections (`contacts` / `deals` / `interactions`
-      // …) that older agent sessions left behind. They duplicate the dedicated
-      // CRM tab in the UI and confuse users. Non-empty ones are preserved.
+      // …). Meant for the ones older agent sessions left behind, which duplicate
+      // the dedicated CRM tab in the UI. On an instance whose CRM is still empty
+      // it also drops the CRM's OWN collections, which `CRM.ensureSchema`
+      // recreates later in this boot. Non-empty ones are preserved.
       const droppedOverlaps = this._dataStore.dropEmptyCrmOverlaps();
       if (droppedOverlaps.length > 0) {
         process.stderr.write(`[lynox] DataStore: dropped ${String(droppedOverlaps.length)} empty CRM-overlap collection(s): ${droppedOverlaps.join(', ')}\n`);
       }
-      const collections = this._dataStore.listCollections();
-      if (collections.length > 0) {
-        this.registerDataStoreTools();
-        // The always-injected `<data_collections>` briefing block was removed
-        // 2026-07-18: `listCollections()` is UNSCOPED, so it dumped EVERY project's
-        // tables (a single tenant's laser-clinic, weather, SEO collections, …) into
-        // every thread's first turn — cross-project bleed, and the specific fake-
-        // "project" contents the model confabulated under the "http-api" label. The
-        // agent enumerates tables on demand via `data_store_list` instead (DK's
-        // default-injection-dies / retrieve-on-demand principle).
-      }
+      // Registered as soon as the store exists — all six, unconditionally. This
+      // used to wait for `listCollections().length > 0`, which an instance with
+      // neither a table of its own nor a CRM record never reaches: the drop just
+      // above removes the CRM's empty collections, and the CRM recreates them
+      // only later in boot (`_initPipelineAndBackup` → `CRM.ensureSchema`). So the
+      // tool that creates a table was offered only once a table already existed,
+      // and no agent on a new instance could create its first one.
+      //
+      // All six at once, not create first and the rest later: an agent keeps the
+      // tool list it was built with for the whole turn, so a table created
+      // mid-turn could not be filled in the same turn. The prompt suffix follows
+      // this registration (the session keys it on `getDataStoreEnabled()`).
+      //
+      // It must also run before `registerPipelineTools()` copies the registry
+      // into `_toolContext.tools`: that copy is what workflow steps get when no
+      // session has been built yet, e.g. a scheduled run right after a restart.
+      this.registerDataStoreTools();
+      // The always-injected `<data_collections>` briefing block was removed
+      // 2026-07-18: `listCollections()` is UNSCOPED, so it dumped EVERY project's
+      // tables (one tenant's unrelated collections from several projects, …) into
+      // every thread's first turn — cross-project bleed, and the specific fake-
+      // "project" contents the model confabulated under the "http-api" label. The
+      // agent enumerates tables on demand via `data_store_list` instead (DK's
+      // default-injection-dies / retrieve-on-demand principle).
     } catch (err) {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
@@ -2102,7 +2117,8 @@ export class Engine {
     this._toolContext.runHistory = this.runHistory ?? null;
   }
 
-  /** Register data store tools on demand */
+  /** Register the six data-store tools. Called once at boot, as soon as the store
+   *  opens (`_initCoreTools`); any later call is a no-op. */
   registerDataStoreTools(): void {
     if (this._dataStoreEnabled || !this._dataStore) return;
     this._dataStoreEnabled = true;
