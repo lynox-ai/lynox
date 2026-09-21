@@ -98,6 +98,23 @@ describe('no-ai-attribution — does not eat prose about the trailers', () => {
     expect(out).toContain(body);
   });
 
+  // The Co-Authored-By pattern has two halves — a line-start anchor and a
+  // trailing address — and the sentence above is caught by both, so either
+  // could be deleted without a test noticing. Each case here passes only one.
+  it('keeps a mid-line quotation of the whole trailer, address included', () => {
+    const body = 'The old default appended Co-Authored-By: Claude <noreply@anthropic.com>';
+    const out = strip(`Explain the rule\n\n${body}\n`);
+
+    expect(out).toContain(body);
+  });
+
+  it('keeps a line that begins with "Co-Authored-By: Claude" but carries no address', () => {
+    const body = 'Co-Authored-By: Claude was the trailer the harness asked for.';
+    const out = strip(`Explain the rule\n\n${body}\n`);
+
+    expect(out).toContain(body);
+  });
+
   it('leaves an untouched message byte-identical', () => {
     const message = 'Add a feature\n\nIt does the thing, for the reason.\n';
 
@@ -232,6 +249,33 @@ describe('no-ai-attribution — the range it was asked to scan', () => {
     }
     expect(stderr).toContain('Refusing to report a clean range');
     expect(stdout).not.toContain('Refusing to report a clean range');
+  });
+
+  // The enumeration can succeed and a single commit still be unreadable (missing
+  // object, shallow gap). `git show … | grep -q` gave grep an empty stream, grep
+  // answered "no match", and a trailer-bearing commit counted as scanned and
+  // clean. Only `show` fails here, and only for the commit that carries the
+  // trailer — the one whose loss the verdict would hide.
+  it('a commit that cannot be read mid-walk refuses, instead of counting as clean', () => {
+    const base = git('rev-parse', 'HEAD');
+    git('commit', '-q', '--allow-empty', '-m', 'add thing\n\nCo-Authored-By: Claude <noreply@anthropic.com>');
+    const head = git('rev-parse', 'HEAD');
+    const bin = join(repo, 'stub-bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'git'),
+      `#!/bin/sh\nif [ "$1" = "show" ]; then for a in "$@"; do [ "$a" = "${head}" ] && { echo "fatal: bad object ${head}" >&2; exit 128; }; done; fi\nexec /usr/bin/git "$@"\n`,
+      { encoding: 'utf-8', mode: 0o755 });
+    let code = 0; let out = '';
+    try {
+      out = execFileSync('bash', [SCRIPT, 'check', base, head],
+        { cwd: repo, encoding: 'utf-8', stdio: 'pipe', env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` } });
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      code = e.status ?? -1; out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    expect(code, 'an unreadable commit must refuse, not pass as clean').toBe(2);
+    expect(out).toContain('could not read commit');
+    expect(out).not.toContain('clean ✓');
   });
 
   it('a range that resolves and is empty still passes, with a real count', () => {
