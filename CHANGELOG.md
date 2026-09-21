@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed: `data_store_query` and `data_store_list` results go through the injection scan
+
+- `data_store_query` returns stored rows, and a table can hold text that came
+  from outside; `data_store_list` prints each table's scope label, which is
+  free text stored with the table. Like `recall`, both now pass through the
+  tool-result injection scan: a flagged result reaches the model with the
+  usual warning line and is recorded as a security event. The other
+  `data_store_*` tools return status text and stay exempt.
+- Known false positive: a column whose name is also a word the scan looks for
+  (`email`, `post` and similar) can make an ordinary row trip a pattern,
+  because the JSON copy of the rows puts the column name next to the values.
+  It costs a warning line and an audit event; nothing is blocked.
+
 ### Changed: the docs and the card now describe the connection you actually get
 
 - The Google docs still described a product from before the scope re-cut: a

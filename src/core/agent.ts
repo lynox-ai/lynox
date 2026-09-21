@@ -3140,7 +3140,8 @@ export class Agent implements IAgent {
    * Set.has(), results from `run_workflow`, `data_store_*` etc. were
    * needlessly running through the injection scanner. The right names
    * are the actual registered tool ids — keep them in sync with
-   * `src/tools/registry.ts`.
+   * `src/tools/registry.ts`. (`data_store_query` and `data_store_list` have
+   * since left the list again, on purpose — see the NOTE below.)
    */
   private static readonly INTERNAL_TOOLS = new Set([
     'write_file', 'edit_file', 'batch_files',
@@ -3154,10 +3155,18 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',
-    'data_store_create', 'data_store_insert', 'data_store_query',
-    'data_store_list', 'data_store_delete', 'data_store_drop',
+    'data_store_create', 'data_store_insert', 'data_store_delete', 'data_store_drop',
     'plan_task',
   ]);
+  // NOTE: `data_store_query` and `data_store_list` are scanned, like `recall`. The
+  // query returns stored rows — whatever a user, a workflow step or an earlier turn
+  // put into a table, which can be text that came from outside — plus subject names
+  // hydrated from the graph. The list prints each table's scope label, which is free
+  // text stored with the table. The other four `data_store_*` tools return status
+  // text or echo the same call's input, never anything read back from the store, and
+  // stay exempt. Both scanned tools also sit under EXTERNAL_CONTENT_TOOLS; that is a
+  // separate signal and stays: it routes durable writes, this one warns the model
+  // and emits the security audit event.
   // NOTE: `read_file`, `spawn_agent`, `run_workflow` and `api_setup` were removed
   // from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23 audit). Their
   // return values now flow through the
