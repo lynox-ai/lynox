@@ -384,10 +384,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         }
       },
       {
-        "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
-        "with": {
-          "version": "10"
-        }
+        "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271"
       },
       {
         "run": "pnpm install --frozen-lockfile"
@@ -421,10 +418,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         }
       },
       {
-        "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
-        "with": {
-          "version": "10"
-        }
+        "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271"
       },
       {
         "run": "pnpm install --frozen-lockfile"
