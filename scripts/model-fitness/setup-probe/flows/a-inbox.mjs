@@ -85,9 +85,17 @@ function rawMessage(m, i) {
   return { raw, date: date.toISOString() };
 }
 
+/**
+ * "All mails, including newsletters and automatic notifications" is part of the task on
+ * purpose. The triage tool drops no-reply and bulk senders as noise by default and only
+ * says so in a count line; with the plain wording, the control model missed the one
+ * no-reply mail in one of its runs. A configured flow states which mail it covers, so the
+ * task does too — without naming the tool or the number of mails.
+ */
 export const TASK = [
   `Sortier bitte meinen Posteingang (Konto ${ACCOUNT.address}).`,
-  `Trag für jede Mail im Posteingang genau eine Zeile in die Tabelle "${TABLE}" ein:`,
+  `Trag für jede Mail im Posteingang genau eine Zeile in die Tabelle "${TABLE}" ein – berücksichtige`,
+  'alle Mails, auch Newsletter und automatische Benachrichtigungen:',
   'absender (E-Mail-Adresse des Absenders), betreff, kategorie.',
   'Kategorien: antwort_noetig (jemand erwartet eine Antwort von uns), rechnung (Rechnungen),',
   'info (reine Information, keine Antwort nötig), werbung (Werbung, Newsletter, Gewinnspiele).',
