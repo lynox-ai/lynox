@@ -68,8 +68,11 @@ jobs:
 
           # red:     a needed job failed or was cancelled. A job that exceeds its
           #          `timeout-minutes` reports `cancelled`, not `failure`, so a hung
-          #          job counts here. A run someone cancels by hand counts too; the
-          #          next green run closes the issue again.
+          #          job counts here. (A run cancelled as a whole, by hand or by a
+          #          newer run, most likely never reaches this job: on a cancel
+          #          GitHub re-evaluates the `if` of running jobs, and this one has
+          #          none. Not verified live; it errs toward silence on a
+          #          deliberate cancel, not on a failure.)
           # green:   one succeeded and none failed or was cancelled
           # neither: every job was skipped; no evidence either way, change nothing
           if ! STATE=$(jq -r '

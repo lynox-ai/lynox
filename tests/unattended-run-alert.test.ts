@@ -85,8 +85,13 @@ function alertGaps(doc: Workflow): string[] {
   if (job.permissions?.['issues'] !== 'write') gaps.push('the alert job needs `permissions: issues: write`');
   // Two overlapping runs of one workflow could both find no issue and open two.
   // Workflow-level concurrency keeps them apart; run-alert.yml deliberately has no
-  // job-level group, because a newer pending alert would cancel an older one.
-  if (doc.concurrency === undefined) gaps.push('the workflow needs workflow-level `concurrency`');
+  // job-level group, because a newer pending alert would cancel an older one. The
+  // group must be FIXED: one built from `github.run_id` exists and prevents nothing.
+  const c = doc.concurrency;
+  const group = typeof c === 'string' ? c : c !== null && typeof c === 'object' ? (c as { group?: unknown }).group : undefined;
+  if (typeof group !== 'string' || group.includes('${{')) {
+    gaps.push('the workflow needs workflow-level `concurrency` with a fixed group');
+  }
   return gaps;
 }
 
@@ -201,6 +206,12 @@ describe('unattended workflows — the check catches each gap', () => {
     const d = ok();
     delete d.concurrency;
     expect(alertGaps(d).join()).toContain('concurrency');
+  });
+
+  it('a concurrency group that differs per run is caught', () => {
+    const d = ok();
+    d.concurrency = { group: 'nightly-${{ github.run_id }}' };
+    expect(alertGaps(d).join()).toContain('fixed group');
   });
 });
 
