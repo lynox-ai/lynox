@@ -42,7 +42,7 @@ type Job = {
   permissions?: Record<string, unknown>;
   steps?: { run?: string; env?: Record<string, string> }[];
 };
-type Workflow = { on?: unknown; jobs?: Record<string, Job> };
+type Workflow = { name?: string; on?: unknown; concurrency?: unknown; jobs?: Record<string, Job> };
 
 function workflowFiles(): string[] {
   return readdirSync(DIR).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml')).sort();
@@ -83,6 +83,10 @@ function alertGaps(doc: Workflow): string[] {
     gaps.push('the alert job must pass `results: ${{ toJSON(needs.*.result) }}`');
   }
   if (job.permissions?.['issues'] !== 'write') gaps.push('the alert job needs `permissions: issues: write`');
+  // Two overlapping runs of one workflow could both find no issue and open two.
+  // Workflow-level concurrency keeps them apart; run-alert.yml deliberately has no
+  // job-level group, because a newer pending alert would cancel an older one.
+  if (doc.concurrency === undefined) gaps.push('the workflow needs workflow-level `concurrency`');
   return gaps;
 }
 
@@ -115,6 +119,17 @@ describe('unattended workflows — who must report', () => {
     for (const f of members) expect(alertGaps(load(f)), f).toEqual([]);
   });
 
+  it('every unattended workflow has a name no other workflow shares', () => {
+    // The issue is found by title, and the title is the workflow's name: two
+    // workflows sharing one would share an issue and close each other's.
+    const names = workflowFiles().map((f) => load(f).name);
+    for (const f of workflowFiles().filter((x) => x !== ALERT_FILE && isUnattended(load(x)))) {
+      const name = load(f).name;
+      expect(name, `${f} needs a name`).toBeTypeOf('string');
+      expect(names.filter((n) => n === name), `${f}: "${name}" is not unique`).toHaveLength(1);
+    }
+  });
+
   it('the alert workflow is only ever called, never triggered on its own', () => {
     expect(triggersOf(load(ALERT_FILE))).toEqual(['workflow_call']);
   });
@@ -133,6 +148,7 @@ describe('unattended workflows — who must report', () => {
 describe('unattended workflows — the check catches each gap', () => {
   const ok = (): Workflow => ({
     on: { schedule: [{ cron: '0 0 * * *' }] },
+    concurrency: { group: 'nightly' },
     jobs: {
       work: {},
       more: { needs: 'work' },
@@ -180,6 +196,12 @@ describe('unattended workflows — the check catches each gap', () => {
     alertOf(d).permissions = { contents: 'read' };
     expect(alertGaps(d).join()).toContain('issues');
   });
+
+  it('a workflow whose runs may overlap is caught', () => {
+    const d = ok();
+    delete d.concurrency;
+    expect(alertGaps(d).join()).toContain('concurrency');
+  });
 });
 
 // ── the script ───────────────────────────────────────────────────────────────
@@ -204,19 +226,21 @@ function expectedBody(phases: number, reds: number): string {
   ].join('\n');
 }
 
-type Issue = { number: number; title: string; state: 'OPEN' | 'CLOSED'; body: string };
-const issue = (state: Issue['state'], phases: number, reds: number, number = 7, title = TITLE): Issue => ({
+/** What the REST issues endpoint returns; pull requests share it and carry `pull_request`. */
+type Issue = { number: number; title: string; state: 'open' | 'closed'; body: string | null; pull_request?: object };
+const issue = (state: Issue['state'], phases: number | string, reds: number | string, number = 7, title = TITLE): Issue => ({
   number,
   title,
   state,
   body: `<!-- run-alert phases=${phases} reds=${reds} -->\nwhatever a human left here`,
 });
 
+const LOOKUP = 'repos/o/r/issues?labels=run-alert&state=all&per_page=100';
 const GH_STUB = `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.GH_STUB_LOG, JSON.stringify(args) + '\\n');
-if (args[0] === 'issue' && args[1] === 'list') process.stdout.write(process.env.GH_STUB_ISSUES);
+if (args[0] === 'api' && args[1] === '${LOOKUP}') process.stdout.write(process.env.GH_STUB_ISSUES);
 `;
 
 /** Run the real step script the way the runner does, against a recording `gh`. */
@@ -275,7 +299,7 @@ describe('run-alert — what the job does to the issue', () => {
   });
 
   it('a further red run only updates the counters — no reopen, no comment', () => {
-    const r = runAlert(['failure'], [issue('OPEN', 2, 3)]);
+    const r = runAlert(['failure'], [issue('open', 2, 3)]);
     expect(r.code, r.out).toBe(0);
     const w = writes(r.calls);
     expect(w.map((c) => c.slice(0, 3))).toEqual([['issue', 'edit', '7']]);
@@ -283,7 +307,7 @@ describe('run-alert — what the job does to the issue', () => {
   });
 
   it('a red run after a green one reopens the same issue and starts a new phase', () => {
-    const r = runAlert(['failure'], [issue('CLOSED', 2, 3)]);
+    const r = runAlert(['failure'], [issue('closed', 2, 3)]);
     expect(r.code, r.out).toBe(0);
     const w = writes(r.calls);
     expect(w.map((c) => c.slice(0, 3))).toEqual([['issue', 'edit', '7'], ['issue', 'reopen', '7']]);
@@ -292,7 +316,7 @@ describe('run-alert — what the job does to the issue', () => {
   });
 
   it('a green run closes an open issue', () => {
-    const r = runAlert(['success', 'skipped'], [issue('OPEN', 2, 3)]);
+    const r = runAlert(['success', 'skipped'], [issue('open', 2, 3)]);
     expect(r.code, r.out).toBe(0);
     const w = writes(r.calls);
     expect(w.map((c) => c.slice(0, 3))).toEqual([['issue', 'close', '7']]);
@@ -300,32 +324,58 @@ describe('run-alert — what the job does to the issue', () => {
   });
 
   it('a green run leaves a closed issue, or no issue, alone', () => {
-    expect(writes(runAlert(['success'], [issue('CLOSED', 2, 3)]).calls)).toEqual([]);
+    expect(writes(runAlert(['success'], [issue('closed', 2, 3)]).calls)).toEqual([]);
     expect(writes(runAlert(['success']).calls)).toEqual([]);
   });
 
-  it('a timed-out or failed job beside a cancelled one still counts as red', () => {
-    const w = writes(runAlert(['cancelled', 'failure']).calls);
-    expect(w.map((c) => c[1])).toEqual(['create']);
+  it('a timed-out job counts as red — it reports `cancelled`, not `failure`', () => {
+    // Measured on real runs that hit their timeout: the job concluded `cancelled`.
+    // An earlier version of this script read that as "no evidence" and stayed
+    // silent on exactly the hung job an alert exists for.
+    for (const results of [['cancelled', 'skipped'], ['success', 'cancelled']]) {
+      const w = writes(runAlert(results).calls);
+      expect(w.map((c) => c[1]), JSON.stringify(results)).toEqual(['create']);
+    }
   });
 
-  it('a run with no success and no failure changes nothing and calls nothing', () => {
-    for (const results of [['skipped'], ['success', 'cancelled'], ['cancelled'], []]) {
-      const r = runAlert(results, [issue('OPEN', 2, 3)]);
+  it('a run in which every job was skipped changes nothing and calls nothing', () => {
+    for (const results of [['skipped'], ['skipped', 'skipped'], []]) {
+      const r = runAlert(results, [issue('open', 2, 3)]);
       expect(r.code, `${JSON.stringify(results)}: ${r.out}`).toBe(0);
       expect(r.calls, JSON.stringify(results)).toEqual([]);
     }
   });
 
+  it('the lookup reads the REST list, not the lagging search index', () => {
+    // `gh issue list --label` goes through search, which can miss an issue created
+    // moments earlier and so open a second one.
+    const r = runAlert(['failure'], [issue('open', 1, 1)]);
+    const reads = r.calls.filter((c) => c[0] === 'api' || (c[0] === 'issue' && c[1] === 'list'));
+    expect(reads).toEqual([['api', LOOKUP]]);
+  });
+
+  it('a pull request with the same title is not taken for the issue', () => {
+    const pr = { ...issue('open', 4, 4, 5), pull_request: {} };
+    const w = writes(runAlert(['failure'], [pr]).calls);
+    expect(w.map((c) => c[1])).toEqual(['create']);
+    expect(w.flat()).not.toContain('5');
+  });
+
+  it('counters a person edited to a leading zero are still read as decimal', () => {
+    const r = runAlert(['failure'], [issue('open', '08', '09')]);
+    expect(r.code, r.out).toBe(0);
+    expect(flag(writes(r.calls)[0], '--body')).toBe(expectedBody(8, 10));
+  });
+
   it("another workflow's issue is never touched", () => {
-    const other = issue('OPEN', 5, 5, 9, 'Unattended run is red: Other thing');
+    const other = issue('open', 5, 5, 9, 'Unattended run is red: Other thing');
     const w = writes(runAlert(['failure'], [other]).calls);
     expect(w.map((c) => c[1])).toEqual(['create']);
     expect(w.flat()).not.toContain('9');
   });
 
   it('a lookup that may be cut short refuses instead of opening a second issue', () => {
-    const many = Array.from({ length: 100 }, (_, i) => issue('CLOSED', 1, 1, 100 + i, `Unattended run is red: W${i}`));
+    const many = Array.from({ length: 100 }, (_, i) => issue('closed', 1, 1, 100 + i, `Unattended run is red: W${i}`));
     const r = runAlert(['failure'], many);
     expect(r.code).not.toBe(0);
     expect(writes(r.calls)).toEqual([]);

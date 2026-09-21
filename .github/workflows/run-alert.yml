@@ -19,10 +19,16 @@
 # public repository, and no repository guard scans issue bodies, so the body is
 # fixed here and pinned by a test.
 #
-# What this cannot see: a workflow file that fails to parse starts no job, so
+# What this cannot see: a workflow file that GitHub rejects starts no job, so
 # nothing calls this. The test that pins the callers also parses every workflow
-# file, which keeps a syntax error from reaching the default branch in the first
-# place.
+# file with a YAML library, which keeps a plain syntax error out of the default
+# branch; it is not GitHub's parser, so a file that is valid YAML but invalid as a
+# workflow still gets through.
+#
+# Two runs of the same workflow must not finish together, or both could find no
+# issue and open two. The callers' workflow-level `concurrency` prevents that, and
+# the test requires it; a job-level group here would instead let a newer pending
+# alert cancel an older one and lose its outcome.
 name: Unattended run alert
 
 on:
@@ -46,11 +52,6 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Serialised per workflow: two runs finishing together must not both find no
-    # issue and both open one.
-    concurrency:
-      group: run-alert-${{ github.workflow }}
-      cancel-in-progress: false
     steps:
       - name: Open, update or close this workflow's alert issue
         env:
@@ -65,18 +66,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          # red:     a needed job failed (a timeout reports as a failure)
+          # red:     a needed job failed or was cancelled. A job that exceeds its
+          #          `timeout-minutes` reports `cancelled`, not `failure`, so a hung
+          #          job counts here. A run someone cancels by hand counts too; the
+          #          next green run closes the issue again.
           # green:   one succeeded and none failed or was cancelled
-          # neither: all skipped or cancelled; no evidence either way, change nothing
+          # neither: every job was skipped; no evidence either way, change nothing
           if ! STATE=$(jq -r '
-              if any(.[]; . == "failure") then "red"
-              elif any(.[]; . == "success") and (any(.[]; . == "cancelled") | not) then "green"
+              if any(.[]; . == "failure" or . == "cancelled") then "red"
+              elif any(.[]; . == "success") then "green"
               else "neither" end' <<< "$RESULTS"); then
             echo "::error::could not read the job results: ${RESULTS}"
             exit 1
           fi
           if [ "$STATE" = neither ]; then
-            echo "no job succeeded or failed (${RESULTS}); leaving the alert issue as it is"
+            echo "every job was skipped (${RESULTS}); leaving the alert issue as it is"
             exit 0
           fi
 
@@ -85,26 +89,29 @@ jobs:
           gh label create "$LABEL" --force --color B60205 \
             --description 'An unattended workflow run is red; closes itself on the next green run' > /dev/null
 
-          # Scoped by the label, so the list stays far below its limit. Reaching the
-          # limit would mean a cut list, and a cut list can miss the issue and open a
-          # second one.
-          ISSUES=$(gh issue list --label "$LABEL" --state all --limit 100 --json number,title,state,body)
-          if [ "$(jq length <<< "$ISSUES")" -ge 100 ]; then
+          # The REST list, not `gh issue list --label`, which goes through the search
+          # index: that index lags, and a lookup that misses an issue created moments
+          # earlier opens a second one. Scoped by the label, so the page stays far
+          # below its size; a full page would mean a cut list, and a cut list can
+          # miss the issue too. Pull requests share the endpoint and are dropped.
+          PAGE=$(gh api "repos/${GH_REPO}/issues?labels=${LABEL}&state=all&per_page=100")
+          if [ "$(jq length <<< "$PAGE")" -ge 100 ]; then
             echo "::error::100 or more '${LABEL}' issues; the lookup may be cut short"
             exit 1
           fi
-          MATCH=$(jq -c --arg t "$TITLE" '[.[] | select(.title == $t)] | sort_by(.number) | first // empty' <<< "$ISSUES")
+          MATCH=$(jq -c --arg t "$TITLE" '[.[] | select((has("pull_request") | not) and .title == $t)] | sort_by(.number) | first // empty' <<< "$PAGE")
 
           PHASES=0
           REDS=0
           if [ -n "$MATCH" ]; then
             NUM=$(jq -r .number <<< "$MATCH")
             ISTATE=$(jq -r .state <<< "$MATCH")
-            OLD=$(jq -r .body <<< "$MATCH")
+            OLD=$(jq -r '.body // ""' <<< "$MATCH")
             re='run-alert phases=([0-9]+) reds=([0-9]+)'
             if [[ $OLD =~ $re ]]; then
-              PHASES=${BASH_REMATCH[1]}
-              REDS=${BASH_REMATCH[2]}
+              # Base 10 explicitly: a hand-edited `08` is octal to bash and fails.
+              PHASES=$((10#${BASH_REMATCH[1]}))
+              REDS=$((10#${BASH_REMATCH[2]}))
             fi
           fi
 
@@ -128,7 +135,7 @@ jobs:
             PHASES=1
             REDS=1
             gh issue create --title "$TITLE" --label "$LABEL" --body "$(render)"
-          elif [ "$STATE" = red ] && [ "$ISTATE" = CLOSED ]; then
+          elif [ "$STATE" = red ] && [ "$ISTATE" = closed ]; then
             PHASES=$((PHASES + 1))
             REDS=1
             gh issue edit "$NUM" --body "$(render)"
@@ -136,7 +143,7 @@ jobs:
           elif [ "$STATE" = red ]; then
             REDS=$((REDS + 1))
             gh issue edit "$NUM" --body "$(render)"
-          elif [ "$ISTATE" = OPEN ]; then
+          elif [ "$ISTATE" = open ]; then
             gh issue close "$NUM" --comment "Green again: ${RUN_URL} (after ${REDS} red run(s) in this phase)"
           else
             echo "green, and alert issue #${NUM} is already closed"
