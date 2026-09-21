@@ -37,6 +37,9 @@ Rules:
   (obviously-fake only) in `fixtures/README.md`. Source-only: plain tsc copies
   no JSON/MD into `dist/`, so fixture-consuming tests read from
   `src/contract/fixtures/`.
+  One golden value lives outside `fixtures/` on purpose: `BROKER_START_GOLDEN`
+  in `broker-start.ts`, a computed signature vector that the S4 value rules
+  cannot hold. Its comment says why, and what it binds.
 
 Design + wave plan: `lynox-pro` `docs/internal/PRD-CORE-PRO-CONTRACT.md` <!-- drift-guard:allow: doc lives in the private lynox-pro repo -->
 (ROOT A / DEF-0030).

@@ -19,27 +19,33 @@
  *
  * in its own code, with its own timing-safe compare.
  *
- * ⚠ This comment used to promise a golden fixture at
- * `fixtures/broker-start-token.json`, to land "with the engine half of this
- * wave". The engine half landed on 2026-09-07
- * (`src/integrations/google/broker-start-mint.ts`) and the fixture did NOT,
- * because that directory cannot hold this kind of value: its rules require a
- * typed mirror against an `http.ts` shape and string leaves that are
- * "obviously fake" (S4), and a signature is by construction a value nobody
- * chose. A fake one would pin nothing. The vector therefore lives beside its
- * test, in `broker-start-mint.test.ts`.
+ * ⚠ What is meant to keep the two HMACs agreeing is ONE golden vector, here
+ * ({@link BROKER_START_GOLDEN}), for both repos to drive: the engine's minter
+ * must PRODUCE its token, the control plane's verifier must ACCEPT it. It
+ * replaces one vector per repo, each picked independently, which agreed by
+ * arithmetic rather than by construction — a derivation change on one side
+ * would have re-picked that side's vector and gone unseen until a tenant
+ * clicked Connect. This repo drives it from the start; the control plane's side
+ * switches over in its own change, once this file has reached its vendored copy.
  *
- * What that costs is real and is not papered over: the vector binds ONE side.
- * This repo drives it against its own minter; the control plane recomputes the
- * same derivation from its own code and checks no shared vector, so a
- * divergence would go unseen until a tenant clicks Connect. Both repos hold a
- * golden vector and they are DIFFERENT ones, picked independently — agreeing
- * today by arithmetic, not by construction.
- * The split is not
- * cosmetic: what both sides MUST agree on byte-for-byte is the payload and the
- * framing, and that is what this file fixes. A shared HMAC helper would fix the
- * same bytes and drag a runtime dependency into a directory two repos compile
- * standalone.
+ * What it catches, once both sides drive it: a derivation change on EITHER side
+ * fails that side's own test against these bytes, because neither side can
+ * re-pick them locally — the vector is contract. Re-picking it is an edit here,
+ * which fails the other side's test when its vendored copy syncs.
+ *
+ * It is a literal in this file rather than `fixtures/broker-start-token.json`
+ * (which this comment once promised) because that directory is built for JSON
+ * wire shapes: a typed mirror against an `http.ts` shape, and string leaves
+ * that are "obviously fake" (S4), which the mechanical check reads as 40-hex
+ * SHAs — a 64-hex signature fails it on length. A hand-written entry, as
+ * `magic-link-verify-request.json` has, could have been allowed in; it would
+ * pin the framing and not the arithmetic, and the arithmetic is the part that
+ * drifts. A literal here needs neither and stays dependency-free.
+ *
+ * The split is not cosmetic: what both sides MUST agree on byte-for-byte is the
+ * payload and the framing, and that is what this file fixes. A shared HMAC
+ * helper would fix the same bytes and drag a runtime dependency into a
+ * directory two repos compile standalone.
  *
  * The derivation follows the domain-separated family already in the control
  * plane (`middleware/customer-auth.ts` › `deriveAdminSessionSecret` and its
@@ -144,3 +150,29 @@ export function parseBrokerStartToken(token: string): BrokerStartToken | null {
 export function formatBrokerStartToken(parts: BrokerStartToken): string {
   return `${BROKER_START_VERSION}.${parts.ts}.${parts.nonce}.${parts.sig}`;
 }
+
+/**
+ * The one golden start token for both repos to check — the arithmetic, not only
+ * the framing.
+ *
+ * Every field is an obviously fake choice except `token`'s signature, which is
+ * computed, and that is the point: the engine's minter must produce exactly
+ * `token` from the other fields, and the control plane's verifier must accept
+ * it for `instanceId` under `signingKey`. Neither side may re-pick it. Changing
+ * it is a wire change like any other here — edit this file, sync downstream.
+ * `signingKey` stands in for the instance secret the key is derived from.
+ *
+ * It ships in `dist/` with the rest of the contract, as `fixtures/mirrors.ts`
+ * does: a fake key and a 2023 timestamp, nothing a runtime could mistake for a
+ * credential.
+ */
+export const BROKER_START_GOLDEN = {
+  instanceId: 'inst_TEST',
+  signingKey: 'TEST-SIGNING-KEY',
+  ts: 1700000000,
+  nonce: '00112233445566778899aabbccddeeff',
+  payload: 'v1.inst_TEST.1700000000.00112233445566778899aabbccddeeff',
+  token:
+    'v1.1700000000.00112233445566778899aabbccddeeff.' +
+    'de2dbbc230477eb6d6f2d5371045165091c39fae9e12b08fcb3fa8f7a0cb9e08',
+} as const;

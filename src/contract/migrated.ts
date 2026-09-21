@@ -99,6 +99,10 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'brokerStartPayload', contractFile: 'broker-start.ts', twinPattern: valueTwin('brokerStartPayload') },
   { name: 'parseBrokerStartToken', contractFile: 'broker-start.ts', twinPattern: valueTwin('parseBrokerStartToken') },
   { name: 'formatBrokerStartToken', contractFile: 'broker-start.ts', twinPattern: valueTwin('formatBrokerStartToken') },
+  // The shared golden vector. A same-named local copy is how one side would
+  // quietly re-pick it; a copy under ANOTHER name is not something this sweep
+  // can see, which is why the tests import the constant rather than restate it.
+  { name: 'BROKER_START_GOLDEN', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN') },
   { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand

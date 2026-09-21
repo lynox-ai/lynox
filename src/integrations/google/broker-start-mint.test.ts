@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
+  BROKER_START_GOLDEN as golden,
   BROKER_START_NONCE_BYTES,
   BROKER_START_PURPOSE,
   brokerStartPayload,
@@ -14,49 +15,25 @@ import {
 } from './broker-start-mint.js';
 
 /**
- * The golden vector, and it deliberately does NOT live in `src/contract/fixtures/`.
- *
- * That directory's rules are built for JSON WIRE SHAPES: every file needs a
- * `satisfies`-typed mirror against an `http.ts` type, a generator row in its
- * README, and string leaves that are "obviously fake" (S4 — no realistic
- * tokens). A signature vector fails the last one by construction: the whole
- * point is a value nobody chose, and `isObviouslyFakeSha` is pinned to 40 hex
- * chars, so a 64-hex HMAC fails on length before anyone judges its realism.
- *
- * ⚠ Not an impossibility, though, and the first draft of this comment said so
- * too strongly. `magic-link-verify-request.json` is the precedent: HAND-WRITTEN
- * rather than captured, because its serializer cannot emit an obviously-fake
- * value either, with the key set pinned in its test instead. That lane could
- * have been widened. It was not, because a hand-written signature pins the
- * framing and not the arithmetic — which is the only part worth pinning here.
- *
- * The contract's own comment predicted `fixtures/broker-start-token.json` by
- * name; that comment is corrected in this change rather than obeyed.
- * Cross-repo pinning is filed as its own row instead.
+ * The golden vector is the CONTRACT's, not this file's: `BROKER_START_GOLDEN`
+ * lives in `src/contract/broker-start.ts` and reaches the control plane with
+ * its vendored copy, where the verifier has to accept the same bytes. This
+ * block is the engine's half — the minter must produce them. If a change here
+ * makes it fail, the fix is never to re-pick the vector in this repo: that is a
+ * wire change, and the other side has to move with it.
  */
-const golden = {
-  instance_id: 'inst_TEST',
-  signing_key: 'TEST-SIGNING-KEY',
-  ts: 1700000000,
-  nonce: '00112233445566778899aabbccddeeff',
-  payload: 'v1.inst_TEST.1700000000.00112233445566778899aabbccddeeff',
-  token:
-    'v1.1700000000.00112233445566778899aabbccddeeff.' +
-    'de2dbbc230477eb6d6f2d5371045165091c39fae9e12b08fcb3fa8f7a0cb9e08',
-} as const;
-
 describe('the golden broker start token — the bytes the control plane must also compute', () => {
-  // The fixture is the EXPECTED value; this test is what binds it to the real
-  // serializer. A fixture nobody drives is a JSON file, not a control.
+  // The vector is the EXPECTED value; this test is what binds it to the real
+  // serializer. A vector nobody drives is a literal, not a control.
   it('is what this repo actually emits, byte for byte', () => {
     const payload = brokerStartPayload({
-      instanceId: golden.instance_id,
+      instanceId: golden.instanceId,
       ts: golden.ts,
       nonce: golden.nonce,
     });
     expect(payload).toBe(golden.payload);
 
-    const sig = signBrokerStartPayload(payload, golden.signing_key);
+    const sig = signBrokerStartPayload(payload, golden.signingKey);
     expect(formatBrokerStartToken({ ts: golden.ts, nonce: golden.nonce, sig })).toBe(golden.token);
   });
 
@@ -64,14 +41,14 @@ describe('the golden broker start token — the bytes the control plane must als
   // calling the functions under test — otherwise the check is the code
   // agreeing with itself, and any wrong-but-consistent derivation passes.
   it('matches the derivation the contract WRITES DOWN, computed independently here', () => {
-    const key = createHmac('sha256', golden.signing_key).update(BROKER_START_PURPOSE).digest();
+    const key = createHmac('sha256', golden.signingKey).update(BROKER_START_PURPOSE).digest();
     const sig = createHmac('sha256', key).update(golden.payload).digest('hex');
     expect(golden.token).toBe(`v1.${golden.ts}.${golden.nonce}.${sig}`);
   });
 
   it('domain-separates the key — the same secret signing a different purpose differs', () => {
-    const proper = deriveBrokerStartKey(golden.signing_key);
-    const undomained = createHmac('sha256', golden.signing_key).update('').digest();
+    const proper = deriveBrokerStartKey(golden.signingKey);
+    const undomained = createHmac('sha256', golden.signingKey).update('').digest();
     expect(proper.equals(undomained)).toBe(false);
   });
 });
