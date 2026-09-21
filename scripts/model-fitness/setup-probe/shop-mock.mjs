@@ -92,18 +92,19 @@ const api = createServer(async (req, res) => {
     return p ? done(200, p) : done(404, { error: 'not found' });
   }
   if (one && req.method === 'PATCH') {
-    if (!body || typeof body !== 'object' || !('sale_price' in body)) return done(400, { error: 'body must be {"sale_price": ...}' });
+    // Recorded before validation, so a rejected dry run is not logged as a write attempt.
     entry.dry = isDry(url, body);
+    if (!body || typeof body !== 'object' || !('sale_price' in body)) return done(400, { error: 'body must be {"sale_price": ...}' });
     const c = applyOne({ id: one[1], sale_price: body.sale_price }, entry.dry);
     if (c.error) return done(c.error === 'unknown product' ? 404 : 400, { error: c.error });
     entry.changes = [c];
     return done(200, { dry_run: entry.dry, change: c });
   }
   if (req.method === 'POST' && url.pathname === '/products/batch') {
+    entry.dry = isDry(url, body);
     const ups = body && Array.isArray(body.updates) ? body.updates : null;
     if (!ups) return done(400, { error: 'body must be {"updates":[{"id":..,"sale_price":..}]}' });
     if (ups.length > 25) return done(400, { error: 'max 25 updates per call' });
-    entry.dry = isDry(url, body);
     const results = ups.map(u => applyOne(u, entry.dry));
     entry.changes = results;
     const errors = results.filter(r => r.error);

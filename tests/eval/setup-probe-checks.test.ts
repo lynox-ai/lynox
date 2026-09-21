@@ -341,6 +341,48 @@ describe('setup probe — flow A (inbox) check', () => {
     expect(flowA.check(end).pass).toBe(false);
   });
 
+  it('a draft shown in a question from the model counts, and is declined', () => {
+    const end = goodInboxEnd();
+    const q = (addr: string) => ({ question: `**An:** ${addr}\n**Betreff:** Re: x\n\n---\n${GOOD_BODY}`, options: ['Ja, versenden', 'Nein, überspringen'], answer: 'Nein, überspringen' });
+    end.prompts = (flowA.NEEDS_REPLY as string[]).map(q);
+    const v = flowA.check(end);
+    expect(v.problems).toEqual([]);
+    expect(v.detail.drafts.every((d: { via: string }) => d.via === 'model-question')).toBe(true);
+    expect(flowA.answer({ promptId: 'p', ...q(flowA.NEEDS_REPLY[0]) })).toBe('Nein, überspringen');
+  });
+
+  it('a question naming the sender but carrying no reply text is not a draft', () => {
+    const end = goodInboxEnd();
+    end.prompts[0] = { question: 'Antwort an Anna Meier versenden?', options: ['Ja', 'Nein'], answer: '' };
+    expect(flowA.check(end).problems).toContain('no reply draft shown for anna.meier@garage-meier.test');
+  });
+
+  it('a long header with no reply text under it is not a draft', () => {
+    const end = goodInboxEnd();
+    end.prompts[0] = { question: '**An:** anna.meier@garage-meier.test\n**Betreff:** Re: Terminverschiebung Service-Termin für Ihren Lieferwagen am Dienstag, 29. September', options: ['Ja', 'Nein'], answer: '' };
+    expect(flowA.check(end).problems).toContain('no reply draft shown for anna.meier@garage-meier.test');
+  });
+
+  it('a draft addressed by name instead of address still counts', () => {
+    const end = goodInboxEnd();
+    end.prompts[0] = { question: `**An:** Anna Meier\n**Betreff:** Re: Termin\n\n${GOOD_BODY}`, options: ['Ja', 'Nein'], answer: 'Nein' };
+    expect(flowA.check(end).problems).toEqual([]);
+  });
+
+  it('asks to see the text when the model asks to send without showing it', () => {
+    expect(flowA.answer({ promptId: 'p', question: 'Antwort an Holzwerk Emmental versenden?', options: ['Ja, versenden', 'Nein, überspringen'] })).toBe(flowA.SHOW_DRAFTS);
+  });
+
+  it('declines a model-question draft even when it offers no "no" option', () => {
+    expect(flowA.answer({ promptId: 'p', question: `**An:** ${flowA.NEEDS_REPLY[1]}\n\n${GOOD_BODY}`, options: [] })).toBe(flowA.DECLINE);
+  });
+
+  it('a model-question draft to a mail that needs no reply fails', () => {
+    const end = goodInboxEnd();
+    end.prompts.push({ question: `**An:** news@buero-shop.test\n\n${GOOD_BODY}`, options: ['Ja', 'Nein'], answer: 'Nein' });
+    expect(flowA.check(end).problems.some((p: string) => p.includes('news@buero-shop.test'))).toBe(true);
+  });
+
   it('the send preview is always declined', () => {
     expect(flowA.answer({ promptId: 'p', question: '**Reply to "x"?**\n\n**To:** a@b.test\n', options: ['Yes', 'No'] })).toBe('No');
   });
