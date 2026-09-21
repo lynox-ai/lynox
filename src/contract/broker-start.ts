@@ -21,12 +21,12 @@
  *
  * ⚠ What is meant to keep the two HMACs agreeing is ONE golden vector, here
  * ({@link BROKER_START_GOLDEN}), for both repos to drive: the engine's minter
- * must PRODUCE its token, the control plane's verifier must ACCEPT it. It
- * replaces one vector per repo, each picked independently, which agreed by
- * arithmetic rather than by construction — a derivation change on one side
- * would have re-picked that side's vector and gone unseen until a tenant
- * clicked Connect. This repo drives it from the start; the control plane's side
- * switches over in its own change, once this file has reached its vendored copy.
+ * must PRODUCE its token, the control plane's verifier must ACCEPT it. It is
+ * meant to replace one vector per repo, each picked independently, which agree
+ * by arithmetic rather than by construction — a derivation change on one side
+ * re-picks that side's vector and goes unseen until a tenant clicks Connect.
+ * This repo drives it from the start; the control plane's side switches over in
+ * its own change, once this file has reached its vendored copy.
  *
  * What it catches, once both sides drive it: a derivation change on EITHER side
  * fails that side's own test against these bytes, because neither side can
@@ -37,10 +37,11 @@
  * (which this comment once promised) because that directory is built for JSON
  * wire shapes: a typed mirror against an `http.ts` shape, and string leaves
  * that are "obviously fake" (S4), which the mechanical check reads as 40-hex
- * SHAs — a 64-hex signature fails it on length. A hand-written entry, as
- * `magic-link-verify-request.json` has, could have been allowed in; it would
- * pin the framing and not the arithmetic, and the arithmetic is the part that
- * drifts. A literal here needs neither and stays dependency-free.
+ * SHAs — a 64-hex signature fails it on length. The hand-written lane
+ * (`magic-link-verify-request.json`, which pins a key set) does not help either:
+ * a hand-written token would fail S4 the same way unless S4 were widened for
+ * it, and it would pin the framing, not the arithmetic — the part that drifts.
+ * A literal here needs neither and stays dependency-free.
  *
  * The split is not cosmetic: what both sides MUST agree on byte-for-byte is the
  * payload and the framing, and that is what this file fixes. A shared HMAC

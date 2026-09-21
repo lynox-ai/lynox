@@ -12,7 +12,7 @@
 // first place.
 //
 // What is meant to keep them agreeing is the contract's `BROKER_START_GOLDEN`:
-// one vector, vendored to the control plane with the rest of the contract, that
+// one vector, travelling to the control plane with the rest of the contract, that
 // this minter must produce (`broker-start-mint.test.ts`) and the control
 // plane's verifier must accept. It is meant to replace two independently chosen
 // vectors, one per repo, that nothing compared; this side drives it now, the
