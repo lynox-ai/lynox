@@ -7,17 +7,9 @@
 import { randomUUID } from 'node:crypto';
 import { ImapFlow, type FetchMessageObject, type MessageStructureObject, type SearchObject } from 'imapflow';
 import nodemailer, { type Transporter } from 'nodemailer';
-// nodemailer ships no typings for its internal composer (the same code path
-// `sendMail` uses to serialize a message); this narrows it to the only two
-// members the Sent-append path touches.
-import MailComposerUntyped from 'nodemailer/lib/mail-composer/index.js';
-interface MailComposerInstance {
-  compile(): { build(cb: (err: Error | null, buf: Buffer) => void): void };
-}
-interface MailComposerCtor {
-  new (mail: Record<string, unknown>): MailComposerInstance;
-}
-const MailComposer = MailComposerUntyped as unknown as MailComposerCtor;
+// The same composer `sendMail` uses to serialize a message; the Sent-append
+// path builds its copy with it.
+import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 
 import {
   MailError,
