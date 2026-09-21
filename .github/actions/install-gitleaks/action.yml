@@ -1,0 +1,46 @@
+name: Install gitleaks
+description: >
+  Install a pinned, checksummed gitleaks onto PATH.
+
+# ONE COPY, ON PURPOSE. Two jobs install this binary — the `gitleaks` job in ci.yml
+# and its twin in ci-docs-stub.yml, which is kept identical to it. Both used to
+# carry the same inline `curl | tar` with no check on the bytes at all.
+#
+# The hash is written down HERE rather than fetched beside the artefact: the release
+# publishes `gitleaks_<version>_checksums.txt`, but taking the expectation from the
+# same place as the bytes only proves the transfer. Written here it is under review
+# like an action SHA. Taken from that published file AND recomputed from the
+# downloaded tarball, 2026-09-21.
+#
+# ⚠ Bounded. A checksum pins these exact bytes; it says nothing about who built
+# them. A downgrade to a genuinely published older release passes only because the
+# checksum moves with the pin.
+
+inputs:
+  version:
+    description: The gitleaks release to install.
+    required: false
+    default: '8.30.1'
+  sha256:
+    description: Expected SHA-256 of gitleaks_<version>_linux_x64.tar.gz for that release.
+    required: false
+    default: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and install gitleaks
+      shell: bash
+      env:
+        GITLEAKS_VERSION: ${{ inputs.version }}
+        GITLEAKS_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        tarball="/tmp/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+        curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o "$tarball"
+        # Before extracting, because nothing after this line is worth anything once
+        # unchecked bytes are on PATH.
+        echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+        tar -xzf "$tarball" -C /tmp gitleaks
+        sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+        gitleaks version
