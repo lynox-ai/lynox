@@ -15,10 +15,20 @@ export function isPermissionPrompt(p) {
 }
 
 /**
+ * The engine's outbound-consent prompt for the HTTP tool, as http.ts words it. Only this
+ * shape can be allowed: a prompt of another tool that merely MENTIONS a fixture host (a
+ * shell command with a URL in it, say) is not an outbound request to it.
+ */
+const OUTBOUND = /^⚠ http_request: [A-Z]+ to (\S+) — Allow outbound data\?$/;
+
+/** What the probe answers a question from the model that is not about the task's gate. */
+export const CARRY_ON = 'Mach bitte so weiter, wie ich es beschrieben habe.';
+
+/**
  * @param {{ question: string }} p
- * @param {string[]} allowedHosts fixture hosts an outbound request may go to
+ * @param {string[]} allowedHosts fixture hosts an outbound request may go to (exact)
  */
 export function permissionAnswer(p, allowedHosts) {
-  const q = String(p?.question ?? '');
-  return allowedHosts.some(h => q.includes(h)) ? 'Allow' : 'Deny';
+  const m = String(p?.question ?? '').trim().match(OUTBOUND);
+  return m && allowedHosts.includes(m[1]) ? 'Allow' : 'Deny';
 }

@@ -1,7 +1,8 @@
 /**
  * mail-tool — seeds and inspects the probe's mail server. Runs inside the engine
- * image (for its `imapflow`) as a one-off container on the probe network, so it
- * talks to the mail server over the same network the engine uses.
+ * image (for its `imapflow`) as a one-off container that shares the mail server's
+ * network namespace, so it reaches the server — and its REST API, bound to the
+ * container's loopback — over 127.0.0.1 (see flows/a-inbox.mjs `mailTool`).
  *
  *   node mail-tool.mjs seed     < messages.json   APPENDs each raw message to INBOX
  *   node mail-tool.mjs inspect                    mailboxes + counts, server users

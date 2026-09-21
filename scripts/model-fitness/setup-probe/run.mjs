@@ -234,6 +234,10 @@ async function oneRun(flow, i, image) {
   return result;
 }
 
+// Validate the provider settings once, before any container exists: a refusal inside a
+// run would exit past its cleanup and leave the slot's fixed addresses taken.
+providerEnv();
+
 const flow = await FLOWS[flowKey]();
 mkdirSync(outDir, { recursive: true });
 env.ensureNetwork();

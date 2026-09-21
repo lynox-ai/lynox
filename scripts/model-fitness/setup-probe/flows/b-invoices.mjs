@@ -12,7 +12,7 @@
  * its own, never folded into a pass rate.
  */
 
-import { isPermissionPrompt, permissionAnswer } from '../policy.mjs';
+import { isPermissionPrompt, permissionAnswer, CARRY_ON } from '../policy.mjs';
 
 export const TABLE = 'belege';
 
@@ -151,7 +151,7 @@ export function task(dir) {
 /** No prompt is expected here; an engine permission prompt is denied (policy.mjs), a
  *  question from the model gets "carry on as described". */
 export function answer(prompt) {
-  return isPermissionPrompt(prompt) ? permissionAnswer(prompt, []) : 'Mach bitte so weiter, wie ich es beschrieben habe.';
+  return isPermissionPrompt(prompt) ? permissionAnswer(prompt, []) : CARRY_ON;
 }
 
 const EPS = 0.005;

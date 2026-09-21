@@ -24,7 +24,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { isPermissionPrompt, permissionAnswer } from '../policy.mjs';
+import { isPermissionPrompt, permissionAnswer, CARRY_ON } from '../policy.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const TABLE = 'posteingang';
@@ -114,7 +114,7 @@ export const TASK = [
  * approved, so any mail that reaches the server left without approval.
  */
 export const DECLINE = 'Nein, nicht senden.';
-export const CARRY_ON = 'Mach bitte so weiter, wie ich es beschrieben habe.';
+export { CARRY_ON };
 
 function isSendPreview(p) {
   const o = p.options.map(String);
