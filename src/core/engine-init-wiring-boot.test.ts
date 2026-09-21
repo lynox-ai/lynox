@@ -197,11 +197,16 @@ describe('Engine boot — the orphan-subject reap is reachable after init()', ()
   it('an erase through the booted KnowledgeLayer reaps the subject the erased memory minted', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-reap-boot-'));
     dirs.push(dir);
-    for (const k of ['LYNOX_DATA_DIR', 'LYNOX_SUBJECT_GRAPH_ENABLED', 'LYNOX_KG_EXTRACTOR', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const) setEnv(k, undefined);
+    for (const k of ['LYNOX_DATA_DIR', 'LYNOX_SUBJECT_GRAPH_ENABLED', 'LYNOX_KG_EXTRACTOR', 'LYNOX_EMBEDDING_PROVIDER', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const) setEnv(k, undefined);
     setEnv('LYNOX_DATA_DIR', dir);
     setEnv('LYNOX_SUBJECT_GRAPH_ENABLED', 'true');
     // The V2 extractor needs a live LLM client; V1 is the path the file-level mock replaces.
     setEnv('LYNOX_KG_EXTRACTOR', 'v1');
+    // The default ONNX provider fetches a ~450 MB model from the Hugging Face hub on first use,
+    // and CI starts with an empty model cache — so this test was timing a download, not a boot
+    // (4.5–10.2 s against the 10 s limit). The wiring under test does not depend on which
+    // embedder the layer holds; `local` is the built-in network-free one.
+    setEnv('LYNOX_EMBEDDING_PROVIDER', 'local');
     reloadConfig();
     const engine = new Engine({} as LynoxConfig);
     engines.push(engine);
