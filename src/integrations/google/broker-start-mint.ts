@@ -5,23 +5,19 @@
 // ended on `?google_oauth_error=missing_token` — measured on staging
 // 2026-09-07, one day after the control plane began requiring it.
 //
-// The contract file (`src/contract/broker-start.ts`) predicted this module by
-// name: the golden fixture that would pin these bytes across the repo boundary
-// "does NOT exist yet ... the serializer is the minting route, which lands with
-// the engine half of this wave". This is that serializer — but the fixture did
-// NOT follow it, and the contract comment is corrected rather than fulfilled.
-//
 // ⚠ The HMAC lives HERE and not in the contract, on purpose. That directory is
 // dependency-free so two repos can compile it standalone, and `node:crypto` is
 // a dependency. Each side therefore computes the signature in its own code —
 // which is exactly the arrangement that let the two sides drift apart in the
 // first place.
 //
-// ⚠ Nothing added here stops that happening again. Both repos hold a golden
-// vector, but they are DIFFERENT vectors, chosen independently: this one, and
-// pro's in `api/oauth/broker-start.test.ts`. Neither side checks the other's.
-// The two derivations agree today — verified by hand against the live control
-// plane on 2026-09-07 — and nothing mechanical keeps them agreeing.
+// What is meant to keep them agreeing is the contract's `BROKER_START_GOLDEN`:
+// one vector, travelling to the control plane with the rest of the contract, that
+// this minter must produce (`broker-start-mint.test.ts`) and the control
+// plane's verifier must accept. It is meant to replace two independently chosen
+// vectors, one per repo, that nothing compared; this side drives it now, the
+// control plane's side switches over in its own change after the vendored copy
+// carries it.
 
 import { createHmac, randomBytes } from 'node:crypto';
 import {

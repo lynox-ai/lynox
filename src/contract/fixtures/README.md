@@ -22,6 +22,11 @@ entropy-realistic tokens, no real subdomains or customer names, no
 production-mirroring secret lengths. `tests/contract-http.test.ts` enforces
 this mechanically for every string leaf.
 
+One golden value is deliberately NOT here: `BROKER_START_GOLDEN` in
+`../broker-start.ts`, a computed HMAC signature, which no obviously-fake rule
+can hold. It sits outside these rules rather than satisfying them, and its
+comment says so.
+
 | Fixture | Shape (`http.ts`/`shapes.ts`) | Serializer (generator) | Parser (pair side) |
 |---|---|---|---|
 | `usage-flush-request.json` | `UsageFlushRequest` | engine `src/core/managed-hook.ts` `flush()` — captured in `src/core/managed-hook.test.ts` | control plane (pair test in the private repo) |
