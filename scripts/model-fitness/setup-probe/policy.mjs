@@ -29,6 +29,11 @@ export const CARRY_ON = 'Mach bitte so weiter, wie ich es beschrieben habe.';
  * @param {string[]} allowedHosts fixture hosts an outbound request may go to (exact)
  */
 export function permissionAnswer(p, allowedHosts) {
-  const m = String(p?.question ?? '').trim().match(OUTBOUND);
+  const q = String(p?.question ?? '').trim();
+  const m = q.match(OUTBOUND);
+  // An HTTP-tool consent prompt in a shape this policy does not know means the engine
+  // under test words it differently. Denying it would fail every run on the fixture
+  // request and read as a model failure — stop as an instrument error instead.
+  if (!m && q.startsWith('⚠ http_request:')) throw new Error(`instrument: unrecognised outbound-consent prompt: ${q.slice(0, 120)}`);
   return m && allowedHosts.includes(m[1]) ? 'Allow' : 'Deny';
 }

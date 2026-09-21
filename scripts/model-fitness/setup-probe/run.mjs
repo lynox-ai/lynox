@@ -190,6 +190,10 @@ async function oneRun(flow, i, image) {
     // 5. drive + judge
     const t0 = Date.now();
     const { records, end } = await flow.drive(ctx);
+    // The evidence is written before judging, so a check that stops with an instrument
+    // error still leaves what it was looking at.
+    writeFileSync(join(runDir, 'records.json'), JSON.stringify(records, null, 1));
+    writeFileSync(join(runDir, 'end-state.json'), JSON.stringify(end, null, 1));
     const verdict = flow.check(end, ctx);
     const usage = records.map(runUsage).reduce((a, u) => ({
       tokensIn: a.tokensIn + u.tokensIn, tokensOut: a.tokensOut + u.tokensOut,
@@ -198,8 +202,6 @@ async function oneRun(flow, i, image) {
     }), { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, model: null, engineCostUsd: 0 });
     const exported = [];
     for (const sid of new Set(records.map(r => r.sessionId))) exported.push(await client.debugExport(sid));
-    writeFileSync(join(runDir, 'records.json'), JSON.stringify(records, null, 1));
-    writeFileSync(join(runDir, 'end-state.json'), JSON.stringify(end, null, 1));
     writeFileSync(join(runDir, 'debug-export.json'), JSON.stringify(exported, null, 1));
     writeFileSync(join(runDir, 'engine.log'), env.containerLogs(name));
     result = {
