@@ -6,20 +6,25 @@
  *
  * The stream is parsed by the rules core's openai-adapter.ts applies (only `data: `
  * lines, `choices[0]`, tool calls keyed by `delta.tool_calls[].index` with argument
- * fragments concatenated per index, a finish_reason required), so a gate that passes
- * here is a wire the engine can read.
+ * fragments concatenated per index), so a gate that passes here is a wire the engine can
+ * read.
  *
  * Gates (each binary; thresholds fixed here, before any measurement):
  *   tool_json        every tool call's arguments parse as a JSON object
  *   parallel         one turn carries >= 2 independent tool calls
  *   chain8           an 8-hop tool chain is followed exactly and the answer is the end word
- *   long_result      a ~50k-token tool result is read: the needle amount is answered
+ *   long_result      a long tool result (1'500 CSV rows; ~52k prompt tokens at the 35
+ *                    tokens per row measured so far, fewer where a tokenizer groups
+ *                    digits) is read: the needle amount is answered, and the prompt stays
+ *                    between 20k and 120k tokens (fits a 128k window)
  *   german           a German question gets a German answer
+ *   finish_reason    every turn ends with a finish_reason (the adapter refuses one without)
  *   no_empty_turn    no turn ends with neither text nor a tool call
- *   ttft             median time to first token on the ~8k-token prefix calls <= 5 s
+ *   ttft             median time to first token on the long-prefix calls <= 5 s
  *
  * And one measurement that is not a gate, three separate answers:
- *   caching          identical ~8k-token prefix sent 3x, plus a same-length control prefix:
+ *   caching          identical long prefix (260 paragraphs, ~12k-15k tokens) sent 3x, plus a
+ *                    same-length control prefix:
  *                    (a) cache fields in the raw usage object, (b) first-token time of
  *                    repeats vs first call vs control.
  *
@@ -29,12 +34,16 @@
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { createWire } from './wire.mjs';
+import { createWire, median, cacheFields, prefixParagraph } from './wire.mjs';
 
 const { values: opt } = parseArgs({
   options: {
     'base-url': { type: 'string' }, model: { type: 'string' }, 'key-file': { type: 'string' },
-    out: { type: 'string' }, 'max-tokens': { type: 'string', default: '8192' },
+    // The engine's own output budget for a model without a registry entry
+    // (FALLBACK_CAPABILITY.defaultMaxOutput in src/types/models.ts). A smaller budget
+    // measures a stricter wire than the product uses: a reasoning model that thinks past
+    // it returns an empty turn here that the engine would not see.
+    out: { type: 'string' }, 'max-tokens': { type: 'string', default: '16000' },
   },
 });
 for (const k of ['base-url', 'model', 'key-file', 'out']) if (!opt[k]) { console.error(`missing --${k}`); process.exit(2); }
@@ -61,7 +70,6 @@ async function loop(messages, tools, impl, label, maxRounds = 14) {
 
 const GERMAN = /\b(und|der|die|das|ist|eine?|nicht|mit|für|auf|wird|werden|sie|wir|bei|auch|als|von|zu|den|dem)\b/gi;
 const looksGerman = t => (String(t).match(GERMAN) ?? []).length >= 5;
-const median = xs => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : null; };
 
 const gates = {};
 const allTurns = [];
@@ -102,17 +110,21 @@ const track = t => { allTurns.push(...(Array.isArray(t) ? t : [t])); return t; }
   const rows = [];
   const fmt = v => v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, "'");
   let x = 7;
-  for (let i = 1; i <= 4200; i++) {
+  for (let i = 1; i <= 1500; i++) {
     x = (x * 48271) % 2147483647;
-    const amount = i === 3117 ? 7412.85 : (x % 900000) / 100 + 10;
+    const amount = i === 1117 ? 7412.85 : (x % 900000) / 100 + 10;
     rows.push(`B-${String(i).padStart(5, '0')};2026-${String(1 + (i % 12)).padStart(2, '0')}-${String(1 + (i % 28)).padStart(2, '0')};Lieferant ${1 + (x % 380)};${fmt(amount)}`);
   }
   const csv = 'beleg;datum;lieferant;betrag_chf\n' + rows.join('\n');
   const tools = [{ type: 'function', function: { name: 'lade_belege', description: 'Lädt die Belegliste des Jahres als CSV.', parameters: { type: 'object', properties: {} } } }];
-  const turns = track(await loop([{ role: 'user', content: 'Ruf lade_belege auf und nenn mir den Betrag von Beleg B-03117.' }], tools, () => csv, 'long_result', 4));
+  // The list is delivered once; a repeated call gets a pointer back, so a model that
+  // calls again cannot multiply the prompt past the window.
+  let delivered = false;
+  const impl = () => { if (delivered) return 'Die Belegliste wurde bereits oben geliefert.'; delivered = true; return csv; };
+  const turns = track(await loop([{ role: 'user', content: 'Ruf lade_belege auf und nenn mir den Betrag von Beleg B-01117.' }], tools, impl, 'long_result', 4));
   const final = turns.at(-1)?.text ?? '';
   const promptTokens = Math.max(0, ...turns.map(t => t.usage?.prompt_tokens ?? 0));
-  gates.long_result = { pass: /7'?412[.,]85/.test(final) && promptTokens >= 40_000, promptTokens, final: final.slice(0, 160) };
+  gates.long_result = { pass: /7'?412[.,]85/.test(final) && promptTokens >= 20_000 && promptTokens <= 120_000, promptTokens, final: final.slice(0, 160) };
 }
 
 // ── german ──────────────────────────────────────────────────────────────────
@@ -124,25 +136,18 @@ const track = t => { allTurns.push(...(Array.isArray(t) ? t : [t])); return t; }
 // ── caching + ttft ──────────────────────────────────────────────────────────
 const caching = {};
 {
-  const para = i => `Abschnitt ${i}: Die Buchhaltung erfasst Belege, prüft Beträge und Mehrwertsteuersätze, ordnet Lieferanten zu und hält Fristen ein. Jeder Beleg erhält eine Nummer, ein Datum und einen Betrag in Franken. `;
-  const prefixA = Array.from({ length: 260 }, (_, i) => para(i)).join('');
-  const prefixB = Array.from({ length: 260 }, (_, i) => para(i).replace('Buchhaltung', 'Lagerverwaltung').replace('Belege', 'Artikel')).join('');
+  const prefixA = Array.from({ length: 260 }, (_, i) => prefixParagraph(i)).join('');
+  const prefixB = Array.from({ length: 260 }, (_, i) => prefixParagraph(i).replace('Buchhaltung', 'Lagerverwaltung').replace('Belege', 'Artikel')).join('');
   const ask = sys => [{ role: 'system', content: sys }, { role: 'user', content: 'Antworte nur mit dem Wort: ok' }];
   const runs = [];
   for (const [label, sys] of [['A1', prefixA], ['A2', prefixA], ['A3', prefixA], ['B1', prefixB]]) {
     const r = track(await chat(ask(sys), null, `cache-${label}`));
     runs.push({ label, ttft: r.ttft, elapsed: r.elapsed, usage: r.usage });
   }
-  const cacheFields = runs.map(r => {
-    const u = r.usage ?? {};
-    const found = {};
-    const walk = (o, p) => { for (const [k, v] of Object.entries(o ?? {})) { if (/cach/i.test(k)) found[p + k] = v; if (v && typeof v === 'object') walk(v, `${p}${k}.`); } };
-    walk(u, '');
-    return { label: r.label, promptTokens: u.prompt_tokens ?? null, cacheFields: found };
-  });
+  const fields = runs.map(r => ({ label: r.label, promptTokens: r.usage?.prompt_tokens ?? null, cacheFields: cacheFields(r.usage) }));
   caching.runs = runs;
-  caching.reportedInUsage = cacheFields.some(c => Object.values(c.cacheFields).some(v => typeof v === 'number' && v > 0));
-  caching.cacheFields = cacheFields;
+  caching.reportedInUsage = fields.some(c => Object.values(c.cacheFields).some(v => typeof v === 'number' && v > 0));
+  caching.cacheFields = fields;
   const [a1, a2, a3, b1] = runs.map(r => r.ttft);
   caching.ttft = { first: a1, repeats: [a2, a3], control: b1 };
   gates.ttft = { pass: median(runs.map(r => r.ttft).filter(v => v !== null)) <= 5000, medianMs: median(runs.map(r => r.ttft).filter(v => v !== null)) };
@@ -151,6 +156,7 @@ const caching = {};
 // ── derived gates ───────────────────────────────────────────────────────────
 const toolTurns = allTurns.filter(t => t.toolCalls?.length);
 gates.tool_json = { pass: toolTurns.length > 0 && toolTurns.every(t => t.toolCalls.every(c => c.argsOk && c.name)), toolTurns: toolTurns.length };
+gates.finish_reason = { pass: allTurns.every(t => !t.ok || t.finish !== null), missing: allTurns.filter(t => t.ok && t.finish === null).length };
 const empty = allTurns.filter(t => t.ok && t.toolCalls.length === 0 && !t.text.trim());
 gates.no_empty_turn = { pass: empty.length === 0 && allTurns.every(t => t.ok), emptyTurns: empty.length, failedCalls: allTurns.filter(t => !t.ok).map(t => t.status) };
 

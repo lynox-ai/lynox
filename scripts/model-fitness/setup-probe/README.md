@@ -35,7 +35,8 @@ set-up would have done it:
 - **tables** — seeded through the image's own `DataStore.createCollection` (`seed.mjs`).
   The data-store tools are only registered when a collection exists at boot.
 - **files** — seeded into the per-context workspace of HTTP-API sessions
-  (`<lynox dir>/workspace/http-api`), the only place `read_file` reads from there.
+  (`<lynox dir>/workspace/http-api`); besides `/tmp`, the artifacts folder and `/app`, it
+  is the only place `read_file` reads from in such a session.
 - **the mailbox** — added through `POST /api/mail/accounts`, connection test included, TLS
   verified against a throw-away test CA the engine is told to trust (`NODE_EXTRA_CA_CERTS`).
 
@@ -71,13 +72,17 @@ node scripts/model-fitness/setup-probe/summarize.mjs <out>/results.jsonl [--labe
 ```
 
 **Ports.** The probe binds exactly one host port, `127.0.0.1:47310` (`--port` to change),
-and refuses to start when it is taken. Nothing in either repository hard-wires a port in
+and refuses to start when it is taken. Nothing in this repository hard-wires a port in
 47300–47399. The fixture services bind no host port at all — they are reachable only on
-the probe network. (The first version used 13100, which is also the fixed port of the
+the probe network, and their admin interfaces only from inside their own container. (The first version used 13100, which is also the fixed port of the
 engine's own HTTP-API test suite; a probe engine there answered that suite's requests.)
 
 Each run writes `result.json`, the SSE record, the end state, the thread's debug export and
-the engine log under `--out`, and appends one line to `results.jsonl`.
+the engine log under `--out`, and appends one line to `results.jsonl`. `--keep-failed` keeps
+the containers and volume of the first run that does not pass and stops there.
+`SETUP_PROBE_TMP` moves the probe's temporary files (seed data, test certificates) off
+`/tmp`. Engine permission prompts are answered like a careful operator would: allowed only
+for the outbound request to a fixture, denied otherwise (`policy.mjs`).
 
 Run a **control** on the same image first: if a strong model fails a flow, the fixture or
 the check is broken, not the model under test. That is how flow A got its shape: three

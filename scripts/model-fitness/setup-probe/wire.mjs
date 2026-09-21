@@ -75,3 +75,16 @@ export function createWire({ base, model, key, out, maxTokens = 8192 }) {
     return { ok: true, status: res.status, toolCalls, text, reasoning, finish, usage, ttft, elapsed: performance.now() - t0 };
   };
 }
+
+export const median = xs => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : null; };
+
+/** Every usage field whose name mentions caching, wherever it is nested. */
+export function cacheFields(usage) {
+  const found = {};
+  const walk = (o, p) => { for (const [k, v] of Object.entries(o ?? {})) { if (/cach/i.test(k)) found[p + k] = v; if (v && typeof v === 'object') walk(v, `${p}${k}.`); } };
+  walk(usage, '');
+  return found;
+}
+
+/** Filler text for long prompts (measured 48-57 tokens per paragraph across three tokenizers). */
+export const prefixParagraph = i => `Abschnitt ${i}: Die Buchhaltung erfasst Belege, prüft Beträge und Mehrwertsteuersätze, ordnet Lieferanten zu und hält Fristen ein. Jeder Beleg erhält eine Nummer, ein Datum und einen Betrag in Franken. `;

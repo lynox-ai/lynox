@@ -15,10 +15,7 @@
  * that before every run — if the guard ever closes that gap, the probe must stop
  * with an instrument error instead of scoring the model for a refused request.
  */
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 export const NET = { name: 'setup-probe-net', subnet: '203.0.113.0/24', gateway: '203.0.113.1' };
@@ -30,10 +27,9 @@ const SLOT = Number(process.env.SETUP_PROBE_SLOT ?? 0);
 if (!Number.isInteger(SLOT) || SLOT < 0 || SLOT > 4) throw new Error(`SETUP_PROBE_SLOT must be 0-4, got ${process.env.SETUP_PROBE_SLOT}`);
 const ip = n => `203.0.113.${n + SLOT * 50}`;
 export const IPS = { engine: ip(30), shop: ip(40), mail: ip(20) };
-export const SLOT_ID = SLOT;
 
-export function docker(args, { input, allowFail = false } = {}) {
-  const r = spawnSync('docker', args, { input, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+export function docker(args, { input, allowFail = false, env } = {}) {
+  const r = spawnSync('docker', args, { input, env: env ?? process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0 && !allowFail) {
     throw new Error(`docker ${args.slice(0, 3).join(' ')} … failed (${r.status}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
   }
@@ -77,36 +73,28 @@ export function seedVolume(image, volume, seedDir, seedScript) {
 }
 
 /**
- * Start one engine. `env` is written to a 0600 env-file in a private temp dir and
- * removed right after `docker run` has read it — secrets never appear on a command
- * line (where `ps` would show them) and do not outlive the start.
+ * Start one engine. Every variable is passed as `-e NAME` — the value travels in the
+ * environment of the `docker` process, never on a command line (where `ps` would show
+ * it) and never in a file (which a killed run would leave behind).
  *
  * @param {{ name: string, image: string, volume: string, env: Record<string,string>,
  *           hostPort: number, extraArgs?: string[] }} o
  */
 export function startEngine(o) {
-  const dir = mkdtempSync(join(process.env.SETUP_PROBE_TMP ?? tmpdir(), 'setup-probe-env-'));
-  const envFile = join(dir, 'engine.env');
-  try {
-    writeFileSync(envFile, Object.entries(o.env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n', { mode: 0o600 });
-    chmodSync(envFile, 0o600);
-    docker([
-      'run', '-d', '--name', o.name,
-      '--network', NET.name, '--ip', IPS.engine,
-      '--read-only',
-      '--tmpfs', '/tmp:size=512M',
-      '--tmpfs', '/workspace:size=256M,uid=1001,gid=1001',
-      '--tmpfs', '/home/lynox/.cache:size=512M,uid=1001,gid=1001',
-      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '512',
-      '--env-file', envFile,
-      '-v', `${o.volume}:/home/lynox/.lynox`,
-      '-p', `127.0.0.1:${o.hostPort}:3000`,
-      ...(o.extraArgs ?? []),
-      o.image,
-    ]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  docker([
+    'run', '-d', '--name', o.name,
+    '--network', NET.name, '--ip', IPS.engine,
+    '--read-only',
+    '--tmpfs', '/tmp:size=512M',
+    '--tmpfs', '/workspace:size=256M,uid=1001,gid=1001',
+    '--tmpfs', '/home/lynox/.cache:size=512M,uid=1001,gid=1001',
+    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '512',
+    ...Object.keys(o.env).flatMap(k => ['-e', k]),
+    '-v', `${o.volume}:/home/lynox/.lynox`,
+    '-p', `127.0.0.1:${o.hostPort}:3000`,
+    ...(o.extraArgs ?? []),
+    o.image,
+  ], { env: { ...process.env, ...o.env } });
 }
 
 export function removeContainer(name) {

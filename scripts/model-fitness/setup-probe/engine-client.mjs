@@ -2,8 +2,10 @@
  * engine-client — drives one engine headless over its HTTP API and records what
  * happened, so a flow can be judged on its END STATE rather than on the model's text.
  *
- * Only the public API is used: `POST /api/sessions`, `POST /api/sessions/:id/run`
- * (SSE), `POST /api/sessions/:id/reply`, `GET /api/threads/:id/debug-export`.
+ * Only the public API is used: `GET /health`, `POST /api/sessions`,
+ * `POST /api/sessions/:id/run` (SSE), `POST /api/sessions/:id/reply`,
+ * `POST /api/sessions/:id/abort`, `GET /api/threads/:id/debug-export`,
+ * `GET /api/datastore/:collection`, and whatever a flow posts through `json()`.
  * Prompts are answered by a flow-supplied policy; every prompt, its answer and the
  * time of both are kept, because several checks are about ORDER (e.g. a write that
  * happened before its approval was given).

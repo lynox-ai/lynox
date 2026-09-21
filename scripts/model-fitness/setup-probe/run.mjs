@@ -60,10 +60,12 @@ const { values: opt } = parseArgs({
     image: { type: 'string', default: 'ghcr.io/lynox-ai/lynox:latest' },
     label: { type: 'string' },
     out: { type: 'string' },
-    // The only host port the probe binds (127.0.0.1). Chosen after grepping both repos
-    // for hard-wired test ports: 13100 is core's http-api test port and a probe engine
-    // there answered the test suite's requests. Fixture services bind no host port.
+    // The only host port the probe binds (127.0.0.1). Not 13100: that is the fixed port
+    // of src/server/http-api.test.ts, and a probe engine there answered that suite's
+    // requests. Fixture services bind no host port.
     port: { type: 'string', default: '47310' },
+    // Keep the containers and volume of the first run that does not pass, and stop there
+    // (they hold the slot's fixed addresses, so no further run could start).
     'keep-failed': { type: 'boolean', default: false },
   },
 });
@@ -80,6 +82,7 @@ const provider = need('provider');
 const label = need('label');
 const outDir = need('out');
 const n = Number(opt.n);
+if (!Number.isInteger(n) || n < 1) { console.error(`--n must be a positive integer, got ${opt.n}`); process.exit(2); }
 const key = readFileSync(need('key-file'), 'utf8').trim();
 const prices = {
   in: Number(need('price-in')),
@@ -90,7 +93,11 @@ const prices = {
 };
 
 function providerEnv() {
-  if (provider === 'anthropic') return { ANTHROPIC_API_KEY: key };
+  if (provider === 'anthropic') {
+    // The engine picks its own Anthropic model; a --model here would be silently ignored.
+    if (opt.model) { console.error('--model is not supported with --provider anthropic'); process.exit(2); }
+    return { ANTHROPIC_API_KEY: key };
+  }
   if (provider === 'openai') {
     return {
       LYNOX_LLM_PROVIDER: 'openai',
@@ -123,15 +130,18 @@ function chmodRecursive(dir) {
   }
 }
 
+let kept = false;
+
 async function oneRun(flow, i, image) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const runId = `${label}-${flowKey}-${String(i).padStart(2, '0')}-${stamp}`;
-  const name = `setup-probe-engine-${process.pid}`;
+  const tag = `${process.pid}-${i}`;
+  const name = `setup-probe-engine-${tag}`;
   const volume = `setup-probe-${runId}`.toLowerCase();
   const runDir = join(outDir, runId);
   mkdirSync(runDir, { recursive: true });
   const secret = env.freshSecret();
-  const ctx = { runId, runDir, name, volume, env, image, flowKey, label, services: [] };
+  const ctx = { runId, runDir, tag, name, volume, env, image, flowKey, label };
   const seedDir = mkdtempSync(join(process.env.SETUP_PROBE_TMP ?? tmpdir(), 'setup-probe-seed-'));
   let result;
   try {
@@ -187,7 +197,7 @@ async function oneRun(flow, i, image) {
       model: a.model ?? u.model, engineCostUsd: a.engineCostUsd + u.engineCostUsd,
     }), { tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, model: null, engineCostUsd: 0 });
     const exported = [];
-    for (const r of records) exported.push(await client.debugExport(r.sessionId));
+    for (const sid of new Set(records.map(r => r.sessionId))) exported.push(await client.debugExport(sid));
     writeFileSync(join(runDir, 'records.json'), JSON.stringify(records, null, 1));
     writeFileSync(join(runDir, 'end-state.json'), JSON.stringify(end, null, 1));
     writeFileSync(join(runDir, 'debug-export.json'), JSON.stringify(exported, null, 1));
@@ -212,8 +222,8 @@ async function oneRun(flow, i, image) {
     try { writeFileSync(join(runDir, 'engine.log'), env.containerLogs(name)); } catch { /* none */ }
   } finally {
     rmSync(seedDir, { recursive: true, force: true });
-    const keep = opt['keep-failed'] && !(result?.pass);
-    if (!keep) {
+    kept = opt['keep-failed'] && !(result?.pass);
+    if (!kept) {
       env.removeContainer(name);
       if (flow.stopServices) await flow.stopServices(ctx);
       env.removeVolume(volume);
@@ -233,4 +243,5 @@ for (let i = 1; i <= n; i++) {
     ? `#${i} INSTRUMENT ERROR: ${r.instrumentError.slice(0, 300)}`
     : `#${i} ${r.pass ? 'PASS' : 'FAIL'}${r.safety.length ? ` SAFETY(${r.safety.length})` : ''} steps=${r.steps} in=${r.usage.tokensIn} out=${r.usage.tokensOut} cost=${r.cost} ${r.currency} ${Math.round(r.durationMs / 1000)}s model=${r.servedModel}${r.problems.length ? `\n   - ${r.problems.slice(0, 6).join('\n   - ')}` : ''}`;
   console.log(line);
+  if (kept) { console.log(`kept the containers and volume of run #${i} for inspection; stopping.`); break; }
 }
