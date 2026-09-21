@@ -1,0 +1,143 @@
+# Unattended run alert — one issue per workflow that follows its red/green state.
+#
+# A run started by `schedule`, `repository_dispatch` or `workflow_run` turns no
+# pull request red and leaves `main` looking green. A failure there is seen only by
+# someone who opens the Actions tab with the right filter, which is how a daily job
+# once failed eleven days in a row with nobody noticing. Failing loudly is not the
+# same as being heard, so the outcome needs a destination.
+#
+# Every such workflow ends in a job that calls this one with its job results. The
+# issue is opened on the first red run, only its counters are updated while the
+# workflow stays red, and it is closed on the next green run. A later red run
+# reopens the same issue. So the notifications follow state changes, not runs, and
+# the counters show whether a workflow flaps (many phases) or is stuck (a long
+# current phase). A threshold such as "only after two red runs" was measured and
+# rejected: most long red phases consisted of a single run.
+#
+# The issue body carries the workflow name, the counters and the run link, and
+# nothing else — no log excerpt, no error text, no host. Issues are public in a
+# public repository, and no repository guard scans issue bodies, so the body is
+# fixed here and pinned by a test.
+#
+# What this cannot see: a workflow file that fails to parse starts no job, so
+# nothing calls this. The test that pins the callers also parses every workflow
+# file, which keeps a syntax error from reaching the default branch in the first
+# place.
+name: Unattended run alert
+
+on:
+  workflow_call:
+    inputs:
+      results:
+        description: '`toJSON(needs.*.result)` of the calling job'
+        required: true
+        type: string
+
+# Set once, here, and not widened again on the job: the docs say a called workflow
+# can only downgrade what its caller grants, and say nothing about a called job
+# re-widening past its own workflow's block. This form needs no such reading.
+permissions:
+  # justified: this workflow's only job opens, updates and closes the calling
+  # workflow's alert issue. It checks nothing out, holds no secrets, and passes no
+  # caller-supplied text into the issue.
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Serialised per workflow: two runs finishing together must not both find no
+    # issue and both open one.
+    concurrency:
+      group: run-alert-${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - name: Open, update or close this workflow's alert issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # `gh` finds the repository through `--repo`, `GH_REPO` or the git remote.
+          # Nothing is checked out here, so without this every call fails with
+          # "failed to determine base repository".
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          RESULTS: ${{ inputs.results }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # red:     a needed job failed (a timeout reports as a failure)
+          # green:   one succeeded and none failed or was cancelled
+          # neither: all skipped or cancelled; no evidence either way, change nothing
+          if ! STATE=$(jq -r '
+              if any(.[]; . == "failure") then "red"
+              elif any(.[]; . == "success") and (any(.[]; . == "cancelled") | not) then "green"
+              else "neither" end' <<< "$RESULTS"); then
+            echo "::error::could not read the job results: ${RESULTS}"
+            exit 1
+          fi
+          if [ "$STATE" = neither ]; then
+            echo "no job succeeded or failed (${RESULTS}); leaving the alert issue as it is"
+            exit 0
+          fi
+
+          TITLE="Unattended run is red: ${WORKFLOW}"
+          LABEL='run-alert'
+          gh label create "$LABEL" --force --color B60205 \
+            --description 'An unattended workflow run is red; closes itself on the next green run' > /dev/null
+
+          # Scoped by the label, so the list stays far below its limit. Reaching the
+          # limit would mean a cut list, and a cut list can miss the issue and open a
+          # second one.
+          ISSUES=$(gh issue list --label "$LABEL" --state all --limit 100 --json number,title,state,body)
+          if [ "$(jq length <<< "$ISSUES")" -ge 100 ]; then
+            echo "::error::100 or more '${LABEL}' issues; the lookup may be cut short"
+            exit 1
+          fi
+          MATCH=$(jq -c --arg t "$TITLE" '[.[] | select(.title == $t)] | sort_by(.number) | first // empty' <<< "$ISSUES")
+
+          PHASES=0
+          REDS=0
+          if [ -n "$MATCH" ]; then
+            NUM=$(jq -r .number <<< "$MATCH")
+            ISTATE=$(jq -r .state <<< "$MATCH")
+            OLD=$(jq -r .body <<< "$MATCH")
+            re='run-alert phases=([0-9]+) reds=([0-9]+)'
+            if [[ $OLD =~ $re ]]; then
+              PHASES=${BASH_REMATCH[1]}
+              REDS=${BASH_REMATCH[2]}
+            fi
+          fi
+
+          render() {
+            printf '%s\n' \
+              "<!-- run-alert phases=${PHASES} reds=${REDS} -->" \
+              "The unattended workflow **${WORKFLOW}** is red." \
+              '' \
+              "- red phases so far: ${PHASES}" \
+              "- red runs in the current phase: ${REDS}" \
+              "- latest red run: ${RUN_URL}" \
+              '' \
+              'This issue is reused for every red phase of this workflow. It closes itself on the next green run and reopens on the next red one. Many phases mean the workflow flaps; a long current phase means it is stuck.'
+          }
+
+          if [ -z "$MATCH" ]; then
+            if [ "$STATE" = green ]; then
+              echo "green and no alert issue exists; nothing to do"
+              exit 0
+            fi
+            PHASES=1
+            REDS=1
+            gh issue create --title "$TITLE" --label "$LABEL" --body "$(render)"
+          elif [ "$STATE" = red ] && [ "$ISTATE" = CLOSED ]; then
+            PHASES=$((PHASES + 1))
+            REDS=1
+            gh issue edit "$NUM" --body "$(render)"
+            gh issue reopen "$NUM" --comment "Red again: ${RUN_URL}"
+          elif [ "$STATE" = red ]; then
+            REDS=$((REDS + 1))
+            gh issue edit "$NUM" --body "$(render)"
+          elif [ "$ISTATE" = OPEN ]; then
+            gh issue close "$NUM" --comment "Green again: ${RUN_URL} (after ${REDS} red run(s) in this phase)"
+          else
+            echo "green, and alert issue #${NUM} is already closed"
+          fi

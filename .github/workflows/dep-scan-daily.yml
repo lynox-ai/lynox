@@ -143,3 +143,19 @@ jobs:
               echo "No HIGH/CRITICAL and no open tracking issue — nothing to do."
             fi
           fi
+
+  # Report this run's outcome to the workflow's one alert issue: opened on the
+  # first red run, updated while red, closed on the next green one. A scheduled run
+  # turns no pull request red, so without this a failure of the scan itself is seen
+  # only by someone who opens the Actions tab. (The tracking issue above reports
+  # FINDINGS; this one reports that the scan did not run.) How and why:
+  # run-alert.yml. The rule that every unattended workflow carries this job:
+  # tests/unattended-run-alert.test.ts.
+  alert:
+    needs: [dep-scan]
+    if: always()
+    permissions:
+      issues: write
+    uses: ./.github/workflows/run-alert.yml
+    with:
+      results: ${{ toJSON(needs.*.result) }}
