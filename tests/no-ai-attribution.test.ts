@@ -98,6 +98,23 @@ describe('no-ai-attribution — does not eat prose about the trailers', () => {
     expect(out).toContain(body);
   });
 
+  // The Co-Authored-By pattern has two halves — a line-start anchor and a
+  // trailing address — and the sentence above is caught by both, so either
+  // could be deleted without a test noticing. Each case here passes only one.
+  it('keeps a mid-line quotation of the whole trailer, address included', () => {
+    const body = 'The old default appended Co-Authored-By: Claude <noreply@anthropic.com>';
+    const out = strip(`Explain the rule\n\n${body}\n`);
+
+    expect(out).toContain(body);
+  });
+
+  it('keeps a line that begins with "Co-Authored-By: Claude" but carries no address', () => {
+    const body = 'Co-Authored-By: Claude was the trailer the harness asked for.';
+    const out = strip(`Explain the rule\n\n${body}\n`);
+
+    expect(out).toContain(body);
+  });
+
   it('leaves an untouched message byte-identical', () => {
     const message = 'Add a feature\n\nIt does the thing, for the reason.\n';
 
