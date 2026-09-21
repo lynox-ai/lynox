@@ -8,10 +8,11 @@
  * time of both are kept, because several checks are about ORDER (e.g. a write that
  * happened before its approval was given).
  *
- * Token usage is taken from the SSE `done` event. `GET /api/history/runs/:id/tool-calls`
- * is deliberately NOT used: for an API run it was measured to return zero rows
- * while the stream showed two tool calls, and it stores `output_json` empty on
- * success, so it cannot tell "cancelled" from "sent".
+ * Token usage is taken from the SSE `done` event. Tool calls are taken from the stream,
+ * not from `GET /api/history/runs/:id/tool-calls`: that route lists only calls whose
+ * handler ran (a call rejected at input validation or naming an unknown tool is
+ * missing), and it stores `output_json` empty on success, so it cannot tell
+ * "cancelled" from "sent".
  */
 
 export class EngineClient {
