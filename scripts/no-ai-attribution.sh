@@ -94,9 +94,23 @@ check_range() {
     } >&2
     exit 2
   fi
+  local msg
   for sha in $revs; do
     scanned=$((scanned + 1))
-    if git show -s --format='%B' "$sha" | grep -qiE "$PATTERN"; then
+    # Read the message with its OWN status before matching. Piped straight into
+    # `grep -q`, a `git show` that failed for one commit (missing object, shallow
+    # gap) handed grep an empty stream, grep answered "no match", and that commit
+    # counted as scanned and clean. Here-string rather than `printf | grep -q`:
+    # under `pipefail`, grep closing the pipe early fails the printf side.
+    if ! msg="$(git show -s --format='%B' "$sha" 2>/dev/null)"; then
+      {
+        echo "❌ no-ai-attribution: could not read commit ${sha}."
+        echo "   $(git show -s --format='%B' "$sha" 2>&1 >/dev/null | head -1)"
+        echo "   Refusing to report a clean range this check could not read."
+      } >&2
+      exit 2
+    fi
+    if grep -qiE "$PATTERN" <<< "$msg"; then
       if [ "$bad" -eq 0 ]; then
         echo ""
         echo "✗ AI self-attribution found in commit messages:"
