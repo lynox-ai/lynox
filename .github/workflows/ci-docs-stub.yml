@@ -96,6 +96,9 @@ jobs:
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
           sudo mv gitleaks /usr/local/bin/
+      - name: Check the gitleaks config still detects
+        # A config with no active rules passes every scan below without a sign.
+        run: bash scripts/gitleaks-config-canary.sh
       - name: Run gitleaks
         run: gitleaks detect --source . --verbose --redact
 

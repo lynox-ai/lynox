@@ -330,6 +330,16 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     // from "crashed", which is the whole claim the exemption makes.
     expectStrippedStderr: /--report <path> is required/,
   },
+  // CI-ONLY, in the gitleaks jobs. Its planted/clean pair cannot run in this suite:
+  // it needs the gitleaks binary, which only those jobs install. It plants its own
+  // value on every run there, so what this harness can add is the stripped door.
+  'gitleaks-config-canary': {
+    kind: 'exempt',
+    reason:
+      'brings its own plant rather than scanning a tree, and needs the gitleaks binary that only the gitleaks CI jobs install; with no config at the repository root it refuses (exit 2) instead of reporting the config as working',
+    expectStrippedExit: 2,
+    expectStrippedStderr: /no \.gitleaks\.toml at .* refusing to report the config as working/,
+  },
   // Not our scripts, so there is nothing here to harden — but they still have to
   // be ACCOUNTED for, otherwise "every gate has a line" is only true of the ones
   // that happened to be shell scripts.
@@ -379,6 +389,7 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
   'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },
+  'gitleaks-config-canary': { cmd: 'bash', args: [join(repoRoot, 'scripts/gitleaks-config-canary.sh')] },
 };
 
 /** Gate names derived from the OTHER executor: the workflow files. Mapped by
