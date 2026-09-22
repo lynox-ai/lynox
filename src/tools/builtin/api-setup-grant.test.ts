@@ -270,6 +270,7 @@ describe('fetch_token — a revocation verdict and the way back', () => {
     const grant = store.get('crm-api')?.oauth_grant;
     expect(grant?.state).toBeUndefined();
     expect(grant?.revoked_fp).toBeUndefined();
+    expect(grant?.revoked_at).toBeUndefined();
     expect(grant?.minted_by).toBe('client-1');
   });
 });
@@ -376,6 +377,23 @@ describe('delete — what leaves the vault with a profile', () => {
     expect(vault.peek('CRM_CUSTOM_TOKEN')).toBe('at-custom');
     expect(result).toContain(`Removed its tokens from the vault: ${ACCESS}, ${REFRESH}.`);
     expect(result).toContain('CRM_CLIENT_ID, CRM_CLIENT_SECRET, CRM_CUSTOM_TOKEN');
+  });
+
+  it('does not list a removed token among the kept ones when the profile names it explicitly', async () => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    // refresh_token_key pointed at the derived slot by hand — it is still the
+    // profile's own token, so it goes, and the message must not claim it stayed.
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: REFRESH } } });
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(vault.peek(REFRESH)).toBeUndefined();
+    const kept = result.slice(result.indexOf('Kept in the vault'));
+    expect(kept).toContain('CRM_CLIENT_ID, CRM_CLIENT_SECRET —');
+    expect(kept).not.toContain(REFRESH);
   });
 
   it('never removes a derived name that falls into a protected prefix', async () => {

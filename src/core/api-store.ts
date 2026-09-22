@@ -753,13 +753,13 @@ export class ApiStore {
       }
     }
 
-    // Moving a profile to a new host releases the old one. Without this the old
-    // host kept pointing here after an update, and the one-per-host rule above
-    // refused the next profile on a host nobody held any more. Only on an actual
-    // move: a save that keeps the host (every `fetch_token` persists its expiry
-    // through here) must not touch the host's rate bucket.
+    // Re-registering starts from a released host. That is what lets a profile
+    // that MOVED stop holding its old host: without it the old host kept pointing
+    // here after an update, and the one-per-host rule above refused the next
+    // profile on a host nobody held any more. On a save that keeps the host it
+    // only drops a rate bucket whose `rate_limit` the update removed.
     const previous = this.profiles.get(profile.id);
-    if (previous && hostOf(previous) !== hostname) this._releaseHost(previous);
+    if (previous) this._releaseHost(previous);
 
     this.profiles.set(profile.id, profile);
     if (hostname !== null) {

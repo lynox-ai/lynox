@@ -3079,6 +3079,22 @@ describe('httpRequestTool', () => {
       await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: liveStore }, sessionCounters: testCounters, secretStore } as never);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-live');
     });
+
+    it('names the slot fetch_token actually reads when the profile sets refresh_token_key', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { token_url: 'https://api.example.com/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', refresh_token_key: 'CRM_RT' } },
+        custom_endpoint_ack: ack,
+        oauth_grant: { state: 'revoked', revoked_fp: '0123456789abcdef', revoked_at: '2026-09-22T00:00:00.000Z' },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
+      // A new token stored under the derived name would never be read.
+      expect(refused).toContain('"CRM_RT" with ask_secret');
+    });
   });
 
   describe('HTML text extraction', () => {

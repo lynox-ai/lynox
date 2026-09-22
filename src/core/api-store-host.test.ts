@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -107,6 +107,43 @@ describe('ApiStore — one profile per host', () => {
     expect(booted.get('crm-a')).toBeDefined();
     expect(booted.get('crm-b')).toBeDefined();
     expect(booted.getHostConflict('api.crm.example')).toEqual(['crm-a', 'crm-b']);
+  });
+
+  it('says so in the operator log when the boot marks a shared host', () => {
+    const store = new ApiStore();
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      store.register(profile('crm-a', 'https://api.crm.example/v1'));
+      store.register(profile('crm-b', 'https://api.crm.example/v2'));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(writes.join('')).toContain('Host api.crm.example is mapped by more than one profile (crm-a, crm-b)');
+  });
+
+  it('hands the host\'s rate bucket to the profile that remains, not the one that left', () => {
+    const store = new ApiStore();
+    // The throttled profile boots first, the unthrottled one shares its host.
+    store.register(profile('crm-a', 'https://api.crm.example/v1', { rate_limit: { requests_per_second: 1 } }));
+    store.register(profile('crm-b', 'https://api.crm.example/v2'));
+    store.unregister('crm-a');
+    // crm-b declares no limit, so none of crm-a's may linger on the host.
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+  });
+
+  it('drops a rate bucket when an update removes the profile\'s rate_limit', () => {
+    const store = new ApiStore();
+    store.save(profile('crm-a', 'https://api.crm.example/v1', { rate_limit: { requests_per_second: 1 } }));
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+    expect(store.checkRateLimit('api.crm.example')).not.toBeNull();
+    store.save(profile('crm-a', 'https://api.crm.example/v1'));
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
   });
 
   it('keeps refusing a vault-slot collision at boot, unlike a shared host', () => {
