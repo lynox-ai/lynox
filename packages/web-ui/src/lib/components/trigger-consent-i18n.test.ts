@@ -26,10 +26,7 @@ function entry(key: string): { de: string; en: string } {
 
 const KEYS = [
 	'triggers.awaiting_confirmation', 'triggers.awaiting_hint', 'triggers.instruction',
-	'triggers.watch_url', 'triggers.watch_every', 'triggers.awaiting_due_since',
-	'triggers.awaiting_first_run', 'triggers.awaiting_paused', 'triggers.awaiting_not_scheduled',
-	'triggers.confirm', 'triggers.confirm_label', 'triggers.confirmed',
-	'triggers.confirmed_paused', 'triggers.confirm_failed',
+	'triggers.confirm', 'triggers.confirm_label', 'triggers.confirmed', 'triggers.confirm_failed',
 ];
 
 describe('the consent block speaks both languages', () => {
@@ -46,14 +43,4 @@ describe('the consent block speaks both languages', () => {
 		}
 	});
 
-	it('the sentences that name a time keep their slot in both languages', () => {
-		for (const key of ['triggers.awaiting_due_since', 'triggers.awaiting_first_run']) {
-			const { de, en } = entry(key);
-			expect(de, key).toContain('{date}');
-			expect(en, key).toContain('{date}');
-		}
-		const every = entry('triggers.watch_every');
-		expect(every.de).toContain('{minutes}');
-		expect(every.en).toContain('{minutes}');
-	});
 });

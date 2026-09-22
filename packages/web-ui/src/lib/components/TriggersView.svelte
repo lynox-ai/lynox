@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t, tf, getLocale } from '../i18n.svelte.js';
+	import { t, getLocale } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
-	import { awaitsConfirmation, confirmationOutcome, displaySafe, instructionOf, watchOf } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction } from '../utils/trigger-consent.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -102,21 +102,18 @@
 	// `confirmed_at` through `POST /api/tasks/:id/confirm`; the trigger keeps its
 	// schedule and becomes due in place — nothing else about it changes.
 	//
-	// The message says only what confirming did. It used to add "runs on its
-	// schedule", which is false for every row the scheduler holds back for a
-	// second reason — a paused one above all, and Pause sits on this same card.
+	// The message says what confirming did and nothing about when the run comes.
+	// Two earlier versions tried to say that — "runs on its schedule", then a date
+	// line — and both spoke for reasons the consent does not settle: a paused row,
+	// a completed one, a row with no next run at all. When the run happens is the
+	// scheduler's answer to give, on its own surface.
 	async function confirmTrigger(trigger: Trigger): Promise<void> {
 		if (busy[trigger.id]) return;
 		busy[trigger.id] = true;
 		try {
 			const res = await fetch(`${getApiBase()}/tasks/${trigger.id}/confirm`, { method: 'POST' });
 			if (!res.ok) throw new Error();
-			// The route answers with the stored row, so the message speaks from what
-			// the engine has, not from what this list happened to load: another
-			// window may have paused the trigger since.
-			const stored = (await res.json().catch(() => null)) as Trigger | null;
-			const paused = (stored ?? trigger).enabled === 0;
-			addToast(paused ? t('triggers.confirmed_paused') : t('triggers.confirmed'), 'success');
+			addToast(t('triggers.confirmed'), 'success');
 			await loadTriggers();
 		} catch {
 			addToast(t('triggers.confirm_failed'), 'error');
@@ -268,37 +265,21 @@
 								{/if}
 							</div>
 							{#if awaitsConfirmation(trigger)}
-								<!-- Confirming allows this to run without the owner present, so the block says
-								     what would run and what would follow. A watch runs on a PAGE — `executeWatch`
-								     prompts with the fetched page and the description reaches it nowhere — so it is
-								     shown that address and its cadence instead of an instruction it does not get. `displaySafe` removes what
-								     could forge that text — it is written by the agent and can quote what the
-								     agent read elsewhere. -->
+								<!-- Confirming allows this to run without the owner present, so what the run
+								     would carry out is shown beside the button — a button next to nothing but an
+								     agent-written heading is a rubber stamp. `displaySafe` removes what could
+								     forge that text; it is written by the agent and can quote what the agent read
+								     elsewhere. A watch runs on a page instead and never receives this text, so it
+								     shows its waiting state and no button at all (`showsInstruction`). -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
 									<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>
-									{#if watchOf(trigger)}
-										<div class="text-xs text-text-muted" data-consent-watch>
-											<p class="break-words"><span class="font-medium">{t('triggers.watch_url')}:</span> {displaySafe(watchOf(trigger)?.url ?? '')}</p>
-											{#if watchOf(trigger)?.intervalMinutes}
-												<p class="mt-0.5">{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
-											{/if}
-										</div>
-									{:else}
+									{#if showsInstruction(trigger)}
 										<div class="text-xs text-text-muted" data-consent-instruction>
 											<span class="font-medium">{t('triggers.instruction')}:</span>
 											<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf(trigger))}</p>
 										</div>
+										<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/15 disabled:opacity-40">{t('triggers.confirm')}</button>
 									{/if}
-									{#if confirmationOutcome(trigger) === 'paused'}
-										<p class="text-xs text-text-muted">{t('triggers.awaiting_paused')}</p>
-									{:else if confirmationOutcome(trigger) === 'due-now'}
-										<p class="text-xs text-text-muted">{tf('triggers.awaiting_due_since', { date: fmtDate(trigger.next_run_at ?? '') })}</p>
-									{:else if confirmationOutcome(trigger) === 'scheduled'}
-										<p class="text-xs text-text-muted">{tf('triggers.awaiting_first_run', { date: fmtDate(trigger.next_run_at ?? '') })}</p>
-									{:else}
-										<p class="text-xs text-text-muted">{t('triggers.awaiting_not_scheduled')}</p>
-									{/if}
-									<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/15 disabled:opacity-40">{t('triggers.confirm')}</button>
 								</div>
 							{/if}
 						</div>

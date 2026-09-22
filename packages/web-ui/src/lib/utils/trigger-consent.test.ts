@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
 import { TriggerStore, type TriggerRow } from '../../../../../src/core/trigger-store.js';
-import { awaitsConfirmation, confirmationOutcome, displaySafe, instructionOf, watchOf } from './trigger-consent.js';
+import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction } from './trigger-consent.js';
 
 describe('awaitsConfirmation', () => {
 	it('is true for an agent run with no confirmation, whether the field is absent or null', () => {
@@ -24,6 +24,22 @@ describe('awaitsConfirmation', () => {
 	});
 });
 
+describe('showsInstruction — only where the run carries out the text', () => {
+	it('is true for a waiting scheduled agent run', () => {
+		expect(showsInstruction({ effect: 'run_agent', source: 'cron' })).toBe(true);
+		expect(showsInstruction({ effect: 'run_agent' })).toBe(true);
+	});
+
+	it('is false for a watch, which runs on its page and never receives this text', () => {
+		expect(showsInstruction({ effect: 'run_agent', source: 'watch' })).toBe(false);
+	});
+
+	it('is false once confirmed, and false for the effects that never wait', () => {
+		expect(showsInstruction({ effect: 'run_agent', source: 'cron', confirmed_at: '2026-01-01T00:00:00.000Z' })).toBe(false);
+		expect(showsInstruction({ effect: 'run_workflow', source: 'cron' })).toBe(false);
+	});
+});
+
 describe('instructionOf — what the run is told, not what the row shows', () => {
 	it('is title and description together, the way the engine composes them', () => {
 		expect(instructionOf({ title: 'Mahnungen', description: 'Ab 14 Tagen, als Entwurf.' }))
@@ -38,48 +54,6 @@ describe('instructionOf — what the run is told, not what the row shows', () =>
 
 	it('does not repeat a description that only echoes the title', () => {
 		expect(instructionOf({ title: 'Mahnungen', description: ' Mahnungen ' })).toBe('Mahnungen');
-	});
-});
-
-describe('watchOf — the page a watch would fetch, and how often', () => {
-	it('reads the url and the interval out of the stored config', () => {
-		expect(watchOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise', interval_minutes: 60, selector: '.p' }) }))
-			.toEqual({ url: 'https://example.com/preise', intervalMinutes: 60 });
-	});
-
-	it('gives the url alone when the config carries no usable interval', () => {
-		expect(watchOf({ watch_config: '{"url":"https://example.com"}' })).toEqual({ url: 'https://example.com' });
-		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":"60"}' })).toEqual({ url: 'https://example.com' });
-	});
-
-	it('yields nothing rather than an empty label', () => {
-		expect(watchOf({})).toBeUndefined();
-		expect(watchOf({ watch_config: '' })).toBeUndefined();
-		expect(watchOf({ watch_config: '{"url":""}' })).toBeUndefined();
-		expect(watchOf({ watch_config: '{"url":123}' })).toBeUndefined();
-		expect(watchOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
-	});
-
-	it('survives a config that is not JSON at all', () => {
-		expect(watchOf({ watch_config: 'https://example.com' })).toBeUndefined();
-		expect(watchOf({ watch_config: '{broken' })).toBeUndefined();
-	});
-
-	it('cuts a url that would push the button off the screen', () => {
-		// Nothing bounds this string on the way in, and the block renders it next to
-		// the Confirm button: an unbounded one buries the thing being agreed to.
-		const long = `https://example.com/${'a'.repeat(5000)}`;
-		const shown = watchOf({ watch_config: JSON.stringify({ url: long }) })?.url ?? '';
-		expect(shown.length).toBeLessThan(200);
-		expect(shown.endsWith('\u2026')).toBe(true);
-		expect(long.startsWith(shown.slice(0, -1))).toBe(true);
-	});
-
-	it('cuts on code points, so a surrogate pair is not halved', () => {
-		const url = `https://example.com/${'\uD83D\uDCC8'.repeat(400)}`;
-		const shown = watchOf({ watch_config: JSON.stringify({ url }) })?.url ?? '';
-		expect(shown).not.toContain('\uFFFD');
-		expect([...shown].every((c) => c.codePointAt(0) !== 0xD83D)).toBe(true);
 	});
 });
 
@@ -195,66 +169,6 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 			.filter((t) => awaitsConfirmation(t) !== !due.has(t.id))
 			.map((t) => `${t.id}: view says ${awaitsConfirmation(t) ? 'waiting' : 'runs'}, scheduler says ${due.has(t.id) ? 'due' : 'held back'}`);
 		expect(disagreements).toEqual([]);
-	});
-
-	it('and what the block PROMISES after confirming is what the scheduler then does', () => {
-		// The claim this pins is the one the first version got wrong twice: it told
-		// the owner of a paused, completed or never-scheduled trigger that it would
-		// run "shortly after you confirm". Here the test does the confirming — it
-		// stamps the consent through the store and asks the scheduler whether the
-		// row runs, at the moment the block names.
-		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
-		dirs.push(dir);
-		const engine = new EngineDb(join(dir, 'engine.db'), '');
-		engines.push(engine);
-		const store = new TriggerStore(engine);
-		const FUTURE = '2027-01-01T00:00:00.000Z';
-		const LATER = '2030-01-01T00:00:00.000Z';
-		const base = {
-			title: 'x', description: '', source: 'cron' as TriggerRow['source'], effect: 'run_agent' as TriggerRow['effect'],
-			conditionJson: JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }),
-			paramsJson: '{}', retryCount: 0, confirmedAt: null,
-		};
-		const rows: TriggerRow[] = [
-			{ ...base, id: 'due', status: 'open', enabled: true, nextRunAt: PAST },
-			{ ...base, id: 'scheduled', status: 'open', enabled: true, nextRunAt: FUTURE },
-			{ ...base, id: 'paused', status: 'open', enabled: false, nextRunAt: PAST },
-			{ ...base, id: 'completed', status: 'completed', enabled: true, nextRunAt: PAST },
-			{ ...base, id: 'waiting', status: 'waiting', enabled: true, nextRunAt: PAST },
-			{ ...base, id: 'no-next-run', status: 'open', enabled: true, nextRunAt: null },
-			{
-				...base, id: 'failed-once', status: 'failed', enabled: true, nextRunAt: PAST,
-				conditionJson: JSON.stringify({ schedule_cron: null, watch_config: null }),
-			},
-		];
-		for (const row of rows) store.upsert(row);
-
-		const listed = JSON.parse(JSON.stringify(store.listFiltered())) as Array<{
-			id: string; status?: string; enabled?: number; next_run_at?: string; schedule_cron?: string;
-		}>;
-		expect(listed).toHaveLength(rows.length);
-
-		// The block speaks BEFORE the confirmation, so its promise is read first.
-		const promised = new Map(listed.map((t) => [t.id, confirmationOutcome(t, Date.parse('2026-09-22T12:00:00.000Z'))]));
-		expect([...promised.values()].filter((o) => o === 'due-now')).toHaveLength(1);
-		expect([...promised.values()].filter((o) => o === 'scheduled')).toHaveLength(1);
-		expect([...promised.values()].filter((o) => o === 'paused')).toHaveLength(1);
-		expect([...promised.values()].filter((o) => o === 'not-scheduled')).toHaveLength(4);
-
-		// …then the consent is actually given, and the scheduler is asked.
-		for (const row of rows) store.setConfirmedAt(row.id, CONFIRMED);
-		const dueNow = new Set(store.getDue('2026-09-22T12:00:00.000Z').map((t) => t.id));
-		const dueLater = new Set(store.getDue(LATER).map((t) => t.id));
-
-		const broken: string[] = [];
-		for (const [id, outcome] of promised) {
-			if (outcome === 'due-now' && !dueNow.has(id)) broken.push(`${id}: promised a run now, scheduler holds it back`);
-			if (outcome === 'scheduled' && (dueNow.has(id) || !dueLater.has(id))) broken.push(`${id}: promised a run at its date, scheduler disagrees`);
-			if ((outcome === 'paused' || outcome === 'not-scheduled') && (dueNow.has(id) || dueLater.has(id))) {
-				broken.push(`${id}: promised nothing, scheduler runs it`);
-			}
-		}
-		expect(broken).toEqual([]);
 	});
 
 	it('and a trigger the view calls waiting is never due, whatever else holds it back', () => {
