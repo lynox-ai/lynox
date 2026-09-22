@@ -554,7 +554,8 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
   }
   const holdsValue = (k: string): boolean => {
     try {
-      return secretStore?.resolve(k) != null;
+      const value = secretStore?.resolve(k);
+      return value !== null && value !== undefined;
     } catch {
       return false;
     }
