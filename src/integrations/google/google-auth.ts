@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
 import { googleFetch, cpFetch } from '../../core/connector-egress.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
+import { classifyRefreshFailure, reclassifyForeignGrant, type RefreshFailureKind } from '../../core/oauth-refresh-failure.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from './vault-keys.js';
 
 // === Types ===
@@ -500,8 +501,6 @@ function deleteTokenData(vault?: SecretVault | undefined): void {
   }
 }
 
-type RefreshFailureKind = 'grant-revoked' | 'client-misconfigured' | 'transient';
-
 /**
  * The remedy per failure kind. A Record over the union rather than a chain of
  * ternaries, so adding a kind is a compile error until it has a remedy.
@@ -562,105 +561,6 @@ const FOREIGN_GRANT_REMEDY =
  * brake did nothing for the one caller that polls on its own.
  */
 const CLIENT_MISCONFIGURED_COOLDOWN_MS = 300_000;
-
-/**
- * Classify a `/token` refresh failure. Anchoring on the `error` field is what
- * every Google client library does; the HTTP status alone is ambiguous
- * (`invalid_grant` returns 400 just like a transient billing-limit would).
- *
- * The three kinds exist because two of them used to be one, and the pair that
- * was merged pulled in opposite directions:
- *
- * - `invalid_grant` — the GRANT is gone (revoked or expired). Nothing we
- *   change brings it back, so the stored token is worthless and is deleted.
- *   Google's remedy: "Authenticate the user again and ask for user consent to
- *   obtain new tokens."
- * - `invalid_client` (and the sibling client-config codes) — OUR credentials
- *   are wrong. The user's grant at Google is untouched. Google's remedy:
- *   "Review the OAuth client configuration, including the client ID and secret
- *   used for this request." Deleting here would destroy a working grant over a
- *   condition we can fix ourselves.
- *
- * Quotes read at developers.google.com/identity/protocols/oauth2/web-server on
- * 2026-08-21 — dated because a vendor page is a moving claim, and the note this
- * replaces cited a guidance that page does not contain (memory `fb_oauth_refresh`).
- *
- * **Scope, stated because the neighbouring comment used to overstate it:** this
- * separates failures by their `error` CODE, not by their cause. A wrong client
- * *secret* surfaces as `invalid_client` and is covered. A syntactically valid
- * but WRONG client *id* authenticates fine and makes Google reject the token as
- * foreign — reported as `invalid_grant`, indistinguishable *here* from a real
- * revocation, because the body carries nothing that separates them.
- *
- * That second case is no longer decided here. It is decided one step later, by
- * `reclassifyForeignGrant`, which compares the id recorded at minting time
- * against the one we just presented — the comparison this function has no
- * access to. This one stays a pure function of the response, which is what
- * makes it testable against Google's wire format alone.
- */
-
-function classifyRefreshFailure(httpStatus: number, body: string): RefreshFailureKind {
-  if (httpStatus >= 500 || httpStatus === 429) return 'transient';
-  try {
-    const parsed = JSON.parse(body) as { error?: unknown };
-    if (typeof parsed.error === 'string') {
-      if (parsed.error === 'invalid_grant') return 'grant-revoked';
-      // `unauthorized_client` / `deleted_client` are the same class as
-      // `invalid_client`: our app registration is wrong. Telling the user to
-      // "retry in a moment" would be a lie — retrying never fixes any of them.
-      if (parsed.error === 'invalid_client'
-        || parsed.error === 'unauthorized_client'
-        || parsed.error === 'deleted_client') return 'client-misconfigured';
-    }
-  } catch {
-    // Non-JSON body — Google may be returning an HTML error page from a
-    // proxy. Don't wipe the token on the basis of unparseable output.
-    return 'transient';
-  }
-  // 4xx with a JSON body naming neither code → unknown failure mode.
-  // Conservative default: keep the token.
-  return 'transient';
-}
-
-/**
- * Separate "the user revoked the grant" from "we presented the token to the
- * wrong client" — the two cases `classifyRefreshFailure` cannot tell apart.
- *
- * Google answers `invalid_grant` to both. A wrong client *secret* fails earlier
- * and louder (`invalid_client`, handled since core#1252); a wrong client *id*
- * that is syntactically valid authenticates fine, and Google then rejects the
- * refresh token as foreign to that client. The response is identical to a real
- * revocation, so the only thing that separates them is the id recorded when the
- * token was minted — which is why this takes the ids rather than the body.
- *
- * Three states, and only ONE of them changes the outcome:
- *
- * - **unknown** (either id absent) → unchanged. A control-plane-minted token
- *   and every blob predating `client_id` land here. Treating unknown as a
- *   mismatch would keep genuinely revoked grants forever and make reconnecting
- *   impossible — the opposite failure, and the more expensive one.
- * - **equal** → unchanged. The token really is dead; deleting it is right.
- * - **different** → `client-misconfigured`. The grant is intact; our
- *   registration is what is wrong. Reusing that kind rather than adding one is
- *   deliberate: its remedy already says exactly this ("Your Google connection
- *   is intact … an operator corrects them"), and it arms the same cool-down.
- *
- * The wrong direction is worth naming because a fix aimed at one failure mode
- * produces the other (`fb_overrule_swap`): being too eager here strands users
- * with a dead token no reconnect clears, being too shy deletes living grants.
- */
-function reclassifyForeignGrant(
-  failure: RefreshFailureKind,
-  mintedBy: string | undefined,
-  presentedBy: string | undefined,
-): RefreshFailureKind {
-  if (failure !== 'grant-revoked') return failure;
-  // Falsy, not `!== undefined`: every writer gates its stamp on truthiness, so
-  // an empty string never means "minted by the empty client" — it means the
-  // same as absent, and reading it as a mismatch would keep a dead token.
-  if (!mintedBy || !presentedBy) return failure;
-  return mintedBy === presentedBy ? failure : 'client-misconfigured';
-}
 
 function base64url(input: string | Buffer): string {
   const buf = typeof input === 'string' ? Buffer.from(input) : input;

@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+### Fixed: deleting an API profile removes the tokens its exchanges wrote
+
+- Deleting a profile — with `api_setup delete` or on the settings page —
+  removed the profile and left every token `fetch_token` had written for it in
+  the vault. `fetch_token` now records each name it writes together with a
+  fingerprint of the value, and a delete removes a name only while the vault
+  still holds that very value — unless another profile still references the
+  name, or the name is one a tenant cannot recover: an infrastructure secret
+  or the slot holding their own provider key. Neither a name nor a record alone
+  is enough: a name derived from the profile id, or one an exchange wrote
+  earlier, can hold a token the user has stored there by hand. A refresh token
+  the provider hands back unchanged — the very one it was sent — is neither
+  rewritten nor recorded. Tokens from before this change are not on any record
+  and stay.
+- `api_setup delete` names what it removed and which of the names the
+  profile used still hold a value — apart from a platform slot or the
+  tenant's own provider key, which are not this profile's to offer — and says
+  to ask the user before removing the rest.
+- The `vault_keys` column of a connection also lists the token names an
+  oauth2 profile uses at runtime, the names its exchanges recorded, and a
+  basic profile's `username_key`/`password_key`.
+- `api_setup` refuses an `auth.vault_keys` that is neither absent nor a list
+  of names.
+
+### Changed: a failed token refresh says whether the grant was revoked
+
+- `fetch_token` reads a failed token exchange the way the Google path already
+  did (the classifier now lives in `src/core/oauth-refresh-failure.ts` for
+  both): `invalid_grant` from the client that minted the refresh token is a
+  revocation; `invalid_client` and its siblings, or `invalid_grant` from a
+  different client, are a client problem that leaves the grant alone;
+  anything else changes nothing. Which client minted a token is stamped with
+  the token, as fingerprints of both, so a refresh token stored later is
+  judged on its own. When the refresh token in the vault has changed or gone
+  by the time the rejection arrives — a concurrent exchange in the same
+  process rotated it, or a token was stored or removed meanwhile — nothing is
+  recorded, and the reply says what changed. A rejection that arrives before a
+  concurrent exchange finishes can still record a revocation; that exchange's
+  success clears it.
+- A revocation is recorded on the profile (`oauth_grant`, engine-owned like
+  `custom_endpoint_ack`: a value in a create or update is discarded, and the
+  reply says so) and projected into `connections.status` while the profile
+  exchanges a refresh token. `fetch_token` will not resend the rejected
+  refresh token, and `http_request` refuses the profile with the way back,
+  instead of a 401 whose hint called it an expired token. A different refresh
+  token in the vault clears the way for both; the next successful exchange
+  clears the record. A profile that reads its refresh token from a slot of its
+  own naming gets no verdict, because `fetch_token` stores rotated tokens under
+  the derived name.
+- `fetch_token` runs its checks on `output_secret_name` before it posts
+  anything, rather than after the exchange has already spent a refresh token,
+  and one check is new: a name where the profile keeps its refresh token is
+  refused, because the access token would be written over it.
+
+### Changed: two API profiles can no longer share a host
+
+- `http_request` picks a profile's credential by hostname alone, so two
+  profiles on one host were last-write-wins: the credential of whichever loaded
+  last went out, without a word. Saving a second profile on a host another
+  profile holds is now refused, with the holder's name. Profiles that already
+  share a host keep loading and can still be saved in place; the host is
+  marked, the boot logs it, and a request there that would carry a credential
+  is refused, naming both and asking for the user's choice, until one is
+  removed or moved. Moving a profile to a new host releases the old one.
+- Two public (`auth.type: none`) profiles on one host are not refused at
+  request time; there is no credential to mix up.
+- An update that removes a profile's `rate_limit` now also drops its rate
+  bucket, and when one of two profiles on a host goes, the one that stays
+  gets its own limit back.
+
 ### Fixed: a new instance can create its first table
 
 - The six `data_store_*` tools were registered at boot only if the store

@@ -76,13 +76,17 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     expect(r.getByHostname('api.stripe.com')?.id).toBe('stripe');
   });
 
-  it('save derives vault_keys from auth.vault_keys + oauth key fields', () => {
+  it('save derives vault_keys from auth.vault_keys, the oauth key fields, and the runtime token slots', () => {
     const { cs } = makeCs();
     const w = new ApiStore();
     w.setConnectionStore(cs);
     w.save(richProfile());
     const keys = cs.get('stripe')?.vaultKeys ?? [];
-    expect([...keys].sort()).toEqual(['STRIPE_CLIENT_ID', 'STRIPE_CLIENT_SECRET', 'STRIPE_REFRESH']);
+    // The last two are what `fetch_token` writes at runtime — named here because
+    // no configuration field ever carries them.
+    expect([...keys].sort()).toEqual([
+      'STRIPE_ACCESS_TOKEN', 'STRIPE_CLIENT_ID', 'STRIPE_CLIENT_SECRET', 'STRIPE_REFRESH', 'STRIPE_REFRESH_TOKEN',
+    ]);
   });
 
   it('save stores kind=api, direction=outbound, subject_id=null', () => {

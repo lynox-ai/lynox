@@ -65,6 +65,8 @@ const mockSecretMask = vi.fn(
 const mockGetUserConfig = vi.fn().mockReturnValue({});
 const mockSecretResolve = vi.fn().mockReturnValue(null);
 const mockSetApiKey = vi.fn();
+// No API store by default; the api-profiles route tests swap a real one in.
+const mockGetApiStore = vi.fn().mockReturnValue(null);
 
 // Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
 // records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
@@ -217,6 +219,7 @@ vi.mock('../core/engine.js', () => ({
       confirmTrigger: mockConfirmTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    this.getApiStore = mockGetApiStore;
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
     this.getSubjectStore = vi.fn().mockReturnValue(null);
@@ -2660,6 +2663,35 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const body = await res.json() as { deleted: boolean };
       expect(body.deleted).toBe(true);
+    });
+  });
+
+  // The settings page deletes profiles through this route, not through the tool,
+  // so it has to take the same tokens with a profile the tool does — and no more.
+  describe('DELETE /api/api-profiles/:id', () => {
+    it('removes the tokens the profile\'s exchanges wrote, and leaves what the user stored', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      // The route reads the vault to match the recorded value before deleting.
+      mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_API_ACCESS_TOKEN' ? 'at-1' : null));
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'] },
+        oauth_grant: { written: [{ name: 'CRM_API_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(store.get('crm-api')).toBeUndefined();
+        expect(mockSecretDelete.mock.calls.map((c: unknown[]) => c[0])).toEqual(['CRM_API_ACCESS_TOKEN']);
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
     });
   });
 

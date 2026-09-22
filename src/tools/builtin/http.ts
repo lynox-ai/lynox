@@ -1,7 +1,8 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
-import { accessTokenKey } from '../../core/api-store.js';
+import { accessTokenKey, hasRevokedGrant, refreshTokenKey } from '../../core/api-store.js';
+import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -459,18 +460,37 @@ async function attachEngineManagedAuth(
   agent: import('../../types/index.js').IAgent,
 ): Promise<AttachedAuth> {
   const secretStore = agent.secretStore;
-  if (!toolContext?.apiStore || !secretStore) return {};
+  const apiStore = toolContext?.apiStore;
+  if (!apiStore || !secretStore) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
   let hostname: string;
   try {
     hostname = new URL(url).hostname;
-    profile = toolContext.apiStore.getByHostname(hostname);
+    profile = apiStore.getByHostname(hostname);
   } catch {
     return {}; // invalid URL — assertHostPolicy reports it downstream
   }
-  const auth = profile?.auth;
-  if (!profile || !auth) return {};
+  if (!profile) {
+    // Two profiles on one host — only the boot can leave that behind, since a
+    // save of the second is refused. The engine used to attach whichever had
+    // loaded last, silently. Now it attaches nothing and says why, but only when
+    // a credential is at stake: two public (`none`) profiles on one host have
+    // nothing to mix up, and blocking their requests would help no one.
+    const conflict = apiStore.getHostConflict(hostname);
+    const credentialed = conflict?.some((id) => {
+      const type = apiStore.get(id)?.auth?.type;
+      return type !== undefined && type !== 'none';
+    });
+    if (conflict && credentialed) {
+      // The model cannot know which of the two is still wanted, so the text sends
+      // it to the user rather than to a delete.
+      return { refusal: `Error: more than one api_profile maps to ${hostname} (${conflict.join(', ')}), so the engine cannot tell which stored credential this request should carry, and it sends none. Ask the user which profile to keep; the other one then has to be deleted or given a different base_url.` };
+    }
+    return {};
+  }
+  const auth = profile.auth;
+  if (!auth) return {};
 
   /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
   const put = (name: string, value: string): AttachedAuth => {
@@ -500,6 +520,22 @@ async function attachEngineManagedAuth(
     // or a JSON dropped into the apis dir), so re-verify here, fail-closed.
     if (!hostVetted) {
       return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
+    }
+    // A revoked grant is said so here, before a request goes out, rather than
+    // after it comes back 401 — where the hint below would call it an expired
+    // token and send the model to fetch_token, which cannot help. Only while the
+    // vault still holds the token that was rejected (or none): a different one
+    // is the way back, and it is also how a verdict another process reached on
+    // a stale view of the vault steps aside once this one holds the newer token.
+    // And only for a refresh-token profile — the only kind a revocation is ever
+    // recorded for; one moved to client credentials since has no refresh token
+    // to hand back, and the text would send the user after one.
+    if (hasRevokedGrant(profile)) {
+      const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+      const current = secretStore.resolve(refreshKey);
+      if (current === null || tokenFingerprint(current) === profile.oauth_grant?.revoked_fp) {
+        return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant?.revoked_at) };
+      }
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
     // the current access_token. Prevents two failure modes: a stale key re-referenced
@@ -625,9 +661,9 @@ async function attachEngineManagedAuth(
 /**
  * Header, query-param and vault-key names come from the PROFILE, and a
  * prompt-injected agent can author one: `validateProfile` shape-checks
- * `username_key`/`password_key` but never `vault_keys`, `header_name` or
- * `query_param`. These land in a hint that is appended OUTSIDE the
- * `untrusted_data` wrap on purpose — system guidance, which the model is meant to
+ * `username_key`/`password_key`, checks `vault_keys` only for being a list of
+ * strings, and never checks `header_name` or `query_param`. These land in a
+ * hint that is appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the model is meant to
  * trust — so a name carrying newlines can forge a reminder of its own.
  *
  * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`
@@ -956,7 +992,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Soft-warning: note missing profile but let the request through
         // The agent sees the warning in the response and can create a profile for next time
         const SKIP_PROFILE_CHECK = new Set(['www.google.com', 'google.com', 'github.com', 'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'localhost', '127.0.0.1']);
-        if (!toolContext.apiStore.getByHostname(reqHostname) && !SKIP_PROFILE_CHECK.has(reqHostname)) {
+        // A shared host HAS profiles — two of them — and a create there is refused,
+        // so "create one" would be advice the model cannot follow.
+        if (!toolContext.apiStore.getByHostname(reqHostname) && !toolContext.apiStore.getHostConflict(reqHostname)
+            && !SKIP_PROFILE_CHECK.has(reqHostname)) {
           const looksLikeApi = reqHostname.startsWith('api.') || input.url.includes('/v1') || input.url.includes('/v2') || input.url.includes('/v3') || input.url.includes('/api/');
           if (looksLikeApi) {
             // Store warning — appended to response after the request completes
