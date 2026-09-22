@@ -1551,7 +1551,12 @@ Next steps before calling create:
         if (isProtectedSecretWrite(derivedAccess)) {
           return `${clash} The name this profile would otherwise use, "${derivedAccess}", is a protected slot, so its id leaves no name for the access token: rename the api_profile so its derived names do not collide.`;
         }
-        if (outputName === derivedAccess) {
+        // On `refreshKey`, not on the output name: the sentence below asserts that
+        // the profile's refresh slot IS the name the access token needs, and that
+        // is true for every shape where it holds — including one that arrives with
+        // an explicit output name and would otherwise be told to leave it out, only
+        // to land here on the next call.
+        if (refreshKey === derivedAccess) {
           const move = grantType === 'refresh_token'
             ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
             : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`;

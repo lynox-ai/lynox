@@ -570,6 +570,20 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('answers the same way when that profile is asked for the derived refresh name as well', async () => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: ACCESS } } });
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'rt-1' }));
+
+    // The refusal is reached through the derived refresh name, but the profile's
+    // own slot is still what blocks the way out.
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: REFRESH }, agent) as string;
+
+    expect(result).toContain('Leaving output_secret_name out does not help');
+    expect(result).not.toContain(`goes to "${ACCESS}"`);
+  });
+
   it('tells a client-credentials profile to drop the refresh slot it does not read', async () => {
     const store = new ApiStore();
     const base = crmProfile({}, 'client_credentials');
