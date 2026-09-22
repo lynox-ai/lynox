@@ -36,19 +36,15 @@ export const CURRENT_PIPELINE_SCHEMA_VERSION = 2;
  * MUST NOT depend on any state outside the blob it is handed.
  */
 const TRANSFORMS: Record<number, (blob: Record<string, unknown>) => void> = {
-  // v0→v1: first-run-confirm backfill (v2.7.0). A v0 blob has NO `schema_version`,
-  // which means it predates content-versioning — and versioning arrived WITH the
-  // portable-import feature, so every v0 template is a SELF-BUILT workflow the user
-  // authored in their own session. v2.7.0 added a consent gate (cron + /run +
-  // autonomous run_workflow) that refuses an unconfirmed workflow; without this
-  // backfill it would retroactively refuse workflows nobody could have confirmed.
-  // The dates, because a shorter sentence here was wrong twice: the gate landed
-  // 2026-06-24 (#766), content-versioning 2026-07-13 (#952), the save-time stamp
-  // 2026-07-14 (#984). So a v0 blob either predates the gate or — saved in the
-  // three weeks between — lived under it with no way to be stamped at all. Both
-  // groups are the same amnesty, and it is a ONE-TIME one: a workflow saved today
-  // lands unconfirmed on purpose, because the tool that saves it is called by the
-  // model, and consent comes from the person scheduling it.
+  // v0→v1: a ONE-TIME first-run-confirm for blobs that predate content-versioning.
+  // A v0 blob has no `schema_version`, which is only written by the native path
+  // (`insertPlannedPipeline` stamps CURRENT), so nothing saved today can enter
+  // here — and a workflow saved today lands UNCONFIRMED on purpose, because the
+  // tool that saves it is called by the model.
+  //   No history in this comment, deliberately. Three attempts to date the gate
+  // against this transform were each wrong in a different way — which release, how
+  // long the window was, whether anything could be stamped during it. The dates
+  // live in git; what this block needs is what it DOES and when it can fire.
   //   Safe against imports: an imported blob is persisted through a fail-closed
   // chokepoint that stamps `schema_version` at CURRENT (import-workflow.ts), so it
   // is never v0 and never enters this step — it stays unconfirmed by design.
