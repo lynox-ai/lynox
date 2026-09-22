@@ -121,14 +121,17 @@ export function revokedGrantMessage(id: string, refreshKey: string, revokedAt: s
 }
 
 /**
- * A short, one-way fingerprint of a token, so a record can say WHICH token the
- * provider rejected without holding the token.
+ * A short, one-way fingerprint, so a record can say WHICH token the provider
+ * rejected — or which client minted one — without holding the value.
  *
  * It lets a revoked verdict refuse to post the same token again, and step aside
  * the moment a different one is in the vault — the user's way back. Sixteen hex
- * characters of SHA-256: the tokens it is taken from are high-entropy, so the
- * prefix identifies without revealing, and collisions between two tokens of one
- * profile are not a practical concern.
+ * characters of SHA-256. For a refresh token that identifies without revealing:
+ * the value is high-entropy. A client id is often a public identifier and gains
+ * no secrecy here; it is fingerprinted because the slot it is read from is named
+ * by the profile and could hold anything, and the record is stored in plain text.
+ * Only equality is ever asked of it, and a collision between two values one
+ * profile sees is not a practical concern.
  */
 export function tokenFingerprint(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 16);

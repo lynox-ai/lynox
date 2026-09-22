@@ -453,6 +453,18 @@ describe('create/update — the grant record belongs to the engine', () => {
     expect(result).toContain('The oauth_grant sent with this call was ignored');
   });
 
+  it('says nothing when an update echoes the stored record unchanged', async () => {
+    const store = new ApiStore();
+    const agent = makeAgent(store, vaultWithRefresh(), allow);
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+
+    // The view → edit → update round trip carries the record back as it was.
+    const result = await apiSetupTool.handler({ action: 'update', profile: crmProfile({ description: 'edited', oauth_grant: stamp('client-1', 'rt-1') }) }, agent) as string;
+
+    expect(store.get('crm-api')?.description).toBe('edited');
+    expect(result).not.toContain('oauth_grant');
+  });
+
   it('keeps the stored record when an update omits the field, without a note', async () => {
     const store = new ApiStore();
     const agent = makeAgent(store, vaultWithRefresh(), allow);
@@ -481,6 +493,19 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
     expect(result).toContain(`Removed the tokens its exchanges wrote: ${ACCESS}, ${REFRESH}, CRM_CUSTOM_TOKEN.`);
     expect(result).toContain('Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET.');
+  });
+
+  it('lists as still in the vault only names that actually hold a value', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS] } }));
+    // The client secret was never stored.
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', [ACCESS]: 'at-1' });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toContain('Still in the vault: CRM_CLIENT_ID.');
+    expect(result).not.toContain('CRM_CLIENT_SECRET');
   });
 
   it('never removes a credential the user stored under a name the id happens to derive', async () => {

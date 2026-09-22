@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { ConnectionStore } from './connection-store.js';
-import { ApiStore, type ApiProfile } from './api-store.js';
+import { ApiStore, purgeRecordedTokens, type ApiProfile } from './api-store.js';
 
 /**
  * One profile per host, and the grant record's two projections (the
@@ -259,6 +259,18 @@ describe('ApiStore — grant record projections', () => {
     store.setConnectionStore(cs);
     store.save({ ...oauthProfile(), auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
     expect(cs.get('crm-api')?.vaultKeys).toEqual(['CRM_KEY']);
+  });
+
+  it('does not count the profile itself as "another profile" when the purge runs before it left the store', () => {
+    const store = new ApiStore();
+    store.register(oauthProfile({ oauth_grant: { written_keys: ['CRM_API_ACCESS_TOKEN'] } }));
+    const values: Record<string, string> = { CRM_API_ACCESS_TOKEN: 'at-1' };
+    const vault = {
+      resolve: (n: string) => values[n] ?? null,
+      deleteSecret: (n: string) => { const had = n in values; delete values[n]; return had; },
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const purge = purgeRecordedTokens(store, store.get('crm-api')!, vault);
+    expect(purge.removed).toEqual(['CRM_API_ACCESS_TOKEN']);
   });
 
   it('names a caller-chosen access-token slot in the purge trail', () => {
