@@ -101,6 +101,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
+	import { createMicSession } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
@@ -964,45 +965,18 @@
 	let mediaRecorder: MediaRecorder | null = null;
 	let isStartingRecording = $state(false);
 	// Persistent mic resources — reused across recordings within the session.
-	let micStream: MediaStream | null = null;
-	let micReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+	// The acquire/reuse/release/recycle policy lives in utils/mic-session.ts so
+	// it can be tested; this component cannot be imported in vitest.
 	const MIC_IDLE_RELEASE_MS = 60_000;
+	const micSession = createMicSession<MediaStream>({
+		acquire: () => navigator.mediaDevices.getUserMedia({ audio: true }),
+		setTimer: (fn, ms) => setTimeout(fn, ms),
+		clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+	}, MIC_IDLE_RELEASE_MS);
 
-	async function ensureMicStream(): Promise<MediaStream> {
-		// A pending release means we're inside the idle window — cancel it
-		// and return the still-live stream.
-		if (micReleaseTimer) {
-			clearTimeout(micReleaseTimer);
-			micReleaseTimer = null;
-		}
-		if (micStream && micStream.getAudioTracks().some((t) => t.readyState === 'live')) {
-			return micStream;
-		}
-		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-		micStream = stream;
-		return stream;
-	}
-
-	function scheduleMicRelease(): void {
-		// No stream to release (e.g. cleanupRecording fired after the
-		// component already tore down the mic on afterNavigate) → don't
-		// arm a no-op timer that would just expire and call releaseMicNow
-		// against null state.
-		if (!micStream) return;
-		if (micReleaseTimer) return;
-		micReleaseTimer = setTimeout(releaseMicNow, MIC_IDLE_RELEASE_MS);
-	}
-
-	function releaseMicNow(): void {
-		if (micReleaseTimer) {
-			clearTimeout(micReleaseTimer);
-			micReleaseTimer = null;
-		}
-		if (micStream) {
-			micStream.getTracks().forEach((t) => t.stop());
-			micStream = null;
-		}
-	}
+	const ensureMicStream = (): Promise<MediaStream> => micSession.ensure();
+	const scheduleMicRelease = (): void => micSession.scheduleRelease();
+	const releaseMicNow = (): void => micSession.releaseNow();
 
 	function cleanupRecording() {
 		recording = false;
@@ -1047,10 +1021,23 @@
 				// bytes, no audio frames) on second-and-later MediaRecorder
 				// runs after a clean stop+cleanup cycle — confirmed 2026-05-06
 				// when consecutive captures all returned a 60-byte body that
-				// Mistral refused with "Transcription failed". Bail before we
-				// burn a transcribe call on data we can already see is empty.
-				if (blob.size < 1024) {
-					addToast(t('chat.voice_too_short'), 'error');
+				// Mistral refused with "Transcription failed".
+				//
+				// Bailing is not enough, and for four months it was all this did.
+				// A wedged session is not an ENDED session: its track still reads
+				// `live`, so the reuse check handed the same dead stream back on
+				// every retry, and the 60-second idle release that would have
+				// cleared it was cancelled by each new attempt. Recycling here is
+				// what turns "the microphone is broken" back into "that one
+				// recording failed" (reported 2026-09-22, iPhone/Safari).
+				if (micSession.afterCapture(blob.size) === 'empty') {
+					// The only trace this failure leaves anywhere. Nothing reaches
+					// the server — the blob never leaves the browser — so without
+					// this line the next report is again "it just stopped working".
+					console.warn('[voice] empty capture, recycling mic session', {
+						bytes: blob.size, mime: actualMime, chunks: chunks.length,
+					});
+					addToast(t('chat.voice_empty_capture'), 'error');
 					return;
 				}
 
