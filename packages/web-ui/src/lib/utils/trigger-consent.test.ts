@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
@@ -371,5 +371,69 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 		// …and it really does call three of them waiting, so the filter is not empty.
 		expect(listed.filter((t) => awaitsConfirmation(t)).map((t) => t.id).sort())
 			.toEqual(['completed-unconfirmed', 'no-next-run-unconfirmed', 'paused-unconfirmed']);
+	});
+});
+
+
+/**
+ * The display promises one thing: what it names is what the run dials. These
+ * three hold that promise against the two places it could quietly break —
+ * the fetch accepting a scheme the display does not (or the reverse), a host
+ * that READS differently from the one that is dialled, and a second writer
+ * repointing the stored address after a human already agreed to it.
+ */
+describe('display and fetch name the same target', () => {
+	const CORE = join(import.meta.dirname, '../../../../../src/core');
+	const target = (url: string) => watchOf({ watch_config: JSON.stringify({ url }) });
+
+	it('offers exactly the schemes fetchPinned accepts', () => {
+		const guard = readFileSync(join(CORE, 'network-guard.ts'), 'utf8');
+		const body = guard.slice(guard.indexOf('export async function fetchPinned'));
+		expect(body, 'fetchPinned not found — the anchor moved, this test measured nothing').not.toBe('');
+		const line = body.split('\n').find((l) => l.includes('parsed.protocol !=='));
+		const accepted = [...(line ?? '').matchAll(/'([a-z][a-z0-9+.-]*:)'/g)].map((m) => m[1]);
+		// Positive control: an anchor that slipped would leave an empty set, and an
+		// empty set passes every loop below without measuring anything.
+		expect(accepted).toContain('https:');
+		expect(accepted.length).toBeGreaterThanOrEqual(2);
+
+		for (const scheme of accepted) {
+			expect(target(`${scheme}//lynox.ai/p`), `${scheme} is fetched but not offered`).toBeDefined();
+		}
+		for (const scheme of ['ftp:', 'file:', 'data:', 'ws:', 'javascript:']) {
+			if (accepted.includes(scheme)) continue;
+			expect(target(`${scheme}//lynox.ai/p`), `${scheme} is offered but the fetch refuses it`).toBeUndefined();
+		}
+	});
+
+	it('names the dialled host, not the one the string reads like', () => {
+		// Expectations are literal on purpose: deriving them with `new URL` again
+		// would only prove that the same parser agrees with itself.
+		const cases: Array<[string, string]> = [
+			['https://lynox.ai@evil.example/prices', 'https://evil.example/prices'],
+			['https://lynox.ai:pw@evil.example/p', 'https://evil.example/p'],
+			['https://l\u0443nox.ai/p', 'https://xn--lnox-v6d.ai/p'],
+			['https://LYNOX.AI/Prices', 'https://lynox.ai/Prices'],
+			['https://lynox.ai:8443/prices', 'https://lynox.ai:8443/prices'],
+			['https://[2606:4700::1]:8443/p', 'https://[2606:4700::1]:8443/p'],
+			['https://lynox.ai/p\u202Egnp.exe', 'https://lynox.ai/p%E2%80%AEgnp.exe'],
+		];
+		for (const [url, shown] of cases) {
+			const t = target(url);
+			expect(`${t?.host ?? ''}${t?.rest ?? ''}`, url).toBe(shown);
+		}
+	});
+
+	it('keeps the stored address free of writers that could repoint it after consent', () => {
+		// Measured: after creation the only writer is the run's own `last_hash`
+		// (worker-loop), routed through task-manager and run-history. Editing the
+		// title or description clears `confirmed_at`; editing the ADDRESS is not a
+		// case that exists, and this is what makes the shown target trustworthy
+		// once it is confirmed. A new file here means a new one does exist.
+		const files = readdirSync(CORE).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'));
+		const writers = files.filter((f) => /updateWatchConfig|updateTriggerWatchConfig/.test(readFileSync(join(CORE, f), 'utf8')));
+		expect(writers.sort(), 'a new writer of watch_config must decide whether it clears confirmed_at — a repointed watch is a new thing to agree to').toEqual(
+			['run-history.ts', 'task-manager.ts', 'trigger-store.ts', 'worker-loop.ts'],
+		);
 	});
 });
