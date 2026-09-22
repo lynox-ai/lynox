@@ -14,7 +14,7 @@ export interface MemoryStubRow {
 }
 
 /**
- * The orphan-subject reap an engine.db memory delete owes (DEF-0015). Called INSIDE the
+ * The orphan-subject reap an engine.db memory delete owes. Called INSIDE the
  * delete transaction with the subject ids the deleted memories were linked to; deletes
  * only what nothing else references and returns the ids it removed. Installed via
  * {@link MemoryGraphStore.setOrphanSubjectReaper} by the owner that can see EVERY
@@ -124,7 +124,7 @@ export interface TierDivergenceReport {
  */
 export class MemoryGraphStore {
   private readonly db: Database.Database;
-  /** DEF-0015 — installed by the owner that can see every reference; null = no reap. */
+  /** Installed by the owner that can see every reference; null = no reap. */
   private orphanReaper: OrphanSubjectReaper | null = null;
 
   constructor(private readonly engine: EngineDb) {
@@ -281,7 +281,7 @@ export class MemoryGraphStore {
    * returns `false` for "nothing happened", and a second supersede method in the same
    * subsystem where a falsy value meant the opposite would be a trap worth avoiding.
    *
-   * WHY THIS IS NOT A GATE (`DEF-dk-trust-gate-consistency` (a)). It reads as one — the
+   * WHY THIS IS NOT A GATE. It reads as one — the
    * shape is `supersedMemory`'s backstop, one store over — but it cannot be:
    *
    *  1. It can never catch a downgrade, only a drift. A production caller reaches this line
@@ -308,16 +308,15 @@ export class MemoryGraphStore {
    * preserves it) and the S5a backfill copies it verbatim — so a divergence is not produced
    * by ordinary writes. But a stub created WITHOUT an explicit tier takes this file's
    * `'agent_inferred'` INSERT default rather than its legacy row's real tier, which invents
-   * a tier for a row that already has one: `DEF-mirror-stub-tier-default-invents-provenance`.
-   * Expect that to be the first thing this report counts.
+   * a tier for a row that already has one. Expect that to be the first thing this report counts.
    *
    * WHEN TO FLIP IT BACK: at the S5b'-d legacy DROP engine.db becomes authoritative and this
    * check becomes the PRIMARY gate — it must refuse again, and its callers must handle that
    * the way `KnowledgeLayer` handles `supersedMemory`'s refusal today (demote the resolution
-   * / roll the raise back whole), not merely log it. That is prose plus a register line
-   * (`DEF-mirror-gate-at-legacy-drop`), which is weaker than a mechanism — the one mechanism
-   * that exists is `memory-write-trust-gate.test.ts`'s "REPORTS a tier disagreement and
-   * retires anyway", which fails the moment the policy flips and points back here.
+   * / roll the raise back whole), not merely log it. That is prose, which is weaker than a
+   * mechanism — the one mechanism that exists is `memory-write-trust-gate.test.ts`'s "REPORTS a
+   * tier disagreement and retires anyway", which fails the moment the policy flips and points
+   * back here.
    */
   markSuperseded(
     memoryId: string,
@@ -455,8 +454,8 @@ export class MemoryGraphStore {
   // recall store. Both delete `memories` rows; the schema's ON DELETE CASCADE reaps
   // memory_subjects + supersedes + conflicts, and relationships.source_memory_id
   // SET-NULLs. The cascade runs memory→junction, not junction→subject, so on its own it
-  // leaves a subject the deleted memory minted standing with its plaintext `name` — the
-  // DEF-0015 residue. That is closed by the ORPHAN-SUBJECT REAP below: inside the same
+  // leaves a subject the deleted memory minted standing with its plaintext `name`.
+  // That is closed by the ORPHAN-SUBJECT REAP below: inside the same
   // transaction, every subject the deleted memories were linked to is handed to the
   // installed {@link OrphanSubjectReaper}, which deletes only what NOTHING else references
   // (verb layer, knowledge entries, thread anchors, records, detail rows — the
@@ -501,7 +500,7 @@ export class MemoryGraphStore {
    * remove too. memory_subjects / supersedes / conflicts still ride their ON DELETE
    * CASCADE.
    *
-   * Then the orphan-subject reap (DEF-0015): the subjects these memories were linked to
+   * Then the orphan-subject reap: the subjects these memories were linked to
    * are collected BEFORE the delete (the cascade takes the junction with it) and handed to
    * the installed reaper AFTER it, inside the same transaction — so a subject whose only
    * holder was the erased memory goes with it, a subject anything else still references

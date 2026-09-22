@@ -351,15 +351,14 @@ const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> =
 
 /**
  * When does a 1:1 detail row carry SUBSTANTIVE data — data that makes the subject a record
- * in its own right, so the orphan reap (DEF-0015) must keep it even with no memory left?
+ * in its own right, so the orphan reap must keep it even with no memory left?
  * Not every non-NULL column qualifies: `people.type` / `organizations.type` are NOT NULL
  * with a default ('contact' / 'other'), so a bare row minted by an ingest has them set
  * without anyone having said anything; they count only when set to a NON-default value (a
  * deliberate classification). `currency` pairs with its amount and says nothing alone.
  * Static SQL fragments over static column names (never input) — same injection argument as
  * REPOINT_TARGETS. `src/scripts/subject-sweep.ts` `blockReason` carries a narrower hand copy
- * of this idea (email/phone/domain/vat_id/sku/price/rate); folding it onto this predicate is a
- * registered follow-up, not done here.
+ * of this idea (email/phone/domain/vat_id/sku/price/rate).
  */
 const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
   person:       "email IS NOT NULL OR phone IS NOT NULL OR role IS NOT NULL OR type <> 'contact'",
@@ -1052,7 +1051,7 @@ export class SubjectStore {
     return counts;
   }
 
-  // ── Orphan-subject reap (DEF-0015) ────────────────────────────
+  // ── Orphan-subject reap ────────────────────────────
 
   /**
    * Why (if at all) a subject is still REFERENCED — the single reference oracle behind the
@@ -1162,7 +1161,7 @@ export class SubjectStore {
 
   /**
    * Hard-delete every candidate {@link referenceReason} finds unreferenced — the
-   * orphan-subject reap an erasure owes (DEF-0015: after a GDPR erase the `subjects` row
+   * orphan-subject reap an erasure owes (after a GDPR erase the `subjects` row
    * survived with its plaintext name). Runs to a FIXPOINT: deleting one candidate can
    * release another (a parent whose only child was itself a candidate), and the outcome
    * must not depend on iteration order. Bounded by the candidate count per pass.

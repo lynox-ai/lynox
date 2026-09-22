@@ -303,8 +303,7 @@ export class Engine {
    * ⚠ And it has no production caller since W3 replaced the `managed_broker`
    * field's source. It stays because removing a public Engine method and
    * re-cutting the six assertions in `engine-client-pair-boot.test.ts` is
-   * §3.2's cleanup, not this wave's — recorded rather than left to be
-   * rediscovered. See `DEF-managed-broker-signal-permanently-false`.
+   * §3.2's cleanup, not this wave's.
    */
   isGoogleManagedBroker(): boolean {
     return isManagedBrokerPair(this._googleClientSource);
@@ -1093,7 +1092,7 @@ export class Engine {
       }
     }
 
-    // Provenance recovery backfill (arc:model-selector P1, DEF-0095). The v47
+    // Provenance recovery backfill. The v47
     // `model_tier_source` column starts every pre-column thread at 'unknown'; this
     // one-shot pass labels a thread whose tier differs from the instance default as
     // a likely deliberate pick ('user'), recovering the real historical picks the
@@ -1534,7 +1533,7 @@ export class Engine {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
     }
-    // DEF-0015: the orphan-subject reap needs the record store to answer "does a table row
+    // The orphan-subject reap needs the record store to answer "does a table row
     // still link this subject?". Handed over HERE — after the DataStore init block succeeded
     // (a store whose init threw is null by then, so the reap stays fail-closed) and not in
     // _initKnowledge(): that step runs BEFORE this one, so `this._dataStore` does not exist
@@ -2067,7 +2066,7 @@ export class Engine {
   /** Create a new per-conversation session. */
   createSession(opts?: SessionOptions): Session {
     // Managed interactive (main-chat) sessions get a CP-owned per-run cost ceiling
-    // (T-within / DEF-0083(b)): the main path otherwise sets no `costGuard`, so one
+    // (T-within): the main path otherwise sets no `costGuard`, so one
     // looping run could drain far past the entitlement balance. Defaulted ONLY when
     // the caller set none (the WorkerLoop's executeStandard passes its own $15) and
     // ONLY on managed instances where the CP emits the ceiling env (self-host / BYOK
@@ -2279,8 +2278,7 @@ export class Engine {
     // slot nothing reads yet.
     //
     // Skipping is the small half of the fix. The structural half — scoping the
-    // key by `(id, kind)` — is a schema migration on a table three kinds share,
-    // and it is filed rather than smuggled in here.
+    // key by `(id, kind)` — is a schema migration on a table three kinds share.
     if (existing && existing.kind !== 'google') {
       console.warn(`[lynox] connection id "google" is held by a ${existing.kind} connection — leaving it alone and not registering the Google row`);
       return;

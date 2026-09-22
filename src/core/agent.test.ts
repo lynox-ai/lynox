@@ -1699,7 +1699,7 @@ describe('Agent', () => {
       // Drives the REAL retry wiring in _sendWithRetry — not just the isRetryable
       // predicate: a dropped provider stream on a long output surfaces as a plain
       // Error named TransformError (no APIError status/body), and the loop must
-      // still retry it (DEF-fireworks-longstream-retry).
+      // still retry it.
       (Agent as unknown as { RETRY_BASE_MS: number }).RETRY_BASE_MS = 1;
 
       mockProcess

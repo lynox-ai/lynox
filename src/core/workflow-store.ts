@@ -4,10 +4,7 @@ import type { EngineDb } from './engine-db.js';
 /**
  * Escape LIKE metacharacters so a `%`/`_` in a (possibly client-supplied) id
  * cannot widen the prefix match to arbitrary rows. Mirrors the escape in
- * run-history-persistence `getPipelineRun`. NOTE: the legacy workflow-def
- * statements (renamePlannedPipeline/deletePlannedPipeline/…) still use a bare
- * `LIKE '${id}%'` — a shared pre-existing over-delete footgun tracked as a
- * follow-up; the mirror is written correctly here rather than replicating it.
+ * run-history-persistence `getPipelineRun`.
  */
 function likePrefix(id: string): string {
   return `${id.replace(/[\\%_]/g, '\\$&')}%`;

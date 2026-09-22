@@ -30,8 +30,7 @@ export type ChatContextRef =
  * when a new member joins {@link ChatContextRef} — so a future `mail-thread`
  * kind cannot be added without entering the sweep, and the sweep then decides
  * whether its output is wrapped. The alternative — a list in the test — is a
- * list somebody has to REMEMBER to extend, which is the failure mode this row
- * was filed for.
+ * list somebody has to REMEMBER to extend.
  *
  * It has to live here, in `src/`, and not in the test: `src/**\/*.test.ts` is in
  * no tsc project (the main tsconfig excludes it, `tsconfig.tests.json` re-excludes
@@ -283,7 +282,7 @@ export function resolveChatContext(
     // (engine-generated) it does not belong there — the placement contradicts the
     // comment three lines above it. Here it goes inside with the other
     // sender-authored fields and the instruction points at it instead of quoting
-    // it. mail-read is not changed from here; see DEF-mail-read-message-id-trusted.
+    // it.
     //
     // ⚠ ABSENCE IS STATED OUTSIDE THE BLOCK, and that placement is the point.
     // `wrapChannelMessage` skips a value that is empty after trim, and
@@ -336,9 +335,7 @@ export function resolveChatContext(
     // starting `instructions…` are separated by `\nMessage: ` — and the override
     // pattern's `\s+` cannot cross that. Measured both ways: the labelled shape is
     // not detected, the unlabelled join is, and the pattern does fire within a
-    // single field. The gap is the same on every channel-wrap caller
-    // (mail-read, envelope, the inbox classifier) — see
-    // DEF-wrapchannelmessage-labels-defeat-cross-field-scan. A pattern split
+    // single field. A pattern split
     // across two SENDERS' items is a different matter and is not a coherent
     // threat: two independent senders would have to coordinate.
     if (!inboxState) return null;

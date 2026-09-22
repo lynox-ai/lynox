@@ -1,6 +1,6 @@
 /**
- * Generated env-ABI drift tests (K-W1 §3.2, PRD-CORE-PRO-CONTRACT / DEF-0030) —
- * both directions, driven entirely by `src/contract/env-registry.ts`:
+ * Generated env-ABI drift tests — both directions, driven entirely by
+ * `src/contract/env-registry.ts`:
  *
  * FORWARD (row → read): every registry row with a readSite-bearing kind must
  * show its real read FORM at its real FILE — a consume-side rename/drop fails
@@ -99,7 +99,7 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       // and fails that one. (An earlier version of this comment said "three
       // times"; the count depends on which call site is repointed, so it was a
       // number nothing verified.) Nothing forces a second provider to bring its
-      // own boot test — DEF-pair-forward-form-provider-blind.
+      // own boot test.
       return [/\bresolveClientPair\s*\(/];
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
@@ -493,9 +493,7 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   //
   // The fix that closes this removes the possibility rather than chasing it:
   // resolveClientPair taking the pair descriptor the contract already declares
-  // leaves no argument order to swap. Tracked as
-  // DEF-pair-resolver-swap-detectable-not-impossible with a compile-level
-  // acceptance test, so no future regex can be mistaken for having closed it.
+  // leaves no argument order to swap.
 
   it('the pair check rejects each broken shape (synthetic rows)', () => {
     // The branches of pairProblems are only reachable through a registry mutation,

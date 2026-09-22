@@ -148,13 +148,12 @@ describe('Engine boot — the Google tools are visible before a credential exist
   });
 
   it('a DISCONNECT leaves the four registered and makes them refuse again', async () => {
-    // The other half of the test above, and the one the register row named as
-    // uncovered. That one boots WITH a pair so `reloadGoogle()` gets past its
-    // early return — which means it only ever exercises the credential branch.
-    // The `if (!pair)` branch, i.e. a disconnect, was asserted nowhere: that the
-    // tools survive it was the design (PRD Stage 1 §3.3 — "clearing the
-    // credential is the whole of disconnect; the registry is not touched") and
-    // nothing held the design in place.
+    // The other half of the test above. That one boots WITH a pair so
+    // `reloadGoogle()` gets past its early return — which means it only ever
+    // exercises the credential branch. The `if (!pair)` branch, i.e. a disconnect,
+    // was asserted nowhere: that the tools survive it was the design (PRD Stage 1
+    // §3.3 — "clearing the credential is the whole of disconnect; the registry is
+    // not touched") and nothing held the design in place.
     //
     // MUTATION THIS KILLS: remove `this._googleAuth = null` from the `!pair`
     // branch of `reloadGoogle()`. The tools resolve the auth per call, so a
@@ -238,10 +237,9 @@ describe('Engine boot — the Google tools are visible before a credential exist
     // append" passes the negative case, "always append" passes the positive.
     const engine = await bootWithCredential('suffix');
 
-    // A credential RESOLVES here, and there is still no grant. That is the case
-    // the row cares about: keying the suffix on the credential instead of the
-    // grant would look correct on a self-host box and be wrong on every tenant
-    // that has entered a client pair but not yet consented.
+    // A credential RESOLVES here, and there is still no grant. Keying the suffix on the
+    // credential instead of the grant would look correct on a self-host box and be
+    // wrong on every tenant that has entered a client pair but not yet consented.
     const google = engine.getGoogleAuth();
     expect(google, 'a pair must resolve, or this tests the wrong branch').not.toBeNull();
     expect(google!.isAuthenticated(), 'resolved is not connected').toBe(false);

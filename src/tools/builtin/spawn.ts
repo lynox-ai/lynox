@@ -339,7 +339,7 @@ export function formatSpawnError(err: unknown): string {
  * an agent-set (hence prompt-injectable) profile from escaping the cost ceiling.
  *
  * REFUSE, not clamp: a profile is a specific endpoint, so you cannot substitute a
- * cheaper model on it (DEF-0080). Semantics:
+ * cheaper model on it. Semantics:
  *  - no ceiling (`max_tier` unset, i.e. self-host default) → never exceeds.
  *  - `max_tier: 'deep'` → not restrictive (nothing is above deep) → never exceeds,
  *    including an unregistered model.
@@ -350,7 +350,7 @@ export function formatSpawnError(err: unknown): string {
 export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier | undefined): boolean {
   // Delegates to the shared predicate — the same rule now guards the tier
   // chokepoint (`resolveRunModel`), so a raw pipeline `step.model` id is refused
-  // the same way a profile is (DEF-0080). (`spec.model` here is separately enum-
+  // the same way a profile is. (`spec.model` here is separately enum-
   // gated to tiers, so it never reaches the chokepoint's raw-id branch.) Kept as a
   // domain-named wrapper.
   return modelIdExceedsMaxTier(profileModelId, maxTier);
@@ -451,11 +451,11 @@ function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfi
   if (!profile) return;
 
   // A profile sets `model = profile.model_id`, bypassing the `max_tier` clamp
-  // that `resolveRunModel` applies to a tier. That is the injection lever
-  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
+  // that `resolveRunModel` applies to a tier. That is the injection lever:
+  // a prompt-injected `spawn({profile})` could route a child to a
   // model above the tenant's cost ceiling. A profile cannot be clamped DOWN (you
   // cannot substitute a different model on someone's endpoint), so the
-  // enforcement is REFUSE, not clamp (DEF-0080). Cross-provider hybrid spawn is
+  // enforcement is REFUSE, not clamp. Cross-provider hybrid spawn is
   // unaffected — that runs on the tier path.
   if (profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
     const band = modelCapability(profile.model_id)?.tier;

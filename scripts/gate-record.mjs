@@ -172,7 +172,7 @@ export function extractRecord(body, mark = MARK) {
   // The loop used to skip whatever it did not recognise, which turned the record
   // into a place where writing something and having nothing read it looked
   // identical to writing nothing. Two measured shapes, both green before this:
-  //   · `closes: DEF-a,` with the second id on a continuation line — the id was
+  //   · a second id wrapped onto a continuation line after `closes: <id>,` — that id was
   //     dropped, silently, by the guard whose entire purpose is to stop a datum
   //     from going missing;
   //   · a second `closes:` line below the first — the last one won, so a
@@ -353,7 +353,7 @@ export function evaluate({ body, head, files, author }) {
   // Measured reason it exists: on 2026-08-24 two register rows still read
   // `open` four days after their fix merged, and the week's cut ranked finished
   // work above unfinished. The detector our own notes recommend for that —
-  // `git log --grep "<DEF-id>"` — was measured at recall 0/2, because neither
+  // `git log --grep "<id>"` — was measured at recall 0/2, because neither
   // fix commit named its row. Nothing required it to. This is that requirement;
   // the query is exact once the datum exists.
   //
@@ -385,8 +385,7 @@ export function evaluate({ body, head, files, author }) {
       errors.push('`closes:` is empty — write `closes: none` if this PR settles no register row');
     }
     for (const id of ids) {
-      // `[A-Za-z0-9-]`, not `[a-z0-9-]`. The register really does contain
-      // `DEF-dk-engineDb-init-partial-wire`, and the lower-case-only class
+      // `[A-Za-z0-9-]`, not `[a-z0-9-]`. The lower-case-only class
       // refused a row that EXISTS — a false red on a correct answer, which this
       // file elsewhere calls the way a guard earns a bypass. Found in pro, where
       // the same class ALSO made the heading scan mint a phantom id; core has no
@@ -420,9 +419,7 @@ export function evaluate({ body, head, files, author }) {
     //
     // An escape hatch for "the delta since only deleted something harmless" was
     // drafted and CUT: review found a defect in every draft of it. Do not re-draft
-    // it here — `DEF-gate-record-round-sha-not-pinned` carries what each draft got
-    // wrong, and names what replaces it: a `round: <sha>` field plus a CI diff,
-    // which turns this exception into a measurement instead of a description.
+    // it here.
     //
     // NOT a second accepted value either: someone merging while attesting an unclean
     // round is the failure this field exists for. The restriction was never the

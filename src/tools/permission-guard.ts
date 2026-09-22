@@ -39,7 +39,7 @@ import { detectInjectionAttempt } from '../core/data-boundary.js';
 //
 // Self-host only — managed instances receive these values as container environment
 // and never materialize the files. Path matching stays a bar, not a boundary (see
-// below); the boundary-level work is tracked separately.
+// below).
 const LYNOX_SECRET_FILES =
   /\.lynox\/(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
 

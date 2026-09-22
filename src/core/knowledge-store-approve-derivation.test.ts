@@ -7,8 +7,7 @@ import { SubjectStore } from './subject-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 
 /**
- * `DEF-dk-trust-gate-consistency` (d): the approve path must DERIVE the tier it stores, not
- * assert it.
+ * The approve path must DERIVE the tier it stores, not assert it.
  *
  * Its own file because the assertion needs the derivation to answer something other than
  * `user_asserted`, which is only reachable by replacing the module — and a module mock poisons
@@ -18,8 +17,7 @@ import { KnowledgeStore } from './knowledge-store.js';
  *
  * The defect it guards is ordinary and slow: someone changes rule 0 — approval becomes
  * `tool_verified`, say — and the approve path keeps writing its literal, so every approved row
- * from then on stores a tier its own evidence contradicts. That is exactly the drift (d) is
- * about, re-introduced by the fix for (d).
+ * from then on stores a tier its own evidence contradicts.
  */
 vi.mock('./provenance.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./provenance.js')>();

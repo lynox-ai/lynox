@@ -47,9 +47,8 @@ import { join, relative, sep } from 'node:path';
  *  - It says nothing about whether the upload path itself is safe. It is not
  *    wrapped or scanned either — a user who uploads a screenshot of someone
  *    else's mail hands the model unscanned foreign text through a trusted-by-
- *    source channel. That is a separate, smaller question (see the register row
- *    DEF-three-unstated-security-invariants) and deliberately NOT what this
- *    test asserts.
+ *    source channel. That is a separate, smaller question and deliberately NOT
+ *    what this test asserts.
  *
  * Implementation note: the sweep reads files with `readFileSync` and matches in
  * JS on purpose. A shell `grep` treats a NUL-tainted file as binary and returns
@@ -111,8 +110,7 @@ describe('image-block producers (untrusted-channel invariant)', () => {
       + 'text-only injection detector AND wrapUntrustedData. Do not just add the '
       + 'file here — decide how that channel is bounded first, then record it '
       + 'with the decision. If the match is a TYPE declaration rather than a new '
-      + 'producer, tighten the matcher — never the allowlist. '
-      + 'See DEF-three-unstated-security-invariants.',
+      + 'producer, tighten the matcher — never the allowlist.',
     ).toEqual([...ALLOWED_PRODUCERS].sort());
   });
 

@@ -104,7 +104,7 @@
 		// The engine cannot name it BEFORE the claim either (`getAccountInfo` reads a connection that
 		// does not exist yet, and even after it returns scopes and expiry, no
 		// identity), so a confirmation the user has to press is the only barrier available
-		// tonight. Binding the state to the browser is the real fix; it is tracked, not promised here.
+		// tonight. Binding the state to the browser is the real fix.
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
 			const claimNonce = params.get('google_oauth');

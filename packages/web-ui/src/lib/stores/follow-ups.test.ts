@@ -116,7 +116,7 @@ describe('the deferred-follow-ups tray is gone', () => {
 	// then had to guess whether a later, rephrased suggestion was the same one —
 	// a comparison over model-written strings, which never matched, so the tray
 	// grew, showed near-duplicates of the live pills, and ate a permanent row of
-	// chips on mobile. The replacement is an explicit pin: DEF-followup-pin-explicit.
+	// chips on mobile.
 	//
 	// Asserted against the sources because these components are not mountable in
 	// this suite (same approach as chat-nav-targets.test.ts). Without it, a

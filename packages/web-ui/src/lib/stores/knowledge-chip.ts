@@ -262,8 +262,8 @@ export function knowledgeCauseKey(cause: string | undefined): string {
 }
 
 /**
- * DEF-dk-review-chip-resume-invisible: turn a thread's PENDING queue entries
- * (GET /api/knowledge/queue?threadId=…) into review chips for the resume path.
+ * Turn a thread's PENDING queue entries (GET /api/knowledge/queue?threadId=…)
+ * into review chips for the resume path.
  *
  * The live chips are CLIENT-ONLY SSE state — a reload lost them, and the only
  * trace was the count-only composer pill (the code documented this itself).

@@ -263,13 +263,13 @@ describe('managed-hook sub-cent billing (L-LE-3)', () => {
 });
 
 /**
- * C2 / DEF-0083(b′) — the local balance mirror. A best-effort bounded local
+ * The local balance mirror. A best-effort bounded local
  * tightening of the coarse ≤5-min allow-boolean: it can only REFUSE more, never
  * admit what `!isStale() && allowed` already refuses. Each test pins one of the
  * §7 build invariants (i–iv) or a §4.2 verify-done clause. The CP stays the exact
  * authority; the mirror closes the burst window between syncs.
  */
-describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
+describe('managed-hook balance mirror', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
   let statusBalance: number | null;
   let statusAllowed: boolean;
@@ -730,7 +730,7 @@ describe('managed-hook contract fixtures (K-W2)', () => {
   });
 });
 /**
- * DEF-provider-billing-alert: a provider billing/quota stop must reach the CP as
+ * A provider billing/quota stop must reach the CP as
  * an incident even though it spent 0 tokens — the failure class that otherwise
  * stays invisible (a per-request error the CP never sees, /api/health green).
  * Emission is gated on the CP FUNDING this instance (spend_gate balance/none),

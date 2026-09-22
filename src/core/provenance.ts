@@ -64,8 +64,8 @@ export function deriveProvenanceTier(ev: ProvenanceEvidence): ProvenanceKind {
   // the opposite situation — the queue shows the reviewer the entry itself and the only thing
   // the action means is "I vouch for this". Without this rule an approved entry stores
   // `user_asserted` while its own evidence re-derives to `external_unverified`, the far end of
-  // the ordering — which breaks the invariant this function's contract rests on
-  // (`DEF-dk-trust-gate-consistency` (d)). See `reviewApproved` for why the agent cannot set it.
+  // the ordering — which breaks the invariant this function's contract rests on.
+  // See `reviewApproved` for why the agent cannot set it.
   if (ev.reviewApproved === true) return 'user_asserted';
   // Rule 1 — untrusted OUTRANKS the channel. A `ui`/`user` write on a turn that read a
   // malicious document is not first-party trust; the operator may be relaying attacker text.

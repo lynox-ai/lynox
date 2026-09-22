@@ -160,8 +160,7 @@ export interface AgentConfig {
    * When set, the agent records each successful tool dispatch + calls
    * `checkAnomaly()` for channel-side-effect publishing — return value
    * intentionally discarded (shadow mode does NOT block dispatch or surface
-   * a warning to the user). Enforcement-mode follow-up tracked for v1.7.3 /
-   * v1.8.0 after we observe false-positive rate in production.
+   * a warning to the user).
    */
   toolCallTracker?: import('../core/output-guard.js').ToolCallTracker | undefined;
 }

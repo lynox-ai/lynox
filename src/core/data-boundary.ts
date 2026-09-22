@@ -212,9 +212,8 @@ const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
  * NORMALISE the input once (decode entities, strip zero-width and C0/C1) and
  * match the coined token on the normalised string. That changes a primitive
  * every untrusted-data caller depends on and needs its own false-positive
- * measurement, so it is registered rather than smuggled into a caller's diff —
- * `DEF-boundary-recognition-enumerates-encodings`. What ships here closes eight
- * measured forms and weakens nothing; it does not close the class.
+ * measurement. What ships here closes eight measured forms and weakens nothing;
+ * it does not close the class.
  */
 export function closeTagPattern(token: string, flags = 'gi'): RegExp {
   return new RegExp(`(${BOUNDARY_OPEN_ANY})${closeTail(token)}`, flags);
@@ -292,7 +291,7 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
 // `&lt;`, then 8192 spaces, then `/untrusted_data>` — `detected: false`, no
 // warning, while the same shape at offset 0 is detected. Neutralisation is NOT
 // windowed and still fires, so the boundary holds; what is lost is the ⚠ signal
-// on that input. Registered rather than widened here, because raising the
+// on that input. Not widened here, because raising the
 // overlap only moves the number the attacker has to beat.
 const SCAN_WINDOW = 64 * 1024;
 const SCAN_OVERLAP = 4 * 1024;
@@ -576,10 +575,7 @@ export function compose(parts: readonly Part[], sep = ''): string {
  * one level down, and a gate that reads clean for exactly the thing it exists to
  * catch is worse than none: it takes the pressure off the root fix. The
  * enforcement belongs in the type system, where composition can only accept
- * declared parts. The withdrawn guard is tracked as
- * `DEF-fence-guard-withdrawn-false-clean`; the separate, still-open question of
- * normalising input before matching is `DEF-boundary-recognition-enumerates-encodings`,
- * and this paragraph used to cite that one for both.
+ * declared parts.
  *
  * ## The token may be a constant, and that is deliberate
  *
@@ -604,7 +600,7 @@ export function compose(parts: readonly Part[], sep = ''): string {
  * It does **not** guarantee that the payload cannot fake OTHER engine framing. A
  * payload that OPENS `<task_overview>` or `<untrusted_data>` passes through
  * untouched, and from there the rest reads to the model as the engine's own
- * frame — the same damage the original finding describes, arriving through a
+ * frame — the same effect as closing its own frame, arriving through a
  * different frame than the one the payload sits in.
  *
  * Say which of the two you mean when you cite this function. Measured on the
@@ -617,8 +613,7 @@ export function compose(parts: readonly Part[], sep = ''): string {
  * `<relevant_context>` carries `<scope>` blocks this same function produced.
  * Neutralising every coined opening tag in a payload would destroy those, so the
  * stronger property needs engine-provenance for nested frames, which is the same
- * hard problem one level down. Tracked as
- * DEF-renderfence-does-not-stop-foreign-framing.
+ * hard problem one level down.
  *
  * @param token   Coined element name. A literal or a module constant — never
  *                attacker-influenced; it names the frame, it is not content.
@@ -701,11 +696,6 @@ export function wrapChannelMessage(opts: {
   // up separated by `\nMessage: `, and the override pattern's `\s+`
   // (`INJECTION_PATTERNS`, "instruction override") cannot cross a label. Measured:
   // the labelled render is not detected, the unlabelled join of the same two
-  // values is, and the pattern does fire when both halves sit in ONE field. Every
-  // caller inherits the gap (mail-read, the triage envelope list, the inbox
-  // classifier, chat-context). Making it true is a change to this function —
-  // scan `Object.values(fields).join('\n')` in ADDITION to the labelled render —
-  // and it belongs in its own diff with its own false-positive measurement, not
-  // in a caller's. Tracked as DEF-wrapchannelmessage-labels-defeat-cross-field-scan.
+  // values is, and the pattern does fire when both halves sit in ONE field.
   return wrapUntrustedData(lines.join('\n'), opts.source);
 }

@@ -41,10 +41,7 @@ import { fileURLToPath } from 'node:url';
  *
  * The finding curve was rising, not falling, which is the signal that the cut is
  * wrong rather than the implementation. A lexical rule cannot decide whether a
- * sentence is TRUE, and that — not vocabulary — is the question. The measurements
- * (42 + 30 asserting wordings, 28 + 4 true sentences) are kept in the register
- * under `DEF-retired-claim-detector-cannot-be-lexical` so the next attempt starts
- * from data instead of from zero, and so nobody rebuilds this one by accident.
+ * sentence is TRUE, and that — not vocabulary — is the question.
  *
  * The sources are read as text, like `preset-cards-i18n.test.ts` does, so this
  * does not depend on a Svelte-aware import of the runes module.

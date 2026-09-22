@@ -30,7 +30,7 @@ export interface RunModelRequest {
    * a pipeline step). A tier name (canonical or legacy) is gated + clamped; a
    * genuine model id (e.g. a pinned `claude-opus-4-7`) is passed through as the
    * model id when it is within the ceiling, but REFUSED (throws) when its cost band
-   * exceeds `maxTier` — a specific id cannot be clamped down (DEF-0080). `undefined`
+   * exceeds `maxTier` — a specific id cannot be clamped down. `undefined`
    * → use `defaultTier`.
    */
   requested?: string | undefined;
@@ -86,7 +86,7 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
 
   // A genuine model id (not a tier name) carries no tier to gate/clamp. It names a
   // specific model/endpoint that cannot be substituted, so an OVER-ceiling id is
-  // REFUSED, not clamped (DEF-0080) — the same rule the spawn profile guard applies
+  // REFUSED, not clamped — the same rule the spawn profile guard applies
   // (`profileExceedsMaxTier`, now delegating to the shared predicate). The one live
   // raw-id ingress that reaches this branch is a pipeline `ManifestStep.model`
   // (a `string`, not tier-validated). The agent-facing `spawn` tool's `spec.model`

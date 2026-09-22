@@ -234,11 +234,11 @@
 	// Per-provider key cache (UI-only — kept in vault, sent on save).
 	let keys = $state<Record<string, string>>({});
 	let loaded = $state(false);
-	// DEF-dk-capture-tool-dependence: server-computed flag (GET /api/config
-	// capabilities) — DK is on AND the active balanced model is a measured-weak
-	// capture caller (Mistral Medium), so `remember` rarely fires and the
-	// knowledge store stays silently inert. Drives the warning banner at the
-	// point the operator can fix it: switch the balanced model.
+	// Server-computed flag (GET /api/config capabilities) — DK is on AND the
+	// active balanced model is a measured-weak capture caller (Mistral Medium),
+	// so `remember` rarely fires and the knowledge store stays silently inert.
+	// Drives the warning banner at the point the operator can fix it: switch
+	// the balanced model.
 	let captureDegraded = $state(false);
 	let testing = $state(false);
 	let saving = $state(false);
@@ -1092,10 +1092,10 @@
 	{/if}
 
 	{#if captureDegraded}
-		<!-- DEF-dk-capture-tool-dependence: DK is on but the active balanced model
-		     is a measured-weak capture caller (Mistral Medium 2/12 vs Sonnet 12/12).
-		     The durable knowledge store stays silently empty because the model rarely
-		     invokes `remember`. Warn here, at the model picker, where it is fixable. -->
+		<!-- DK is on but the active balanced model is a measured-weak capture caller
+		     (Mistral Medium 2/12 vs Sonnet 12/12). The durable knowledge store stays
+		     silently empty because the model rarely invokes `remember`. Warn here, at
+		     the model picker, where it is fixable. -->
 		<!-- Dominant state-surface shape (shapes.contract.json `state`): a tint + a
 		     same-colour border at LOW opacity, not a full-strength one — this is a
 		     standing advisory, not one of the five full-strength warning exceptions. -->

@@ -2,7 +2,7 @@
  * Which names fold onto one subject — per RESOLVER, because there are three,
  * and PERSONS GO THROUGH TWO OF THEM depending on where the name came from.
  *
- * WHY THIS FILE EXISTS. The durable-knowledge rollout carries a blocker filed as
+ * WHY THIS FILE EXISTS. A concern in the durable-knowledge rollout was that
  * "same-named subjects merge irreversibly, no ledger". Sizing it turned out not
  * to need a production query — but it took three attempts to state the answer
  * correctly, and both wrong versions were wrong the same way: they described
@@ -34,13 +34,12 @@
  * third line, persons included: CRM contacts (`crm.ts:261`), task assignees
  * (`task-store.ts:241` → `resolveAssigneeToSubjectId`), the graph backfill
  * (`subject-graph-backfill.ts:265`), the DataStore subject-column bridge
- * (`engine.ts:1712`), and — the one that matters most for the register entry
- * this file feeds — the DURABLE-KNOWLEDGE write path itself
+ * (`engine.ts:1712`), and — the one that matters most for that concern — the
+ * DURABLE-KNOWLEDGE write path itself
  * (`knowledge-store.ts:143`, whose kind is `params.subjectKind ?? 'organization'`
  * and so resolves a person through `findOrCreate` too).
  *
- * That split is the finding, and it points the opposite way from the blocker it
- * was filed under: the same human entered as the contact "Ada" and extracted
+ * That split is the finding: the same human entered as the contact "Ada" and extracted
  * from a mail as "Dr. Ada Lovelace" becomes TWO subjects. Over-merging was the
  * worry; on every person path except extraction, fragmentation is the behaviour.
  *
@@ -321,7 +320,7 @@ describe('subject folding, per resolver', () => {
       // `findOrCreate({kind:'person'})`, which has no subset stage. So the same
       // human, entered as the contact "Ada" and extracted from a mail as
       // "Dr. Ada Lovelace", becomes two subjects — fragmentation, the mirror of
-      // the over-merge the register entry worries about. Pinned so the
+      // the over-merge that concern is about. Pinned so the
       // divergence is visible; not endorsed.
       const store = makeStore();
       const extracted = store.resolvePersonSubject('Dr. Ada Lovelace');
@@ -344,7 +343,7 @@ describe('subject folding, per resolver', () => {
       // list with the canonical name, so these folds leave no trace. Asserted on
       // the RAW array: the first version lower-cased it before looking for the
       // folded form, which the ORIGINAL name satisfies — it passed while proving
-      // nothing, and the register entry rested on it.
+      // nothing, and an earlier conclusion rested on it.
       const store = makeStore();
       const { id } = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
       store.findOrCreate({ kind: 'organization', name: 'meridian ag' });

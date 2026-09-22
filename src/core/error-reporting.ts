@@ -161,8 +161,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         // it keeps growing (208 across 40 files, measured 2026-08-24). Bugsink
         // is first-party and self-hosted, so a stripped stack trace is a
         // diagnostic loss we inflict on ourselves with no third party on the
-        // other side. Whether to take that trade is a risk decision, tracked in
-        // the register rather than settled here.
+        // other side.
         for (const value of event.exception?.values ?? []) {
           if (typeof value.value === 'string') value.value = maskSecretText(value.value);
         }

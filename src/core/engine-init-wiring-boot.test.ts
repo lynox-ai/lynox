@@ -27,12 +27,11 @@ vi.mock('./entity-extractor.js', async (importOriginal) => {
  * received a restore and never merges. Fall away the Drive gate and CP-provisioned instances
  * upload those same backups to a third party again.
  *
- * Both shipped as declared survivors under `DEF-engine-init-wiring-untestable`, whose
- * verify-done is a CONJUNCTION — a test for only one gate lets the other keep vanishing
- * unnoticed — on the premise that reaching `init()` needs the heavy mock chain
- * `engine-propagate-provider.test.ts` builds. That premise looked at the wrong precedent:
- * `engine-startup-reap-boot.test.ts` and `engine-verb-backfill-boot.test.ts` boot a real
- * Engine against a tmp data dir and call `init()` directly. This test is that same shape.
+ * Both shipped as declared survivors on the premise that reaching `init()` needs the heavy
+ * mock chain `engine-propagate-provider.test.ts` builds. That premise looked at the wrong
+ * precedent: `engine-startup-reap-boot.test.ts` and `engine-verb-backfill-boot.test.ts` boot
+ * a real Engine against a tmp data dir and call `init()` directly. This test is that same
+ * shape.
  */
 describe('Engine boot — the two init() gates are actually wired', () => {
   const dirs: string[] = [];
@@ -167,7 +166,7 @@ describe('Engine boot — the two init() gates are actually wired', () => {
   });
 });
 
-// ─── Gate 3: the orphan-subject reap is wired through init() (DEF-0015) ───────────────────
+// ─── Gate 3: the orphan-subject reap is wired through init() ───────────────────
 //
 // The reap needs the record store, which `_initCoreTools()` hands the KnowledgeLayer via
 // `setRecordStore` — AFTER `_initKnowledge()`. The older bridge attach in

@@ -573,7 +573,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     //  · the SOURCE was already updated before the throw, so it now describes
     //    the pair the failed build was for while the handle is from the previous
     //    one. Harmless while both resolve to the same tier and not obviously
-    //    right otherwise — carried as DEF-reload-throw-leaves-source-ahead.
+    //    right otherwise.
     expect(engine.getGoogleAuth(), 'a failed rebuild must not drop a working handle').toBe(handleBefore);
     expect(engine.registry.find(PROBE_TOOL), 'the tools stay — there is no unregister path at all').toBeDefined();
     expect(engine.getGoogleClientSource(), 'the source reflects the attempted pair').toBe('env');

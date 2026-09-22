@@ -223,8 +223,7 @@ jobs:
       # staging managed instance with the freshly pushed :staging image.
       # Keeps the prod admin token out of this public repo — the dispatch PAT
       # here cannot call the admin API. It is still a write credential on the
-      # deployment repository, not a trigger-only one; scope and rotation are
-      # tracked there.
+      # deployment repository, not a trigger-only one.
       - name: Dispatch engine redeploy to lynox-pro
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}

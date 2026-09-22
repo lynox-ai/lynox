@@ -1066,8 +1066,8 @@ describe('OpenAIAdapter', () => {
 
       // The user-visible text must survive the split intact. (The next request's
       // history does NOT — `translateMessages` joins text parts with a newline
-      // and plants one mid-sentence. Pre-existing, tracked separately; asserted
-      // here only so the split itself is not blamed for it later.)
+      // and plants one mid-sentence. Pre-existing; asserted here only so the
+      // split itself is not blamed for it later.)
       const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
       const result = await processor.process(
         (async function* () { for (const e of events) yield e; })(),
@@ -1637,7 +1637,7 @@ describe('OpenAIAdapter', () => {
 describe('translateMessages — user content is never silently dropped', () => {
   const IMG = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
 
-  it('DEF-0073: translates a user image to an image_url part when vision is supported', () => {
+  it('translates a user image to an image_url part when vision is supported', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [{ type: 'text', text: 'what is this?' }, IMG] },
     ], { visionSupport: true });
@@ -1650,13 +1650,13 @@ describe('translateMessages — user content is never silently dropped', () => {
     ]);
   });
 
-  it('DEF-0073: translates an image for an unknown/custom model (visionSupport undefined)', () => {
+  it('translates an image for an unknown/custom model (visionSupport undefined)', () => {
     const out = translateMessages(undefined, [{ role: 'user', content: [IMG] }], {});
     const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
     expect(parts[0]!.type).toBe('image_url');
   });
 
-  it('DEF-0073: throws a clear error for a known non-vision model instead of silently dropping', () => {
+  it('throws a clear error for a known non-vision model instead of silently dropping', () => {
     // Use a genuinely non-vision id: gen-3 Mistral (mistral-large-2512 etc.) is
     // now vision:true, so codestral — a code model that rejects images — is the
     // honest example of the visionSupport:false path.
@@ -1723,7 +1723,7 @@ describe('translateMessages — user content is never silently dropped', () => {
     }
   });
 
-  it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
+  it('preserves user text that shares a turn with a tool_result', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [
         { type: 'tool_result', tool_use_id: 'call_1', content: 'result text' },
@@ -1738,7 +1738,7 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(user.content).toBe('and here is my follow-up');
   });
 
-  it('DEF-openai-wire-toolerr: prefixes an is_error tool_result so the model sees the failure', () => {
+  it('prefixes an is_error tool_result so the model sees the failure', () => {
     // The Anthropic wire carries is_error on tool_result; the OpenAI wire has no
     // such field on role:'tool'. Without a marker, agent.ts error results
     // ('Permission denied', tool exceptions) reach the model as ordinary
@@ -1751,7 +1751,7 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_e', content: '[Tool error] Permission denied' }]);
   });
 
-  it('DEF-openai-wire-toolerr: prefixes is_error with block-array content too', () => {
+  it('prefixes is_error with block-array content too', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [
         {
@@ -1764,7 +1764,7 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(tool.content).toBe('[Tool error] HTTP 403\nforbidden');
   });
 
-  it('DEF-openai-wire-toolerr: an is_error result with empty content still carries the marker', () => {
+  it('an is_error result with empty content still carries the marker', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_x', is_error: true }] },
     ]);
@@ -1773,7 +1773,7 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_x', content: '[Tool error]' }]);
   });
 
-  it('DEF-openai-wire-toolerr: a successful tool_result carries no prefix', () => {
+  it('a successful tool_result carries no prefix', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_ok', content: 'fine', is_error: false }] },
     ]);
@@ -1807,7 +1807,7 @@ describe('translateMessages — empty-content edge', () => {
 });
 
 
-describe('OpenAIAdapter — request idle timeout (DEF-openai-adapter-timeout)', () => {
+describe('OpenAIAdapter — request idle timeout', () => {
   const prev = process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
   beforeEach(() => { process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'] = '300'; });
   afterEach(() => {

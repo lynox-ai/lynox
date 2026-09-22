@@ -13,7 +13,7 @@
 		text: string;
 		subjectHint: string | null;
 		/**
-		 * What approving this entry would bind its hint to (DEF-review-approve-target-opaque).
+		 * What approving this entry would bind its hint to.
 		 * OPTIONAL on purpose: an engine older than this UI sends no target, and that has to
 		 * render as the plain hint rather than as a wrong claim about what approve will do.
 		 * `null` is the engine's answer for a hintless entry — different from absent.

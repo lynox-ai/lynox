@@ -439,12 +439,11 @@ describe('error-reporting scrubbing', () => {
     // Deliberate scope, not an oversight. A PII denylist over free text has an
     // unbounded form space while the set of `throw new Error(`…${…}`)` sites
     // feeding it keeps growing, and Bugsink is self-hosted — a stripped stack
-    // trace is a diagnostic loss with no third party on the other side. Whether
-    // to take that trade is tracked in the register as a risk decision.
+    // trace is a diagnostic loss with no third party on the other side.
     const { beforeSend } = await hooks();
     const out = beforeSend(eventWith('failed to send mail to angela.meier@example.com about Q3 invoice'));
     const value = firstValue(out as Record<string, unknown>);
-    expect(value, 'if this ever starts failing, the scope changed and the register row must too').toContain(
+    expect(value, 'if this ever starts failing, the scope changed').toContain(
       'angela.meier@example.com',
     );
   });

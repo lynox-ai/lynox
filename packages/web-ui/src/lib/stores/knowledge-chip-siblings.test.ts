@@ -25,12 +25,12 @@ import {
  *   [screenshot]  a66ccc10 still pending, its chip not on screen
  *
  * These pass on the code as it stands — the DATA layer does not lose the sibling, and
- * that is what they now hold. The observation itself stayed unreproduced (the missing
- * chip is registered separately); what these cover is the class of regression that
- * WOULD produce it. Two mutations were run and both were caught: a dedup keyed on
- * `subject` instead of `id` kills the projection and resume tests, and a carry
- * truncated to `fresh[0]` kills the adoption test. That is the extent of the claim —
- * see the note in the resolve test for one property deliberately left unasserted.
+ * that is what they now hold. The observation itself stayed unreproduced; what these
+ * cover is the class of regression that WOULD produce it. Two mutations were run and both
+ * were caught: a dedup keyed on `subject` instead of `id` kills the projection and resume
+ * tests, and a carry truncated to `fresh[0]` kills the adoption test. That is the extent
+ * of the claim — see the note in the resolve test for one property deliberately left
+ * unasserted.
  *
  * The render itself is out of reach here — web-ui has no component-test harness — so
  * a green run is an exoneration of the data path, not of the surface.

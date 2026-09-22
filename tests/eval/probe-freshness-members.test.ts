@@ -5,13 +5,12 @@ import path from 'node:path';
 /**
  * The MEMBER COUNT for probe fact-freshness.
  *
- * `DEF-dk-xprov-facts-not-fresh-across-runs` was filed against one script. It is not a
- * property of one script: any probe that POSTs a fact to `/api/sessions/:id/run` writes into
- * a store that KEEPS it, so its next run measures dedup. Three such probes existed when this
- * was written, and the first sweep for them missed one — because it was drawn over the
- * DIRECTORY `scripts/model-fitness/` while the class is defined by BEHAVIOUR. A control that
- * proves a pattern matches inside a directory does not prove the directory is the right
- * place to look.
+ * Fact freshness is not a property of one script: any probe that POSTs a fact to
+ * `/api/sessions/:id/run` writes into a store that KEEPS it, so its next run measures dedup.
+ * Three such probes existed when this was written, and the first sweep for them missed one —
+ * because it was drawn over the DIRECTORY `scripts/model-fitness/` while the class is defined
+ * by BEHAVIOUR. A control that proves a pattern matches inside a directory does not prove the
+ * directory is the right place to look.
  *
  * ⚠️ WHAT THIS SWEEP IS, stated exactly, because an earlier version of this comment claimed
  * more than it does. It enumerates files that NAME the run route (or reach it through the

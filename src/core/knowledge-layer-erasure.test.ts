@@ -163,7 +163,7 @@ describe('KnowledgeLayer.eraseByPattern (Erasure — hard delete)', () => {
   });
 });
 
-// ── DEF-0015: the orphan-subject reap, end to end through the layer ──────────
+// ── The orphan-subject reap, end to end through the layer ──────────
 //
 // The layer is the one that can see EVERY reference a subject may still have — engine.db,
 // the history.db thread anchor (via runHistory) and datastore.db (via `setRecordStore`, which
@@ -176,7 +176,7 @@ import { ThreadStore } from './thread-store.js';
 import { DataStore } from './data-store.js';
 import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
 
-describe('KnowledgeLayer erase → orphan-subject reap (DEF-0015)', () => {
+describe('KnowledgeLayer erase → orphan-subject reap', () => {
   const provider = new LocalProvider();
   const scope: MemoryScopeRef = { type: 'context', id: 'proj-1' };
   const dirs: string[] = [];

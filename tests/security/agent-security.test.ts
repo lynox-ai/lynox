@@ -197,7 +197,7 @@ describe('Agent Security Audit', () => {
       // A tool may be on BOTH lists only with a written reason. The point is not to
       // permit it — it is that every overlap is named here instead of going unnoticed.
       const JUSTIFIED_OVERLAP: Record<string, string> = {
-        // OPEN CANDIDATE, recorded rather than fixed in the PR that derived this guard:
+        // OPEN CANDIDATE:
         // `batch_files` reads file contents exactly like `read_file`, which WAS removed
         // under H-001. It is scan-exempt today. Whether it belongs on the allowlist is a
         // measurement nobody has run — remove this entry when it has been.

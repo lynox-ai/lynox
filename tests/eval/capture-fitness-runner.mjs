@@ -2,7 +2,7 @@
 /**
  * Capture fitness — does the model record a durable fact when one is present?
  *
- * WHY THIS EXISTS. `DEF-dk-capture-observability` measured a 1/29 fire rate on the canary and
+ * WHY THIS EXISTS. A measurement saw a 1/29 fire rate on the canary and
  * read it as "capture is dead". It could not be: its denominator counts every turn that ended,
  * so it cannot tell "capture is broken" from "most turns have nothing to record". This runner
  * fixes the denominator by LABELLING the opportunity — each case declares whether a durable

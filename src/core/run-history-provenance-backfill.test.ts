@@ -3,7 +3,7 @@ import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
 
 /**
- * Provenance recovery backfill (arc:model-selector P1, DEF-0095). Exercises the
+ * Provenance recovery backfill. Exercises the
  * REAL migration path (`new RunHistory(':memory:')` runs v47 model_tier_source +
  * v49 marker) so the SQL + brand-name normalisation are verified end-to-end.
  */

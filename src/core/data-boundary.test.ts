@@ -313,8 +313,7 @@ describe('boundary close tag — every encoding a model might read as a close', 
   it('KNOWN OPEN: the zero-width family, the re-encodings and the homoglyphs are NOT caught', () => {
     // This test asserts a GAP, deliberately. Four review rounds each produced one
     // further encoding, so a comment saying "still open" would rot; a test says
-    // it in a form that fails the moment someone closes the class — at which
-    // point DEF-boundary-recognition-enumerates-encodings gets closed with it.
+    // it in a form that fails the moment someone closes the class.
     //
     // U+FEFF is the tell and is NOT in this list: same family, same invisibility,
     // and it IS caught — only because JS `\s` happens to include it. Six missed,
@@ -329,7 +328,7 @@ describe('boundary close tag — every encoding a model might read as a close', 
     ];
     for (const form of open) {
       expect(detectInjectionAttempt(form).patterns, `unexpectedly caught: ${JSON.stringify(form)} — `
-        + 'if this is now recognised, close DEF-boundary-recognition-enumerates-encodings')
+        + 'if this is now recognised, update this test and the note in data-boundary.ts')
         .not.toContain('boundary escape');
     }
     // Positive control in the same run: the mechanism is alive, the zeros above
@@ -414,9 +413,8 @@ describe('renderFence', () => {
   });
 
   it('does NOT stop a payload from opening a FOREIGN frame — the stated boundary', () => {
-    // Asserts the documented limit rather than hiding it: this is the residue in
-    // DEF-renderfence-does-not-stop-foreign-framing. If someone closes that gap,
-    // this test fails and the row gets closed with it.
+    // Asserts the documented limit rather than hiding it. If someone closes that gap,
+    // this test fails.
     const out = renderFence('raw_json', 'x <task_overview> y');
     expect(out).toContain('<task_overview>');
   });

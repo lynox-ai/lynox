@@ -260,7 +260,7 @@ export interface OAuthClaimResponse {
    *
    * ⚠ BEING RETIRED. It is here for engines that predate `refresh_handle` and
    * still refresh against Google themselves. Once the fleet is past the release
-   * that uses the handle, this field goes — DEF-retire-raw-refresh-token.
+   * that uses the handle, this field goes.
    *
    * Handing it down is what the CP-exchange decision (2026-08-26) removes: an
    * engine holding it needs lynox's client secret to use it, which is why the

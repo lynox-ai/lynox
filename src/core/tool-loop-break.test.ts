@@ -3,8 +3,7 @@
 // `api_setup view` call. Measured on prod 2026-08-14 (thread 861f3e4b, GLM via
 // Fireworks): ~25 identical calls, every escalation read and ignored, ~50 s
 // burned per run until the user aborted — and the aborted run's display-only
-// rollback meant the NEXT run started with no memory of the loop (see
-// DEF-webui-run-refire-on-reconnect for the restart half).
+// rollback meant the NEXT run started with no memory of the loop.
 //
 // The guard's soft escalation was the only line of defense and it is advisory:
 // whether it is obeyed is up to the model. This spec pins the HARD line: after

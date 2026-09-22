@@ -142,11 +142,12 @@ describe('promptUser callers', () => {
    * leaves the reason's WORDS intact and its claim false, and the earlier
    * version of this list stayed green through exactly that.
    *
-   * `gap` — the caller is NOT safe and we know it. Carrying it as a named,
-   * registered gap is the honest form; carrying it as a reason that reads like
-   * safety is how a list of exceptions becomes a list of lies.
+   * `unmarked` — the caller passes text whose authorship is not marked; the
+   * entry says which text. Carrying it that way is the honest form; carrying it
+   * as a reason that reads like safety is how a list of exceptions becomes a
+   * list of lies.
    */
-  const AUTHORSHIP_EXEMPT: Record<string, { proof: RegExp } | { gap: string }> = {
+  const AUTHORSHIP_EXEMPT: Record<string, { proof: RegExp } | { unmarked: string }> = {
     'tools/builtin/plan-task.ts': { proof: /joinPrompts\(/ },
     'integrations/mail/tools/mail-send.ts': { proof: /const preview = buildSendPreview\(/ },
     // Not `buildSendPreview` — this one assembles its own `pv`. The first draft
@@ -160,10 +161,9 @@ describe('promptUser callers', () => {
     // generated tier text — all-frame is the true claim"). Measured: the string
     // comes from `_detectDanger`, which interpolates the agent-controlled
     // `preview` and `filePath` into a plain template — so a security decision
-    // prompt carries an unmarked agent span, which is this row's own defect one
-    // surface over. Migrating it means changing what `_detectDanger` RETURNS,
-    // across many return sites, so it is registered rather than smuggled in here.
-    'core/agent.ts': { gap: 'DEF-danger-warning-interpolates-unmarked-agent-text' },
+    // prompt carries an unmarked agent span. Migrating it means changing what
+    // `_detectDanger` RETURNS, across many return sites.
+    'core/agent.ts': { unmarked: '_detectDanger builds this prompt from agent-controlled preview and filePath without marking them' },
   };
 
   /** Blank out comment bodies and string contents, keeping offsets intact. */
@@ -323,7 +323,7 @@ describe('promptUser callers', () => {
     expect(findOffenders(new Map([['x/ok.ts', 'promptUser(pv`a ${b}`, o); // promptUser(raw)\nconst s = "promptUser(raw)";']]), {}))
       .toEqual([]);
     // An exemption silences it, which is the whole reason the list is audited.
-    expect(findOffenders(new Map([['x/raw.ts', 'promptUser(agentText);']]), { 'x/raw.ts': { gap: 'DEF-x' } }))
+    expect(findOffenders(new Map([['x/raw.ts', 'promptUser(agentText);']]), { 'x/raw.ts': { unmarked: 'raw agent text reaches the prompt' } }))
       .toEqual([]);
   });
 
@@ -332,12 +332,20 @@ describe('promptUser callers', () => {
     expect(checkExemptions(files, { 'x/a.ts': { proof: /confirmMsg: PromptText/ } }))
       .toEqual(['x/a.ts is exempt on a reason that is no longer true']);
     expect(checkExemptions(files, { 'x/a.ts': { proof: /promptUser\(/ } })).toEqual([]);
-    expect(checkExemptions(new Map(), { 'x/gone.ts': { gap: 'DEF-x' } }))
+    expect(checkExemptions(new Map(), { 'x/gone.ts': { unmarked: 'raw agent text reaches the prompt' } }))
       .toEqual(['x/gone.ts is exempt but no longer exists']);
-    expect(checkExemptions(new Map([['x/b.ts', 'nothing here']]), { 'x/b.ts': { gap: 'DEF-x' } }))
+    expect(checkExemptions(new Map([['x/b.ts', 'nothing here']]), { 'x/b.ts': { unmarked: 'raw agent text reaches the prompt' } }))
       .toEqual(['x/b.ts is exempt but no longer calls promptUser']);
-    expect(checkExemptions(files, { 'x/a.ts': { gap: 'not-a-row-id' } }))
-      .toEqual(['x/a.ts declares a gap that does not name a register row']);
+    expect(checkExemptions(files, { 'x/a.ts': { unmarked: 'unsafe' } }))
+      .toEqual(['x/a.ts declares an unmarked caller in fewer than four words']);
+    // The threshold is four words: three is still a label, four is a sentence.
+    expect(checkExemptions(files, { 'x/a.ts': { unmarked: 'raw agent text' } }))
+      .toEqual(['x/a.ts declares an unmarked caller in fewer than four words']);
+    expect(checkExemptions(files, { 'x/a.ts': { unmarked: 'raw agent text passes' } })).toEqual([]);
+    // Padding and repeated spaces are not words.
+    expect(checkExemptions(files, { 'x/a.ts': { unmarked: '  raw   agent  ' } }))
+      .toEqual(['x/a.ts declares an unmarked caller in fewer than four words']);
+    expect(checkExemptions(files, { 'x/a.ts': { unmarked: 'raw agent text reaches the prompt' } })).toEqual([]);
   });
 
   /**
@@ -353,7 +361,7 @@ describe('promptUser callers', () => {
   /** The sweep, over an explicit map so it can be run against fixtures. */
   function findOffenders(
     files: ReadonlyMap<string, string>,
-    exempt: Record<string, { proof: RegExp } | { gap: string }>,
+    exempt: Record<string, { proof: RegExp } | { unmarked: string }>,
   ): string[] {
     const found: string[] = [];
     for (const [rel, source] of files) {
@@ -371,7 +379,7 @@ describe('promptUser callers', () => {
   /** The exemption audit, likewise. Returns one message per rotten entry. */
   function checkExemptions(
     files: ReadonlyMap<string, string>,
-    exempt: Record<string, { proof: RegExp } | { gap: string }>,
+    exempt: Record<string, { proof: RegExp } | { unmarked: string }>,
   ): string[] {
     const problems: string[] = [];
     for (const [rel, entry] of Object.entries(exempt)) {
@@ -380,8 +388,9 @@ describe('promptUser callers', () => {
       if (!promptUserCalls().test(src)) { problems.push(`${rel} is exempt but no longer calls promptUser`); continue; }
       if ('proof' in entry) {
         if (!entry.proof.test(src)) problems.push(`${rel} is exempt on a reason that is no longer true`);
-      } else if (!/^DEF-[a-z0-9-]+$/.test(entry.gap)) {
-        problems.push(`${rel} declares a gap that does not name a register row`);
+      } else if (entry.unmarked.trim().split(/\s+/).length < 4) {
+        // At least four words: a sentence, not a bare label.
+        problems.push(`${rel} declares an unmarked caller in fewer than four words`);
       }
     }
     return problems;

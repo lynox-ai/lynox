@@ -107,7 +107,7 @@ describe("KnowledgeLayer lifecycle cutover (S5b'-c)", () => {
     expect(layer.getDb().getMemoryIdsByThread('thread-A')).toEqual([]);
   });
 
-  it('purge WITHOUT the cross-DB reference oracle is fail-closed: deletes NO subject — not the cross-thread one, not even the orphaned one (DEF-0015; the reaping case lives in knowledge-layer-erasure.test.ts)', async () => {
+  it('purge WITHOUT the cross-DB reference oracle is fail-closed: deletes NO subject — not the cross-thread one, not even the orphaned one (the reaping case lives in knowledge-layer-erasure.test.ts)', async () => {
     // This layer has no runHistory and no record store → the orphan reap cannot answer
     // "is this subject a thread anchor / a record?" and must leave every subject standing.
     const { layer, engine } = await newLayer({ subjectGraph: true });

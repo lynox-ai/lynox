@@ -1,7 +1,6 @@
 /**
  * Cross-repo env-ABI registry — SINGLE SOURCE OF TRUTH for every environment
- * variable that crosses the control-plane → engine wire (K-W1 §3.2,
- * PRD-CORE-PRO-CONTRACT / DEF-0030).
+ * variable that crosses the control-plane → engine wire.
  *
  * VENDORED DOWNSTREAM — edit ONLY here (`core/src/contract/`; a vendored copy
  * of this file is read-only, synced via the consumer's sync script). The
@@ -34,8 +33,7 @@
  *   each shipped a false sentence — the mechanisms live in other files and move
  *   independently of this one, so a summary written here is stale the moment
  *   either changes. `tests/contract-env.test.ts` documents its own form,
- *   `src/core/google-client-pair-welds.ts` documents what it welds, and
- *   `DEF-pair-forward-form-provider-blind` records the gap between them.
+ *   and `src/core/google-client-pair-welds.ts` documents what it welds.
  *
  *   The direct `process.env` form is accepted only at `alsoReadAt` sites, so the
  *   primary read site stays pinned to the resolver.

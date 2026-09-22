@@ -134,8 +134,8 @@ export async function ingestDocumentText(
 	// to the review queue. `deriveTurnUntrusted` is seated only from TOOL signals (a
 	// wrapped tool result, an external-content tool at dispatch, or the rehydration scan
 	// for those two); an HTTP-attached document sets none of them. That gap predates this
-	// change and is tracked separately — do not read this branch as if a trust gate had
-	// replaced the tier the archive copy used to carry.
+	// change — do not read this branch as if a trust gate had replaced the tier the
+	// archive copy used to carry.
 	if (params.durableKnowledgeActive) return 0;
 
 	const chunks = chunkDocumentText(params.text);

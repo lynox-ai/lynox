@@ -344,7 +344,7 @@ describe('KnowledgeStore review queue (DK.2)', () => {
   });
 
   it('an approved entry RE-DERIVES its stored tier from its own persisted evidence', () => {
-    // `DEF-dk-trust-gate-consistency` (d). `deriveProvenanceTier`'s contract is that the tier is
+    // `deriveProvenanceTier`'s contract is that the tier is
     // a pure function of the stored evidence — which is what makes a derivation bug a
     // recomputation instead of a migration. Approve used to hardcode `user_asserted` while
     // leaving `source_untrusted` set, so re-deriving the very same row produced
@@ -1213,7 +1213,7 @@ describe('kind-agnostic subject resolution on the durable surface', () => {
 });
 
 /**
- * DEF-review-approve-target-opaque — the review surface must name the subject an approval
+ * The review surface must name the subject an approval
  * WOULD bind to, before the human decides. `reviewEntry` resolves the hint AFTER the
  * decision, so the reviewer used to approve a link nobody had shown them.
  *
@@ -1319,7 +1319,7 @@ describe('previewHintTarget — the approve target, resolved without performing 
   });
 
   /**
-   * The predicate of the register row: the resolution must appear in the shape the review
+   * The requirement: the resolution must appear in the shape the review
    * surface is served. A hintless entry carries an explicit `null` — "binds nothing" and
    * "this engine does not compute targets" must not look alike to the UI.
    */

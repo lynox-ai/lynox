@@ -20,8 +20,7 @@
  * resolving — but deleting ONE weld passes both vitest and tsc, because the
  * statement and its suppression go together and nothing is left unused. The
  * obvious guard, counting `@ts-expect-error` occurrences in the source, is
- * theater: it pins a number, not a property. Carried as
- * DEF-single-weld-deletion-undetected.
+ * theater: it pins a number, not a property.
  *
  * The checks live in an exported, never-called function. The first version used
  * `declare const`, which type-checks and does not exist at runtime, so importing

@@ -38,8 +38,7 @@ import DOMPurify from 'dompurify';
  *
  * Scope, stated honestly: this closes SUPPRESSION. It does not stop a value
  * from adding a plausible-looking FAKE line of its own — that needs the prompt
- * payload to separate system frame from interpolated value, which is a
- * different change (see DEF-confirm-prompt-value-spoofing).
+ * payload to separate system frame from interpolated value.
  */
 
 /** Schemes a link inside a prompt may point at. */
@@ -105,10 +104,9 @@ export function isSafePromptHref(href: string): boolean {
  *     looks exactly like a real field. Under the collapsed paragraph the same
  *     payload landed mid-sentence, where a second `Host:` reads as odd. So this
  *     makes an already-possible forgery more plausible; it does not create it.
- * Closing that asymmetry needs the payload to mark which spans are values —
- * see DEF-confirm-prompt-value-spoofing. It is deliberately NOT patched by
- * escaping newlines here: this layer receives one finished string and cannot
- * tell a frame newline from a value newline.
+ * Closing that asymmetry needs the payload to mark which spans are values. It
+ * is deliberately NOT patched by escaping newlines here: this layer receives
+ * one finished string and cannot tell a frame newline from a value newline.
  */
 const promptMarked = new Marked({
 	gfm: true,

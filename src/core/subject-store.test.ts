@@ -673,7 +673,7 @@ describe('findByNameAnyKind — one name, any kind', () => {
   });
 });
 
-// ── DEF-0015: the reference oracle + the orphan reap ──────────────────────────
+// ── the reference oracle + the orphan reap ─────────────────────────────────────
 //
 // After a GDPR erase the legacy orphan-entity delete reaped the entity; engine.db's cascade
 // runs memory→junction only, so the minted `subjects` row survived with its plaintext name.
@@ -681,7 +681,7 @@ describe('findByNameAnyKind — one name, any kind', () => {
 // `reapOrphans` deletes what nothing holds. Every reference kind below is a row that MUST keep
 // a subject alive — and the cooccurrence case is the one that must NOT (derived data; counting
 // it would make the reap a no-op on every real corpus).
-describe('SubjectStore.referenceReason + reapOrphans (DEF-0015 orphan-subject reap)', () => {
+describe('SubjectStore.referenceReason + reapOrphans (orphan-subject reap)', () => {
   const tmpDirs: string[] = [];
   const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
 
@@ -814,7 +814,7 @@ describe('SubjectStore.referenceReason + reapOrphans (DEF-0015 orphan-subject re
   });
 });
 
-describe('SubjectStore.referenceReason — detail-row defaults (DEF-0015)', () => {
+describe('SubjectStore.referenceReason — detail-row defaults', () => {
   const tmpDirs: string[] = [];
   const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
   afterEach(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); tmpDirs.length = 0; });
@@ -838,7 +838,7 @@ describe('SubjectStore.referenceReason — detail-row defaults (DEF-0015)', () =
   });
 });
 
-describe('SubjectStore reference oracle — schema sweep + merge closure (DEF-0015)', () => {
+describe('SubjectStore reference oracle — schema sweep + merge closure', () => {
   const tmpDirs: string[] = [];
   const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
   function make(): { store: SubjectStore; engine: EngineDb; mem: MemoryGraphStore } {

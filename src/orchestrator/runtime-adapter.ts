@@ -500,9 +500,7 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
  *     What "unknown" must NOT cover is a REGISTERED deep model wearing a date
  *     suffix — see {@link rawIdIsDeepBand}.
  *
- * Interactive requests are returned UNCHANGED: the interactive consent prompt
- * for steps (a GO at the run_workflow surface, like spawn's) is the full-parity
- * follow-up — see the deferred register — and clamping interactively would
+ * Interactive requests are returned UNCHANGED: clamping interactively would
  * silently change runs a user is watching.
  */
 /**

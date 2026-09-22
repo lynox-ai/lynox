@@ -1296,7 +1296,7 @@ describe('WorkerLoop', () => {
   });
 
   it('SECURITY: the watch analysis run suppresses ALL tools (untrusted page content cannot reach a tool)', async () => {
-    // DEF-0099: the analysis prompt embeds up to 8 KB of the WATCHED PAGE —
+    // The analysis prompt embeds up to 8 KB of the WATCHED PAGE —
     // content the user did not author and an attacker may control. The session
     // is autonomous + headless, where a non-critical dangerous tool AUTO-GRANTS.
     // So an injected "run bash …" must have nothing to call: the run is toolless.

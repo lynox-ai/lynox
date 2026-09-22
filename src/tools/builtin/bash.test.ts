@@ -400,7 +400,7 @@ describe('buildSafeEnv', () => {
   });
 });
 
-describe('bash tool description (DEF-bash-install-workaround)', () => {
+describe('bash tool description', () => {
   const description = bashTool.definition.description;
 
   it('no longer advertises package management', () => {

@@ -1,5 +1,5 @@
 /**
- * DEF-review-approve-target-opaque — what the review queue says about the subject an
+ * What the review queue says about the subject an
  * approval would bind a pending entry to.
  *
  * Pure, and here rather than in the template on purpose. The components in this package
