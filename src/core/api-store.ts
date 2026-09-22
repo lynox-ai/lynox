@@ -247,6 +247,39 @@ export interface ApiProfile {
    * profile is re-saved through the disclosure. See `CustomEndpointAck`.
    */
   custom_endpoint_ack?: CustomEndpointAck | undefined;
+
+  /**
+   * What the engine has learned about this profile's OAuth grant. Written by the
+   * engine only — `api_setup fetch_token` today — and handled like
+   * `custom_endpoint_ack`: a value arriving in a create/update is discarded and
+   * the stored one kept, so the model can neither forge nor erase it.
+   *
+   * Not a security boundary, and nothing that decides where a credential goes
+   * reads it. It steers which refusal the model sees and what a delete purges.
+   */
+  oauth_grant?: OAuthGrantRecord | undefined;
+}
+
+/** The engine-owned half of a profile's OAuth state. See {@link ApiProfile.oauth_grant}. */
+export interface OAuthGrantRecord {
+  /**
+   * The client id that last minted or successfully used the stored refresh
+   * token. Compared on `invalid_grant` to tell a revocation from a client that
+   * no longer matches the token (see `reclassifyForeignGrant`).
+   */
+  minted_by?: string | undefined;
+  /** Set when the provider rejected the stored refresh token as revoked. */
+  state?: 'revoked' | undefined;
+  /** Fingerprint of the refresh token the provider rejected (`tokenFingerprint`). */
+  revoked_fp?: string | undefined;
+  /** ISO timestamp of the revocation verdict. */
+  revoked_at?: string | undefined;
+  /**
+   * Vault names a token exchange wrote beyond the derived ones — the
+   * `output_secret_name` a caller chose. Recorded so the purge trail
+   * (`vault_keys`) names every slot the runtime filled for this profile.
+   */
+  written_keys?: string[] | undefined;
 }
 
 /**
@@ -299,6 +332,16 @@ function collectVaultKeys(profile: ApiProfile): string[] {
       if (k) keys.add(k);
     }
   }
+  // The names a token exchange writes at RUNTIME. They are created after the last
+  // profile write that a configuration change causes, so collecting only the
+  // configured names left out exactly the material most likely to be personal
+  // data. The derived pair is deterministic from the id; anything else a caller
+  // chose is on the record.
+  if (profile.auth?.type === 'oauth2') {
+    keys.add(accessTokenKey(profile.id));
+    keys.add(refreshTokenKey(profile.id));
+  }
+  for (const k of profile.oauth_grant?.written_keys ?? []) keys.add(k);
   return [...keys];
 }
 
@@ -313,7 +356,10 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     direction: 'outbound',
     configJson: JSON.stringify(rest),
     vaultKeys: collectVaultKeys(profile),
-    status: 'active',
+    // A projection of the engine-owned grant record, never read back: the record
+    // in `config_json` is the one writer, so the column cannot disagree with it.
+    // It was hard-wired to 'active', which left a revoked grant nowhere to land.
+    status: profile.oauth_grant?.state === 'revoked' ? 'revoked' : 'active',
   };
 }
 
@@ -425,9 +471,34 @@ export function refreshTokenKey(id: string): string {
   return `${vaultSlotBase(id)}_REFRESH_TOKEN`;
 }
 
+/** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
+function hostOf(profile: ApiProfile): string | null {
+  try {
+    return new URL(profile.base_url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Who is registering a profile, because the two answer a duplicate host
+ * differently. `save` is an actor who can be told no: a second profile on a host
+ * another profile holds is refused. `load` is the boot (engine.db, the apis
+ * directory, a migration), where refusing would silently drop a profile that
+ * already exists — so the host is marked as a conflict instead, and the attach
+ * refuses there by name until one of the two is removed.
+ */
+export type RegisterMode = 'save' | 'load';
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
-  private readonly hostToProfile = new Map<string, string>(); // hostname → profile id
+  /**
+   * hostname → every profile id whose `base_url` is on that host. A set rather
+   * than one id: with one id per host the map was last-write-wins, and the
+   * attach handed whichever profile loaded last its credential without a word.
+   * More than one member is a conflict ({@link getHostConflict}).
+   */
+  private readonly hostToIds = new Map<string, Set<string>>();
   readonly rateLimiter = new PerApiRateLimiter();
 
   /**
@@ -634,14 +705,26 @@ export class ApiStore {
    * which `validateProfile` already rejects upstream, so no caller had ever
    * needed the answer.
    */
-  register(profile: ApiProfile): boolean {
+  register(profile: ApiProfile, mode: RegisterMode = 'load'): boolean {
+    const refusal = this._admit(profile, mode);
+    if (refusal !== null) {
+      process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${refusal}\n`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The body of {@link register}: `null` when the profile landed, otherwise the
+   * reason it did not — so `save` can hand the actor the reason instead of
+   * reconstructing it after the fact.
+   */
+  private _admit(profile: ApiProfile, mode: RegisterMode): string | null {
     if (!PROFILE_ID_PATTERN.test(profile.id)) {
       // Refuse the id at the gate so the in-memory Map's invariant holds
       // — every key is a safe filename component. `unregister` can then
       // hand the id directly to `join(apisDir, …)` without a second check.
-      // eslint-disable-next-line no-console
-      process.stderr.write(`[lynox:api-store] Skipping profile with invalid id "${profile.id}" (must match ${PROFILE_ID_PATTERN.source})\n`);
-      return false;
+      return `invalid id (must match ${PROFILE_ID_PATTERN.source})`;
     }
     // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
     // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
@@ -649,27 +732,77 @@ export class ApiStore {
     // profile's token and the attach would hand it to BOTH hosts. Refused here
     // rather than at `save`, because `save` is not the only entry: profiles also
     // arrive through the boot load, and a collision that only a save can catch
-    // is one a restart re-admits.
+    // is one a restart re-admits. Refused in BOTH modes — unlike a shared host,
+    // a shared slot cannot be made safe by marking it.
     const slot = vaultSlotBase(profile.id);
     for (const [otherId] of this.profiles) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
-        process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": its vault slot (${slot}) is already held by profile "${otherId}" — the two ids differ only in \`-\` vs \`_\`. Rename one.\n`);
-        return false;
+        return `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${otherId}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
       }
     }
-    this.profiles.set(profile.id, profile);
 
-    // Map hostname for rate limit lookups
-    try {
-      const hostname = new URL(profile.base_url).hostname;
-      this.hostToProfile.set(hostname, profile.id);
+    const hostname = hostOf(profile);
+    // One profile per host, because `http_request` has no profile parameter: the
+    // attach resolves the credential by hostname alone, so two profiles on one
+    // host cannot be told apart at call time. An actor is told so here; the boot
+    // marks the conflict instead (see RegisterMode).
+    if (hostname !== null && mode === 'save') {
+      const holder = [...(this.hostToIds.get(hostname) ?? [])].find((o) => o !== profile.id);
+      if (holder !== undefined) {
+        return `api_profile "${holder}" already maps to ${hostname}. http_request picks the profile by hostname, so a second profile on the same host would make it ambiguous which credential a request carries. Nothing was saved. Update "${holder}" instead, or delete it first.`;
+      }
+    }
+
+    // Moving a profile to a new host releases the old one. Without this the old
+    // host kept pointing here after an update, and the one-per-host rule above
+    // refused the next profile on a host nobody held any more. Only on an actual
+    // move: a save that keeps the host (every `fetch_token` persists its expiry
+    // through here) must not touch the host's rate bucket.
+    const previous = this.profiles.get(profile.id);
+    if (previous && hostOf(previous) !== hostname) this._releaseHost(previous);
+
+    this.profiles.set(profile.id, profile);
+    if (hostname !== null) {
+      let ids = this.hostToIds.get(hostname);
+      if (!ids) {
+        ids = new Set();
+        this.hostToIds.set(hostname, ids);
+      }
+      ids.add(profile.id);
+      if (ids.size > 1) {
+        process.stderr.write(`[lynox:api-store] Host ${hostname} is mapped by more than one profile (${[...ids].join(', ')}); requests to it will be refused until one is removed.\n`);
+      }
       if (profile.rate_limit) {
         this.rateLimiter.register(hostname, profile.rate_limit);
       }
-    } catch {
-      // Invalid URL — skip hostname mapping
     }
-    return true;
+    return null;
+  }
+
+  /**
+   * Drop `profile` from its host's id set, and keep the host's rate bucket in
+   * step: cleared when nobody is left, handed to the remaining profile's own
+   * limit (or cleared) when one is.
+   */
+  private _releaseHost(profile: ApiProfile): void {
+    const hostname = hostOf(profile);
+    if (hostname === null) return; // Invalid base_url — no hostname mapping or bucket to clean.
+    const ids = this.hostToIds.get(hostname);
+    if (!ids?.delete(profile.id)) return;
+    if (ids.size === 0) {
+      this.hostToIds.delete(hostname);
+      this.rateLimiter.unregister(hostname);
+      return;
+    }
+    if (ids.size === 1) {
+      const [remainingId] = [...ids];
+      const remaining = remainingId === undefined ? undefined : this.profiles.get(remainingId);
+      if (remaining?.rate_limit) {
+        this.rateLimiter.register(hostname, remaining.rate_limit);
+      } else {
+        this.rateLimiter.unregister(hostname);
+      }
+    }
   }
 
   /**
@@ -685,11 +818,12 @@ export class ApiStore {
    *
    * Two invariants worth flagging because they're not obvious from the
    * call site:
-   * - The hostname → id index is dropped only when it still points at
-   *   the id being removed. A profile that re-claimed the hostname mid-
-   *   session must keep its mapping.
-   * - The rate-limit bucket is cleared so a future re-registration with
-   *   *no* `rate_limit` doesn't inherit stale throttling from this profile.
+   * - Only this id leaves its host's set. Another profile on the same host
+   *   keeps its mapping — and if exactly one is left, a conflict on that host
+   *   is resolved by this removal.
+   * - The rate-limit bucket is cleared when nobody is left on the host, so a
+   *   future re-registration with *no* `rate_limit` doesn't inherit stale
+   *   throttling from this profile.
    */
   unregister(id: string, apisDir?: string): boolean {
     // Belt-and-suspenders — `register` already refuses bad ids, but this
@@ -701,17 +835,8 @@ export class ApiStore {
     const profile = this.profiles.get(id);
     if (!profile) return false;
 
+    this._releaseHost(profile);
     this.profiles.delete(id);
-
-    try {
-      const hostname = new URL(profile.base_url).hostname;
-      if (this.hostToProfile.get(hostname) === id) {
-        this.hostToProfile.delete(hostname);
-        this.rateLimiter.unregister(hostname);
-      }
-    } catch {
-      // Invalid base_url — no hostname mapping or bucket to clean.
-    }
 
     if (apisDir) {
       const filePath = join(apisDir, `${id}.json`);
@@ -742,16 +867,8 @@ export class ApiStore {
    */
   save(profile: ApiProfile, apisDir?: string): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const isNew = !this.profiles.has(profile.id);
-    if (!this.register(profile)) {
-      const slot = vaultSlotBase(profile.id);
-      const holder = [...this.profiles.keys()].find((o) => o !== profile.id && vaultSlotBase(o) === slot);
-      return {
-        ok: false,
-        reason: holder
-          ? `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${holder}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`
-          : `profile id "${profile.id}" was refused by the store.`,
-      };
-    }
+    const refusal = this._admit(profile, 'save');
+    if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
       this.connStore.upsert(profileToConnectionRow(profile));
     } else if (apisDir) {
@@ -830,10 +947,29 @@ export class ApiStore {
     return this.profiles.get(id);
   }
 
-  /** Find profile by hostname (used by http_request for rate limiting). */
+  /**
+   * The ONE profile mapped to this hostname — `undefined` when none is, and
+   * also when more than one is. A conflict has no right answer to return: every
+   * caller (the credential attach, response shaping, the cost display, the 401
+   * hint) would act on whichever profile it got, and picking one silently is the
+   * defect this replaced. Callers that must say so ask {@link getHostConflict}.
+   */
   getByHostname(hostname: string): ApiProfile | undefined {
-    const id = this.hostToProfile.get(hostname);
-    return id ? this.profiles.get(id) : undefined;
+    const ids = this.hostToIds.get(hostname);
+    if (ids?.size !== 1) return undefined;
+    const [id] = [...ids];
+    return id === undefined ? undefined : this.profiles.get(id);
+  }
+
+  /**
+   * The ids sharing this hostname when there is more than one, sorted;
+   * `undefined` otherwise. Only the boot can produce this (a save of a second
+   * profile on a held host is refused) — it is the marker for profiles that
+   * already existed when the one-per-host rule arrived.
+   */
+  getHostConflict(hostname: string): string[] | undefined {
+    const ids = this.hostToIds.get(hostname);
+    return ids && ids.size > 1 ? [...ids].sort() : undefined;
   }
 
   /** Check per-API rate limit for a hostname. Returns null if OK, or reason string. */

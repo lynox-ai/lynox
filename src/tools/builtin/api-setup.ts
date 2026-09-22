@@ -15,10 +15,11 @@
  */
 
 import { join } from 'node:path';
-import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
+import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey } from '../../core/api-store.js';
+import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
@@ -949,6 +950,78 @@ function applyRefine(existing: ApiProfile, patch: RefinePatch): ApiProfile {
   return merged;
 }
 
+/**
+ * What deleting a profile takes out of the vault, and what it leaves — returned
+ * as the tail of the delete message so neither half is silent.
+ *
+ * Removed: the two names a token exchange derives from the id (`accessTokenKey`,
+ * `refreshTokenKey`). Nothing but this profile writes them, and they are the
+ * material most likely to be personal data. Before this, a delete removed the
+ * profile and left every token it had minted in the vault.
+ *
+ * Kept, and named: what the user stored for the API (client id/secret, the
+ * configured `vault_keys`, an explicit `refresh_token_key`) and any
+ * `output_secret_name` a caller chose. Another profile may use the same slot,
+ * and a delete that guesses wrong destroys a neighbour's credential.
+ *
+ * Never removed, whatever the id: a protected name. An id like `google-oauth`
+ * derives into a platform prefix; `fetch_token` refuses to write such a slot, so
+ * anything in it belongs to the platform.
+ */
+function purgeRuntimeTokens(secretStore: SecretStoreLike | undefined, profile: ApiProfile): string {
+  const derived = [accessTokenKey(profile.id), refreshTokenKey(profile.id)]
+    .filter((k) => !isProtectedSecretWrite(k));
+  const oauth = profile.auth?.oauth;
+  const kept = [...new Set([
+    oauth?.client_id_key,
+    oauth?.client_secret_key,
+    oauth?.refresh_token_key,
+    ...(profile.auth?.vault_keys ?? []),
+    ...(profile.oauth_grant?.written_keys ?? []),
+  ].filter((k): k is string => k !== undefined && !derived.includes(k)))];
+  const keptNote = kept.length > 0
+    ? ` Kept in the vault because another profile may use them: ${kept.join(', ')} — remove them with the user if nothing else needs them.`
+    : '';
+  if (!secretStore?.deleteSecret) {
+    return ` The vault has no delete path in this context, so ${derived.join(' and ')} were NOT removed.${keptNote}`;
+  }
+  const deleteSecret = secretStore.deleteSecret.bind(secretStore);
+  const removed = derived.filter((k) => deleteSecret(k));
+  const removedNote = removed.length > 0 ? ` Removed its tokens from the vault: ${removed.join(', ')}.` : '';
+  return `${removedNote}${keptNote}`;
+}
+
+/**
+ * Persist the engine-owned grant record — and, after a successful exchange, the
+ * token expiry — onto the FRESHEST copy of the profile: an exchange takes
+ * seconds, and saving the copy read before it would roll back a concurrent
+ * update. A failed or refused save is swallowed on purpose. The vault already
+ * reflects the exchange and the request budget is already charged; turning a
+ * completed exchange into a reported failure would make the model mint again,
+ * while losing the record only returns this path to the state it had before the
+ * record existed.
+ */
+function persistGrant(
+  apiStore: ApiStore | null | undefined,
+  id: string,
+  fallback: ApiProfile,
+  apisDir: string,
+  update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
+  tokenExpiresAt?: number,
+): void {
+  if (!apiStore) return;
+  const fresh = apiStore.get(id) ?? fallback;
+  const next: ApiProfile = tokenExpiresAt === undefined
+    ? { ...fresh }
+    : { ...fresh, auth: { ...fresh.auth, oauth: { ...fresh.auth?.oauth, token_expires_at: tokenExpiresAt } } } as ApiProfile;
+  next.oauth_grant = update(fresh.oauth_grant);
+  try {
+    apiStore.save(next, apisDir);
+  } catch {
+    // See the docstring: the exchange is complete either way.
+  }
+}
+
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
@@ -1238,6 +1311,16 @@ Next steps before calling create:
         delete profile.custom_endpoint_ack;
       }
 
+      // The grant record is the engine's, never the caller's — the same rule as the
+      // ack above. A create/update able to write it could clear a revocation or
+      // forge the client stamp. Whatever arrived is dropped and the stored record
+      // rides along unchanged, so a view → edit → update round trip neither trips
+      // over it nor erases it. Discarding rather than refusing is deliberate: the
+      // round trip would otherwise fail every time the model echoes the field back.
+      const storedGrant = agent.toolContext?.apiStore?.get(profile.id)?.oauth_grant;
+      if (storedGrant) profile.oauth_grant = storedGrant;
+      else delete profile.oauth_grant;
+
       // Enforce research: warn if profile is too thin
       const warnings: string[] = [];
       if (!profile.endpoints || profile.endpoints.length === 0) {
@@ -1303,19 +1386,30 @@ Next steps before calling create:
       if (!apiStore) {
         return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
       }
+      // Read before the delete: what the vault holds for this profile is decided
+      // by the profile, and afterwards there is no profile to ask.
+      const existing = apiStore.get(id);
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
+      let removed: boolean;
       try {
-        return apiStore.remove(id, apisDir)
-          ? `Deleted API profile "${id}".`
-          : `API profile "${id}" not found.`;
+        removed = apiStore.remove(id, apisDir);
       } catch (err) {
         // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
         // when a non-ENOENT unlink fails — the profile is already gone from
-        // memory. Surface it so the agent doesn't retry blindly.
+        // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
+        // a profile that resurrects on restart should come back working.
         return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
+      if (!removed) return `API profile "${id}" not found.`;
+      // Only for a profile that was REGISTERED: the slot guard in
+      // `ApiStore.register` is what makes the derived names this profile's alone,
+      // and it only speaks for profiles it admitted. `remove` also succeeds for a
+      // row that sat in the store unregistered — the boot refuses the second of a
+      // `-`/`_` pair — and that row's derived names are its neighbour's.
+      if (!existing) return `Deleted API profile "${id}".`;
+      return `Deleted API profile "${id}".${purgeRuntimeTokens(agent.secretStore, existing)}`;
     }
 
     if (input.action === 'fetch_token') {
@@ -1382,12 +1476,23 @@ Next steps before calling create:
       if (grantType === 'refresh_token' && isProtectedSecretWrite(refreshKey)) {
         return `Error: profile "${input.id}" resolves its refresh token from "${refreshKey}", which is a protected credential slot — refusing to send it to ${new URL(oauth.token_url).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
       }
-      if (grantType === 'refresh_token') {
-        const rt = resolveOne(refreshKey);
-        if (rt === null) missing.push(refreshKey);
-      }
+      // Resolved once: the token this exchange presents is also the one a failure
+      // is judged against — the rotation check and the revocation fingerprint
+      // below must both refer to exactly what went out.
+      const presentedRefresh = grantType === 'refresh_token' ? resolveOne(refreshKey) : null;
+      if (grantType === 'refresh_token' && presentedRefresh === null) missing.push(refreshKey);
       if (missing.length > 0) {
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${n}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+      }
+      // A revocation verdict stands until the refresh token changes. Posting the
+      // very token the provider already rejected only repeats the rejection, and
+      // a 401 loop would do exactly that. A DIFFERENT token in the slot is the
+      // user's way back, so the verdict steps aside for it — and is cleared once
+      // an exchange succeeds.
+      const grant = profile.oauth_grant;
+      if (presentedRefresh !== null && grant?.state === 'revoked'
+          && grant.revoked_fp === tokenFingerprint(presentedRefresh)) {
+        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at);
       }
       // fetch_token drives a real outbound POST; honour the same per-session HTTP
       // ceiling http_request enforces. It already increments httpRequests after a
@@ -1414,10 +1519,7 @@ Next steps before calling create:
       };
       if (oauth.scope) params['scope'] = oauth.scope;
       if (oauth.audience) params['audience'] = oauth.audience;
-      if (grantType === 'refresh_token') {
-        const rt = resolveOne(refreshKey);
-        if (rt !== null) params['refresh_token'] = rt;
-      }
+      if (presentedRefresh !== null) params['refresh_token'] = presentedRefresh;
       const headers: Record<string, string> = { 'Accept': 'application/json' };
       let body: string;
       if (bodyFormat === 'json') {
@@ -1483,7 +1585,38 @@ Next steps before calling create:
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
         const snippet = respText.length > 500 ? respText.slice(0, 500) + '…[truncated]' : respText;
-        return `Token exchange failed with HTTP ${response.status}. Response body:\n${snippet}\n\nThis is the external provider rejecting the credentials or app config — NOT a lynox tool limitation. Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage. Do NOT recommend self-host or tier changes for this kind of failure.`;
+        const providerNote = `Response body:\n${snippet}\n\nThis is the external provider rejecting the credentials or app config — NOT a lynox tool limitation. Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage. Do NOT recommend self-host or tier changes for this kind of failure.`;
+        // Which of three things failed decides what happens to the grant: a
+        // revocation ends it, a client problem leaves it intact, and anything
+        // else changes nothing. Before this, all three read as "check your
+        // credentials", and a revoked grant looked like a token that had merely
+        // expired — the model was told to fetch again, forever.
+        let kind = classifyRefreshFailure(response.status, respText);
+        // Only a refresh token is a grant the user gave and the provider can take
+        // back. A client-credentials exchange answering `invalid_grant` refuses
+        // the client itself, so it is read as a client problem.
+        if (kind === 'grant-revoked' && presentedRefresh === null) kind = 'client-misconfigured';
+        kind = reclassifyForeignGrant(kind, grant?.minted_by, clientId ?? undefined);
+        // Two writers can rotate one token: another process on the same vault (a
+        // CLI run beside the server) may have exchanged it while this request
+        // was in flight, and the provider then rejects the old one as spent. If
+        // the slot no longer holds what went out, that is a rotation, not a
+        // revocation — declaring the grant dead here would end a live one.
+        if (kind === 'grant-revoked' && resolveOne(refreshKey) !== presentedRefresh) kind = 'transient';
+        if (kind === 'grant-revoked' && presentedRefresh !== null) {
+          const revokedFp = tokenFingerprint(presentedRefresh);
+          persistGrant(apiStore, input.id, profile, apisDir, (current) => ({
+            ...current,
+            state: 'revoked',
+            revoked_fp: revokedFp,
+            revoked_at: new Date().toISOString(),
+          }));
+          return `${revokedGrantMessage(input.id, refreshKey, undefined)}\n\n${providerNote}`;
+        }
+        if (kind === 'client-misconfigured') {
+          return `Token exchange failed with HTTP ${response.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${providerNote}`;
+        }
+        return `Token exchange failed with HTTP ${response.status} — a temporary provider or network condition, or an answer the engine does not classify. Nothing was changed; retry later. ${providerNote}`;
       }
       let parsed: { access_token?: string; expires_in?: number; refresh_token?: string; scope?: string; token_type?: string };
       try {
@@ -1546,21 +1679,27 @@ Next steps before calling create:
       // One year is far past any real token and still a finite integer.
       const MAX_TOKEN_LIFETIME_S = 366 * 24 * 60 * 60;
       const lifetimeS = parsed.expires_in;
-      if (apiStore && typeof lifetimeS === 'number' && Number.isSafeInteger(lifetimeS)
-          && lifetimeS > 0 && lifetimeS <= MAX_TOKEN_LIFETIME_S) {
-        // Re-read: `profile` was fetched before a multi-second exchange, and
-        // saving the stale copy would roll back a concurrent update.
-        const fresh = apiStore.get(input.id) ?? profile;
-        const oauthWithExpiry = { ...fresh.auth?.oauth, token_expires_at: Date.now() + lifetimeS * 1000 };
-        try {
-          apiStore.save({ ...fresh, auth: { ...fresh.auth, oauth: oauthWithExpiry } } as typeof fresh, apisDir);
-        } catch {
-          // The tokens are already in the vault and the request budget is already
-          // charged. Turning a completed exchange into a reported failure would
-          // make the model retry and mint again; losing the expiry only returns
-          // this path to the state it was in before it was persisted at all.
+      const tokenExpiresAt = typeof lifetimeS === 'number' && Number.isSafeInteger(lifetimeS)
+        && lifetimeS > 0 && lifetimeS <= MAX_TOKEN_LIFETIME_S
+        ? Date.now() + lifetimeS * 1000
+        : undefined;
+      // The grant record rides in the same save as the expiry. The client that
+      // just succeeded is stamped as the one the stored refresh token belongs to —
+      // the comparison `reclassifyForeignGrant` needs on the next `invalid_grant`.
+      // A success also ends a revocation verdict: a token that works is not
+      // revoked. And a name the caller chose for the access token joins the
+      // purge trail, since the derived one is not where this token went.
+      const writtenName = outputName === accessTokenKey(input.id) ? undefined : outputName;
+      persistGrant(apiStore, input.id, profile, apisDir, (current) => {
+        const next: OAuthGrantRecord = { ...current, minted_by: clientId ?? undefined };
+        delete next.state;
+        delete next.revoked_fp;
+        delete next.revoked_at;
+        if (writtenName !== undefined) {
+          next.written_keys = [...new Set([...(current?.written_keys ?? []), writtenName])];
         }
-      }
+        return next;
+      }, tokenExpiresAt);
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${refreshTokenKey(input.id)}\`.` : ''}`;
     }

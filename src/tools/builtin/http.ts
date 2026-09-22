@@ -1,7 +1,8 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
-import { accessTokenKey } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey } from '../../core/api-store.js';
+import { revokedGrantMessage } from '../../core/oauth-refresh-failure.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -459,18 +460,35 @@ async function attachEngineManagedAuth(
   agent: import('../../types/index.js').IAgent,
 ): Promise<AttachedAuth> {
   const secretStore = agent.secretStore;
-  if (!toolContext?.apiStore || !secretStore) return {};
+  const apiStore = toolContext?.apiStore;
+  if (!apiStore || !secretStore) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
   let hostname: string;
   try {
     hostname = new URL(url).hostname;
-    profile = toolContext.apiStore.getByHostname(hostname);
+    profile = apiStore.getByHostname(hostname);
   } catch {
     return {}; // invalid URL — assertHostPolicy reports it downstream
   }
-  const auth = profile?.auth;
-  if (!profile || !auth) return {};
+  if (!profile) {
+    // Two profiles on one host — only the boot can leave that behind, since a
+    // save of the second is refused. The engine used to attach whichever had
+    // loaded last, silently. Now it attaches nothing and says why, but only when
+    // a credential is at stake: two public (`none`) profiles on one host have
+    // nothing to mix up, and blocking their requests would help no one.
+    const conflict = apiStore.getHostConflict(hostname);
+    const credentialed = conflict?.some((id) => {
+      const type = apiStore.get(id)?.auth?.type;
+      return type !== undefined && type !== 'none';
+    });
+    if (conflict && credentialed) {
+      return { refusal: `Error: more than one api_profile maps to ${hostname} (${conflict.join(', ')}), so the engine cannot tell which stored credential this request should carry, and it sends none. Delete the profile that is no longer needed with api_setup({ action: "delete", id: "…" }), or give one of them a different base_url.` };
+    }
+    return {};
+  }
+  const auth = profile.auth;
+  if (!auth) return {};
 
   /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
   const put = (name: string, value: string): AttachedAuth => {
@@ -500,6 +518,13 @@ async function attachEngineManagedAuth(
     // or a JSON dropped into the apis dir), so re-verify here, fail-closed.
     if (!hostVetted) {
       return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
+    }
+    // A revoked grant is said so here, before a request goes out, rather than
+    // after it comes back 401 — where the hint below would call it an expired
+    // token and send the model to fetch_token, which cannot help.
+    if (profile.oauth_grant?.state === 'revoked') {
+      const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+      return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant.revoked_at) };
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
     // the current access_token. Prevents two failure modes: a stale key re-referenced
