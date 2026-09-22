@@ -1,10 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
 import { TriggerStore, type TriggerRow } from '../../../../../src/core/trigger-store.js';
-import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction } from './trigger-consent.js';
+import {
+	awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf,
+} from './trigger-consent.js';
 
 describe('awaitsConfirmation', () => {
 	it('is true for an agent run with no confirmation, whether the field is absent or null', () => {
@@ -54,6 +56,117 @@ describe('instructionOf — what the run is told, not what the row shows', () =>
 
 	it('does not repeat a description that only echoes the title', () => {
 		expect(instructionOf({ title: 'Mahnungen', description: ' Mahnungen ' })).toBe('Mahnungen');
+	});
+});
+
+describe('watchOf — the host, the rest, and how often', () => {
+	it('splits the address so the host stands on its own', () => {
+		expect(watchOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise?x=1', interval_minutes: 60 }) }))
+			.toEqual({ host: 'https://example.com', rest: '/preise?x=1', intervalMinutes: 60 });
+	});
+
+	it('shows the port too, because :8443 is a different target than 443', () => {
+		// `fetchPinned` sends `parsed.host` as its Host header and dials that port.
+		expect(watchOf({ watch_config: '{"url":"https://evil.example:8443/x"}' })?.host)
+			.toBe('https://evil.example:8443');
+		// A default port is not part of `host`, so it does not appear.
+		expect(watchOf({ watch_config: '{"url":"https://example.com:443/x"}' })?.host)
+			.toBe('https://example.com');
+	});
+
+	it('offers nothing for a protocol the fetch would reject', () => {
+		// It parses and it has a host, so it WOULD have been shown — a consent for
+		// something that cannot happen.
+		for (const url of ['ftp://evil.example/x', 'ws://evil.example/x', 'chrome://settings']) {
+			expect(watchOf({ watch_config: JSON.stringify({ url }) }), url).toBeUndefined();
+		}
+	});
+
+	it('bounds the HOST as well, not only the rest', () => {
+		// The correction that split the two bounded only the second, so the whole
+		// wall moved into the host.
+		const host = watchOf({ watch_config: JSON.stringify({ url: `https://${'a'.repeat(5000)}.example/x` }) })?.host ?? '';
+		expect(host.length).toBeLessThan(200);
+		expect(host.endsWith('\u2026')).toBe(true);
+	});
+
+	it('shows the host that is FETCHED, not the one the string reads as', () => {
+		// `@` makes everything before it a username, so this reads as the product's
+		// own domain and is fetched from the other one. The engine resolves
+		// `hostname`; the view now shows the same field.
+		const shown = watchOf({ watch_config: JSON.stringify({ url: 'https://lynox.ai@evil.example/prices' }) });
+		expect(shown?.host).toBe('https://evil.example');
+		expect(`${shown?.host}${shown?.rest}`).not.toContain('lynox.ai');
+	});
+
+	it('gives the host alone when the config carries no usable interval', () => {
+		expect(watchOf({ watch_config: '{"url":"https://example.com"}' })).toEqual({ host: 'https://example.com', rest: '/' });
+		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":"60"}' })).toEqual({ host: 'https://example.com', rest: '/' });
+		// Infinity survives JSON.parse as a number and would render as a cadence.
+		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":1e999}' })).toEqual({ host: 'https://example.com', rest: '/' });
+	});
+
+	it('yields nothing rather than an empty or unfetchable label', () => {
+		expect(watchOf({})).toBeUndefined();
+		expect(watchOf({ watch_config: '' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":""}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":123}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
+		// Not a URL the engine could fetch either — so there is nothing to agree to.
+		expect(watchOf({ watch_config: '{"url":"example.com/preise"}' })).toBeUndefined();
+		// These DO parse, and have no host: shown as a host they would read as
+		// `file://` or `data:` with the payload beside it, which is a consent to
+		// something the label does not describe.
+		expect(watchOf({ watch_config: '{"url":"file:///etc/passwd"}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":"data:text/html,<b>hi</b>"}' })).toBeUndefined();
+	});
+
+	it('survives a config that is not JSON at all', () => {
+		expect(watchOf({ watch_config: 'https://example.com' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{broken' })).toBeUndefined();
+	});
+
+	it('cuts the rest so it cannot bury the button, on code points', () => {
+		const long = `https://example.com/${'a'.repeat(5000)}`;
+		const shown = watchOf({ watch_config: JSON.stringify({ url: long }) });
+		expect(shown?.host).toBe('https://example.com');
+		expect((shown?.rest ?? '').length).toBeLessThan(200);
+		expect((shown?.rest ?? '').endsWith('\u2026')).toBe(true);
+		// `URL` percent-encodes anything non-ASCII in the path, so what is cut here
+		// is always ASCII — the code-point cut is form, not protection, and this
+		// asserts the encoding rather than pretending the cut does the work.
+		const emoji = `https://example.com/${'\uD83D\uDCC8'.repeat(4)}`;
+		expect(watchOf({ watch_config: JSON.stringify({ url: emoji }) })?.rest).toBe(`/${'%F0%9F%93%88'.repeat(4)}`);
+	});
+});
+
+describe('showsWatchTarget / offersConfirmation — who may be asked, and for what', () => {
+	const watch = { effect: 'run_agent', source: 'watch', watch_config: JSON.stringify({ url: 'https://example.com/p', interval_minutes: 30 }) };
+
+	it('asks for a watch on its TARGET, never on the instruction it does not receive', () => {
+		expect(showsWatchTarget(watch)).toBe(true);
+		expect(showsInstruction(watch)).toBe(false);
+		expect(offersConfirmation(watch)).toBe(true);
+	});
+
+	it('asks for a scheduled run on its instruction, and not on a target it has none of', () => {
+		const cron = { effect: 'run_agent', source: 'cron' };
+		expect(showsInstruction(cron)).toBe(true);
+		expect(showsWatchTarget(cron)).toBe(false);
+		expect(offersConfirmation(cron)).toBe(true);
+	});
+
+	it('does NOT ask when the address cannot be read — there would be nothing to agree to', () => {
+		for (const config of [undefined, '', '{broken', '{"url":""}', '{"selector":".p"}']) {
+			const row = { effect: 'run_agent', source: 'watch', ...(config === undefined ? {} : { watch_config: config }) };
+			expect(showsWatchTarget(row), String(config)).toBe(false);
+			expect(offersConfirmation(row), String(config)).toBe(false);
+		}
+	});
+
+	it('asks nobody once the trigger is confirmed, and nobody for the effects that never wait', () => {
+		expect(offersConfirmation({ ...watch, confirmed_at: '2026-01-01T00:00:00.000Z' })).toBe(false);
+		expect(offersConfirmation({ effect: 'run_workflow', source: 'cron' })).toBe(false);
 	});
 });
 
@@ -189,6 +302,39 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 		expect(disagreements).toEqual([]);
 	});
 
+	it('a watch is held back like any other agent run — and runs once it is confirmed', () => {
+		// The half the view cannot prove on its own: the block now asks for consent
+		// on a watch, so the consent has to be the thing that releases it. The gate
+		// carries no source term, which is the reason — asserted here against the
+		// store rather than read out of the SQL.
+		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
+		dirs.push(dir);
+		const engine = new EngineDb(join(dir, 'engine.db'), '');
+		engines.push(engine);
+		const store = new TriggerStore(engine);
+		const row: TriggerRow = {
+			id: 'watch-1', title: 'Preise', description: '', source: 'watch' as TriggerRow['source'],
+			effect: 'run_agent' as TriggerRow['effect'],
+			conditionJson: JSON.stringify({ schedule_cron: null, watch_config: JSON.stringify({ url: 'https://example.com', interval_minutes: 30 }) }),
+			paramsJson: '{}', status: 'open', enabled: true, retryCount: 0, nextRunAt: PAST, confirmedAt: null,
+		};
+		store.upsert(row);
+
+		const listed = JSON.parse(JSON.stringify(store.listFiltered())) as Array<{
+			id: string; effect?: string; source?: string; confirmed_at?: string | null; watch_config?: string;
+		}>;
+		const view = listed[0]!;
+		expect(showsWatchTarget(view)).toBe(true);
+		expect(offersConfirmation(view)).toBe(true);
+		expect(store.getDue().map((t) => t.id)).not.toContain('watch-1');
+
+		expect(store.setConfirmedAt('watch-1', CONFIRMED)).toBe(true);
+		expect(store.getDue().map((t) => t.id)).toContain('watch-1');
+		const after = JSON.parse(JSON.stringify(store.listFiltered()))[0] as { confirmed_at?: string };
+		expect(showsWatchTarget(after)).toBe(false);
+		expect(offersConfirmation(after)).toBe(false);
+	});
+
 	it('and a trigger the view calls waiting is never due, whatever else holds it back', () => {
 		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
 		dirs.push(dir);
@@ -225,5 +371,69 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 		// …and it really does call three of them waiting, so the filter is not empty.
 		expect(listed.filter((t) => awaitsConfirmation(t)).map((t) => t.id).sort())
 			.toEqual(['completed-unconfirmed', 'no-next-run-unconfirmed', 'paused-unconfirmed']);
+	});
+});
+
+
+/**
+ * The display promises one thing: what it names is what the run dials. These
+ * three hold that promise against the two places it could quietly break —
+ * the fetch accepting a scheme the display does not (or the reverse), a host
+ * that READS differently from the one that is dialled, and a second writer
+ * repointing the stored address after a human already agreed to it.
+ */
+describe('display and fetch name the same target', () => {
+	const CORE = join(import.meta.dirname, '../../../../../src/core');
+	const target = (url: string) => watchOf({ watch_config: JSON.stringify({ url }) });
+
+	it('offers exactly the schemes fetchPinned accepts', () => {
+		const guard = readFileSync(join(CORE, 'network-guard.ts'), 'utf8');
+		const body = guard.slice(guard.indexOf('export async function fetchPinned'));
+		expect(body, 'fetchPinned not found — the anchor moved, this test measured nothing').not.toBe('');
+		const line = body.split('\n').find((l) => l.includes('parsed.protocol !=='));
+		const accepted = [...(line ?? '').matchAll(/'([a-z][a-z0-9+.-]*:)'/g)].map((m) => m[1]);
+		// Positive control: an anchor that slipped would leave an empty set, and an
+		// empty set passes every loop below without measuring anything.
+		expect(accepted).toContain('https:');
+		expect(accepted.length).toBeGreaterThanOrEqual(2);
+
+		for (const scheme of accepted) {
+			expect(target(`${scheme}//lynox.ai/p`), `${scheme} is fetched but not offered`).toBeDefined();
+		}
+		for (const scheme of ['ftp:', 'file:', 'data:', 'ws:', 'javascript:']) {
+			if (accepted.includes(scheme)) continue;
+			expect(target(`${scheme}//lynox.ai/p`), `${scheme} is offered but the fetch refuses it`).toBeUndefined();
+		}
+	});
+
+	it('names the dialled host, not the one the string reads like', () => {
+		// Expectations are literal on purpose: deriving them with `new URL` again
+		// would only prove that the same parser agrees with itself.
+		const cases: Array<[string, string]> = [
+			['https://lynox.ai@evil.example/prices', 'https://evil.example/prices'],
+			['https://lynox.ai:pw@evil.example/p', 'https://evil.example/p'],
+			['https://l\u0443nox.ai/p', 'https://xn--lnox-v6d.ai/p'],
+			['https://LYNOX.AI/Prices', 'https://lynox.ai/Prices'],
+			['https://lynox.ai:8443/prices', 'https://lynox.ai:8443/prices'],
+			['https://[2606:4700::1]:8443/p', 'https://[2606:4700::1]:8443/p'],
+			['https://lynox.ai/p\u202Egnp.exe', 'https://lynox.ai/p%E2%80%AEgnp.exe'],
+		];
+		for (const [url, shown] of cases) {
+			const t = target(url);
+			expect(`${t?.host ?? ''}${t?.rest ?? ''}`, url).toBe(shown);
+		}
+	});
+
+	it('keeps the stored address free of writers that could repoint it after consent', () => {
+		// Measured: after creation the only writer is the run's own `last_hash`
+		// (worker-loop), routed through task-manager and run-history. Editing the
+		// title or description clears `confirmed_at`; editing the ADDRESS is not a
+		// case that exists, and this is what makes the shown target trustworthy
+		// once it is confirmed. A new file here means a new one does exist.
+		const files = readdirSync(CORE).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'));
+		const writers = files.filter((f) => /updateWatchConfig|updateTriggerWatchConfig/.test(readFileSync(join(CORE, f), 'utf8')));
+		expect(writers.sort(), 'a new writer of watch_config must decide whether it clears confirmed_at — a repointed watch is a new thing to agree to').toEqual(
+			['run-history.ts', 'task-manager.ts', 'trigger-store.ts', 'worker-loop.ts'],
+		);
 	});
 });

@@ -1572,6 +1572,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.awaiting_confirmation': { de: 'Wartet auf Bestätigung', en: 'Awaiting confirmation' },
 	'triggers.awaiting_hint': { de: 'Läuft erst, wenn du ihn bestätigst.', en: "It won't run until you confirm it." },
 	'triggers.instruction': { de: 'Auftrag (von lynox geschrieben)', en: 'Instruction (written by lynox)' },
+	'triggers.watch_url': { de: 'Beobachtete Seite', en: 'Watched page' },
+	'triggers.watch_every': { de: 'Prüft alle {minutes} Minuten.', en: 'Checks every {minutes} minutes.' },
 	'triggers.confirm': { de: 'Bestätigen', en: 'Confirm' },
 	'triggers.confirm_label': { de: 'Bestätigen, dass dieser Trigger ohne dich laufen darf', en: 'Confirm that this trigger may run without you' },
 	'triggers.confirmed': { de: 'Bestätigt.', en: 'Confirmed.' },

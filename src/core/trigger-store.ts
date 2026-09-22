@@ -486,7 +486,11 @@ export class TriggerStore {
     // an already-confirmed `run_agent` trigger (mirrors update-workflow clearing the
     // workflow's confirmedAt on any step edit). No-op for non-run_agent effects
     // (confirmed_at is unread there). A schedule-only change doesn't alter WHAT runs,
-    // so it does NOT clear consent.
+    // so it does NOT clear consent. The watched ADDRESS would alter it — a watch run
+    // builds its prompt from the page it fetches — but no path edits it: after creation
+    // the only writer of `watch_config` is the run storing its own `last_hash`. A writer
+    // that repoints a watch has to clear consent right here; `trigger-consent.test.ts`
+    // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {
       sets.push('confirmed_at = NULL');
     }

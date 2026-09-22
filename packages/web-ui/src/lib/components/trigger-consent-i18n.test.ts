@@ -55,18 +55,35 @@ describe('the consent block speaks both languages, and says only what it may', (
 			'triggers.confirmed': "'triggers.confirmed': { de: 'Bestätigt.', en: 'Confirmed.' },",
 			'triggers.confirm_failed':
 				"'triggers.confirm_failed': { de: 'Bestätigen fehlgeschlagen. Bitte erneut versuchen.', en: 'Could not confirm. Please try again.' },",
+			'triggers.watch_url': "'triggers.watch_url': { de: 'Beobachtete Seite', en: 'Watched page' },",
+			'triggers.watch_every':
+				"'triggers.watch_every': { de: 'Prüft alle {minutes} Minuten.', en: 'Checks every {minutes} minutes.' },",
 		};
 		for (const [key, expected] of Object.entries(pinned)) {
 			expect(row(key), key).toBe(expected);
 		}
 	});
 
+	it('the cadence sentence keeps its slot in both languages', () => {
+		// It is the one string here that carries a number, and a lost slot renders
+		// the word `{minutes}` to the person about to allow an unattended fetch.
+		const every = row('triggers.watch_every');
+		expect(every).toContain('{minutes}');
+		expect(every.match(/\{minutes\}/g) ?? []).toHaveLength(2);
+	});
+
 	it('no sentence promises a time, in either language', () => {
 		// The claim this block may not make, in the place it came back through the
 		// last time: "runs shortly after", "on its schedule", a date, a duration.
+		//
+		// `triggers.watch_every` is deliberately NOT in this set, and the omission is
+		// the considered half: "checks every 30 minutes" states the watch's INTERVAL,
+		// which is a property of the thing being confirmed, not a promise about when
+		// the first run happens. Its own test above pins its slot.
 		const consent = Object.keys({
 			'triggers.awaiting_confirmation': 0, 'triggers.awaiting_hint': 0, 'triggers.instruction': 0,
 			'triggers.confirm': 0, 'triggers.confirm_label': 0, 'triggers.confirmed': 0, 'triggers.confirm_failed': 0,
+			'triggers.watch_url': 0,
 		}).map((key) => row(key)).join('\n');
 		for (const forbidden of [
 			/\bgleich\b/i, /\bkurz (danach|nach)\b/i, /\bsofort\b/i, /zeitplan/i, /\bf\u00e4llig\b/i, /\bminuten?\b/i,
