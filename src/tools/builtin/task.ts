@@ -123,7 +123,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', minimum: 5, description: 'How often to check the watched URL (in minutes). Default: 60. Minimum: 5.' },
         workflow_id: { type: 'string', description: 'ID of a stored workflow to execute on this schedule.' },
-        params: { type: 'object', description: 'Values for the workflow\'s {{params.<name>}} placeholders, re-targeting THIS firing (needs workflow_id). Run one workflow over many batches by firing it once per batch with a different range, e.g. {"from":1,"to":90} then {"from":91,"to":180}.' },
+        params: { type: 'object', description: 'Values for the workflow\'s {{params.<name>}} placeholders, re-targeting THIS firing (needs workflow_id).' },
       },
       required: ['title'],
     },

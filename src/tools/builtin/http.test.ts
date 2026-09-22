@@ -3423,10 +3423,12 @@ describe('http_request tool description — the session cap is stated, not disco
     // give consent. So the sentence was removed rather than rewritten, and this
     // pins the removal: an instruction that ends in a refusal is worse than none,
     // and naming a different one is a decision about who may consent.
-    expect(description).not.toMatch(/task_create/);
-    expect(description).not.toMatch(/fresh budget/i);
-    // The limit itself is still stated — that half was never the problem.
-    expect(description).toContain(String(MAX_REQUESTS_PER_SESSION));
+    // Not a two-word blocklist over the tool's own prose: any wording that sends the
+    // model to a saved workflow lands in the same refusal, so the whole subject is
+    // out until someone decides who may consent. The cap itself is asserted by its
+    // own test two blocks up, and `shared with sub-agents` by the one between.
+    expect(description).not.toMatch(/workflow/i);
+    expect(description).not.toMatch(/task_create|fresh budget/i);
   });
 });
 

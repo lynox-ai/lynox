@@ -303,7 +303,11 @@ describe('save_workflow — workflow_id source', () => {
     expect(stored).toBeDefined();
     expect(stored?.confirmedAt).toBeUndefined();
     // …and the copy in the live store agrees, so this is not an artefact of the
-    // mock: the object the rest of the engine reads is unconfirmed too.
+    // mock: the object the rest of the engine reads is unconfirmed too. The
+    // existence check is not decoration — `getPipeline` of a wrong id also yields
+    // `undefined`, so without it "never stored at all" reads as "stored
+    // unconfirmed" and the assertion passes for the wrong reason.
+    expect(getPipeline(savedId)).toBeDefined();
     expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
   });
 

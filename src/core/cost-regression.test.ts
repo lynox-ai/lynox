@@ -305,10 +305,12 @@ function measureStaticPrefixTokens(): number {
 // tool description and no prompt, so the model learned it by HITTING it. A live
 // bulk on 2026-08-18 asked for 130 records, got exactly 100, and stopped at id
 // 101 — correctly reported, but it had no way to have batched differently,
-// because it could not know the ceiling existed. The escape it now names is
-// real: a saved workflow fired per batch gets fresh counters (proved by two
-// headless runs of 60 requests each, 120 total, none blocked), and `params` is
-// what makes one workflow serve many batches.
+// because it could not know the ceiling existed.
+//   The escape it named alongside — a saved workflow fired per batch, with
+// `params` re-targeting each firing — was removed on 2026-09-22 and the entry
+// below records what that cost. The CAP half of this bump stands; the escape
+// half stopped being true when a saved workflow stopped confirming itself, and
+// a route that ends in a refusal is worse to name than to leave unnamed.
 //
 // The alternative was leaving the model to discover a hard wall mid-job on a
 // customer's 2000-record import. 125 tokens a turn is the cheaper failure.
@@ -398,7 +400,15 @@ function measureStaticPrefixTokens(): number {
 // spelled out "to authorize a provider" and "show it to them". Naming the
 // provider is redundant inside a tool that is entirely about one API profile,
 // and the second clause repeated the verb. Same rule, eight tokens less.
-const STATIC_PREFIX_BUDGET = 23948;
+// 2026-09-22: −108 (measured 23805) — three sentences deleted, not rewritten. Two in
+// this prompt ("scheduled via `task_create(workflow_id, schedule)`", "a `workflow_id`
+// for `run_workflow` / `task_create`") and one in `task_create`'s `params` description
+// (firing one workflow per batch). All three named a route that now ends at a consent
+// step the model cannot grant, because `save_workflow` no longer stamps the workflow as
+// confirmed. Naming a DIFFERENT route would be a decision about who may consent, so the
+// sentences are gone rather than replaced — and the ratchet is lowered to what the prompt
+// now actually costs, which is the whole point of it being a ratchet.
+const STATIC_PREFIX_BUDGET = 23805;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
