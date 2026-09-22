@@ -543,6 +543,18 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBe('rt-1');
   });
 
+  it('does not spend the profile\'s request budget on a refused output name', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ rate_limit: { requests_per_second: 1 } }));
+    const agent = makeAgent(store, vaultWithRefresh());
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: REFRESH }, agent) as string;
+
+    expect(result).toContain('is where this profile keeps its refresh token');
+    // The one request per second this profile allows is still there.
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+  });
+
   it('keeps the tokens it wrote when only the save of its record fails', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
@@ -681,6 +693,7 @@ describe('create — vault_keys is a list of names', () => {
     } }, agent) as string;
 
     expect(result).not.toContain('Invalid auth.vault_keys');
+    expect(store.get('crm-api')).toBeDefined();
   });
 });
 

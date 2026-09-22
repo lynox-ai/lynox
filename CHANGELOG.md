@@ -16,8 +16,9 @@
   rewritten nor recorded. Tokens from before this change are not on any record
   and stay.
 - `api_setup delete` names what it removed and which of the names the
-  profile used still hold a value, and says to ask the user before removing
-  the rest.
+  profile used still hold a value — apart from a platform slot or the
+  tenant's own provider key, which are not this profile's to offer — and says
+  to ask the user before removing the rest.
 - The `vault_keys` column of a connection also lists the token names an
   oauth2 profile uses at runtime, the names its exchanges recorded, and a
   basic profile's `username_key`/`password_key`.

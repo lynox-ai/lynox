@@ -579,8 +579,9 @@ export interface TokenPurge {
  * credentials the user stored, tokens from before exchanges were recorded,
  * recorded names whose value has changed since, and recorded names another
  * profile uses. The caller names them, because only the user can say whether
- * anything else needs them. A protected name is not named: it belongs to the
- * platform, and the user is not the one to ask about removing it.
+ * anything else needs them. A protected name is not named either: an
+ * infrastructure secret, or the slot holding the tenant's own provider key, is
+ * not this profile's to hand over for removal.
  */
 export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
   const inUseElsewhere = new Set<string>();

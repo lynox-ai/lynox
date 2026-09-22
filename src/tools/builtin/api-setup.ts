@@ -1534,9 +1534,12 @@ Next steps before calling create:
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
       }
       // Never a slot the refresh token lives in: the access token would be written
-      // over it, and the grant would go with it.
+      // over it, and the grant would go with it. Both slots, because a profile can
+      // name one of its own AND still have rotations written to the derived one —
+      // and the advice has to cover the case where the profile's own naming is what
+      // collides, which dropping `output_secret_name` would not fix.
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
-        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Pick another name, or leave output_secret_name out.`;
+        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Pick another output_secret_name, or point auth.oauth.refresh_token_key at a slot of its own.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
