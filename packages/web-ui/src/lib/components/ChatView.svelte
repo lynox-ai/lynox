@@ -101,7 +101,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
-	import { createMicSession } from '../utils/mic-session.js';
+	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
@@ -972,6 +972,12 @@
 		acquire: () => navigator.mediaDevices.getUserMedia({ audio: true }),
 		setTimer: (fn, ms) => setTimeout(fn, ms),
 		clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+		// The only trace this failure leaves anywhere. The blob never reaches the
+		// server, and web-ui has no client telemetry sink, so without this line
+		// the next report is again "voice just stopped working".
+		onRecycle: (bytes, durationMs) => {
+			console.warn('[voice] capture had no audio, dropped the mic session', { bytes, durationMs });
+		},
 	}, MIC_IDLE_RELEASE_MS);
 
 	const ensureMicStream = (): Promise<MediaStream> => micSession.ensure();
@@ -1012,32 +1018,22 @@
 			const chunks: Blob[] = [];
 
 			recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+			let startedAt = 0;
 			recorder.onstop = async () => {
+				const durationMs = startedAt === 0 ? 0 : Date.now() - startedAt;
 				cleanupRecording();
 
 				const blob = new Blob(chunks, { type: actualMime });
 
-				// iOS Safari sometimes hands back a header-only WebM blob (~60
-				// bytes, no audio frames) on second-and-later MediaRecorder
-				// runs after a clean stop+cleanup cycle — confirmed 2026-05-06
-				// when consecutive captures all returned a 60-byte body that
-				// Mistral refused with "Transcription failed".
-				//
-				// Bailing is not enough, and for four months it was all this did.
-				// A wedged session is not an ENDED session: its track still reads
-				// `live`, so the reuse check handed the same dead stream back on
-				// every retry, and the 60-second idle release that would have
-				// cleared it was cancelled by each new attempt. Recycling here is
-				// what turns "the microphone is broken" back into "that one
-				// recording failed" (reported 2026-09-22, iPhone/Safari).
-				if (micSession.afterCapture(blob.size) === 'empty') {
-					// The only trace this failure leaves anywhere. Nothing reaches
-					// the server — the blob never leaves the browser — so without
-					// this line the next report is again "it just stopped working".
-					console.warn('[voice] empty capture, recycling mic session', {
-						bytes: blob.size, mime: actualMime, chunks: chunks.length,
-					});
-					addToast(t('chat.voice_empty_capture'), 'error');
+				// Weigh the recording before spending a transcribe call on it. The
+				// session decides what a small blob MEANS — a brief tap, a wedged
+				// audio session, or a teardown mid-recording — because the three
+				// need different answers and only one of them is a fault.
+				const verdict = micSession.afterCapture(blob.size, durationMs);
+				if (verdict !== 'captured') {
+					if (verdict === 'short') addToast(t('chat.voice_too_short'), 'error');
+					if (verdict === 'empty') addToast(t('chat.voice_empty_capture'), 'error');
+					// 'aborted' says nothing: the user backgrounded or navigated away.
 					return;
 				}
 
@@ -1153,11 +1149,13 @@
 			// timeslice the chunks accumulate as audio flows, so even a glitched
 			// session still hands us populated chunks.
 			recorder.start(1000);
+			startedAt = Date.now();
 			recording = true;
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
 		} catch (err) {
+			if (err instanceof MicSessionReleased) return; // user left mid-prompt
 			if (err instanceof DOMException && err.name === 'NotAllowedError') {
 				addToast(t('chat.mic_denied'), 'error');
 			} else {

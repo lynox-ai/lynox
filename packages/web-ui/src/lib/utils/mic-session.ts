@@ -1,25 +1,37 @@
 /*
  * The microphone session behind voice input — acquire, reuse, release, recycle.
  *
- * Why it is a module and not three closures in ChatView: the component cannot be
- * imported in vitest (rune component, no svelte plugin in the root config), and
- * everything in here was untested for four and a half months while carrying the
- * only defence against a known iOS capture failure.
+ * It is a module and not three closures in ChatView because the component
+ * cannot be imported in vitest (rune component, no svelte plugin in the root
+ * config), and this logic went four and a half months without a single test
+ * while carrying the only response to a known iOS capture failure.
  *
- * THE BUG THIS EXISTS FOR (reported 2026-09-22, iPhone/Safari). iOS sometimes
- * hands back a header-only WebM blob — about sixty bytes, no audio frames — on
- * second-and-later MediaRecorder runs over the same audio session. The old code
- * detected that (a blob under 1 KiB) and only showed a toast. It never touched
- * the stream, and a wedged stream is not an ENDED stream: its track still reads
- * `live`, so the reuse test kept handing the same dead session back. Worse, the
- * one escape — a 60-second idle release — was CANCELLED by the next attempt, so
- * a user retrying every few seconds (what a person actually does) pushed their
- * only recovery window ahead of themselves indefinitely. What looked like "voice
- * input stopped working" was voice input refusing to recover.
+ * ── WHAT IS MEASURED, AND WHAT IS NOT ──────────────────────────────────────
  *
- * So an empty capture must RECYCLE the session, not merely report it. That is
- * `recycle()`, and it is the difference between one failed recording and a
- * permanently broken microphone.
+ * Measured (core#256, 2026-05-06, from a HAR): on iOS Safari a wedged audio
+ * session makes MediaRecorder emit a header-only WebM blob of about sixty
+ * bytes, where a working recording in the same session was 87 KB and 221 KB.
+ * Three orders of magnitude, so a byte threshold separates them with room to
+ * spare. That commit ALSO recorded two things that argue against the obvious
+ * repair, and they are written here because a later reader will otherwise
+ * rediscover them the expensive way:
+ *
+ *   · "all subsequent clamped under 1KB **until page reload**" — and at that
+ *     time every recording already stopped its tracks and called getUserMedia
+ *     again. So re-acquiring did NOT heal it.
+ *   · "per-recording getUserMedia + new MediaRecorder drove iOS Safari into a
+ *     stuck audio-session state" — re-acquiring per recording was named as a
+ *     CAUSE. The persistent stream this module keeps was the fix for it.
+ *
+ * NOT measured: that `recycle` helps. It is a hypothesis. What is known is only
+ * that the session in hand is producing nothing, so dropping it cannot make
+ * that session worse — and that dropping it on EVERY recording is the pattern
+ * that historically caused the wedge, which is why `afterCapture` will not do
+ * it for a short tap. A device verification is owed and is recorded as owed.
+ *
+ * NOT measured either: that today's failure (reported 2026-09-22, iPhone) is
+ * the same mechanism as 2026-05-06. The analyser branch blamed back then has
+ * since been removed entirely. Treat the two as related, not identical.
  */
 
 /** The slice of MediaStreamTrack this module touches — narrow so a test can fake it. */
@@ -28,54 +40,88 @@ export interface MicTrack {
 	stop(): void;
 }
 
-/** The slice of MediaStream this module touches. */
+/**
+ * The slice of MediaStream this module touches.
+ *
+ * `getAudioTracks` and `getTracks` are DIFFERENT sets and the difference is
+ * load-bearing: health is judged on audio tracks only (a live video track must
+ * not vouch for a dead microphone), while teardown must stop everything.
+ */
 export interface MicStream {
 	getAudioTracks(): MicTrack[];
 	getTracks(): MicTrack[];
 }
 
-/** The browser surface, injected so the policy above is drivable in a test. */
+/** The browser surface, injected so the policy is drivable in a test. */
 export interface MicSessionHost<S extends MicStream = MicStream> {
 	/** `navigator.mediaDevices.getUserMedia({ audio: true })`. */
 	acquire(): Promise<S>;
 	setTimer(fn: () => void, ms: number): unknown;
 	clearTimer(handle: unknown): void;
-	/** Optional: called when a capture came back empty, for a console breadcrumb. */
-	onRecycle?(): void;
+	/** Called when a capture came back empty and the session was dropped. */
+	onRecycle?(byteLength: number, durationMs: number): void;
 }
 
 /**
- * Bytes below which a capture cannot contain audio.
- *
- * A header-only WebM blob is roughly sixty bytes; a real capture of even a
- * fraction of a second is several kilobytes. The exact value is not load-bearing
- * — anything between "a container header" and "the shortest useful utterance"
- * behaves identically — but it is named here so the threshold has one home.
+ * Thrown by `ensure()` when the session was released while the acquire was
+ * still in flight — the user backgrounded the app or navigated away mid-prompt.
+ * The caller should abandon the recording quietly rather than report a fault.
+ */
+export class MicSessionReleased extends Error {
+	constructor() {
+		super('microphone session was released while acquiring');
+		this.name = 'MicSessionReleased';
+	}
+}
+
+/**
+ * Bytes below which a capture cannot contain audio. See the HAR figures above:
+ * broken is ~60 B, working was 87 KB. Anything in between separates them.
  */
 export const MIN_CAPTURE_BYTES = 1024;
 
-/** True when the browser returned a container with no audio frames in it. */
-export function isEmptyCapture(byteLength: number): boolean {
-	return byteLength < MIN_CAPTURE_BYTES;
-}
+/**
+ * Milliseconds below which a sub-threshold capture is explained by its own
+ * brevity rather than by a fault.
+ *
+ * The mic button is tap-to-toggle, so two quick taps are a normal accident and
+ * produce a small blob honestly. Telling those two cases apart matters because
+ * the response differs: a short tap must NOT drop the session (dropping it per
+ * recording is the pattern the 05-06 notes blame for the wedge), while an empty
+ * long recording is the case worth dropping it for.
+ */
+export const MIN_CAPTURE_MS = 700;
+
+/** What a finished recording turned out to be. */
+export type CaptureVerdict =
+	/** Real audio. The session stays warm for a quick re-tap. */
+	| 'captured'
+	/** Too brief to contain anything. Honest, not a fault; the session is kept. */
+	| 'short'
+	/** Long enough to contain audio, and did not. The session is dropped. */
+	| 'empty'
+	/** No session was held — it was torn down mid-recording. Not a fault to report. */
+	| 'aborted';
 
 export interface MicSession<S extends MicStream = MicStream> {
-	/** The stream to record from, reusing a healthy one and re-acquiring otherwise. */
+	/** The stream to record from. Throws `MicSessionReleased` if released meanwhile. */
 	ensure(): Promise<S>;
 	/** Arm the idle release. No-op when nothing is held, or one is already armed. */
 	scheduleRelease(): void;
-	/** Stop and drop the stream now. */
+	/** Stop and drop the stream now, superseding any acquire still in flight. */
 	releaseNow(): void;
 	/**
-	 * Report what a finished recording weighed, and let the session act on it.
+	 * Report what a finished recording weighed and how long it ran, and let the
+	 * session act on it.
 	 *
-	 * The single entry point on purpose. Split into "is it empty?" plus "recycle
-	 * or schedule?", a call site gets to pick — and picking `scheduleRelease` on
-	 * an empty capture is exactly the bug: recovery 60 seconds away, cancelled by
-	 * the next attempt. Here the caller reports a fact and reads a verdict.
+	 * One entry point rather than a predicate plus two actions: split apart, a
+	 * call site gets to pick, and picking the wrong one is the whole defect.
+	 * (The caller may still have armed an idle release before this runs —
+	 * `cleanupRecording` does — so every branch here leaves the timer in the
+	 * state it wants rather than assuming one.)
 	 */
-	afterCapture(byteLength: number): 'empty' | 'captured';
-	/** Whether a stream is currently held — for tests and for assertions at call sites. */
+	afterCapture(byteLength: number, durationMs: number): CaptureVerdict;
+	/** Whether a live stream is currently held. */
 	isHeld(): boolean;
 }
 
@@ -84,6 +130,12 @@ export function createMicSession<S extends MicStream>(
 ): MicSession<S> {
 	let stream: S | null = null;
 	let releaseTimer: unknown = null;
+	/**
+	 * Bumped by every teardown. An `ensure()` that started before the bump must
+	 * not install the stream it was waiting for: the user has already left, and
+	 * installing it leaves the recording indicator lit with no way to turn it off.
+	 */
+	let generation = 0;
 
 	const clearPendingRelease = (): void => {
 		if (releaseTimer === null) return;
@@ -91,7 +143,8 @@ export function createMicSession<S extends MicStream>(
 		releaseTimer = null;
 	};
 
-	const stopStream = (): void => {
+	const teardown = (): void => {
+		generation++;
 		if (stream === null) return;
 		for (const track of stream.getTracks()) track.stop();
 		stream = null;
@@ -104,7 +157,7 @@ export function createMicSession<S extends MicStream>(
 		if (releaseTimer !== null) return;
 		releaseTimer = host.setTimer(() => {
 			releaseTimer = null;
-			stopStream();
+			teardown();
 		}, idleReleaseMs);
 	};
 
@@ -116,7 +169,16 @@ export function createMicSession<S extends MicStream>(
 			if (stream !== null && stream.getAudioTracks().some((t) => t.readyState === 'live')) {
 				return stream;
 			}
-			stream = await host.acquire();
+			// Drop the dead one BEFORE asking for a new one: if the acquire is
+			// refused, `isHeld()` must not keep reporting a stream nobody can use.
+			teardown();
+			const mine = generation;
+			const acquired = await host.acquire();
+			if (mine !== generation) {
+				for (const track of acquired.getTracks()) track.stop();
+				throw new MicSessionReleased();
+			}
+			stream = acquired;
 			return stream;
 		},
 
@@ -124,21 +186,29 @@ export function createMicSession<S extends MicStream>(
 
 		releaseNow(): void {
 			clearPendingRelease();
-			stopStream();
+			teardown();
 		},
 
-		afterCapture(byteLength: number): 'empty' | 'captured' {
-			if (!isEmptyCapture(byteLength)) {
-				// A real recording: keep the session warm for a quick re-tap.
+		afterCapture(byteLength: number, durationMs: number): CaptureVerdict {
+			if (stream === null) {
+				// Torn down while recording — backgrounded, navigated away. The tiny
+				// blob is the consequence of that, not evidence of a fault, and
+				// reporting it would fill the only diagnostic trace with noise.
+				return 'aborted';
+			}
+			if (byteLength >= MIN_CAPTURE_BYTES) {
 				scheduleRelease();
 				return 'captured';
 			}
-			// No audio came through. Reusing this stream is what kept the
-			// microphone broken, so it goes now — not in 60 seconds, which the
-			// next attempt would cancel.
+			if (durationMs < MIN_CAPTURE_MS) {
+				// Two quick taps. Keep the session: dropping it per recording is the
+				// pattern the 05-06 notes blame for the stuck audio session.
+				scheduleRelease();
+				return 'short';
+			}
 			clearPendingRelease();
-			stopStream();
-			host.onRecycle?.();
+			teardown();
+			host.onRecycle?.(byteLength, durationMs);
 			return 'empty';
 		},
 
