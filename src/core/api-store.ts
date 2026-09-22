@@ -95,6 +95,18 @@ export interface ApiAuth {
     scope?: string | undefined;
     /** Optional audience (Auth0-style flows). */
     audience?: string | undefined;
+    /**
+     * Which built-in provider preset this profile connects through
+     * (`src/core/oauth-presets.ts`). It decides the authorize and token hosts,
+     * and it is the ONLY thing that may: a host a model wrote into a profile is
+     * a host a model chose.
+     */
+    preset_id?: string | undefined;
+    /**
+     * The values the preset needs, e.g. the shop name. Checked against the
+     * preset's own anchored patterns at every use, never trusted from here.
+     */
+    preset_params?: Record<string, string> | undefined;
     /** Body encoding for the token POST. Most providers want `form`
      *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
      *  Default: `form`. */

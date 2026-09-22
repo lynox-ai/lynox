@@ -20,6 +20,7 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
+import { derivePresetEndpoints, presetIds } from '../../core/oauth-presets.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
@@ -52,7 +53,7 @@ const TOKEN_BODY_MAX_BYTES = 64 * 1024;
  */
 const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
-type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token';
+type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect';
 
 interface RefinePatch {
   addGuidelines?: string[] | undefined;
@@ -1021,6 +1022,19 @@ function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecre
 }
 
 /**
+ * Is a vault name filled? Asked through the same indirection `fetch_token`
+ * uses, so the value never reaches the model or this function's caller — only
+ * the yes or no does.
+ */
+function vaultHolds(agent: IAgent, name: string): boolean {
+  const store = agent.secretStore;
+  if (!store) return false;
+  const probe = { _: `secret:${name}` };
+  const probed = store.resolveSecretRefs(probe) as { _: string };
+  return probed._ !== `secret:${name}`;
+}
+
+/**
  * The reply for an exchange that finished after its profile was deleted: the
  * delete already ran, so nothing is left to hold a record of what the exchange
  * wrote — it is taken out again now, where it can be, and the reply says what
@@ -1047,7 +1061,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token'],
+          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect'],
           description: 'Action to perform',
         },
         profile: {
@@ -1396,6 +1410,54 @@ Next steps before calling create:
       }
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
+    }
+
+    if (input.action === 'connect') {
+      const id = input.id ?? input.profile?.id;
+      if (!id) return 'Error: "id" is required for connect action.';
+      const apiStore = agent.toolContext?.apiStore;
+      if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
+      const profile = apiStore.get(id);
+      if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
+      if (profile.auth?.type !== 'oauth2') {
+        return `Error: profile "${id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
+      }
+      // The link is built from the server's own origin, never assembled by the
+      // model: a link the model writes is a link the model chooses. Without an
+      // HTTP server there is nothing to send the user to.
+      const origin = process.env['ORIGIN'];
+      if (!origin) {
+        return 'Error: connecting needs the web interface. This engine runs without an HTTP server, so there is no page for the user to return to. Start it with --http-api, or set the credentials by hand with ask_secret and use action=fetch_token.';
+      }
+      // Derived here only to answer BEFORE sending the user anywhere; the route
+      // derives again at use, and that derivation is the boundary.
+      const endpoints = derivePresetEndpoints(profile.auth.oauth?.preset_id ?? '', profile.auth.oauth?.preset_params);
+      if ('kind' in endpoints) {
+        const ids = presetIds();
+        const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
+        if (endpoints.kind === 'unknown-preset') {
+          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
+        }
+        return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
+      }
+      const clientIdKey = profile.auth.oauth?.client_id_key;
+      const clientSecretKey = profile.auth.oauth?.client_secret_key;
+      const missing = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
+      if (!clientIdKey || !clientSecretKey || missing.length > 0) {
+        const names = [clientIdKey ?? 'the client id key', clientSecretKey ?? 'the client secret key'];
+        return `Error: profile "${id}" cannot authorize yet — the provider's client credentials are not in the vault. Call ask_secret for ${names.join(' and ')}, then connect.`;
+      }
+      const link = `${origin.replace(/\/$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      const grant = profile.oauth_grant;
+      // Three replies, one link. What differs is what the user is walking into,
+      // and saying it here is cheaper than a surprise on the provider's page.
+      if (grant?.state === 'revoked') {
+        return `The provider ended this authorization, so "${id}" has to be authorized again. Show the user this link and let them click it: ${link}\n\nThe old access is gone either way; connecting again is what brings it back.`;
+      }
+      if (grant?.origin === 'callback' && (grant.state === 'connected' || grant.state === 'no-refresh')) {
+        return `"${id}" is already connected. Show the user this link only if they want to authorize again: ${link}\n\nA new authorization replaces the stored token, so anything running against the old one stops working the moment it is used.`;
+      }
+      return `Show the user this link and let them click it: ${link}\n\nIt opens ${endpoints.host}, where they authorize this engine. They come back to this instance, and the connection is stored for you — do not ask them to paste a token, and do not build this link yourself.`;
     }
 
     if (input.action === 'delete') {
