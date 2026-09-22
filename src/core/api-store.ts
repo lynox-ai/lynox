@@ -280,8 +280,32 @@ export interface OAuthGrantRecord {
    * stamp knows nothing about, and is judged as unstamped.
    */
   minted_for?: string | undefined;
-  /** Set when the provider rejected the stored refresh token as revoked. */
-  state?: 'revoked' | undefined;
+  /**
+   * How this grant came to be — and the reason it is a field of its own rather
+   * than something read off `auth.oauth.grant_type`.
+   *
+   * ⚠ To the next reader who notices that `callback` grants are the ones with
+   * `grant_type: 'refresh_token'` and reaches for the simplification: they are
+   * not the same set. A profile a user configured BY HAND also carries
+   * `refresh_token`, and it has no callback to send anyone back to. The texts
+   * that tell the model what to do next differ for exactly that reason — a
+   * hand-configured profile is told to call `ask_secret` with a new token,
+   * which is right for it and wrong for a connected one, where the way back is
+   * the connect link. Collapse the two and the hand-configured profile starts
+   * getting advice it cannot follow.
+   */
+  origin?: 'callback' | undefined;
+  /**
+   * What the last exchange left behind.
+   *
+   * `revoked` — the provider rejected the stored refresh token (W0).
+   * `connected` — an exchange succeeded and left a refresh token.
+   * `no-refresh` — an exchange succeeded and left none, so there is nothing to
+   *   refresh with; neither state is the normal case until a real provider has
+   *   been measured, and the code treats them as equal outcomes.
+   * `refresh-dead` — a refresh attempt failed in a way that is not a revocation.
+   */
+  state?: 'revoked' | 'connected' | 'no-refresh' | 'refresh-dead' | undefined;
   /** Fingerprint of the refresh token the provider rejected (`tokenFingerprint`). */
   revoked_fp?: string | undefined;
   /** ISO timestamp of the revocation verdict. */

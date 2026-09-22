@@ -310,6 +310,17 @@ describe('ApiStore — grant record projections', () => {
   // together are one guarantee; this test pins the pair. Keep the write-side guard —
   // the column is what a later purge trusts — and do not read the raw column here to
   // make it fail on its own.
+  it.each(['connected', 'no-refresh', 'refresh-dead'] as const)('does not project %s as revoked', (state) => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    // Only a revocation blocks the profile. The other three say what the last
+    // exchange left behind, and a connection the user can still use must not
+    // be shown as dead because the record carries something.
+    store.save(oauthProfile({ oauth_grant: { origin: 'callback', state } }));
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
   it('lists only string entries of vault_keys in the trail', () => {
     const cs = makeCs();
     const store = new ApiStore();
