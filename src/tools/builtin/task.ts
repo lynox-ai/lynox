@@ -77,6 +77,31 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
   return `Error: ${field} contains what looks like escaped JSON fragments of other task_create parameters (matched: "${paramName}"). These must be passed as separate top-level parameters, not embedded inside ${field}. Retry the call with schedule, priority, assignee, tags, etc. as their own fields.`;
 }
 
+/**
+ * The sentence a reported row owes the reader when the scheduler will NOT run it
+ * yet.
+ *
+ * Drawn over the BEHAVIOUR, not over the branch: `getDue` holds back every
+ * `run_agent` row with no `confirmed_at`, with no carve-out for how it was made
+ * (`trigger-store.ts`). Each branch used to speak for itself — one said
+ * "watching <url> every 60min", others reported a next run — and each was wrong
+ * the same way for the same reason. One predicate, appended wherever a row is
+ * reported, is the only shape that cannot drift apart again: a branch that
+ * forgets it says nothing extra, and a row that is not held back gets no
+ * sentence it does not deserve. A workflow trigger is NOT held back by this gate
+ * (its consent sits on the workflow), and an edit that changes what a trigger
+ * runs clears the stamp, so the update path needs it too.
+ */
+function pendingConsent(task: object): string {
+  // Takes the union both creators return (a TODO has neither field) and reads
+  // the two fields the gate reads. Narrowed here rather than cast per call site:
+  // a caller that has to shape its argument is a caller that can shape it wrong.
+  const row = task as { effect?: unknown; confirmed_at?: unknown };
+  return row.effect === 'run_agent' && !row.confirmed_at
+    ? ' — it runs once you confirm it in Triggers.'
+    : '';
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
   definition: {
     name: 'task_create',
@@ -207,7 +232,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
         const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-        return `Workflow task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}`;
+        return `Workflow task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}${pendingConsent(task)}`;
       }
 
       if (input.schedule) {
@@ -216,10 +241,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           scheduleCron: input.schedule,
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-        // Says the pending step, because the row does NOT run yet: an agent-made
-        // trigger lands unconfirmed and the scheduler skips it silently. Reporting
-        // only the next run made the tool promise something the engine holds back.
-        return `Scheduled task created: ${formatTaskLine(task)}${nextRun} — it runs once you confirm it in Triggers.`;
+        return `Scheduled task created: ${formatTaskLine(task)}${nextRun}${pendingConsent(task)}`;
       }
 
       if (input.watch_url) {
@@ -231,9 +253,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           watchUrl: input.watch_url,
           watchIntervalMinutes: intervalMinutes,
         });
-        // Same correction as the scheduled branch, and the older of the two lies:
-        // "watching X every Nmin" described a row the scheduler never returns.
-        return `Watch task created: ${formatTaskLine(task)} — it checks ${input.watch_url} every ${String(intervalMinutes)}min once you confirm it in Triggers.`;
+        return `Watch task created: ${formatTaskLine(task)} — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`;
       }
 
       if (input.run_at) {
@@ -241,11 +261,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
         }
         const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
-        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task)}`;
+        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task)}${pendingConsent(task)}`;
       }
 
       const task = managerRef.create(baseParams);
-      return `Task created: ${formatTaskLine(task)}`;
+      return `Task created: ${formatTaskLine(task)}${pendingConsent(task)}`;
     } catch (e: unknown) {
       logErrorChain('task_create', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -319,7 +339,10 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         : 'schedule_cron' in task && task.schedule_cron
           ? ` — schedule: ${task.schedule_cron}`
           : '';
-      return `Task updated: ${formatTaskLine(task)}${scheduleNote}`;
+      // An edit can re-open consent: changing what a trigger RUNS clears the stamp
+      // (`trigger-store.ts`), so the row just edited may be held back again — and
+      // this report is the only place that says so.
+      return `Task updated: ${formatTaskLine(task)}${scheduleNote}${pendingConsent(task)}`;
     } catch (e: unknown) {
       logErrorChain('task_update', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;

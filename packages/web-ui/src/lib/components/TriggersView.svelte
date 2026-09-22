@@ -285,7 +285,7 @@
 									{#if showsWatchTarget(trigger)}
 										<div class="text-xs text-text-muted" data-consent-watch>
 											<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>
-											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{displaySafe(watchOf(trigger)?.host ?? '')}</span>{displaySafe(watchOf(trigger)?.rest ?? '')}</p>
+											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5"><span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>
 											{#if watchOf(trigger)?.intervalMinutes}
 												<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
 											{/if}

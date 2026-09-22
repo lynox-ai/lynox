@@ -149,8 +149,8 @@ export function instructionOf(trigger: { title: string; description?: string | u
 }
 
 /**
- * The page a watch trigger reads — as a HOST plus the rest, because the host is
- * the thing being agreed to.
+ * The page a watch trigger reads — as the HOST it would be fetched from, plus
+ * the rest, because the host is the thing being agreed to.
  *
  * A watch does not run the text above: `executeWatch` builds its prompt from
  * this URL and from what it fetched there, and the description reaches it
@@ -160,10 +160,19 @@ export function instructionOf(trigger: { title: string; description?: string | u
  * The host is parsed out with `URL` rather than shown inside the string, and the
  * reason is a measured deception: `https://lynox.ai@evil.example/prices` READS
  * as the product's own domain and is fetched from `evil.example` — the `@` makes
- * everything before it a username. The engine resolves `parsed.hostname`, so the
- * view shows exactly that, and shows the rest beside it rather than in front of
- * it. An address `URL` cannot parse yields nothing: the engine could not fetch
- * it either, and there is nothing to consent to.
+ * everything before it a username. What is shown is `parsed.host`, which is what
+ * the fetch sends as its `Host` header, INCLUDING a non-default port: a watch on
+ * `:8443` is a different target than one on 443, and hiding that would be the
+ * same class of omission one line up.
+ *
+ * Only `http:`/`https:` yield anything. `ftp://…` parses and has a host, so it
+ * would have been offered for consent while the fetch rejects the protocol — a
+ * consent for something that cannot happen is as wrong as one for something the
+ * reader cannot see.
+ *
+ * Both parts are bounded, and that is deliberate after a correction that bounded
+ * only the second: `https://<5000 chars>.example/x` put the whole wall in the
+ * HOST. What buries the button is length, not which half it sits in.
  *
  * `watch_config` is JSON that reaches here as a string from the wire; anything
  * that is not an object with a usable `url` yields nothing, and the block that
@@ -176,22 +185,32 @@ export function watchOf(trigger: { watch_config?: string | undefined }):
 		const config = JSON.parse(trigger.watch_config) as { url?: unknown; interval_minutes?: unknown };
 		if (typeof config.url !== 'string' || config.url === '') return undefined;
 		const parsed = new URL(config.url);
+		if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return undefined;
 		if (parsed.hostname === '') return undefined;
-		// A model-authored "url" is a string of any length, and the rest of it can
-		// bury the button under a wall of text — the failure `prompt-origin.ts`
-		// names: the person cannot see what they are agreeing to. The wall grows
-		// DOWNWARD (the box wraps), so the cut is the mitigation, not the wrapping
-		// class. Cut on code points so an emoji or a surrogate pair is not halved.
-		const tail = `${parsed.pathname}${parsed.search}${parsed.hash}`;
-		const chars = [...tail];
-		const rest = chars.length > URL_DISPLAY_MAX ? `${chars.slice(0, URL_DISPLAY_MAX - 1).join('')}\u2026` : tail;
 		const interval = typeof config.interval_minutes === 'number' && Number.isFinite(config.interval_minutes)
 			? { intervalMinutes: config.interval_minutes }
 			: {};
-		return { host: `${parsed.protocol}//${parsed.hostname}`, rest, ...interval };
+		return {
+			host: clampForDisplay(`${parsed.protocol}//${parsed.host}`),
+			rest: clampForDisplay(`${parsed.pathname}${parsed.search}${parsed.hash}`),
+			...interval,
+		};
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Bound a piece of the shown address.
+ *
+ * `URL` percent-encodes the characters `displaySafe` removes, and IDNA rejects
+ * or strips them in a host, so what reaches the view is already ASCII — which is
+ * why the address does not go through `displaySafe` and why this cut is by code
+ * point only as a matter of form.
+ */
+function clampForDisplay(part: string): string {
+	const chars = [...part];
+	return chars.length > URL_DISPLAY_MAX ? `${chars.slice(0, URL_DISPLAY_MAX - 1).join('')}\u2026` : part;
 }
 
 /** Long enough for a real URL with a path, short enough to leave the button on screen. */

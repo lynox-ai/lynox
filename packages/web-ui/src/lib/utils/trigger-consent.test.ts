@@ -65,6 +65,31 @@ describe('watchOf — the host, the rest, and how often', () => {
 			.toEqual({ host: 'https://example.com', rest: '/preise?x=1', intervalMinutes: 60 });
 	});
 
+	it('shows the port too, because :8443 is a different target than 443', () => {
+		// `fetchPinned` sends `parsed.host` as its Host header and dials that port.
+		expect(watchOf({ watch_config: '{"url":"https://evil.example:8443/x"}' })?.host)
+			.toBe('https://evil.example:8443');
+		// A default port is not part of `host`, so it does not appear.
+		expect(watchOf({ watch_config: '{"url":"https://example.com:443/x"}' })?.host)
+			.toBe('https://example.com');
+	});
+
+	it('offers nothing for a protocol the fetch would reject', () => {
+		// It parses and it has a host, so it WOULD have been shown — a consent for
+		// something that cannot happen.
+		for (const url of ['ftp://evil.example/x', 'ws://evil.example/x', 'chrome://settings']) {
+			expect(watchOf({ watch_config: JSON.stringify({ url }) }), url).toBeUndefined();
+		}
+	});
+
+	it('bounds the HOST as well, not only the rest', () => {
+		// The correction that split the two bounded only the second, so the whole
+		// wall moved into the host.
+		const host = watchOf({ watch_config: JSON.stringify({ url: `https://${'a'.repeat(5000)}.example/x` }) })?.host ?? '';
+		expect(host.length).toBeLessThan(200);
+		expect(host.endsWith('\u2026')).toBe(true);
+	});
+
 	it('shows the host that is FETCHED, not the one the string reads as', () => {
 		// `@` makes everything before it a username, so this reads as the product's
 		// own domain and is fetched from the other one. The engine resolves
@@ -107,9 +132,11 @@ describe('watchOf — the host, the rest, and how often', () => {
 		expect(shown?.host).toBe('https://example.com');
 		expect((shown?.rest ?? '').length).toBeLessThan(200);
 		expect((shown?.rest ?? '').endsWith('\u2026')).toBe(true);
-		const emoji = `https://example.com/${'\uD83D\uDCC8'.repeat(400)}`;
-		const cut = watchOf({ watch_config: JSON.stringify({ url: emoji }) })?.rest ?? '';
-		expect(cut).not.toContain('\uFFFD');
+		// `URL` percent-encodes anything non-ASCII in the path, so what is cut here
+		// is always ASCII — the code-point cut is form, not protection, and this
+		// asserts the encoding rather than pretending the cut does the work.
+		const emoji = `https://example.com/${'\uD83D\uDCC8'.repeat(4)}`;
+		expect(watchOf({ watch_config: JSON.stringify({ url: emoji }) })?.rest).toBe(`/${'%F0%9F%93%88'.repeat(4)}`);
 	});
 });
 

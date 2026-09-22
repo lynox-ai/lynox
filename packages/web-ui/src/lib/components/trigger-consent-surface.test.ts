@@ -78,76 +78,6 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
-	it('the consent block is pinned whole at its root, and says the trigger will not run', () => {
-		const { cond, body } = ifBlockAround('data-trigger-consent');
-		expect(cond).toBe('awaitsConfirmation(trigger)');
-		// The ROOT tag, compared whole. A delta round put `class="hidden"` on this
-		// one element and every assertion below still passed: the block vanished,
-		// the button with it, and the suite was green. Pinning the button alone was
-		// not enough — the element ABOVE it decides whether any of it renders.
-		expect(line('data-trigger-consent')).toBe('<div class="mt-2 space-y-1.5" data-trigger-consent>');
-		expect(body.trim().startsWith('<div')).toBe(true);
-		expect(body).toContain('<button onclick={() => confirmTrigger(trigger)}');
-		expect(line("t('triggers.awaiting_hint')")).toBe(
-			`<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>`,
-		);
-	});
-
-	it('the Confirm button is pinned whole — class, state and accessible name included', () => {
-		expect(line('<button onclick={() => confirmTrigger(trigger)}')).toBe(
-			'<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]}'
-			+ " aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')}"
-			+ ' class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text'
-			+ ' hover:bg-accent/15 disabled:opacity-40">{t(\'triggers.confirm\')}</button>',
-		);
-	});
-
-	it('what would run comes BEFORE the button, not after it', () => {
-		const { body } = ifBlockAround('data-trigger-consent');
-		const button = body.indexOf('<button onclick={() => confirmTrigger(trigger)}');
-		for (const marker of ['data-consent-instruction', 'data-consent-watch', "t('triggers.awaiting_hint')"]) {
-			expect(body.indexOf(marker), marker).toBeGreaterThan(-1);
-			expect(body.indexOf(marker), marker).toBeLessThan(button);
-		}
-	});
-
-	it('the instruction is gated on showsInstruction, the watch target on showsWatchTarget', () => {
-		const instruction = ifBlockAround('data-consent-instruction');
-		expect(instruction.cond).toBe('showsInstruction(trigger)');
-		expect(line('data-consent-instruction')).toBe('<div class="text-xs text-text-muted" data-consent-instruction>');
-		expect(line('{displaySafe(instructionOf(trigger))}')).toBe(
-			'<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words'
-			+ ' rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
-			+ '{displaySafe(instructionOf(trigger))}</p>',
-		);
-		const watch = ifBlockAround('data-consent-watch');
-		expect(watch.cond).toBe('showsWatchTarget(trigger)');
-		expect(line('data-consent-watch')).toBe('<div class="text-xs text-text-muted" data-consent-watch>');
-		// Whole tags, like the instruction box next door: a round put `hidden` on
-		// each of these three in turn and every assertion here stayed green.
-		expect(line('{displaySafe(watchOf(trigger)?.host')).toBe(
-			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
-			+ '<span class="font-medium text-text">{displaySafe(watchOf(trigger)?.host ?? \'\')}</span>'
-			+ "{displaySafe(watchOf(trigger)?.rest ?? '')}</p>",
-		);
-		expect(line('data-consent-cadence')).toBe(
-			'<p class="mt-0.5" data-consent-cadence>'
-			+ "{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>",
-		);
-		// The two never both render: an instruction belongs to the standard run, a
-		// target to the watch, and `showsWatchTarget` requires the watch source.
-		expect(instruction.body).not.toContain('data-consent-watch');
-		expect(watch.body).not.toContain('data-consent-instruction');
-	});
-
-	it('ONE gate decides the button, for both kinds', () => {
-		// The button may not outlive the thing it consents to, and it may not be
-		// duplicated per kind — one conditional, asserted whole, plus the count.
-		const button = ifBlockAround('confirmTrigger(trigger)');
-		expect(button.cond).toBe('offersConfirmation(trigger)');
-		expect(TEMPLATE.split('confirmTrigger(trigger)')).toHaveLength(2);
-	});
-
 	it('says nothing about WHEN the run comes', () => {
 		// Two earlier versions did, and both spoke for reasons consent does not
 		// settle. The scheduler's answer is not this block's to give.
@@ -155,17 +85,47 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(body).not.toMatch(/next_run_at|fmtDate|schedule_cron/);
 	});
 
-	it('every agent-authored string in the block goes through displaySafe', () => {
+	it('the consent block is compared WHOLE — nothing may be added to it', () => {
+		// Every assertion in this file named elements it expected, so anything ADDED
+		// passed: a `<div class="hidden">` wrapped around the watch box, a second
+		// raw `<p>` beside the address, the cadence moved out of its gate. Each was
+		// measured green. Naming more elements buys one more round; comparing the
+		// artefact whole ends the class — this block is small, it is ours, and it
+		// changes once a quarter, which is exactly when a whole comparison is the
+		// right instrument. It subsumes what several separate assertions used to
+		// state — the root element, the button's attributes and order, the labels,
+		// the absence of a link or a raw `{trigger.x}` — because none of those can
+		// change without changing the shape. Two instruments for one question is one
+		// too many to keep in step.
 		const { body } = ifBlockAround('data-trigger-consent');
-		// A bare `{trigger.x}` renders what the agent wrote with its overrides and
-		// invisible spaces intact — in the text a person reads before granting the run.
-		expect(body.match(/\{trigger\.[a-z_]+\}/g) ?? []).toEqual([]);
-		expect(body).not.toContain('{@html');
-		// No link, either: wrapping the address in an `<a href={…}>` passed every
-		// assertion in this file once, and a `javascript:` address is one click away
-		// on the surface whose job is to make the decision informed.
-		expect(body).not.toMatch(/<a\b/);
-		expect(body).not.toContain('href');
+		const shape = body.split('\n').map((l) => l.trim()).filter((l) => l !== '').join('\n');
+		expect(shape).toBe([
+			'<div class="mt-2 space-y-1.5" data-trigger-consent>',
+			`<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>`,
+			'{#if showsInstruction(trigger)}',
+			'<div class="text-xs text-text-muted" data-consent-instruction>',
+			`<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>`,
+			'<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf(trigger))}</p>',
+			'</div>',
+			'{/if}',
+			'{#if showsWatchTarget(trigger)}',
+			'<div class="text-xs text-text-muted" data-consent-watch>',
+			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
+			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
+				+ `<span class="font-medium text-text">{watchOf(trigger)?.host ?? ''}</span>{watchOf(trigger)?.rest ?? ''}</p>`,
+			'{#if watchOf(trigger)?.intervalMinutes}',
+			`<p class="mt-0.5" data-consent-cadence>{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>`,
+			'{/if}',
+			'</div>',
+			'{/if}',
+			'{#if offersConfirmation(trigger)}',
+			'<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]}'
+				+ " aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')}"
+				+ ' class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text'
+				+ " hover:bg-accent/15 disabled:opacity-40\">{t('triggers.confirm')}</button>",
+			'{/if}',
+			'</div>',
+		].join('\n'));
 	});
 
 	it('confirming calls the existing confirm route with POST, and reports what it did', () => {
@@ -196,24 +156,6 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// exists to withhold — and every "pinned whole" assertion here reads the
 		// first match, so it went green.
 		expect(TEMPLATE.split('confirmTrigger(trigger)')).toHaveLength(2);
-	});
-
-	it('each label is pinned INSIDE its own block, so the two cannot be swapped', () => {
-		// They were pinned by searching the template for the key, which found the
-		// first match and checked that the SEARCH STRING is unique — not that the
-		// shape is. With a second, textually identical span in the watch block, the
-		// two keys could be exchanged: the instruction box then reads "Watched page"
-		// and the address reads "Instruction (written by lynox)". Measured, survived.
-		const instruction = ifBlockAround('data-consent-instruction').body;
-		expect(instruction).toContain(
-			`<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>`,
-		);
-		expect(instruction).not.toContain("triggers.watch_url");
-		const watch = ifBlockAround('data-consent-watch').body;
-		expect(watch).toContain(
-			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
-		);
-		expect(watch).not.toContain("triggers.instruction");
 	});
 
 	it('the card stacks below `sm`, which is what makes the instruction readable there', () => {

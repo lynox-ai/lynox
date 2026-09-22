@@ -157,26 +157,39 @@ describe('Task Tools', () => {
       expect(result).toContain('every 5min');
     });
 
-    it('tells the truth about what happens next — the row does not run yet', async () => {
+    it('tells the truth about what happens next — on every report of a held-back row', async () => {
       // Both answers used to describe a running automation: "watching <url> every
       // 60min" and a bare "next run: <date>". An agent-made trigger lands
       // unconfirmed, and the scheduler skips it with no failure and no note — so
-      // the tool was the only thing that spoke, and it spoke wrongly. The pending
-      // step is named because the Triggers view now offers it.
-      const watch = await taskCreateTool.handler(
-        { title: 'Preise', watch_url: 'https://example.com', watch_interval_minutes: 30 },
-        makeAgent(),
-      );
-      expect(watch).toMatch(/confirm it in Triggers/);
-      expect(watch).not.toMatch(/^.*— watching /);
+      // the tool was the only thing that spoke about it, and it spoke wrongly.
+      //
+      // The set is drawn over the BEHAVIOUR, not over the branches someone looked
+      // at: the gate holds back every unconfirmed agent run regardless of how it
+      // was made. A first pass fixed two branches and left three, which is the
+      // failure this case exists to prevent.
+      const reports = await Promise.all([
+        taskCreateTool.handler({ title: 'Preise', watch_url: 'https://example.com', watch_interval_minutes: 30 }, makeAgent()),
+        taskCreateTool.handler({ title: 'Bericht', schedule: '0 9 * * 1' }, makeAgent()),
+        taskCreateTool.handler({ title: 'Einmalig', run_at: '2027-01-01T09:00:00.000Z', assignee: 'lynox' }, makeAgent()),
+        taskCreateTool.handler({ title: 'Sofort', assignee: 'lynox' }, makeAgent()),
+      ]);
+      for (const report of reports) {
+        expect(report, report).toMatch(/confirm it in Triggers/);
+      }
+      // …and the watch no longer claims to be watching already.
+      expect(reports[0]).not.toMatch(/— watching /);
+      // …while the half that was never wrong stays.
+      expect(reports[1]).toContain('next run:');
+    });
 
-      const scheduled = await taskCreateTool.handler(
-        { title: 'Bericht', schedule: '0 9 * * 1' },
+    it('and says NOTHING extra about a row that is not held back', async () => {
+      // The direction that keeps an "always append" regression visible: a TODO for
+      // a person is not an agent run, and the gate does not touch it.
+      const todo = await taskCreateTool.handler(
+        { title: 'Rückruf', assignee: 'rafael', due_date: '2027-01-01' },
         makeAgent(),
       );
-      expect(scheduled).toMatch(/confirm it in Triggers/);
-      // …and it still says WHEN, because that half was never the problem.
-      expect(scheduled).toContain('next run:');
+      expect(todo).not.toMatch(/confirm it in Triggers/);
     });
 
     it('keeps a watch interval that is already above the floor', async () => {
@@ -460,6 +473,23 @@ describe('Task Tools', () => {
       );
       expect(result).toContain('Task updated');
       expect(result).toContain('in_progress');
+    });
+
+    it('says the row is held back again after an edit that re-opens consent', async () => {
+      // Editing what a trigger RUNS clears its stamp (`trigger-store.ts`), so the
+      // row the user just edited goes back to being skipped — and this report is
+      // the only place that says so. Without it the tool answers with a next-run
+      // date for a row the scheduler will pass over, which is the same broken
+      // promise the create path carried.
+      const trigger = tm.createScheduled({ title: 'Bericht', scheduleCron: '0 9 * * 1', confirmedAt: new Date().toISOString() });
+      const before = await taskUpdateTool.handler({ task_id: trigger.id, status: 'in_progress' }, makeAgent());
+      expect(before).not.toMatch(/confirm it in Triggers/);
+
+      const after = await taskUpdateTool.handler(
+        { task_id: trigger.id, description: 'Jetzt mit Vorjahresvergleich.' },
+        makeAgent(),
+      );
+      expect(after).toMatch(/confirm it in Triggers/);
     });
 
     it('should complete via status', async () => {
