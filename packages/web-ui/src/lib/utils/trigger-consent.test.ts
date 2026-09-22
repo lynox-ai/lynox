@@ -263,6 +263,39 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 		expect(disagreements).toEqual([]);
 	});
 
+	it('a watch is held back like any other agent run — and runs once it is confirmed', () => {
+		// The half the view cannot prove on its own: the block now asks for consent
+		// on a watch, so the consent has to be the thing that releases it. The gate
+		// carries no source term, which is the reason — asserted here against the
+		// store rather than read out of the SQL.
+		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
+		dirs.push(dir);
+		const engine = new EngineDb(join(dir, 'engine.db'), '');
+		engines.push(engine);
+		const store = new TriggerStore(engine);
+		const row: TriggerRow = {
+			id: 'watch-1', title: 'Preise', description: '', source: 'watch' as TriggerRow['source'],
+			effect: 'run_agent' as TriggerRow['effect'],
+			conditionJson: JSON.stringify({ schedule_cron: null, watch_config: JSON.stringify({ url: 'https://example.com', interval_minutes: 30 }) }),
+			paramsJson: '{}', status: 'open', enabled: true, retryCount: 0, nextRunAt: PAST, confirmedAt: null,
+		};
+		store.upsert(row);
+
+		const listed = JSON.parse(JSON.stringify(store.listFiltered())) as Array<{
+			id: string; effect?: string; source?: string; confirmed_at?: string | null; watch_config?: string;
+		}>;
+		const view = listed[0]!;
+		expect(showsWatchTarget(view)).toBe(true);
+		expect(offersConfirmation(view)).toBe(true);
+		expect(store.getDue().map((t) => t.id)).not.toContain('watch-1');
+
+		expect(store.setConfirmedAt('watch-1', CONFIRMED)).toBe(true);
+		expect(store.getDue().map((t) => t.id)).toContain('watch-1');
+		const after = JSON.parse(JSON.stringify(store.listFiltered()))[0] as { confirmed_at?: string };
+		expect(showsWatchTarget(after)).toBe(false);
+		expect(offersConfirmation(after)).toBe(false);
+	});
+
 	it('and a trigger the view calls waiting is never due, whatever else holds it back', () => {
 		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
 		dirs.push(dir);
