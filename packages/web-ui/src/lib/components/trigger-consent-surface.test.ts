@@ -123,8 +123,17 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		const watch = ifBlockAround('data-consent-watch');
 		expect(watch.cond).toBe('showsWatchTarget(trigger)');
 		expect(line('data-consent-watch')).toBe('<div class="text-xs text-text-muted" data-consent-watch>');
-		expect(watch.body).toContain("{displaySafe(watchOf(trigger)?.url ?? '')}");
-		expect(watch.body).toContain("tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })");
+		// Whole tags, like the instruction box next door: a round put `hidden` on
+		// each of these three in turn and every assertion here stayed green.
+		expect(line('{displaySafe(watchOf(trigger)?.host')).toBe(
+			'<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
+			+ '<span class="font-medium text-text">{displaySafe(watchOf(trigger)?.host ?? \'\')}</span>'
+			+ "{displaySafe(watchOf(trigger)?.rest ?? '')}</p>",
+		);
+		expect(line('data-consent-cadence')).toBe(
+			'<p class="mt-0.5" data-consent-cadence>'
+			+ "{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>",
+		);
 		// The two never both render: an instruction belongs to the standard run, a
 		// target to the watch, and `showsWatchTarget` requires the watch source.
 		expect(instruction.body).not.toContain('data-consent-watch');
@@ -152,6 +161,11 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// invisible spaces intact — in the text a person reads before granting the run.
 		expect(body.match(/\{trigger\.[a-z_]+\}/g) ?? []).toEqual([]);
 		expect(body).not.toContain('{@html');
+		// No link, either: wrapping the address in an `<a href={…}>` passed every
+		// assertion in this file once, and a `javascript:` address is one click away
+		// on the surface whose job is to make the decision informed.
+		expect(body).not.toMatch(/<a\b/);
+		expect(body).not.toContain('href');
 	});
 
 	it('confirming calls the existing confirm route with POST, and reports what it did', () => {
@@ -184,13 +198,22 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(TEMPLATE.split('confirmTrigger(trigger)')).toHaveLength(2);
 	});
 
-	it('the label that names the text as agent-written cannot be hidden', () => {
-		// The only element saying the box below is what lynox wrote, rather than
-		// what the owner asked for. Every neighbour was pinned whole; this was not,
-		// and `class="font-medium hidden"` passed.
-		expect(line("{t('triggers.instruction')}")).toBe(
-			`<span class="font-medium">{t('triggers.instruction')}:</span>`,
+	it('each label is pinned INSIDE its own block, so the two cannot be swapped', () => {
+		// They were pinned by searching the template for the key, which found the
+		// first match and checked that the SEARCH STRING is unique — not that the
+		// shape is. With a second, textually identical span in the watch block, the
+		// two keys could be exchanged: the instruction box then reads "Watched page"
+		// and the address reads "Instruction (written by lynox)". Measured, survived.
+		const instruction = ifBlockAround('data-consent-instruction').body;
+		expect(instruction).toContain(
+			`<span class="font-medium" data-consent-label="instruction">{t('triggers.instruction')}:</span>`,
 		);
+		expect(instruction).not.toContain("triggers.watch_url");
+		const watch = ifBlockAround('data-consent-watch').body;
+		expect(watch).toContain(
+			`<span class="font-medium" data-consent-label="watch">{t('triggers.watch_url')}:</span>`,
+		);
+		expect(watch).not.toContain("triggers.instruction");
 	});
 
 	it('the card stacks below `sm`, which is what makes the instruction readable there', () => {

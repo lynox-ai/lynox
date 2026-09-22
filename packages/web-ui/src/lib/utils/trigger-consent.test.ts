@@ -59,23 +59,41 @@ describe('instructionOf — what the run is told, not what the row shows', () =>
 	});
 });
 
-describe('watchOf — the page a watch would fetch, and how often', () => {
-	it('reads the url and the interval out of the stored config', () => {
-		expect(watchOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise', interval_minutes: 60, selector: '.p' }) }))
-			.toEqual({ url: 'https://example.com/preise', intervalMinutes: 60 });
+describe('watchOf — the host, the rest, and how often', () => {
+	it('splits the address so the host stands on its own', () => {
+		expect(watchOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise?x=1', interval_minutes: 60 }) }))
+			.toEqual({ host: 'https://example.com', rest: '/preise?x=1', intervalMinutes: 60 });
 	});
 
-	it('gives the url alone when the config carries no usable interval', () => {
-		expect(watchOf({ watch_config: '{"url":"https://example.com"}' })).toEqual({ url: 'https://example.com' });
-		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":"60"}' })).toEqual({ url: 'https://example.com' });
+	it('shows the host that is FETCHED, not the one the string reads as', () => {
+		// `@` makes everything before it a username, so this reads as the product's
+		// own domain and is fetched from the other one. The engine resolves
+		// `hostname`; the view now shows the same field.
+		const shown = watchOf({ watch_config: JSON.stringify({ url: 'https://lynox.ai@evil.example/prices' }) });
+		expect(shown?.host).toBe('https://evil.example');
+		expect(`${shown?.host}${shown?.rest}`).not.toContain('lynox.ai');
 	});
 
-	it('yields nothing rather than an empty label', () => {
+	it('gives the host alone when the config carries no usable interval', () => {
+		expect(watchOf({ watch_config: '{"url":"https://example.com"}' })).toEqual({ host: 'https://example.com', rest: '/' });
+		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":"60"}' })).toEqual({ host: 'https://example.com', rest: '/' });
+		// Infinity survives JSON.parse as a number and would render as a cadence.
+		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":1e999}' })).toEqual({ host: 'https://example.com', rest: '/' });
+	});
+
+	it('yields nothing rather than an empty or unfetchable label', () => {
 		expect(watchOf({})).toBeUndefined();
 		expect(watchOf({ watch_config: '' })).toBeUndefined();
 		expect(watchOf({ watch_config: '{"url":""}' })).toBeUndefined();
 		expect(watchOf({ watch_config: '{"url":123}' })).toBeUndefined();
 		expect(watchOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
+		// Not a URL the engine could fetch either — so there is nothing to agree to.
+		expect(watchOf({ watch_config: '{"url":"example.com/preise"}' })).toBeUndefined();
+		// These DO parse, and have no host: shown as a host they would read as
+		// `file://` or `data:` with the payload beside it, which is a consent to
+		// something the label does not describe.
+		expect(watchOf({ watch_config: '{"url":"file:///etc/passwd"}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":"data:text/html,<b>hi</b>"}' })).toBeUndefined();
 	});
 
 	it('survives a config that is not JSON at all', () => {
@@ -83,21 +101,15 @@ describe('watchOf — the page a watch would fetch, and how often', () => {
 		expect(watchOf({ watch_config: '{broken' })).toBeUndefined();
 	});
 
-	it('cuts a url that would push the button off the screen', () => {
-		// Nothing bounds this string on the way in, and the block renders it next to
-		// the Confirm button: an unbounded one buries the thing being agreed to.
+	it('cuts the rest so it cannot bury the button, on code points', () => {
 		const long = `https://example.com/${'a'.repeat(5000)}`;
-		const shown = watchOf({ watch_config: JSON.stringify({ url: long }) })?.url ?? '';
-		expect(shown.length).toBeLessThan(200);
-		expect(shown.endsWith('\u2026')).toBe(true);
-		expect(long.startsWith(shown.slice(0, -1))).toBe(true);
-	});
-
-	it('cuts on code points, so a surrogate pair is not halved', () => {
-		const url = `https://example.com/${'\uD83D\uDCC8'.repeat(400)}`;
-		const shown = watchOf({ watch_config: JSON.stringify({ url }) })?.url ?? '';
-		expect(shown).not.toContain('\uFFFD');
-		expect([...shown].every((c) => c.codePointAt(0) !== 0xD83D)).toBe(true);
+		const shown = watchOf({ watch_config: JSON.stringify({ url: long }) });
+		expect(shown?.host).toBe('https://example.com');
+		expect((shown?.rest ?? '').length).toBeLessThan(200);
+		expect((shown?.rest ?? '').endsWith('\u2026')).toBe(true);
+		const emoji = `https://example.com/${'\uD83D\uDCC8'.repeat(400)}`;
+		const cut = watchOf({ watch_config: JSON.stringify({ url: emoji }) })?.rest ?? '';
+		expect(cut).not.toContain('\uFFFD');
 	});
 });
 

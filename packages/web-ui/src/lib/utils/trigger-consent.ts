@@ -149,34 +149,46 @@ export function instructionOf(trigger: { title: string; description?: string | u
 }
 
 /**
- * The page a watch trigger reads, out of its stored config.
+ * The page a watch trigger reads — as a HOST plus the rest, because the host is
+ * the thing being agreed to.
  *
  * A watch does not run the text above: `executeWatch` builds its prompt from
- * this URL and from what it fetched there (*"You are monitoring <url> for
- * changes"*), and the description reaches it nowhere. The title appears only
- * afterwards, as the heading of the notification. Confirming a watch without
- * seeing the address would be consent to a repeated fetch of a page the view
- * never showed.
+ * this URL and from what it fetched there, and the description reaches it
+ * nowhere. Confirming one without seeing the address would be consent to a
+ * repeated fetch of a page the view never showed.
+ *
+ * The host is parsed out with `URL` rather than shown inside the string, and the
+ * reason is a measured deception: `https://lynox.ai@evil.example/prices` READS
+ * as the product's own domain and is fetched from `evil.example` — the `@` makes
+ * everything before it a username. The engine resolves `parsed.hostname`, so the
+ * view shows exactly that, and shows the rest beside it rather than in front of
+ * it. An address `URL` cannot parse yields nothing: the engine could not fetch
+ * it either, and there is nothing to consent to.
  *
  * `watch_config` is JSON that reaches here as a string from the wire; anything
- * that is not an object with a non-empty string `url` yields nothing, and the
- * block that shows it disappears rather than rendering an empty label.
+ * that is not an object with a usable `url` yields nothing, and the block that
+ * shows it disappears rather than rendering an empty label.
  */
 export function watchOf(trigger: { watch_config?: string | undefined }):
-	{ url: string; intervalMinutes?: number | undefined } | undefined {
+	{ host: string; rest: string; intervalMinutes?: number | undefined } | undefined {
 	if (!trigger.watch_config) return undefined;
 	try {
 		const config = JSON.parse(trigger.watch_config) as { url?: unknown; interval_minutes?: unknown };
 		if (typeof config.url !== 'string' || config.url === '') return undefined;
-		// A model-authored "url" is a string of any length, and `break-all` would
-		// wrap it into a wall that pushes the button off the screen — the failure
-		// `prompt-origin.ts` names: the person cannot see what they are agreeing
-		// to. Cut on code points so an emoji or a surrogate pair is not halved.
-		const chars = [...config.url];
-		const url = chars.length > URL_DISPLAY_MAX ? `${chars.slice(0, URL_DISPLAY_MAX - 1).join('')}…` : config.url;
-		return typeof config.interval_minutes === 'number' && Number.isFinite(config.interval_minutes)
-			? { url, intervalMinutes: config.interval_minutes }
-			: { url };
+		const parsed = new URL(config.url);
+		if (parsed.hostname === '') return undefined;
+		// A model-authored "url" is a string of any length, and the rest of it can
+		// bury the button under a wall of text — the failure `prompt-origin.ts`
+		// names: the person cannot see what they are agreeing to. The wall grows
+		// DOWNWARD (the box wraps), so the cut is the mitigation, not the wrapping
+		// class. Cut on code points so an emoji or a surrogate pair is not halved.
+		const tail = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+		const chars = [...tail];
+		const rest = chars.length > URL_DISPLAY_MAX ? `${chars.slice(0, URL_DISPLAY_MAX - 1).join('')}\u2026` : tail;
+		const interval = typeof config.interval_minutes === 'number' && Number.isFinite(config.interval_minutes)
+			? { intervalMinutes: config.interval_minutes }
+			: {};
+		return { host: `${parsed.protocol}//${parsed.hostname}`, rest, ...interval };
 	} catch {
 		return undefined;
 	}
