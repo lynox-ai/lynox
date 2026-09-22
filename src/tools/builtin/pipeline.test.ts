@@ -498,6 +498,35 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('…and ALLOWS a confirmed one in that same autonomous session', async () => {
+    // The missing half of the pair above, and the half that matters more now.
+    // Until this change every workflow built in a session arrived confirmed
+    // (`save_workflow` stamped it), so the refusal above only ever met an
+    // imported one. With the stamp gone the gate decides the normal case too —
+    // and a gate that refuses EVERYTHING passes the refusal test. This is the
+    // control that tells the two apart.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = 'stored-confirmed';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'test-plan',
+      goal: 'test goal',
+      steps: [{ id: 's1', task: 'x' }],
+      reasoning: 'test plan',
+      estimatedCost: 0.01,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      confirmedAt: '2026-01-01T00:00:00.000Z',
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
   it('ALLOWS an unconfirmed workflow from an INTERACTIVE session (each step still prompts)', async () => {
     // autonomy undefined = interactive chat: the per-step approver is present, so
     // run_workflow stays the safe way to trial an imported workflow. Not gated.

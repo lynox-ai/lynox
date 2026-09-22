@@ -113,17 +113,24 @@ describe('save_workflow — session source', () => {
     expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
   });
 
-  it('first-run-confirms the saved workflow (self-built = authorised)', async () => {
-    // The provenance seam behind the library Run gate + the worker-loop cron gate:
-    // the user authored these steps in their own session, so the saved workflow is
-    // confirmed for unattended execution at save time. An IMPORTED workflow lands
-    // UNCONFIRMED on purpose (its steps are attacker-authorable) — asserted in
-    // import-workflow.test.ts. Without this stamp the Run gate would refuse a
-    // user's own saved workflow.
+  it('does NOT confirm the saved workflow — a tool call is not a person', async () => {
+    // This assertion used to read the other way, with the reason "self-built =
+    // authorised": the steps came out of the user's own session, so the save was
+    // treated as their consent. The caller is the MODEL — `save_workflow` is a
+    // tool — so that stamp was a permission the model wrote for itself, and
+    // `confirmedAt` is what the worker-loop cron gate and the library Run gate
+    // read before running a workflow with nobody watching.
+    //
+    // Consent now comes from where a person acts: scheduling the workflow stamps
+    // it. The cost is stated rather than hidden — a freshly saved workflow is
+    // refused by the library Run gate until it has been scheduled once, and the
+    // refusal names both ways out (schedule it, or run it from a chat where each
+    // action asks). That refusal is the true state: nobody has agreed yet.
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     await saveWorkflowTool.handler({ name: 'Test' }, agent);
     const pipeline = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
-    expect(pipeline?.confirmedAt).toBeTruthy();
+    expect(pipeline).toBeDefined();
+    expect(pipeline?.confirmedAt).toBeUndefined();
   });
 
   it('resolves input_from by step order even when order != array index', async () => {

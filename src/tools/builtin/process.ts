@@ -155,12 +155,14 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     template: true,
     executed: false,
     createdAt: new Date().toISOString(),
-    // First-run-confirm the workflow: the user built these steps in their own
-    // session, so they have seen and authorised them. `confirmedAt` is the seam
-    // that lets a workflow run unattended (worker-loop cron gate + the library
-    // Run gate). An IMPORTED workflow deliberately does NOT get this — its steps
-    // are attacker-authorable, so it stays inert until the user reviews it.
-    confirmedAt: new Date().toISOString(),
+    // NOT first-run-confirmed here, and that is the point: this function is a
+    // TOOL, so the caller is the model. Stamping at save time let a model write
+    // its own permission to run unattended — the seam behind the worker-loop
+    // cron gate and the library Run gate — without a person in the loop. An
+    // imported workflow was already left unconfirmed for the same reason; the
+    // only difference was who authored the steps, and that is not what the stamp
+    // means. Consent is given where a human acts: scheduling the workflow
+    // (`POST /api/tasks` with a `pipelineId`) stamps it.
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],
@@ -282,10 +284,8 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       createdAt: new Date().toISOString(),
       executed: false,
       template: true, // Saved workflows are always reusable templates.
-      // First-run-confirm: captured from the user's own session → they authored
-      // and saw these steps. Lets the workflow run unattended (cron + library
-      // Run gate); an IMPORTED workflow stays unconfirmed until reviewed.
-      confirmedAt: new Date().toISOString(),
+      // Not confirmed here either — same reason as above: the model calls this,
+      // so a stamp here is a permission the model wrote itself.
       // Captured sessions don't carry ask_user/ask_secret today; infer the
       // interaction mode by step inspection so the contract stays honest.
       mode: inferPipelineMode(pipelineSteps),
