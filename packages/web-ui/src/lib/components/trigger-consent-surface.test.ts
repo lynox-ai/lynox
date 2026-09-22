@@ -31,6 +31,9 @@ const TEMPLATE = VIEW.slice(SCRIPT_END).replace(/<!--[\s\S]*?-->/g, '');
 function ifBlockAround(marker: string): { cond: string; body: string } {
 	const at = TEMPLATE.indexOf(marker);
 	expect(at, `${marker} is gone from TriggersView`).toBeGreaterThan(-1);
+	// Uniqueness, because every assertion below reads the FIRST match: a second
+	// Confirm button appended beside the gated one passed this whole file once.
+	expect(TEMPLATE.indexOf(marker, at + 1), `${marker} appears more than once`).toBe(-1);
 	const open = TEMPLATE.lastIndexOf('{#if ', at);
 	expect(open, `no {#if} before ${marker}`).toBeGreaterThan(-1);
 	const lineStart = TEMPLATE.lastIndexOf('\n', open) + 1;
@@ -46,6 +49,7 @@ function ifBlockAround(marker: string): { cond: string; body: string } {
 function line(contains: string): string {
 	const at = TEMPLATE.indexOf(contains);
 	expect(at, `${contains} is gone from TriggersView`).toBeGreaterThan(-1);
+	expect(TEMPLATE.indexOf(contains, at + 1), `${contains} appears more than once`).toBe(-1);
 	const start = TEMPLATE.lastIndexOf('\n', at) + 1;
 	const end = TEMPLATE.indexOf('\n', at);
 	return TEMPLATE.slice(start, end === -1 ? undefined : end).trim();
@@ -161,6 +165,40 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(run.body.trim().startsWith('<button onclick={() => runNow(trigger)}')).toBe(true);
 	});
 
+	it('there is exactly ONE Confirm button in the whole view', () => {
+		// Not a style rule: a second one, appended inside the block behind
+		// `{#if !showsInstruction(trigger)}`, gives a watch the button that the gate
+		// exists to withhold — and every "pinned whole" assertion here reads the
+		// first match, so it went green.
+		expect(TEMPLATE.split('confirmTrigger(trigger)')).toHaveLength(2);
+	});
+
+	it('the label that names the text as agent-written cannot be hidden', () => {
+		// The only element saying the box below is what lynox wrote, rather than
+		// what the owner asked for. Every neighbour was pinned whole; this was not,
+		// and `class="font-medium hidden"` passed.
+		expect(line("{t('triggers.instruction')}")).toBe(
+			`<span class="font-medium">{t('triggers.instruction')}:</span>`,
+		);
+	});
+
+	it('the card stacks below `sm`, which is what makes the instruction readable there', () => {
+		// The commit that added this said the tests pinned it; they did not, and all
+		// three class changes reverted green. The controls are ~290px on a ~310px
+		// card, so side by side left the text column a few pixels and the title —
+		// `line-clamp`, so `overflow: hidden` — collapsed to nothing.
+		expect(line('<div class="flex flex-col gap-2 sm:flex-row')).toBe(
+			'<div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">',
+		);
+		expect(line('<div class="flex flex-wrap items-center gap-2 sm:shrink-0')).toBe(
+			'<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">',
+		);
+		// …and the badges wrap instead of squeezing the title out of its own row.
+		expect(line('<div class="flex flex-wrap items-center gap-x-2 gap-y-1">')).toBe(
+			'<div class="flex flex-wrap items-center gap-x-2 gap-y-1">',
+		);
+	});
+
 	it('the controls hide on hover-capable pointers, not at a width', () => {
 		// A touch screen wider than `sm` has no hover either: keyed on the width, the
 		// controls were unreachable there with no rule left to bring them back.
@@ -168,7 +206,10 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 			const tag = line(`<button onclick={() => ${control}}`);
 			expect(tag, control).toContain('[@media(hover:hover)]:opacity-0');
 			expect(tag, control).toContain('group-hover:opacity-100');
-			expect(tag, control).not.toContain('sm:opacity-0');
+			// Any width-keyed hide, not just the one that was there: `md:opacity-0`
+			// beside the pointer rule passed, and reintroduces the same dead end on a
+			// touch screen wider than that breakpoint.
+			expect(tag, control).not.toMatch(/(sm|md|lg|xl|2xl):opacity-0/);
 		}
 	});
 });

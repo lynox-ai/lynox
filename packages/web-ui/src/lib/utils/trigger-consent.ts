@@ -24,10 +24,10 @@ export function awaitsConfirmation(trigger: {
 /**
  * A waiting trigger whose run really carries out the text this view can show.
  *
- * The dispatcher picks the executor by SOURCE, not by effect
- * (`worker-loop.ts`: `task.source === 'watch' ? executeWatch : executeStandard`),
- * and a watch runs on the page it fetches — the instruction below never reaches
- * it. So the consent surface offers the instruction and the button only where
+ * The dispatch switches on the EFFECT first, and inside `run_agent` it picks the
+ * executor by SOURCE — `worker-loop.ts`, an `if (task.source === 'watch')` that
+ * calls `executeWatch`, else `executeStandard`. A watch runs on the page it
+ * fetches, so the instruction below never reaches it. So the consent surface offers the instruction and the button only where
  * the instruction is the truth; a watch shows its waiting state and nothing it
  * would not do. Showing it the same block would be a consent to a text the run
  * ignores, which is worse than showing nothing.
@@ -41,9 +41,15 @@ export function showsInstruction(trigger: {
 }
 
 /**
- * The bidi EMBEDDINGS, OVERRIDES and ISOLATES, which render a run of text in an
- * order it is not written in, plus the two invisible space characters that put a
- * character where a reader sees none.
+ * Characters that put text where a reader sees none, or render a run in an order
+ * it is not written in: the bidi embeddings, overrides and isolates, the
+ * zero-width and invisible-format characters, and the TAG block, which encodes a
+ * whole second sentence in characters no font draws.
+ *
+ * The tag block matters most here and was missed once: the run reads
+ * `description` raw, so a tagged clause reaches the model while the box shows a
+ * short, harmless-looking instruction — the same gap as an instruction the run
+ * never receives, only inverted.
  *
  * What is deliberately NOT here, and the omission is the considered half:
  * · LRM/RLM (U+200E/200F) — legitimate in right-to-left text, where they order
@@ -55,8 +61,15 @@ export function showsInstruction(trigger: {
  *   the Persian `\u0645\u06CC\u200C\u0631\u0648\u062F` into a different word.
  *   `prompt-origin.ts` does strip them, because its field is a short workflow
  *   label and never prose; this one is prose someone has to read and act on.
+ * · Variation selectors and combining marks — they change how a visible
+ *   character is drawn, and removing them damages emoji and half the alphabets
+ *   that are not Latin.
+ *
+ * Not a complete answer to "reads as its opposite": natural right-to-left prose
+ * reorders neutral characters with no control character at all, and nothing in
+ * this package sets `dir`. That is a wider gap than this block.
  */
-const FORGING_CHARS = /[\u200B\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+const FORGING_CHARS = /[\u00AD\u061C\u180E\u200B\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/gu;
 /**
  * The C0/C1 ranges and the Unicode separators, but NOT tab and newline: the text
  * this cleans is an instruction written over several lines, and its line breaks
