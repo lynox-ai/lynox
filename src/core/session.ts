@@ -2523,6 +2523,9 @@ export class Session {
 
   registerTool<T>(entry: ToolEntry<T>): void { this.engine.registerTool(entry); }
   registerPipelineTools(): void { this.engine.registerPipelineTools(); }
+  /** @deprecated The engine registers the data-store tools itself at boot, as soon
+   *  as the store opens, so there is nothing left for this to do. Kept for library
+   *  consumers; a call changes neither the tool list nor the registry version. */
   registerDataStoreTools(): void { this.engine.registerDataStoreTools(); }
   registerHooks(hooks: LynoxHooks): void { this.engine.registerHooks(hooks); }
   addTool<T>(entry: ToolEntry<T>): void {

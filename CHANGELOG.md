@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixed: a new instance can create its first table
+
+- The six `data_store_*` tools were registered at boot only if the store
+  already held a table, and on an instance with neither a table of its own nor
+  a CRM record it never did: boot drops the CRM's own empty collections just
+  before that check, and the CRM recreates them later in the same boot. So
+  `data_store_create`, the tool that makes the first table, was offered only
+  once a table existed. The base prompt routes quantitative data to
+  `data_store_insert` all the same, so a model that followed it would get
+  "Tool not found". Workflows on those instances lacked the tools too,
+  although workflow steps list `data_store_query` and `data_store_insert` as
+  available.
+- The tools are now registered as soon as the store opens, all six together,
+  and the *Data Tables* section of the system prompt comes with them. Together
+  rather than create first: an agent keeps its tool list for the whole turn, so
+  "make a table for these receipts and put them in" needs insert to be there
+  when create runs.
+- Instances with neither a table of their own nor a CRM record now carry those
+  six definitions and that prompt section, roughly 2,000 tokens by a character
+  estimate. Instances that already had either are unchanged.
+
+### Deprecated: `Session.registerDataStoreTools()`
+
+- The engine now registers the data-store tools itself during `init()`, as
+  soon as the data store opens, so this method has nothing left to do. It
+  stays; a call changes neither the tool list nor the registry version.
+
 ### Changed: `data_store_query` and `data_store_list` results go through the injection scan
 
 - `data_store_query` returns stored rows, and a table can hold text that came
