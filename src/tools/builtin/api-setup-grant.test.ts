@@ -564,7 +564,37 @@ describe('fetch_token — what a successful exchange records', () => {
 
     const result = await fetchToken(agent);
 
-    expect(result).toContain("If that name IS this profile's auth.oauth.refresh_token_key, point that field at a slot that holds only the refresh token");
+    expect(result).toContain('Leaving output_secret_name out does not help');
+    expect(result).toContain('Point auth.oauth.refresh_token_key at a slot that holds only the refresh token');
+    expect(result).not.toContain(`goes to "${ACCESS}"`);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('tells a client-credentials profile to drop the refresh slot it does not read', async () => {
+    const store = new ApiStore();
+    const base = crmProfile({}, 'client_credentials');
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: ACCESS } } });
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends an id whose derived access name is protected to a rename, not to a name it cannot use', async () => {
+    const store = new ApiStore();
+    // `lynox-y` derives LYNOX_Y_ACCESS_TOKEN, a platform prefix. The profile reads its
+    // refresh token from a slot of its own, so the refusal is about the output name.
+    const base = crmProfile();
+    store.register({ ...base, id: 'lynox-y', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] }, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT' } } });
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT: 'rt-1' }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'lynox-y', output_secret_name: 'CRM_RT' }, agent) as string;
+
+    expect(result).toContain('is a protected slot, so its id leaves no name for the access token: rename the api_profile');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

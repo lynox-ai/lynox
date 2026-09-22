@@ -1541,11 +1541,23 @@ Next steps before calling create:
       //
       // The advice is "leave it out", not "pick another name": the attach reads the
       // derived access name and nothing else, so any other chosen name clears this
-      // refusal and leaves a token no request can use. The one shape the default
-      // cannot fix is a profile whose `refresh_token_key` IS the derived access
-      // name; there the profile's own field has to move, and the token with it.
+      // refusal and leaves a token no request can use. Two shapes the default does
+      // not fix get their own answer — a profile that reads its refresh token from
+      // that very name, and an id whose derived access name is itself protected —
+      // because in both, following "leave it out" walks into the next refusal.
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
-        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Leave output_secret_name out, so the access token goes to "${accessTokenKey(input.id)}", the slot http_request reads. If that name IS this profile's auth.oauth.refresh_token_key, point that field at a slot that holds only the refresh token and put the token there with ask_secret.`;
+        const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
+        const derivedAccess = accessTokenKey(input.id);
+        if (isProtectedSecretWrite(derivedAccess)) {
+          return `${clash} The name this profile would otherwise use, "${derivedAccess}", is a protected slot, so its id leaves no name for the access token: rename the api_profile so its derived names do not collide.`;
+        }
+        if (outputName === derivedAccess) {
+          const move = grantType === 'refresh_token'
+            ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
+            : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`;
+          return `${clash} Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${move}`;
+        }
+        return `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
