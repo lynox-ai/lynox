@@ -46,6 +46,25 @@ describe('ApiStore — one profile per host', () => {
     expect(store.getByHostname('api.crm.example')?.id).toBe('crm-a');
   });
 
+  it('sends the actor to the user, not to a delete, when it refuses', () => {
+    const store = new ApiStore();
+    store.save(profile('crm-a', 'https://api.crm.example/v1'));
+    const second = store.save(profile('crm-b', 'https://api.crm.example/v2'));
+    expect(second.ok ? '' : second.reason).toContain('Ask the user whether "crm-a" should be updated instead.');
+    expect(second.ok ? '' : second.reason).not.toContain('delete');
+  });
+
+  it('lets a profile the boot left on a shared host save in place, but no third one join', () => {
+    const store = new ApiStore();
+    store.register(profile('crm-a', 'https://api.crm.example/v1'));
+    store.register(profile('crm-b', 'https://api.crm.example/v2'));
+    // An expiry, a revocation, an edit — none of them makes the conflict worse.
+    expect(store.save(profile('crm-a', 'https://api.crm.example/v1', { description: 'edited' }))).toEqual({ ok: true, isNew: false });
+    expect(store.get('crm-a')?.description).toBe('edited');
+    expect(store.getHostConflict('api.crm.example')).toEqual(['crm-a', 'crm-b']);
+    expect(store.save(profile('crm-c', 'https://api.crm.example/v3')).ok).toBe(false);
+  });
+
   it('saves the same profile again on its own host (an update is not a second profile)', () => {
     const store = new ApiStore();
     store.save(profile('crm-a', 'https://api.crm.example/v1'));
@@ -224,6 +243,22 @@ describe('ApiStore — grant record projections', () => {
     const booted = new ApiStore();
     booted.loadFromConnections(cs);
     expect(booted.get('crm-api')?.oauth_grant).toBeUndefined();
+  });
+
+  it('does not project a revocation for a profile that is no longer oauth2', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save({ ...oauthProfile({ oauth_grant: { state: 'revoked' } }), auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
+  it('lists the derived token names in the trail only for an oauth2 profile', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save({ ...oauthProfile(), auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+    expect(cs.get('crm-api')?.vaultKeys).toEqual(['CRM_KEY']);
   });
 
   it('names a caller-chosen access-token slot in the purge trail', () => {

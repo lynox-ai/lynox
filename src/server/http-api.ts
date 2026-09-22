@@ -7804,8 +7804,10 @@ export class LynoxHTTPApi {
       const store = engine.getApiStore();
       if (!requireService(res, store, 'API store')) return;
       const { getLynoxDir } = await import('../core/config.js');
-      const { ApiProfileUnlinkError } = await import('../core/api-store.js');
+      const { ApiProfileUnlinkError, purgeRecordedTokens } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
+      // Read before the delete: the tokens to purge are named on the profile.
+      const existing = store.get(params['id']!);
       try {
         const removed = store.remove(params['id']!, apisDir);
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }
@@ -7813,12 +7815,16 @@ export class LynoxHTTPApi {
         if (err instanceof ApiProfileUnlinkError) {
           // The in-memory side already happened; report the partial state
           // so the operator sees a 500 instead of a misleading 404 + a
-          // silent file that would resurrect on next restart.
+          // silent file that would resurrect on next restart. The tokens
+          // stay, so a profile that resurrects comes back working.
           errorResponse(res, 500, 'Profile removed from memory but on-disk delete failed; restart will resurrect it');
           return;
         }
         throw err;
       }
+      // The same purge `api_setup delete` runs, so the settings page and the tool
+      // take the same tokens with a profile — only those its exchanges wrote.
+      if (existing) purgeRecordedTokens(store, existing, engine.getSecretStore());
       jsonResponse(res, 200, { ok: true });
     }));
 

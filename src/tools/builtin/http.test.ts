@@ -3030,6 +3030,8 @@ describe('httpRequestTool', () => {
 
       const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, agent);
       expect(refused).toContain('more than one api_profile maps to api.example.com (crm-a, crm-b)');
+      // Which one is still wanted is the user's call, not the model's.
+      expect(refused).toContain('Ask the user which profile to keep');
       expect(fetchMock).not.toHaveBeenCalled();
 
       store.unregister('crm-b');
@@ -3049,7 +3051,24 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never;
 
-      await handler({ url: 'https://api.example.com/v1/stats' }, agent);
+      const result = await visible({ url: 'https://api.example.com/v1/stats' }, agent);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // The host HAS profiles; "create one" would be advice a save then refuses.
+      expect(result).not.toContain('No API profile for');
+    });
+
+    it('treats a profile without any auth block as carrying no credential', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      const bare = (id: string): import('../../core/api-store.js').ApiProfile => ({ id, name: id, base_url: 'https://api.example.com/v1', description: `${id} API` });
+      store.register(bare('docs-a'));
+      store.register(bare('docs-b'));
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({ url: 'https://api.example.com/v1/docs' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -3065,10 +3084,12 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live' });
+      const { tokenFingerprint } = await import('../../core/oauth-refresh-failure.js');
+      // The vault still holds the very token the provider rejected.
+      const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live', CRM_API_REFRESH_TOKEN: 'rt-rejected' });
 
       const revokedStore = new ApiStore();
-      revokedStore.register(oauth({ state: 'revoked', revoked_fp: '0123456789abcdef', revoked_at: '2026-09-22T00:00:00.000Z' }));
+      revokedStore.register(oauth({ state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' }));
       const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: revokedStore }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired (recorded 2026-09-22T00:00:00.000Z)');
       expect(refused).toContain('CRM_API_REFRESH_TOKEN');
@@ -3078,6 +3099,43 @@ describe('httpRequestTool', () => {
       liveStore.register(oauth({ minted_by: 'client-1' }));
       await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: liveStore }, sessionCounters: testCounters, secretStore } as never);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-live');
+    });
+
+    it('refuses a revoked grant while the vault holds no refresh token at all', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { token_url: 'https://api.example.com/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
+        custom_endpoint_ack: ack,
+        oauth_grant: { state: 'revoked', revoked_fp: '0123456789abcdef', revoked_at: '2026-09-22T00:00:00.000Z' },
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-old' }) } as never);
+      expect(refused).toContain('as revoked or expired');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('steps aside once the vault holds a different refresh token than the one rejected', async () => {
+      // The user's way back — and how a verdict another process reached on a stale
+      // view of the vault stops blocking once this process holds the newer token.
+      const { ApiStore } = await import('../../core/api-store.js');
+      const { tokenFingerprint } = await import('../../core/oauth-refresh-failure.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { token_url: 'https://api.example.com/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
+        custom_endpoint_ack: ack,
+        oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-2', CRM_API_REFRESH_TOKEN: 'rt-newer' }) } as never);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-2');
     });
 
     it('names the slot fetch_token actually reads when the profile sets refresh_token_key', async () => {

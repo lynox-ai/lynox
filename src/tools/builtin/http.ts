@@ -2,7 +2,7 @@ import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey } from '../../core/api-store.js';
-import { revokedGrantMessage } from '../../core/oauth-refresh-failure.js';
+import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -483,7 +483,9 @@ async function attachEngineManagedAuth(
       return type !== undefined && type !== 'none';
     });
     if (conflict && credentialed) {
-      return { refusal: `Error: more than one api_profile maps to ${hostname} (${conflict.join(', ')}), so the engine cannot tell which stored credential this request should carry, and it sends none. Delete the profile that is no longer needed with api_setup({ action: "delete", id: "…" }), or give one of them a different base_url.` };
+      // The model cannot know which of the two is still wanted, so the text sends
+      // it to the user rather than to a delete.
+      return { refusal: `Error: more than one api_profile maps to ${hostname} (${conflict.join(', ')}), so the engine cannot tell which stored credential this request should carry, and it sends none. Ask the user which profile to keep; the other one then has to be deleted or given a different base_url.` };
     }
     return {};
   }
@@ -521,10 +523,16 @@ async function attachEngineManagedAuth(
     }
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
-    // token and send the model to fetch_token, which cannot help.
+    // token and send the model to fetch_token, which cannot help. Only while the
+    // vault still holds the token that was rejected (or none): a different one
+    // is the way back, and it is also how a verdict another process reached on
+    // a stale view of the vault steps aside once this one holds the newer token.
     if (profile.oauth_grant?.state === 'revoked') {
       const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
-      return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant.revoked_at) };
+      const current = secretStore.resolve(refreshKey);
+      if (current === null || tokenFingerprint(current) === profile.oauth_grant.revoked_fp) {
+        return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant.revoked_at) };
+      }
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
     // the current access_token. Prevents two failure modes: a stale key re-referenced
@@ -981,7 +989,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Soft-warning: note missing profile but let the request through
         // The agent sees the warning in the response and can create a profile for next time
         const SKIP_PROFILE_CHECK = new Set(['www.google.com', 'google.com', 'github.com', 'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'localhost', '127.0.0.1']);
-        if (!toolContext.apiStore.getByHostname(reqHostname) && !SKIP_PROFILE_CHECK.has(reqHostname)) {
+        // A shared host HAS profiles — two of them — and a create there is refused,
+        // so "create one" would be advice the model cannot follow.
+        if (!toolContext.apiStore.getByHostname(reqHostname) && !toolContext.apiStore.getHostConflict(reqHostname)
+            && !SKIP_PROFILE_CHECK.has(reqHostname)) {
           const looksLikeApi = reqHostname.startsWith('api.') || input.url.includes('/v1') || input.url.includes('/v2') || input.url.includes('/v3') || input.url.includes('/api/');
           if (looksLikeApi) {
             // Store warning — appended to response after the request completes

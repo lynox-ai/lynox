@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from './oauth-refresh-failure.js';
 
-describe('classifyRefreshFailure — the three kinds, by RFC 6749 error code', () => {
+describe('classifyRefreshFailure — the three kinds, by token-endpoint error code', () => {
   it.each([
     [400, { error: 'invalid_grant' }, 'grant-revoked'],
     [401, { error: 'invalid_client' }, 'client-misconfigured'],

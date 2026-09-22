@@ -48,6 +48,7 @@ afterEach(() => {
 });
 
 interface MockVault {
+  resolve(name: string): string | null;
   resolveSecretRefs(input: unknown): unknown;
   set(name: string, value: string): void;
   deleteSecret?(name: string): boolean;
@@ -58,6 +59,7 @@ interface MockVault {
 function makeVault(initial: Record<string, string>, opts: { canDelete?: boolean } = {}): MockVault {
   const store: Record<string, string> = { ...initial };
   const vault: MockVault = {
+    resolve: (name) => store[name] ?? null,
     resolveSecretRefs: (input: unknown): unknown => {
       const text = JSON.stringify(input);
       const resolved = text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (_m, name: string) => {
@@ -130,6 +132,10 @@ function crmProfile(over: Partial<ApiProfile> = {}, grantType: 'refresh_token' |
 const ACCESS = 'CRM_API_ACCESS_TOKEN';
 const REFRESH = 'CRM_API_REFRESH_TOKEN';
 
+/** The stamp a successful exchange writes: which client, for which refresh token. */
+const stamp = (client: string, refreshToken: string): OAuthGrantRecord =>
+  ({ minted_by: tokenFingerprint(client), minted_for: tokenFingerprint(refreshToken) });
+
 function vaultWithRefresh(token = 'rt-1'): MockVault {
   return makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: token });
 }
@@ -144,7 +150,7 @@ const fetchToken = (agent: never): Promise<string> =>
 describe('fetch_token — what a failed exchange does to the grant', () => {
   it('records a revocation when the provider answers invalid_grant to the client that minted the token', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { minted_by: 'client-1' } }));
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     const agent = makeAgent(store, vaultWithRefresh());
     tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
 
@@ -152,15 +158,16 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
 
     expect(result).toContain('as revoked or expired');
     expect(result).toContain('not an expired access token');
+    // A revocation is not a client problem: no advice to check the client values.
+    expect(result).not.toContain('Check: client_id');
     const grant = store.get('crm-api')?.oauth_grant;
     expect(grant?.state).toBe('revoked');
     expect(grant?.revoked_fp).toBe(tokenFingerprint('rt-1'));
-    expect(grant?.minted_by).toBe('client-1');
   });
 
-  it('reads invalid_grant as a client problem when a different client minted the token, and keeps the grant', async () => {
+  it('reads invalid_grant as a client problem when a different client minted this token, and keeps the grant', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { minted_by: 'client-OLD' } }));
+    store.register(crmProfile({ oauth_grant: stamp('client-OLD', 'rt-1') }));
     const agent = makeAgent(store, vaultWithRefresh());
     tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
 
@@ -168,6 +175,18 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
 
     expect(result).toContain('rejected this API\'s client configuration');
     expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
+  });
+
+  it('does not apply a stamp taken with another refresh token — a new token from a new client can still be revoked', async () => {
+    const store = new ApiStore();
+    // The stamp describes rt-OLD; the user has since stored rt-1 for a re-created app.
+    store.register(crmProfile({ oauth_grant: stamp('client-OLD', 'rt-OLD') }));
+    const agent = makeAgent(store, vaultWithRefresh('rt-1'));
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
   });
 
   it('records a revocation on invalid_grant when nothing recorded which client minted the token', async () => {
@@ -183,14 +202,15 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
 
   it.each(['invalid_client', 'unauthorized_client', 'deleted_client'])('reads %s as a client problem and keeps the grant', async (code) => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { minted_by: 'client-1' } }));
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     const agent = makeAgent(store, vaultWithRefresh());
     tokenEndpoint(401, JSON.stringify({ error: code }));
 
     const result = await fetchToken(agent);
 
     expect(result).toContain('rejected this API\'s client configuration');
-    expect(store.get('crm-api')?.oauth_grant).toEqual({ minted_by: 'client-1' });
+    expect(result).toContain('Check: client_id');
+    expect(store.get('crm-api')?.oauth_grant).toEqual(stamp('client-1', 'rt-1'));
   });
 
   it.each([
@@ -200,23 +220,23 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
     ['a code the engine does not classify', 400, JSON.stringify({ error: 'invalid_request' })],
   ])('changes nothing on %s', async (_label, status, body) => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { minted_by: 'client-1' } }));
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     const agent = makeAgent(store, vaultWithRefresh());
     tokenEndpoint(status, body);
 
     const result = await fetchToken(agent);
 
     expect(result).toContain('Nothing was changed; retry later.');
-    expect(store.get('crm-api')?.oauth_grant).toEqual({ minted_by: 'client-1' });
+    expect(store.get('crm-api')?.oauth_grant).toEqual(stamp('client-1', 'rt-1'));
   });
 
-  it('reads invalid_grant as a rotation, not a revocation, when another writer replaced the token mid-flight', async () => {
+  it('reads invalid_grant as a rotation, not a revocation, when a concurrent exchange replaced the token mid-flight', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { minted_by: 'client-1' } }));
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     const vault = vaultWithRefresh('rt-1');
     const agent = makeAgent(store, vault);
-    // The second writer: while the POST is out, the slot is rotated to rt-2, and
-    // the provider then rejects the spent rt-1.
+    // The other writer in this process: while the POST is out, the slot is
+    // rotated to rt-2, and the provider then rejects the spent rt-1.
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       vault.set(REFRESH, 'rt-2');
       return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
@@ -225,6 +245,20 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
     const result = await fetchToken(agent);
 
     expect(result).toContain('Nothing was changed; retry later.');
+    expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
+  });
+
+  it('records no verdict when the profile reads its refresh token from a slot rotations are not written to', async () => {
+    const store = new ApiStore();
+    const base = crmProfile({ oauth_grant: stamp('client-1', 'rt-1') });
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT' } } });
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT: 'rt-1' }));
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('Nothing was recorded.');
+    expect(result).toContain(`stores a rotated one under "${REFRESH}"`);
     expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
   });
 
@@ -239,10 +273,23 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
     expect(result).toContain('rejected this API\'s client configuration');
     expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
   });
+
+  it('records a revocation even while the boot left the host shared — a save in place is not refused', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    store.register({ ...crmProfile(), id: 'crm-other', custom_endpoint_ack: ACK });
+    expect(store.getHostConflict('api.crm.example')).toEqual(['crm-api', 'crm-other']);
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+  });
 });
 
 describe('fetch_token — a revocation verdict and the way back', () => {
-  const revoked = (fp: string): OAuthGrantRecord => ({ minted_by: 'client-1', state: 'revoked', revoked_fp: fp, revoked_at: '2026-09-22T00:00:00.000Z' });
+  const revoked = (fp: string): OAuthGrantRecord => ({ ...stamp('client-1', 'rt-1'), state: 'revoked', revoked_fp: fp, revoked_at: '2026-09-22T00:00:00.000Z' });
 
   it('does not resend the refresh token the provider already rejected', async () => {
     const store = new ApiStore();
@@ -271,12 +318,13 @@ describe('fetch_token — a revocation verdict and the way back', () => {
     expect(grant?.state).toBeUndefined();
     expect(grant?.revoked_fp).toBeUndefined();
     expect(grant?.revoked_at).toBeUndefined();
-    expect(grant?.minted_by).toBe('client-1');
+    // No rotated token in the answer: the stamp now names the one that worked.
+    expect(grant?.minted_for).toBe(tokenFingerprint('rt-new'));
   });
 });
 
 describe('fetch_token — what a successful exchange records', () => {
-  it('stamps the client that minted the token, so a later invalid_grant can be told apart', async () => {
+  it('stamps a fingerprint of the client, not the id itself, for the refresh token now in play', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
     const agent = makeAgent(store, vaultWithRefresh());
@@ -284,8 +332,36 @@ describe('fetch_token — what a successful exchange records', () => {
 
     await fetchToken(agent);
 
-    expect(store.get('crm-api')?.oauth_grant?.minted_by).toBe('client-1');
+    const grant = store.get('crm-api')?.oauth_grant;
+    expect(grant?.minted_by).toBe(tokenFingerprint('client-1'));
+    expect(JSON.stringify(store.get('crm-api'))).not.toContain('client-1');
+    expect(grant?.minted_for).toBe(tokenFingerprint('rt-2'));
     expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeGreaterThan(Date.now());
+  });
+
+  it('stamps nothing when no refresh token is in play', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({}, 'client_credentials'));
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')?.oauth_grant?.minted_by).toBeUndefined();
+    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual([ACCESS]);
+  });
+
+  it('records every name an exchange wrote, including one the caller chose', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
+    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CUSTOM_TOKEN' }, agent);
+    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual(['CRM_CUSTOM_TOKEN', REFRESH]);
+
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+    await fetchToken(agent);
+    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual(['CRM_CUSTOM_TOKEN', REFRESH, ACCESS]);
   });
 
   it('writes its record onto the profile as it is after the exchange, not the copy read before it', async () => {
@@ -301,7 +377,21 @@ describe('fetch_token — what a successful exchange records', () => {
     await fetchToken(agent);
 
     expect(store.get('crm-api')?.description).toBe('updated mid-exchange');
-    expect(store.get('crm-api')?.oauth_grant?.minted_by).toBe('client-1');
+    expect(store.get('crm-api')?.oauth_grant?.minted_by).toBe(tokenFingerprint('client-1'));
+  });
+
+  it('does not bring back a profile deleted while its exchange was in flight', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const agent = makeAgent(store, vaultWithRefresh());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      store.unregister('crm-api');
+      return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')).toBeUndefined();
   });
 
   it('asks for a missing refresh token before posting anything', async () => {
@@ -314,22 +404,6 @@ describe('fetch_token — what a successful exchange records', () => {
 
     expect(result).toContain(`missing the OAuth credentials for profile "crm-api": "${REFRESH}"`);
     expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it('records a caller-chosen access-token slot for the purge trail, and not the derived one', async () => {
-    const store = new ApiStore();
-    store.register(crmProfile());
-    const vault = vaultWithRefresh();
-    const agent = makeAgent(store, vault);
-    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
-
-    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CUSTOM_TOKEN' }, agent);
-    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual(['CRM_CUSTOM_TOKEN']);
-
-    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
-    await fetchToken(agent);
-    // The derived name is in the trail by derivation; recording it would be noise.
-    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual(['CRM_CUSTOM_TOKEN']);
   });
 
   it('projects a revocation into the engine.db status column through the tool path', async () => {
@@ -358,40 +432,43 @@ describe('create/update — the grant record belongs to the engine', () => {
     const agent = makeAgent(store, vaultWithRefresh(), allow);
     const forged = crmProfile({ oauth_grant: { minted_by: 'attacker', state: 'revoked', revoked_fp: 'ffffffffffffffff' } });
 
-    await apiSetupTool.handler({ action: 'create', profile: forged }, agent);
+    const result = await apiSetupTool.handler({ action: 'create', profile: forged }, agent) as string;
 
     expect(store.get('crm-api')).toBeDefined();
     expect(store.get('crm-api')?.oauth_grant).toBeUndefined();
+    expect(result).toContain('The oauth_grant sent with this call was ignored');
   });
 
-  it('keeps the stored record when an update carries a different one', async () => {
+  it('keeps the stored record when an update carries a different one, and says so', async () => {
     const store = new ApiStore();
     const agent = makeAgent(store, vaultWithRefresh(), allow);
-    const engineRecord: OAuthGrantRecord = { minted_by: 'client-1', state: 'revoked', revoked_fp: tokenFingerprint('rt-1'), revoked_at: '2026-09-22T00:00:00.000Z' };
+    const engineRecord: OAuthGrantRecord = { ...stamp('client-1', 'rt-1'), state: 'revoked', revoked_fp: tokenFingerprint('rt-1'), revoked_at: '2026-09-22T00:00:00.000Z' };
     store.register(crmProfile({ oauth_grant: engineRecord }));
 
     // A model clearing the revocation by echoing an edited record back.
-    await apiSetupTool.handler({ action: 'update', profile: crmProfile({ description: 'edited', oauth_grant: { minted_by: 'client-1' } }) }, agent);
+    const result = await apiSetupTool.handler({ action: 'update', profile: crmProfile({ description: 'edited', oauth_grant: {} }) }, agent) as string;
 
     expect(store.get('crm-api')?.description).toBe('edited');
     expect(store.get('crm-api')?.oauth_grant).toEqual(engineRecord);
+    expect(result).toContain('The oauth_grant sent with this call was ignored');
   });
 
-  it('keeps the stored record when an update omits the field', async () => {
+  it('keeps the stored record when an update omits the field, without a note', async () => {
     const store = new ApiStore();
     const agent = makeAgent(store, vaultWithRefresh(), allow);
-    store.register(crmProfile({ oauth_grant: { minted_by: 'client-1' } }));
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
 
-    await apiSetupTool.handler({ action: 'update', profile: crmProfile({ description: 'edited' }) }, agent);
+    const result = await apiSetupTool.handler({ action: 'update', profile: crmProfile({ description: 'edited' }) }, agent) as string;
 
-    expect(store.get('crm-api')?.oauth_grant).toEqual({ minted_by: 'client-1' });
+    expect(store.get('crm-api')?.oauth_grant).toEqual(stamp('client-1', 'rt-1'));
+    expect(result).not.toContain('oauth_grant');
   });
 });
 
-describe('delete — what leaves the vault with a profile', () => {
-  it('removes the tokens the profile minted and names the credentials it keeps', async () => {
+describe('delete — only what the profile\'s exchanges wrote leaves the vault', () => {
+  it('removes the recorded tokens and names what stays', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written_keys: ['CRM_CUSTOM_TOKEN'] } }));
+    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS, REFRESH, 'CRM_CUSTOM_TOKEN'] } }));
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'at-1', [REFRESH]: 'rt-1', CRM_CUSTOM_TOKEN: 'at-custom' });
     const agent = makeAgent(store, vault);
 
@@ -399,35 +476,70 @@ describe('delete — what leaves the vault with a profile', () => {
 
     expect(vault.peek(ACCESS)).toBeUndefined();
     expect(vault.peek(REFRESH)).toBeUndefined();
-    // What the user stored, and a slot a caller chose, stay: another profile may use them.
+    expect(vault.peek('CRM_CUSTOM_TOKEN')).toBeUndefined();
     expect(vault.peek('CRM_CLIENT_ID')).toBe('client-1');
     expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
-    expect(vault.peek('CRM_CUSTOM_TOKEN')).toBe('at-custom');
-    expect(result).toContain(`Removed its tokens from the vault: ${ACCESS}, ${REFRESH}.`);
-    expect(result).toContain('CRM_CLIENT_ID, CRM_CLIENT_SECRET, CRM_CUSTOM_TOKEN');
+    expect(result).toContain(`Removed the tokens its exchanges wrote: ${ACCESS}, ${REFRESH}, CRM_CUSTOM_TOKEN.`);
+    expect(result).toContain('Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET.');
   });
 
-  it('does not list a removed token among the kept ones when the profile names it explicitly', async () => {
+  it('never removes a credential the user stored under a name the id happens to derive', async () => {
     const store = new ApiStore();
-    const base = crmProfile();
-    // refresh_token_key pointed at the derived slot by hand — it is still the
-    // profile's own token, so it goes, and the message must not claim it stayed.
-    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: REFRESH } } });
-    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' });
+    // A header profile named `shopify`, holding the user's own token under the
+    // exact name `accessTokenKey('shopify')` derives. No exchange wrote it.
+    store.register({ id: 'shopify', name: 'Shopify', base_url: 'https://shop.example.com/admin', description: 'Shop', auth: { type: 'header', header_name: 'X-Token', vault_keys: ['SHOPIFY_ACCESS_TOKEN'] } });
+    const vault = makeVault({ SHOPIFY_ACCESS_TOKEN: 'shown-once' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'shopify' }, agent) as string;
 
-    expect(vault.peek(REFRESH)).toBeUndefined();
-    const kept = result.slice(result.indexOf('Kept in the vault'));
-    expect(kept).toContain('CRM_CLIENT_ID, CRM_CLIENT_SECRET —');
-    expect(kept).not.toContain(REFRESH);
+    expect(vault.peek('SHOPIFY_ACCESS_TOKEN')).toBe('shown-once');
+    expect(result).toContain('Still in the vault: SHOPIFY_ACCESS_TOKEN.');
   });
 
-  it('never removes a derived name that falls into a protected prefix', async () => {
+  it('never removes a refresh token the user pasted into the derived slot, which no exchange recorded', async () => {
     const store = new ApiStore();
-    // `google-oauth-x` derives into GOOGLE_OAUTH_, a platform prefix.
-    store.register({ ...crmProfile(), id: 'google-oauth-x', base_url: 'https://api.g.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.g.example'] } });
+    store.register(crmProfile());
+    const vault = vaultWithRefresh('pasted-by-the-user');
+    const agent = makeAgent(store, vault);
+
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+
+    expect(vault.peek(REFRESH)).toBe('pasted-by-the-user');
+  });
+
+  it('keeps a recorded token another profile still reads', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS] } }));
+    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    const vault = makeVault({ [ACCESS]: 'shared' });
+    const agent = makeAgent(store, vault);
+
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+
+    expect(vault.peek(ACCESS)).toBe('shared');
+  });
+
+  it('cannot be used to delete an unrelated secret by creating and deleting a profile of the same name', async () => {
+    const store = new ApiStore();
+    const vault = makeVault({ GITHUB_ACCESS_TOKEN: 'the-users-github-token' });
+    const agent = makeAgent(store, vault);
+    // A host on the private LAN saves with no confirmation prompt.
+    await apiSetupTool.handler({ action: 'create', profile: {
+      id: 'github', name: 'x', base_url: 'https://x.local/api', description: 'x',
+      auth: { type: 'bearer', vault_keys: ['X_KEY'] },
+      endpoints: [{ method: 'GET', path: '/', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent);
+    expect(store.get('github')).toBeDefined();
+
+    await apiSetupTool.handler({ action: 'delete', id: 'github' }, agent);
+
+    expect(vault.peek('GITHUB_ACCESS_TOKEN')).toBe('the-users-github-token');
+  });
+
+  it('never removes a protected name, even when it is on the record', async () => {
+    const store = new ApiStore();
+    store.register({ ...crmProfile(), id: 'google-oauth-x', base_url: 'https://api.g.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.g.example'] }, oauth_grant: { written_keys: ['GOOGLE_OAUTH_X_ACCESS_TOKEN'] } });
     const vault = makeVault({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' });
     const agent = makeAgent(store, vault);
 
@@ -436,7 +548,7 @@ describe('delete — what leaves the vault with a profile', () => {
     expect(vault.peek('GOOGLE_OAUTH_X_ACCESS_TOKEN')).toBe('platform-owned');
   });
 
-  it('purges nothing for a row the boot refused — its derived names are a neighbour\'s', async () => {
+  it('purges nothing for a row the boot refused', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-api-grant-slot-'));
     tmpDirs.push(dir);
     const engine = new EngineDb(join(dir, 'engine.db'), '');
@@ -445,10 +557,10 @@ describe('delete — what leaves the vault with a profile', () => {
     // Two rows whose ids differ only in `-` vs `_`, as an old database can hold them.
     const writer = new ApiStore();
     writer.setConnectionStore(cs);
-    writer.save({ ...crmProfile(), id: 'x-y', base_url: 'https://api.one.example/v1' });
+    writer.save({ ...crmProfile(), id: 'x-y', base_url: 'https://api.one.example/v1', oauth_grant: { written_keys: ['X_Y_ACCESS_TOKEN'] } });
     const lone = new ApiStore();
     lone.setConnectionStore(cs);
-    lone.save({ ...crmProfile(), id: 'x_y', base_url: 'https://api.two.example/v1' });
+    lone.save({ ...crmProfile(), id: 'x_y', base_url: 'https://api.two.example/v1', oauth_grant: { written_keys: ['X_Y_ACCESS_TOKEN'] } });
 
     const booted = new ApiStore();
     booted.setConnectionStore(cs);
@@ -467,13 +579,25 @@ describe('delete — what leaves the vault with a profile', () => {
 
   it('says so when the vault cannot delete, instead of implying the tokens are gone', async () => {
     const store = new ApiStore();
-    store.register(crmProfile());
+    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS] } }));
     const vault = makeVault({ [ACCESS]: 'at-1' }, { canDelete: false });
     const agent = makeAgent(store, vault);
 
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
 
-    expect(result).toContain(`so ${ACCESS} and ${REFRESH} were NOT removed`);
+    expect(result).toContain(`Could NOT remove ${ACCESS}`);
+    expect(vault.peek(ACCESS)).toBe('at-1');
+  });
+
+  it('tolerates a record whose written_keys is not an array', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written_keys: 'CRM_API_ACCESS_TOKEN' as unknown as string[] } }));
+    const vault = makeVault({ [ACCESS]: 'at-1' });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toContain('Deleted API profile "crm-api".');
     expect(vault.peek(ACCESS)).toBe('at-1');
   });
 });

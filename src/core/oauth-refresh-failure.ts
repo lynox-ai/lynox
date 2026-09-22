@@ -9,9 +9,10 @@ import { createHash } from 'node:crypto';
  * verdicts for the same wire response — the pair these two functions exist to
  * keep apart is exactly the one that drifts when nobody compares them.
  *
- * The codes are the ones RFC 6749 §5.2 defines for a token endpoint, so nothing
- * here is Google-specific. The remedies stay with each path, because only the
- * path knows who can act on them.
+ * The codes are the ones RFC 6749 §5.2 defines for a token endpoint, plus
+ * `deleted_client`, which Google returns for a removed OAuth client; a provider
+ * that never sends it loses nothing. The remedies stay with each path, because
+ * only the path knows who can act on them.
  */
 export type RefreshFailureKind = 'grant-revoked' | 'client-misconfigured' | 'transient';
 

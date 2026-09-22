@@ -16,6 +16,8 @@ import { compose, wrapUntrustedData, renderFence } from './data-boundary.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
+import { isProtectedSecretWrite } from './secret-store.js';
+import type { SecretStoreLike } from '../types/index.js';
 
 // ── Errors ──
 
@@ -263,11 +265,20 @@ export interface ApiProfile {
 /** The engine-owned half of a profile's OAuth state. See {@link ApiProfile.oauth_grant}. */
 export interface OAuthGrantRecord {
   /**
-   * The client id that last minted or successfully used the stored refresh
-   * token. Compared on `invalid_grant` to tell a revocation from a client that
-   * no longer matches the token (see `reclassifyForeignGrant`).
+   * Fingerprint (`tokenFingerprint`) of the client id that minted, or last used
+   * successfully, the refresh token named by {@link minted_for}. Compared on
+   * `invalid_grant` to tell a revocation from a client that no longer matches
+   * the token (see `reclassifyForeignGrant`). A fingerprint, not the id: the id
+   * comes from a slot the profile names, and this record is stored and served
+   * in plain text.
    */
   minted_by?: string | undefined;
+  /**
+   * Fingerprint of the refresh token {@link minted_by} describes. The stamp only
+   * speaks for that token — a refresh token stored later, by anyone, is one the
+   * stamp knows nothing about, and is judged as unstamped.
+   */
+  minted_for?: string | undefined;
   /** Set when the provider rejected the stored refresh token as revoked. */
   state?: 'revoked' | undefined;
   /** Fingerprint of the refresh token the provider rejected (`tokenFingerprint`). */
@@ -275,11 +286,23 @@ export interface OAuthGrantRecord {
   /** ISO timestamp of the revocation verdict. */
   revoked_at?: string | undefined;
   /**
-   * Vault names a token exchange wrote beyond the derived ones — the
-   * `output_secret_name` a caller chose. Recorded so the purge trail
-   * (`vault_keys`) names every slot the runtime filled for this profile.
+   * Vault names a token exchange for this profile actually WROTE — recorded at
+   * the write, so a delete removes exactly these and nothing it merely derives.
+   * A name derived from the id can equally hold a token the user stored by hand,
+   * or one another profile reads.
    */
   written_keys?: string[] | undefined;
+}
+
+/**
+ * The recorded names from {@link OAuthGrantRecord.written_keys}, tolerating a
+ * hand-edited or imported record whose field is not an array — the profile
+ * arrives through `JSON.parse(...) as ApiProfile` with no schema check, and a
+ * bad value must not throw on every save and delete of that profile.
+ */
+export function recordedWrittenKeys(profile: ApiProfile): string[] {
+  const keys = profile.oauth_grant?.written_keys;
+  return Array.isArray(keys) ? keys.filter((k): k is string => typeof k === 'string') : [];
 }
 
 /**
@@ -332,16 +355,16 @@ function collectVaultKeys(profile: ApiProfile): string[] {
       if (k) keys.add(k);
     }
   }
-  // The names a token exchange writes at RUNTIME. They are created after the last
-  // profile write that a configuration change causes, so collecting only the
+  // The names a token exchange uses at RUNTIME. They come into being after the
+  // last profile write a configuration change causes, so collecting only the
   // configured names left out exactly the material most likely to be personal
-  // data. The derived pair is deterministic from the id; anything else a caller
-  // chose is on the record.
+  // data. An oauth2 profile reads the derived pair; what an exchange actually
+  // wrote is on the record.
   if (profile.auth?.type === 'oauth2') {
     keys.add(accessTokenKey(profile.id));
     keys.add(refreshTokenKey(profile.id));
   }
-  for (const k of profile.oauth_grant?.written_keys ?? []) keys.add(k);
+  for (const k of recordedWrittenKeys(profile)) keys.add(k);
   return [...keys];
 }
 
@@ -359,7 +382,9 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     // A projection of the engine-owned grant record, never read back: the record
     // in `config_json` is the one writer, so the column cannot disagree with it.
     // It was hard-wired to 'active', which left a revoked grant nowhere to land.
-    status: profile.oauth_grant?.state === 'revoked' ? 'revoked' : 'active',
+    // Only for oauth2: a profile moved to another auth type keeps its old record,
+    // and nothing could clear a revocation that no longer describes it.
+    status: profile.auth?.type === 'oauth2' && profile.oauth_grant?.state === 'revoked' ? 'revoked' : 'active',
   };
 }
 
@@ -480,6 +505,64 @@ function hostOf(profile: ApiProfile): string | null {
   }
 }
 
+/** What {@link purgeRecordedTokens} did, for the caller to report. */
+export interface TokenPurge {
+  /** Vault names removed. */
+  removed: string[];
+  /** Names the profile referenced that still hold a value and were left on purpose. */
+  kept: string[];
+  /** Recorded names that would have been removed, but this vault cannot delete. */
+  notRemovable: string[];
+}
+
+/**
+ * Take the tokens a deleted profile's exchanges wrote out of the vault, and say
+ * what stays. Call it AFTER the profile left the store, with the profile as it
+ * was, so `store` holds only the others.
+ *
+ * Removed: the names on the profile's record (`written_keys`), which is exactly
+ * what an exchange for it wrote — unless another profile still references the
+ * name, or the name is protected. A name derived from the id is NOT removed on
+ * derivation alone: the same name can hold a token the user stored by hand, or
+ * one another profile reads, and a delete that guesses destroys it for good.
+ *
+ * Kept: every other name the profile referenced that still holds a value — the
+ * credentials the user stored, tokens from before exchanges were recorded, and
+ * recorded names another profile uses. The caller names them, because only the
+ * user can say whether anything else needs them.
+ */
+export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
+  const inUseElsewhere = new Set<string>();
+  for (const other of store.getAll()) {
+    if (other.id === profile.id) continue;
+    for (const k of collectVaultKeys(other)) inUseElsewhere.add(k);
+  }
+  const candidates = recordedWrittenKeys(profile)
+    .filter((k) => !isProtectedSecretWrite(k) && !inUseElsewhere.has(k));
+  const removed: string[] = [];
+  const notRemovable: string[] = [];
+  for (const k of candidates) {
+    if (!secretStore?.deleteSecret) {
+      notRemovable.push(k);
+      continue;
+    }
+    try {
+      if (secretStore.deleteSecret(k)) removed.push(k);
+    } catch {
+      notRemovable.push(k);
+    }
+  }
+  const holdsValue = (k: string): boolean => {
+    try {
+      return secretStore?.resolve(k) != null;
+    } catch {
+      return false;
+    }
+  };
+  const kept = collectVaultKeys(profile).filter((k) => !removed.includes(k) && !notRemovable.includes(k) && holdsValue(k));
+  return { removed, kept, notRemovable };
+}
+
 /**
  * Who is registering a profile, because the two answer a duplicate host
  * differently. `save` is an actor who can be told no: a second profile on a host
@@ -537,7 +620,7 @@ export class ApiStore {
         // Count registrations, not files: a refused profile is not in the store,
         // and reporting it as loaded is the same false confidence the save path
         // had.
-        if (this.register(migrated)) loaded++;
+        if (this.register(migrated, 'load')) loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
@@ -560,7 +643,7 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        this.register(migrateV1Profile(profile));
+        this.register(migrateV1Profile(profile), 'load');
         loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -704,6 +787,11 @@ export class ApiStore {
    * exist. Before the slot guard below, the only refusal was a malformed id,
    * which `validateProfile` already rejects upstream, so no caller had ever
    * needed the answer.
+   *
+   * This is the BOOT's entry, so it defaults to `load`: a duplicate host is
+   * marked, not refused. An actor who can be told no goes through {@link save},
+   * which admits in `save` mode — a caller adding profiles on someone's behalf
+   * belongs there, not here.
    */
   register(profile: ApiProfile, mode: RegisterMode = 'load'): boolean {
     const refusal = this._admit(profile, mode);
@@ -742,14 +830,19 @@ export class ApiStore {
     }
 
     const hostname = hostOf(profile);
+    const previous = this.profiles.get(profile.id);
     // One profile per host, because `http_request` has no profile parameter: the
     // attach resolves the credential by hostname alone, so two profiles on one
-    // host cannot be told apart at call time. An actor is told so here; the boot
-    // marks the conflict instead (see RegisterMode).
-    if (hostname !== null && mode === 'save') {
+    // host cannot be told apart at call time. An actor JOINING a held host is
+    // told so here; the boot marks the conflict instead (see RegisterMode). A
+    // save that keeps its host is never refused — in a conflict the boot left
+    // behind, that save (an expiry, a revocation, an edit) makes nothing worse,
+    // and refusing it would lose the write while every way out stays open.
+    const joining = previous === undefined || hostOf(previous) !== hostname;
+    if (hostname !== null && mode === 'save' && joining) {
       const holder = [...(this.hostToIds.get(hostname) ?? [])].find((o) => o !== profile.id);
       if (holder !== undefined) {
-        return `api_profile "${holder}" already maps to ${hostname}. http_request picks the profile by hostname, so a second profile on the same host would make it ambiguous which credential a request carries. Nothing was saved. Update "${holder}" instead, or delete it first.`;
+        return `api_profile "${holder}" already maps to ${hostname}. http_request picks the profile by hostname, so a second profile on the same host would make it ambiguous which credential a request carries. Nothing was saved. Ask the user whether "${holder}" should be updated instead.`;
       }
     }
 
@@ -758,7 +851,6 @@ export class ApiStore {
     // here after an update, and the one-per-host rule above refused the next
     // profile on a host nobody held any more. On a save that keeps the host it
     // only drops a rate bucket whose `rate_limit` the update removed.
-    const previous = this.profiles.get(profile.id);
     if (previous) this._releaseHost(previous);
 
     this.profiles.set(profile.id, profile);
