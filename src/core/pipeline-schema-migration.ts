@@ -41,8 +41,10 @@ const TRANSFORMS: Record<number, (blob: Record<string, unknown>) => void> = {
   // portable-import feature, so every v0 template is a SELF-BUILT workflow the user
   // authored in their own session. v2.7.0 added a consent gate (cron + /run +
   // autonomous run_workflow) that refuses an unconfirmed workflow; without this
-  // backfill it would retroactively refuse a workflow the user made themselves,
-  // which save_workflow now confirms at write time. Grant the same confirm here.
+  // backfill it would retroactively refuse workflows that predate the gate
+  // entirely. A ONE-TIME grant for those blobs and nothing else: a workflow saved
+  // today lands unconfirmed on purpose, because the tool that saves it is called
+  // by the model, and consent comes from the person scheduling it.
   //   Safe against imports: an imported blob is persisted through a fail-closed
   // chokepoint that stamps `schema_version` at CURRENT (import-workflow.ts), so it
   // is never v0 and never enters this step — it stays unconfirmed by design.

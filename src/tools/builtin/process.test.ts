@@ -288,6 +288,25 @@ describe('save_workflow — workflow_id source', () => {
     captureProcessMock.mockReset();
   });
 
+  it('does NOT confirm the promoted copy either — the same tool, the same caller', async () => {
+    // The session path has the same assertion one block up, and for a while only
+    // that one existed: putting the save-time stamp back HERE passed the whole
+    // suite. Both writers are the same function reached two ways, so both need
+    // the same guard — a model promoting a plan it wrote is not a person agreeing
+    // to let it run unattended.
+    storePipeline('plan-789', makePlan());
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, agent);
+
+    const { workflow_id: savedId } = JSON.parse(result) as { workflow_id: string };
+    const stored = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+    expect(stored).toBeDefined();
+    expect(stored?.confirmedAt).toBeUndefined();
+    // …and the copy in the live store agrees, so this is not an artefact of the
+    // mock: the object the rest of the engine reads is unconfirmed too.
+    expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
+  });
+
   it('promotes a non-template plan into a reusable workflow copy', async () => {
     storePipeline('plan-789', makePlan());
     const agent = makeAgent({}, mockHistory);
