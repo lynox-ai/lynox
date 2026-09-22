@@ -9,7 +9,8 @@
   the vault. `fetch_token` now records each name it writes together with a
   fingerprint of the value, and a delete removes a name only while the vault
   still holds that very value — unless another profile still references the
-  name or it falls into a platform prefix. Neither a name nor a record alone
+  name, or the name is one a tenant cannot recover: an infrastructure secret
+  or the slot holding their own provider key. Neither a name nor a record alone
   is enough: a name derived from the profile id, or one an exchange wrote
   earlier, can hold a token the user has stored there by hand. A refresh token
   the provider hands back unchanged — the very one it was sent — is neither
@@ -22,7 +23,8 @@
 - The `vault_keys` column of a connection also lists the token names an
   oauth2 profile uses at runtime, the names its exchanges recorded, and a
   basic profile's `username_key`/`password_key`.
-- `api_setup` refuses an `auth.vault_keys` that is not a list of names.
+- `api_setup` refuses an `auth.vault_keys` that is neither absent nor a list
+  of names.
 
 ### Changed: a failed token refresh says whether the grant was revoked
 

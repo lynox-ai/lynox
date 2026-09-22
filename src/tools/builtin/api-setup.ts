@@ -1522,24 +1522,25 @@ Next steps before calling create:
       if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
         return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
       }
-      // The same refusal `validateProfile` makes for `vault_keys` — this path had only the
-      // shape check, so a well-formed name was enough to write over any platform secret.
-      // `secretStore.set` below overwrites without asking, and the agent chooses the name:
-      // one injected `fetch_token` could replace a mail credential or a feed address with an
-      // OAuth token, and the only symptom is the feature quietly failing afterwards.
-      // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
-      // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
-      // so the protected set grew while this door stayed open.
+      // `secretStore.set` below overwrites without asking, and the agent chooses
+      // the name, so one injected `fetch_token` could otherwise replace a mail
+      // credential or a feed address with an OAuth token — and the only symptom
+      // would be the feature quietly failing afterwards. `validateProfile` refuses
+      // an infrastructure secret as a basic-auth key name for the same reason; the
+      // check here covers both halves of what a tenant cannot recover, the
+      // infrastructure secrets and the slot holding their own provider key.
       if (isProtectedSecretWrite(outputName)) {
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
       }
       // Never a slot the refresh token lives in: the access token would be written
       // over it, and the grant would go with it. Both slots, because a profile can
-      // name one of its own AND still have rotations written to the derived one —
-      // and the advice has to cover the case where the profile's own naming is what
-      // collides, which dropping `output_secret_name` would not fix.
+      // read from one of its own naming AND still have rotations written to the
+      // derived one. The advice names a different output name, and — for the one
+      // shape where even the default collides, a profile whose `refresh_token_key`
+      // IS the derived access name — removing that field, which is what the
+      // split-slot reply asks for as well.
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
-        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Pick another output_secret_name, or point auth.oauth.refresh_token_key at a slot of its own.`;
+        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Pick another output_secret_name; if the profile's own auth.oauth.refresh_token_key is what collides, remove that field so both ends use the derived name.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';

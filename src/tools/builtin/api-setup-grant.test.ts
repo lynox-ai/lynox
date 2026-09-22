@@ -551,8 +551,11 @@ describe('fetch_token — what a successful exchange records', () => {
     const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: REFRESH }, agent) as string;
 
     expect(result).toContain('is where this profile keeps its refresh token');
-    // The one request per second this profile allows is still there.
+    // The one request per second this profile allows is still there — and the
+    // second call proves the bucket exists, so the first `null` is an answer
+    // and not the silence of a host nothing registered a limit for.
     expect(store.checkRateLimit('api.crm.example')).toBeNull();
+    expect(store.checkRateLimit('api.crm.example')).not.toBeNull();
   });
 
   it('keeps the tokens it wrote when only the save of its record fails', async () => {
@@ -685,7 +688,7 @@ describe('create — vault_keys is a list of names', () => {
     expect(store.get('crm-api')).toBeUndefined();
   });
 
-  it('reads a null vault_keys as absent, like every other reader', async () => {
+  it('reads a null vault_keys as absent', async () => {
     const store = new ApiStore();
     const agent = makeAgent(store, makeVault({}), async () => 'allow');
     const result = await apiSetupTool.handler({ action: 'create', profile: {
@@ -750,6 +753,15 @@ describe('create/update — the grant record belongs to the engine', () => {
   });
 });
 
+// A mutation of `purgeRecordedTokens` survives on purpose: dropping
+// `!removed.includes(k)` from the kept filter changes nothing, because a name the
+// purge just deleted no longer resolves — `deleteSecret` drops it from the same map
+// `resolve` reads (`secret-store.ts`) — so the value check already excludes it.
+// Killing it would need a store that reports a delete as done and keeps handing the
+// value out, i.e. a broken store, and the test would then pin that contract breach
+// as expected behaviour. The redundancy stays because it states the intent at the
+// place a reader looks; do not delete it, and do not add a lying-vault fixture to
+// make it fail.
 describe('delete — only what the profile\'s exchanges wrote leaves the vault', () => {
   it('removes the recorded tokens and names what stays', async () => {
     const store = new ApiStore();

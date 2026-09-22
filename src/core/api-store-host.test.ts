@@ -145,6 +145,13 @@ describe('ApiStore — one profile per host', () => {
     expect(writes.join('')).toContain('Host api.crm.example is mapped by more than one profile (crm-a, crm-b)');
   });
 
+  // Leaving an empty id set behind instead of deleting the host key is a mutation
+  // that survives, and it has to: every reader is size-gated — `getByHostname` wants
+  // exactly one id, `getHostConflict` more than one, the holder lookup finds nobody
+  // in it, `_releaseHost` returns when its delete finds nothing, and the admit path
+  // reuses the set it finds. Nothing exposes the map itself, so an empty set and a
+  // missing key are the same thing to every caller. The delete stays because it keeps
+  // the map from growing; do not add a test that reaches into the private field.
   it('hands the host\'s rate bucket to the profile that remains, not the one that left', () => {
     const store = new ApiStore();
     // The throttled profile boots first, the unthrottled one shares its host.
@@ -182,6 +189,22 @@ describe('ApiStore — one profile per host', () => {
     store.save(profile('crm-a', 'https://api.crm.example/v1'));
     expect(store.checkRateLimit('api.crm.example')).toBeNull();
     expect(store.checkRateLimit('api.crm.example')).toBeNull();
+  });
+
+  it('does not refuse a profile against its own stale host entry', () => {
+    const store = new ApiStore();
+    const stored = profile('crm-a', 'https://api.crm.example/v1');
+    store.save(stored);
+    // A caller that edits the object it handed over leaves the host index pointing
+    // at the old address. No engine path does this — every write builds a new
+    // object — but the id in that index is still this profile's own, and a save
+    // must not be refused against itself.
+    stored.base_url = 'https://api.other.example/v1';
+
+    const again = store.save(profile('crm-a', 'https://api.crm.example/v2'));
+
+    expect(again.ok).toBe(true);
+    expect(store.get('crm-a')?.base_url).toBe('https://api.crm.example/v2');
   });
 
   it('keeps refusing a vault-slot collision at boot, unlike a shared host', () => {
@@ -273,6 +296,20 @@ describe('ApiStore — grant record projections', () => {
     expect(cs.get('crm-api')?.vaultKeys).toEqual([]);
   });
 
+  it('does not project a revocation for a record that only carries a stamp', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save(oauthProfile({ oauth_grant: { minted_by: '0123456789abcdef', minted_for: 'fedcba9876543210' } }));
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
+  // The `typeof k === 'string'` guard inside `collectVaultKeys` cannot be killed on
+  // its own: `parseVaultKeys` filters the same way when the column is read back, so
+  // a non-string that slips into the write is invisible to every reader. The two
+  // together are one guarantee; this test pins the pair. Keep the write-side guard —
+  // the column is what a later purge trusts — and do not read the raw column here to
+  // make it fail on its own.
   it('lists only string entries of vault_keys in the trail', () => {
     const cs = makeCs();
     const store = new ApiStore();
