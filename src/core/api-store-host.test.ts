@@ -265,6 +265,14 @@ describe('ApiStore — grant record projections', () => {
     expect(cs.get('crm-api')?.status).toBe('active');
   });
 
+  it('reads a null vault_keys as naming nothing', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save({ ...oauthProfile(), auth: { type: 'bearer', vault_keys: null as unknown as string[] } });
+    expect(cs.get('crm-api')?.vaultKeys).toEqual([]);
+  });
+
   it('lists only string entries of vault_keys in the trail', () => {
     const cs = makeCs();
     const store = new ApiStore();

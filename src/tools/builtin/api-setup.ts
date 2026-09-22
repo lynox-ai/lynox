@@ -147,8 +147,8 @@ function validateProfile(profile: ApiProfile): string | null {
     // other value still hands it a name, and every other reader would have to
     // guess the same way.
     const vaultKeys: unknown = profile.auth.vault_keys;
-    if (vaultKeys !== undefined && !(Array.isArray(vaultKeys) && vaultKeys.every((k) => typeof k === 'string'))) {
-      return 'Invalid auth.vault_keys: must be a list of vault key names, e.g. ["MY_API_KEY"]';
+    if (vaultKeys !== undefined && vaultKeys !== null && !(Array.isArray(vaultKeys) && vaultKeys.every((k) => typeof k === 'string'))) {
+      return 'Invalid auth.vault_keys: must be a list of vault key names, e.g. ["MY_API_KEY"]. A stored profile holding something else there is fixed with api_setup update.';
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
@@ -1010,16 +1010,14 @@ function persistGrant(
 /**
  * The record's writes after an exchange: what it held, with each name this
  * exchange wrote replaced by the value it wrote now. A name keeps one entry —
- * the fingerprint of the latest value is the only one a delete may match. That
- * holds within one exchange too: an `output_secret_name` equal to the derived
- * refresh name is written twice, and the vault keeps the second value.
+ * the fingerprint of the latest value is the only one a delete may match. One
+ * exchange never writes a name twice: its output name may not be a refresh slot.
  */
 function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
-  const latest = new Map<string, WrittenSecret>();
-  for (const w of writes) latest.set(w.name, w);
+  const rewritten = new Set(writes.map((w) => w.name));
   const kept = recordedWrites({ id: '', name: '', base_url: '', description: '', oauth_grant: current })
-    .filter((w) => !latest.has(w.name));
-  return [...kept, ...latest.values()];
+    .filter((w) => !rewritten.has(w.name));
+  return [...kept, ...writes];
 }
 
 /**
@@ -1517,6 +1515,32 @@ Next steps before calling create:
           && grant.revoked_fp === tokenFingerprint(presentedRefresh)) {
         return revokedGrantMessage(input.id, refreshKey, grant.revoked_at);
       }
+      // Where the access token will go, checked BEFORE the POST: a refusal after it
+      // would throw away a freshly minted token, and with a provider that rotates,
+      // the refresh token the POST just spent along with it.
+      const outputName = input.output_secret_name ?? accessTokenKey(input.id);
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
+        return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
+      }
+      // The same refusal `validateProfile` makes for `vault_keys` — this path had only the
+      // shape check, so a well-formed name was enough to write over any platform secret.
+      // `secretStore.set` below overwrites without asking, and the agent chooses the name:
+      // one injected `fetch_token` could replace a mail credential or a feed address with an
+      // OAuth token, and the only symptom is the feature quietly failing afterwards.
+      // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
+      // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
+      // so the protected set grew while this door stayed open.
+      if (isProtectedSecretWrite(outputName)) {
+        return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
+      // Never a slot the refresh token lives in: the access token would be written
+      // over it, and the grant would go with it.
+      if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
+        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Pick another name, or leave output_secret_name out.`;
+      }
+      if (!secretStore.set) {
+        return 'Error: secret store has no write path in this context — cannot persist the access_token.';
+      }
       // fetch_token drives a real outbound POST; honour the same per-session HTTP
       // ceiling http_request enforces. It already increments httpRequests after a
       // successful fetch (below), so without this pre-check it could charge past
@@ -1682,32 +1706,12 @@ Next steps before calling create:
       if (!accessToken || typeof accessToken !== 'string') {
         return `Token exchange returned HTTP ${response.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
       }
-      const outputName = input.output_secret_name ?? accessTokenKey(input.id);
-      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
-        return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
-      }
-      // The same refusal `validateProfile` makes for `vault_keys` — this path had only the
-      // shape check, so a well-formed name was enough to write over any platform secret.
-      // `secretStore.set` below overwrites without asking, and the agent chooses the name:
-      // one injected `fetch_token` could replace a mail credential or a feed address with an
-      // OAuth token, and the only symptom is the feature quietly failing afterwards.
-      // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
-      // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
-      // so the protected set grew while this door stayed open.
-      if (isProtectedSecretWrite(outputName)) {
-        return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
-      }
-      if (!secretStore.set) {
-        return 'Error: secret store has no write path in this context — cannot persist the access_token.';
-      }
-      // A refresh token counts as new only if it differs from what the derived slot
-      // held before this exchange wrote anything. A provider that does not rotate
-      // can answer with the very token it was sent; rewriting that and putting it on
-      // the record would make the user's own grant look like the exchange's, and a
-      // delete would take it.
+      // A refresh token counts as new only if it differs from the one this exchange
+      // sent. A provider that does not rotate can answer with the very token it was
+      // sent; writing that again and putting it on the record would make the
+      // user's own grant look like the exchange's, and a delete would take it.
       const refreshName = refreshTokenKey(input.id);
-      const heldRefresh = resolveOne(refreshName);
-      const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' && parsed.refresh_token !== heldRefresh
+      const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' && parsed.refresh_token !== presentedRefresh
         ? parsed.refresh_token
         : null;
       secretStore.set(outputName, accessToken);
@@ -1759,12 +1763,14 @@ Next steps before calling create:
       // the comparison `reclassifyForeignGrant` needs on the next `invalid_grant`.
       // A success also ends a revocation verdict: a token that works is not
       // revoked. Every value this exchange wrote joins the record with its
-      // fingerprint, which is what a later delete removes — and all it removes.
+      // fingerprint when the save goes through (see `persistGrant`), and that is
+      // what a later delete removes — and all it removes.
       const writes: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
       if (rotated !== null) writes.push({ name: refreshName, fp: tokenFingerprint(rotated) });
-      // The refresh token now in play: a rotated one if the answer carried it,
-      // otherwise the one that just worked. The stamp names that token, so it
-      // says nothing about any token stored after it.
+      // The refresh token now in play: a new one if the answer carried it,
+      // otherwise the one that just worked — which is also what an answer that
+      // hands it back unchanged names. The stamp names that token, so it says
+      // nothing about any token stored after it.
       const liveRefresh = rotated ?? presentedRefresh;
       const outcome = persistGrant(apiStore, input.id, apisDir, (current) => {
         const next: OAuthGrantRecord = { ...current };

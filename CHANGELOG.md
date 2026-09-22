@@ -12,9 +12,9 @@
   name or it falls into a platform prefix. Neither a name nor a record alone
   is enough: a name derived from the profile id, or one an exchange wrote
   earlier, can hold a token the user has stored there by hand. A refresh token
-  the provider hands back unchanged is neither rewritten nor recorded, so it
-  stays the user's. Tokens from before this change are not on any record and
-  stay.
+  the provider hands back unchanged — the very one it was sent — is neither
+  rewritten nor recorded. Tokens from before this change are not on any record
+  and stay.
 - `api_setup delete` names what it removed and which of the names the
   profile used still hold a value, and says to ask the user before removing
   the rest.
@@ -43,10 +43,14 @@
   reply says so) and projected into `connections.status` while the profile
   exchanges a refresh token. `fetch_token` will not resend the rejected
   refresh token, and `http_request` refuses the profile with the way back,
-  instead of a 401 whose hint called it an expired token. A different refresh token in the vault clears the way for both; the
-  next successful exchange clears the record. A profile that reads its refresh
-  token from a slot of its own naming gets no verdict, because `fetch_token`
-  stores rotated tokens under the derived name.
+  instead of a 401 whose hint called it an expired token. A different refresh
+  token in the vault clears the way for both; the next successful exchange
+  clears the record. A profile that reads its refresh token from a slot of its
+  own naming gets no verdict, because `fetch_token` stores rotated tokens under
+  the derived name.
+- `fetch_token` checks `output_secret_name` before it posts anything, and
+  refuses a name where the profile keeps its refresh token: the access token
+  would be written over it.
 
 ### Changed: two API profiles can no longer share a host
 

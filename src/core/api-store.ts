@@ -355,11 +355,13 @@ function migrateV1Profile(profile: ApiProfile): ApiProfile {
 const IMPORT_SENTINEL = '.imported-to-connections';
 
 /**
- * Whether a revocation verdict is in force: recorded, on a profile that still
- * exchanges a refresh token — the only kind a verdict is ever recorded for. One
- * moved to client credentials since has no user grant left to revoke. The attach
- * and the `connections.status` projection both ask this, so the column never
- * says `revoked` for a profile the attach lets through.
+ * Whether a revocation verdict is on record for a profile it still applies to:
+ * oauth2, exchanging a refresh token — the only kind a verdict is ever recorded
+ * for. One moved to client credentials since has no user grant left to revoke.
+ * The `connections.status` projection is exactly this. The attach asks it too,
+ * and then also steps aside once the vault holds a different refresh token — so
+ * the column can still say `revoked` while the way back is in place, until the
+ * next successful exchange clears the record.
  */
 export function hasRevokedGrant(profile: ApiProfile): boolean {
   return profile.auth?.type === 'oauth2'
@@ -427,9 +429,9 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     // A projection of the engine-owned grant record, never read back: the record
     // in `config_json` is the one writer, so the column cannot disagree with it.
     // It was hard-wired to 'active', which left a revoked grant nowhere to land.
-    // Only while the verdict is in force (`hasRevokedGrant`): a profile moved to
+    // Only while the verdict applies (`hasRevokedGrant`): a profile moved to
     // another auth type or to client credentials keeps its old record, and
-    // nothing could clear a revocation that no longer describes it.
+    // nothing prompts the exchange that would clear it.
     status: hasRevokedGrant(profile) ? 'revoked' : 'active',
   };
 }
@@ -577,7 +579,8 @@ export interface TokenPurge {
  * credentials the user stored, tokens from before exchanges were recorded,
  * recorded names whose value has changed since, and recorded names another
  * profile uses. The caller names them, because only the user can say whether
- * anything else needs them.
+ * anything else needs them. A protected name is not named: it belongs to the
+ * platform, and the user is not the one to ask about removing it.
  */
 export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
   const inUseElsewhere = new Set<string>();
@@ -611,7 +614,7 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
     }
   }
   const kept = collectVaultKeys(profile)
-    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && valueOf(k) !== null);
+    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
   return { removed, kept, notRemovable };
 }
 

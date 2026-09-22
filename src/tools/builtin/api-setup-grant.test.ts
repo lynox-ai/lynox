@@ -434,6 +434,22 @@ describe('fetch_token — what a successful exchange records', () => {
 
     expect(result).toContain('was deleted while it ran. Removed the tokens its exchanges wrote: LX_TOKEN.');
     expect(vault.peek('LX_TOKEN')).toBeUndefined();
+    // A platform slot is not offered to the user for removal.
+    expect(result).not.toContain('LYNOX_X_REFRESH_TOKEN');
+  });
+
+  it('keeps that access token when only the save of its record fails', async () => {
+    const store = new ApiStore();
+    store.register({ ...crmProfile({}, 'client_credentials'), id: 'lynox-x', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] } });
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', LYNOX_X_REFRESH_TOKEN: 'platform-owned' });
+    const agent = makeAgent(store, vault);
+    vi.spyOn(store, 'save').mockReturnValue({ ok: false } as never);
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'lynox-x', output_secret_name: 'LX_TOKEN' }, agent) as string;
+
+    expect(result).toContain('the refresh token was NOT stored');
+    expect(vault.peek('LX_TOKEN')).toBe('at-1');
   });
 
   it('neither rewrites nor records a refresh token the provider hands back unchanged, so a delete leaves it', async () => {
@@ -459,35 +475,72 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(deleted).toContain(`Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET, ${REFRESH}.`);
   });
 
-  it('compares a returned refresh token with the slot it writes to, not the one a split profile reads', async () => {
+  it('does not copy a refresh token handed back unchanged into the derived slot of a profile that reads its own', async () => {
     const store = new ApiStore();
     const base = crmProfile();
     store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT' } } });
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT: 'rt-1' });
     const agent = makeAgent(store, vault);
-    // The provider hands back the token it was sent; the derived slot held nothing.
+    // The provider hands back the token it was sent.
     tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }));
 
     await fetchToken(agent);
 
-    // A copy the exchange made under the derived name is its own write.
-    expect(vault.peek(REFRESH)).toBe('rt-1');
-    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1', [REFRESH]: 'rt-1' }));
+    expect(vault.peek(REFRESH)).toBeUndefined();
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1' }));
     expect(vault.peek('CRM_RT')).toBe('rt-1');
   });
 
-  it('keeps one entry per name when the chosen output name is the derived refresh name', async () => {
+  it('leaves a refresh token stored while the exchange ran, when the answer only hands back the one it sent', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
     const vault = vaultWithRefresh('rt-1');
     const agent = makeAgent(store, vault);
-    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      vault.set(REFRESH, 'rt-stored-meanwhile');
+      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
 
-    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: REFRESH }, agent);
+    await fetchToken(agent);
 
-    // Written twice; the vault keeps the second value, and so does the record.
-    expect(vault.peek(REFRESH)).toBe('rt-2');
-    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [REFRESH]: 'rt-2' }));
+    expect(vault.peek(REFRESH)).toBe('rt-stored-meanwhile');
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1' }));
+  });
+
+  it('ignores an empty refresh token in the answer', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const vault = vaultWithRefresh('rt-1');
+    const agent = makeAgent(store, vault);
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: '', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    expect(vault.peek(REFRESH)).toBe('rt-1');
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1' }));
+  });
+
+  it.each([
+    ['the derived refresh slot', REFRESH, undefined, 'is where this profile keeps its refresh token'],
+    ['the refresh slot the profile names', 'CRM_RT', 'CRM_RT', 'is where this profile keeps its refresh token'],
+    ['the derived refresh slot, while the profile names another', REFRESH, 'CRM_RT', 'is where this profile keeps its refresh token'],
+    ['a platform slot', 'LYNOX_ENGINE_KEY', undefined, 'would overwrite a credential the tenant cannot recover'],
+    ['a name that is not UPPER_SNAKE_CASE', 'crm-token', undefined, 'is not valid UPPER_SNAKE_CASE'],
+  ])('refuses %s as output name before posting anything', async (_label, outputName, refreshTokenKeyName, message) => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    store.register(refreshTokenKeyName
+      ? { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: refreshTokenKeyName } } }
+      : base);
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_RT: 'rt-1' });
+    const agent = makeAgent(store, vault);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: outputName }, agent) as string;
+
+    expect(result).toContain(message);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(vault.peek(REFRESH)).toBe('rt-1');
   });
 
   it('keeps the tokens it wrote when only the save of its record fails', async () => {
@@ -522,7 +575,7 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBeUndefined();
   });
 
-  it('names what it could not take out when the profile was deleted while its exchange ran', async () => {
+  it('names what it kept because another profile uses it, when the profile was deleted while its exchange ran', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
     // Another profile reads the name this exchange writes its access token to.
@@ -616,7 +669,18 @@ describe('create — vault_keys is a list of names', () => {
     } }, agent) as string;
 
     expect(result).toContain('Invalid auth.vault_keys: must be a list of vault key names');
+    expect(result).toContain('fixed with api_setup update');
     expect(store.get('crm-api')).toBeUndefined();
+  });
+
+  it('reads a null vault_keys as absent, like every other reader', async () => {
+    const store = new ApiStore();
+    const agent = makeAgent(store, makeVault({}), async () => 'allow');
+    const result = await apiSetupTool.handler({ action: 'create', profile: {
+      ...crmProfile(), auth: { type: 'bearer', vault_keys: null as unknown as string[] },
+    } }, agent) as string;
+
+    expect(result).not.toContain('Invalid auth.vault_keys');
   });
 });
 
@@ -829,9 +893,11 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' });
     const agent = makeAgent(store, vault);
 
-    await apiSetupTool.handler({ action: 'delete', id: 'google-oauth-x' }, agent);
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'google-oauth-x' }, agent) as string;
 
     expect(vault.peek('GOOGLE_OAUTH_X_ACCESS_TOKEN')).toBe('platform-owned');
+    // Nor offered to the user for removal: it is not theirs to decide.
+    expect(result).toBe('Deleted API profile "google-oauth-x".');
   });
 
   it('purges nothing for a row the boot refused', async () => {
