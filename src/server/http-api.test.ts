@@ -2671,11 +2671,14 @@ describe('LynoxHTTPApi', () => {
   describe('DELETE /api/api-profiles/:id', () => {
     it('removes the tokens the profile\'s exchanges wrote, and leaves what the user stored', async () => {
       const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      // The route reads the vault to match the recorded value before deleting.
+      mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_API_ACCESS_TOKEN' ? 'at-1' : null));
       const store = new ApiStore();
       store.register({
         id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
         auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'] },
-        oauth_grant: { written_keys: ['CRM_API_ACCESS_TOKEN'] },
+        oauth_grant: { written: [{ name: 'CRM_API_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] },
       });
       mockGetApiStore.mockReturnValue(store);
       mockSecretDelete.mockClear();
@@ -2686,6 +2689,8 @@ describe('LynoxHTTPApi', () => {
         expect(mockSecretDelete.mock.calls.map((c: unknown[]) => c[0])).toEqual(['CRM_API_ACCESS_TOKEN']);
       } finally {
         mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
       }
     });
   });

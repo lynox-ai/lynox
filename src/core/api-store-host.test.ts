@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { ConnectionStore } from './connection-store.js';
 import { ApiStore, purgeRecordedTokens, type ApiProfile } from './api-store.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 
 /**
  * One profile per host, and the grant record's two projections (the
@@ -263,7 +264,7 @@ describe('ApiStore — grant record projections', () => {
 
   it('does not count the profile itself as "another profile" when the purge runs before it left the store', () => {
     const store = new ApiStore();
-    store.register(oauthProfile({ oauth_grant: { written_keys: ['CRM_API_ACCESS_TOKEN'] } }));
+    store.register(oauthProfile({ oauth_grant: { written: [{ name: 'CRM_API_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] } }));
     const values: Record<string, string> = { CRM_API_ACCESS_TOKEN: 'at-1' };
     const vault = {
       resolve: (n: string) => values[n] ?? null,
@@ -273,11 +274,33 @@ describe('ApiStore — grant record projections', () => {
     expect(purge.removed).toEqual(['CRM_API_ACCESS_TOKEN']);
   });
 
+  it('lists a basic profile\'s username and password keys in the trail', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save({ ...oauthProfile(), auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'CRM_USER', password_key: 'CRM_PASS' } });
+    expect([...(cs.get('crm-api')?.vaultKeys ?? [])].sort()).toEqual(['CRM_PASS', 'CRM_USER']);
+  });
+
+  it('does not throw on a neighbour whose vault_keys is not an array', () => {
+    const store = new ApiStore();
+    store.register(oauthProfile({ oauth_grant: { written: [{ name: 'CRM_API_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] } }));
+    store.register({ ...oauthProfile(), id: 'broken', base_url: 'https://broken.example/v1', auth: { type: 'bearer', vault_keys: {} as unknown as string[] } });
+    const values: Record<string, string> = { CRM_API_ACCESS_TOKEN: 'at-1' };
+    const vault = {
+      resolve: (n: string) => values[n] ?? null,
+      deleteSecret: (n: string) => { const had = n in values; delete values[n]; return had; },
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const gone = store.get('crm-api')!;
+    store.unregister('crm-api');
+    expect(purgeRecordedTokens(store, gone, vault).removed).toEqual(['CRM_API_ACCESS_TOKEN']);
+  });
+
   it('names a caller-chosen access-token slot in the purge trail', () => {
     const cs = makeCs();
     const store = new ApiStore();
     store.setConnectionStore(cs);
-    store.save(oauthProfile({ oauth_grant: { written_keys: ['CRM_CUSTOM_TOKEN'] } }));
+    store.save(oauthProfile({ oauth_grant: { written: [{ name: 'CRM_CUSTOM_TOKEN', fp: tokenFingerprint('v') }] } }));
     expect(cs.get('crm-api')?.vaultKeys).toContain('CRM_CUSTOM_TOKEN');
   });
 });

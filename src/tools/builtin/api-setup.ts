@@ -17,8 +17,8 @@
 import { join } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge } from '../../core/api-store.js';
-import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrittenKeys } from '../../core/api-store.js';
+import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -974,6 +974,9 @@ function purgeMessage(purge: TokenPurge): string {
  * budget is already charged; turning a completed exchange into a reported
  * failure would make the model mint again, while losing the record only returns
  * this path to the state it had before the record existed.
+ *
+ * Returns `'gone'` when the profile no longer exists, so a caller that just
+ * wrote tokens for it can take them out again.
  */
 function persistGrant(
   apiStore: ApiStore | null | undefined,
@@ -981,19 +984,32 @@ function persistGrant(
   apisDir: string,
   update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
   tokenExpiresAt?: number,
-): void {
-  if (!apiStore) return;
+): 'saved' | 'gone' | 'not-saved' {
+  if (!apiStore) return 'not-saved';
   const fresh = apiStore.get(id);
-  if (!fresh) return;
+  if (!fresh) return 'gone';
   const next: ApiProfile = tokenExpiresAt === undefined
     ? { ...fresh }
     : { ...fresh, auth: { ...fresh.auth, oauth: { ...fresh.auth?.oauth, token_expires_at: tokenExpiresAt } } } as ApiProfile;
   next.oauth_grant = update(fresh.oauth_grant);
   try {
-    apiStore.save(next, apisDir);
+    return apiStore.save(next, apisDir).ok ? 'saved' : 'not-saved';
   } catch {
     // See the docstring: the exchange is complete either way.
+    return 'not-saved';
   }
+}
+
+/**
+ * The record's writes after an exchange: what it held, with each name this
+ * exchange wrote replaced by the value it wrote now. A name keeps one entry —
+ * the fingerprint of the latest value is the only one a delete may match.
+ */
+function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
+  const rewritten = new Set(writes.map((w) => w.name));
+  const kept = recordedWrites({ id: '', name: '', base_url: '', description: '', oauth_grant: current })
+    .filter((w) => !rewritten.has(w.name));
+  return [...kept, ...writes];
 }
 
 // ── Tool definition ───────────────────────────────────────────────────────────
@@ -1595,7 +1611,13 @@ Next steps before calling create:
         // revocation. This reads the process's own view of the vault; a writer in
         // another process is not seen here — the attach's fingerprint check is
         // what lets a restart that loads the newer token past such a verdict.
-        if (kind === 'grant-revoked' && resolveOne(refreshKey) !== presentedRefresh) kind = 'transient';
+        // When that happened, the other exchange has also stored its access token
+        // already (it writes the access token before the refresh token), so the
+        // useful next step is the request itself, not another exchange that would
+        // spend the refresh token the other one just stored.
+        if (kind === 'grant-revoked' && resolveOne(refreshKey) !== presentedRefresh) {
+          return `Token exchange failed with HTTP ${response.status}: the refresh token it sent had just been replaced by another exchange for api_profile "${input.id}" that ran at the same time. That exchange stored a fresh access token. Nothing was recorded. Retry the API request; do not call fetch_token again now, it would spend the refresh token that was just stored. ${responseBody}`;
+        }
         // A profile that names its own refresh slot reads from there, while every
         // exchange stores a rotated token under the derived name. The token that
         // just failed may simply be the one the last rotation replaced, so no
@@ -1654,6 +1676,12 @@ Next steps before calling create:
         // close the door and leave the window.
         const refreshName = refreshTokenKey(input.id);
         if (isProtectedSecretWrite(refreshName)) {
+          // The access token is written already; it goes on the record like any
+          // other write, or no later delete could take it.
+          persistGrant(apiStore, input.id, apisDir, (current) => ({
+            ...current,
+            written: mergeWrites(current, [{ name: outputName, fp: tokenFingerprint(accessToken) }]),
+          }));
           return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
         }
         secretStore.set(refreshName, parsed.refresh_token);
@@ -1686,16 +1714,16 @@ Next steps before calling create:
       // just succeeded is stamped as the one the stored refresh token belongs to —
       // the comparison `reclassifyForeignGrant` needs on the next `invalid_grant`.
       // A success also ends a revocation verdict: a token that works is not
-      // revoked. Every name this exchange wrote joins the record, which is what a
-      // later delete removes — and all it removes.
-      const written = [outputName];
+      // revoked. Every value this exchange wrote joins the record with its
+      // fingerprint, which is what a later delete removes — and all it removes.
       const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' ? parsed.refresh_token : null;
-      if (rotated !== null) written.push(refreshTokenKey(input.id));
+      const writes: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
+      if (rotated !== null) writes.push({ name: refreshTokenKey(input.id), fp: tokenFingerprint(rotated) });
       // The refresh token now in play: a rotated one if the answer carried it,
       // otherwise the one that just worked. The stamp names that token, so it
       // says nothing about any token stored after it.
       const liveRefresh = rotated ?? presentedRefresh;
-      persistGrant(apiStore, input.id, apisDir, (current) => {
+      const outcome = persistGrant(apiStore, input.id, apisDir, (current) => {
         const next: OAuthGrantRecord = { ...current };
         if (liveRefresh !== null && clientId !== null) {
           next.minted_by = tokenFingerprint(clientId);
@@ -1704,9 +1732,16 @@ Next steps before calling create:
         delete next.state;
         delete next.revoked_fp;
         delete next.revoked_at;
-        next.written_keys = [...new Set([...recordedWrittenKeys({ ...profile, oauth_grant: current }), ...written])];
+        next.written = mergeWrites(current, writes);
         return next;
       }, tokenExpiresAt);
+      // Deleted while the exchange was out: there is no profile to hold the
+      // record, and the delete already ran — so the tokens this exchange wrote
+      // would sit in the vault with nothing left to remove them.
+      if (outcome === 'gone' && apiStore) {
+        purgeRecordedTokens(apiStore, { ...profile, oauth_grant: { written: writes } }, secretStore);
+        return `Token exchange completed, but api_profile "${input.id}" was deleted meanwhile, so the tokens it returned were removed again. Nothing is stored for this profile.`;
+      }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${refreshTokenKey(input.id)}\`.` : ''}`;
     }

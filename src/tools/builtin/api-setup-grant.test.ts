@@ -136,6 +136,10 @@ const REFRESH = 'CRM_API_REFRESH_TOKEN';
 const stamp = (client: string, refreshToken: string): OAuthGrantRecord =>
   ({ minted_by: tokenFingerprint(client), minted_for: tokenFingerprint(refreshToken) });
 
+/** Record entries for values an exchange wrote: name → the value it put there. */
+const wrote = (entries: Record<string, string>): OAuthGrantRecord['written'] =>
+  Object.entries(entries).map(([name, value]) => ({ name, fp: tokenFingerprint(value) }));
+
 function vaultWithRefresh(token = 'rt-1'): MockVault {
   return makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: token });
 }
@@ -244,7 +248,7 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
 
     const result = await fetchToken(agent);
 
-    expect(result).toContain('Nothing was changed; retry later.');
+    expect(result).toContain('Retry the API request; do not call fetch_token again now');
     expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
   });
 
@@ -348,20 +352,52 @@ describe('fetch_token — what a successful exchange records', () => {
     await fetchToken(agent);
 
     expect(store.get('crm-api')?.oauth_grant?.minted_by).toBeUndefined();
-    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual([ACCESS]);
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1' }));
   });
 
-  it('records every name an exchange wrote, including one the caller chose', async () => {
+  it('records every value an exchange wrote, with its name, including a name the caller chose', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
     const agent = makeAgent(store, vaultWithRefresh());
     tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
     await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CUSTOM_TOKEN' }, agent);
-    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual(['CRM_CUSTOM_TOKEN', REFRESH]);
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ CRM_CUSTOM_TOKEN: 'at-1', [REFRESH]: 'rt-2' }));
 
-    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+    // A later write under a recorded name replaces its entry: only the latest value may match.
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-3', expires_in: 3600 }));
     await fetchToken(agent);
-    expect(store.get('crm-api')?.oauth_grant?.written_keys).toEqual(['CRM_CUSTOM_TOKEN', REFRESH, ACCESS]);
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ CRM_CUSTOM_TOKEN: 'at-1', [ACCESS]: 'at-2', [REFRESH]: 'rt-3' }));
+  });
+
+  it('records the access token it wrote even when it must refuse to store the refresh token', async () => {
+    const store = new ApiStore();
+    // `lynox-x` derives LYNOX_X_REFRESH_TOKEN, a platform prefix; the access token goes to a chosen name.
+    // Reachable with client credentials: the answer carries a refresh token nobody reads.
+    store.register({ ...crmProfile({}, 'client_credentials'), id: 'lynox-x', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] } });
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', LYNOX_X_REFRESH_TOKEN: 'platform-owned' }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'lynox-x', output_secret_name: 'LX_TOKEN' }, agent) as string;
+
+    expect(result).toContain('the refresh token was NOT stored');
+    expect(store.get('lynox-x')?.oauth_grant?.written).toEqual(wrote({ LX_TOKEN: 'at-1' }));
+  });
+
+  it('takes the tokens out again when the profile was deleted while its exchange was in flight', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const vault = vaultWithRefresh();
+    const agent = makeAgent(store, vault);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      store.unregister('crm-api');
+      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('was deleted meanwhile');
+    expect(vault.peek(ACCESS)).toBeUndefined();
+    expect(vault.peek(REFRESH)).toBeUndefined();
   });
 
   it('writes its record onto the profile as it is after the exchange, not the copy read before it', async () => {
@@ -480,7 +516,7 @@ describe('create/update — the grant record belongs to the engine', () => {
 describe('delete — only what the profile\'s exchanges wrote leaves the vault', () => {
   it('removes the recorded tokens and names what stays', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS, REFRESH, 'CRM_CUSTOM_TOKEN'] } }));
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1', [REFRESH]: 'rt-1', CRM_CUSTOM_TOKEN: 'at-custom' }) } }));
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'at-1', [REFRESH]: 'rt-1', CRM_CUSTOM_TOKEN: 'at-custom' });
     const agent = makeAgent(store, vault);
 
@@ -497,7 +533,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
   it('lists as still in the vault only names that actually hold a value', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS] } }));
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
     // The client secret was never stored.
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', [ACCESS]: 'at-1' });
     const agent = makeAgent(store, vault);
@@ -535,7 +571,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
   it('keeps a recorded token another profile still reads', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS] } }));
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
     store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
@@ -562,9 +598,59 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek('GITHUB_ACCESS_TOKEN')).toBe('the-users-github-token');
   });
 
+  it('never removes a recorded name whose value the user has replaced since', async () => {
+    const store = new ApiStore();
+    // The exchange wrote at-1; the user has since put their own token under the name.
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
+    const vault = makeVault({ [ACCESS]: 'the-users-own-token' });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(vault.peek(ACCESS)).toBe('the-users-own-token');
+    expect(result).not.toContain('Removed');
+    expect(result).toContain(`Still in the vault: ${ACCESS}.`);
+  });
+
+  it('keeps a recorded token another profile reads as its basic password', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
+    store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: ACCESS } });
+    const vault = makeVault({ [ACCESS]: 'shared' });
+    const agent = makeAgent(store, vault);
+
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+
+    expect(vault.peek(ACCESS)).toBe('shared');
+  });
+
+  it('keeps a recorded token another profile names as its oauth client secret', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
+    store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: ACCESS } } });
+    const vault = makeVault({ [ACCESS]: 'shared' });
+    const agent = makeAgent(store, vault);
+
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+
+    expect(vault.peek(ACCESS)).toBe('shared');
+  });
+
+  it('keeps a recorded token that another profile has on its own record', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } }));
+    store.register({ ...crmProfile(), id: 'second', base_url: 'https://second.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['second.example.com'] }, oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } });
+    const vault = makeVault({ SHARED_TOKEN: 'v' });
+    const agent = makeAgent(store, vault);
+
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+
+    expect(vault.peek('SHARED_TOKEN')).toBe('v');
+  });
+
   it('never removes a protected name, even when it is on the record', async () => {
     const store = new ApiStore();
-    store.register({ ...crmProfile(), id: 'google-oauth-x', base_url: 'https://api.g.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.g.example'] }, oauth_grant: { written_keys: ['GOOGLE_OAUTH_X_ACCESS_TOKEN'] } });
+    store.register({ ...crmProfile(), id: 'google-oauth-x', base_url: 'https://api.g.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.g.example'] }, oauth_grant: { written: wrote({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' }) } });
     const vault = makeVault({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' });
     const agent = makeAgent(store, vault);
 
@@ -582,10 +668,10 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     // Two rows whose ids differ only in `-` vs `_`, as an old database can hold them.
     const writer = new ApiStore();
     writer.setConnectionStore(cs);
-    writer.save({ ...crmProfile(), id: 'x-y', base_url: 'https://api.one.example/v1', oauth_grant: { written_keys: ['X_Y_ACCESS_TOKEN'] } });
+    writer.save({ ...crmProfile(), id: 'x-y', base_url: 'https://api.one.example/v1', oauth_grant: { written: wrote({ X_Y_ACCESS_TOKEN: 'the-holders-token' }) } });
     const lone = new ApiStore();
     lone.setConnectionStore(cs);
-    lone.save({ ...crmProfile(), id: 'x_y', base_url: 'https://api.two.example/v1', oauth_grant: { written_keys: ['X_Y_ACCESS_TOKEN'] } });
+    lone.save({ ...crmProfile(), id: 'x_y', base_url: 'https://api.two.example/v1', oauth_grant: { written: wrote({ X_Y_ACCESS_TOKEN: 'the-holders-token' }) } });
 
     const booted = new ApiStore();
     booted.setConnectionStore(cs);
@@ -604,7 +690,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
   it('says so when the vault cannot delete, instead of implying the tokens are gone', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written_keys: [ACCESS] } }));
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
     const vault = makeVault({ [ACCESS]: 'at-1' }, { canDelete: false });
     const agent = makeAgent(store, vault);
 
@@ -614,9 +700,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek(ACCESS)).toBe('at-1');
   });
 
-  it('tolerates a record whose written_keys is not an array', async () => {
+  it('tolerates a record whose written list is not an array of entries', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written_keys: 'CRM_API_ACCESS_TOKEN' as unknown as string[] } }));
+    store.register(crmProfile({ oauth_grant: { written: [ACCESS, { name: ACCESS }] as unknown as OAuthGrantRecord['written'] } }));
     const vault = makeVault({ [ACCESS]: 'at-1' });
     const agent = makeAgent(store, vault);
 

@@ -17,6 +17,7 @@ import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 import type { SecretStoreLike } from '../types/index.js';
 
 // ── Errors ──
@@ -286,23 +287,36 @@ export interface OAuthGrantRecord {
   /** ISO timestamp of the revocation verdict. */
   revoked_at?: string | undefined;
   /**
-   * Vault names a token exchange for this profile actually WROTE — recorded at
-   * the write, so a delete removes exactly these and nothing it merely derives.
-   * A name derived from the id can equally hold a token the user stored by hand,
-   * or one another profile reads.
+   * What a token exchange for this profile actually WROTE — each vault name
+   * with a fingerprint of the value it put there, recorded at the write. A
+   * delete removes a name only while the vault still holds that very value:
+   * the name alone proves nothing, since the user can store their own token
+   * under it later, and a name derived from the id can hold one from the start.
    */
-  written_keys?: string[] | undefined;
+  written?: WrittenSecret[] | undefined;
+}
+
+/** One entry of {@link OAuthGrantRecord.written}. */
+export interface WrittenSecret {
+  /** The vault name. */
+  name: string;
+  /** `tokenFingerprint` of the value the exchange wrote under it. */
+  fp: string;
 }
 
 /**
- * The recorded names from {@link OAuthGrantRecord.written_keys}, tolerating a
- * hand-edited or imported record whose field is not an array — the profile
- * arrives through `JSON.parse(...) as ApiProfile` with no schema check, and a
- * bad value must not throw on every save and delete of that profile.
+ * The entries of {@link OAuthGrantRecord.written}, tolerating a hand-edited or
+ * imported record whose field is not an array of entries — the profile arrives
+ * through `JSON.parse(...) as ApiProfile` with no schema check, and a bad value
+ * must not throw on every save and delete of that profile.
  */
-export function recordedWrittenKeys(profile: ApiProfile): string[] {
-  const keys = profile.oauth_grant?.written_keys;
-  return Array.isArray(keys) ? keys.filter((k): k is string => typeof k === 'string') : [];
+export function recordedWrites(profile: ApiProfile): WrittenSecret[] {
+  const written: unknown = profile.oauth_grant?.written;
+  if (!Array.isArray(written)) return [];
+  return written.filter((w): w is WrittenSecret =>
+    typeof w === 'object' && w !== null
+    && typeof (w as { name?: unknown }).name === 'string'
+    && typeof (w as { fp?: unknown }).fp === 'string');
 }
 
 /**
@@ -348,7 +362,17 @@ const IMPORT_SENTINEL = '.imported-to-connections';
  */
 function collectVaultKeys(profile: ApiProfile): string[] {
   const keys = new Set<string>();
-  for (const k of profile.auth?.vault_keys ?? []) keys.add(k);
+  // Guarded: a hand-edited or imported `vault_keys` that is not an array must not
+  // throw here, because the purge runs this over every OTHER profile too.
+  const vaultKeys: unknown = profile.auth?.vault_keys;
+  if (Array.isArray(vaultKeys)) {
+    for (const k of vaultKeys) if (typeof k === 'string') keys.add(k);
+  }
+  // Every name the attach can read: the basic pair as well, or a purge would
+  // count a profile that reads a name as one that does not.
+  for (const k of [profile.auth?.username_key, profile.auth?.password_key]) {
+    if (k) keys.add(k);
+  }
   const oauth = profile.auth?.oauth;
   if (oauth) {
     for (const k of [oauth.client_id_key, oauth.client_secret_key, oauth.refresh_token_key]) {
@@ -364,7 +388,7 @@ function collectVaultKeys(profile: ApiProfile): string[] {
     keys.add(accessTokenKey(profile.id));
     keys.add(refreshTokenKey(profile.id));
   }
-  for (const k of recordedWrittenKeys(profile)) keys.add(k);
+  for (const w of recordedWrites(profile)) keys.add(w.name);
   return [...keys];
 }
 
@@ -511,7 +535,7 @@ export interface TokenPurge {
   removed: string[];
   /** Names the profile referenced that still hold a value and were left on purpose. */
   kept: string[];
-  /** Recorded names that would have been removed, but this vault cannot delete. */
+  /** Recorded names still holding the value written, which this vault cannot delete. */
   notRemovable: string[];
 }
 
@@ -520,16 +544,18 @@ export interface TokenPurge {
  * what stays. Call it AFTER the profile left the store, with the profile as it
  * was, so `store` holds only the others.
  *
- * Removed: the names on the profile's record (`written_keys`), which is exactly
- * what an exchange for it wrote — unless another profile still references the
- * name, or the name is protected. A name derived from the id is NOT removed on
- * derivation alone: the same name can hold a token the user stored by hand, or
- * one another profile reads, and a delete that guesses destroys it for good.
+ * Removed: a name on the profile's record (`written`) while the vault still
+ * holds the very value the exchange wrote there — unless another profile still
+ * references the name, or the name is protected. The name alone proves nothing:
+ * the user can store their own token under it after the exchange, and a name
+ * derived from the id can hold one from the start. A delete that guesses
+ * destroys it for good.
  *
  * Kept: every other name the profile referenced that still holds a value — the
- * credentials the user stored, tokens from before exchanges were recorded, and
- * recorded names another profile uses. The caller names them, because only the
- * user can say whether anything else needs them.
+ * credentials the user stored, tokens from before exchanges were recorded,
+ * recorded names whose value has changed since, and recorded names another
+ * profile uses. The caller names them, because only the user can say whether
+ * anything else needs them.
  */
 export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
   const inUseElsewhere = new Set<string>();
@@ -537,30 +563,33 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
     if (other.id === profile.id) continue;
     for (const k of collectVaultKeys(other)) inUseElsewhere.add(k);
   }
-  const candidates = recordedWrittenKeys(profile)
-    .filter((k) => !isProtectedSecretWrite(k) && !inUseElsewhere.has(k));
+  const valueOf = (k: string): string | null => {
+    try {
+      return secretStore?.resolve(k) ?? null;
+    } catch {
+      return null;
+    }
+  };
   const removed: string[] = [];
   const notRemovable: string[] = [];
-  for (const k of candidates) {
+  for (const w of recordedWrites(profile)) {
+    if (isProtectedSecretWrite(w.name) || inUseElsewhere.has(w.name)) continue;
+    const value = valueOf(w.name);
+    // Only the value this profile's exchange wrote. Anything else under the
+    // name — replaced since, or nothing at all — is not this profile's to take.
+    if (value === null || tokenFingerprint(value) !== w.fp) continue;
     if (!secretStore?.deleteSecret) {
-      notRemovable.push(k);
+      notRemovable.push(w.name);
       continue;
     }
     try {
-      if (secretStore.deleteSecret(k)) removed.push(k);
+      if (secretStore.deleteSecret(w.name)) removed.push(w.name);
     } catch {
-      notRemovable.push(k);
+      notRemovable.push(w.name);
     }
   }
-  const holdsValue = (k: string): boolean => {
-    try {
-      const value = secretStore?.resolve(k);
-      return value !== null && value !== undefined;
-    } catch {
-      return false;
-    }
-  };
-  const kept = collectVaultKeys(profile).filter((k) => !removed.includes(k) && !notRemovable.includes(k) && holdsValue(k));
+  const kept = collectVaultKeys(profile)
+    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && valueOf(k) !== null);
   return { removed, kept, notRemovable };
 }
 

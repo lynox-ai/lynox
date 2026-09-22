@@ -6,12 +6,13 @@
 
 - Deleting a profile — with `api_setup delete` or on the settings page —
   removed the profile and left every token `fetch_token` had written for it in
-  the vault. `fetch_token` now records each name it writes, and a delete
-  removes exactly those, unless another profile still references the name or
-  it falls into a platform prefix. Nothing is removed because of what its name
-  looks like: a name derived from the profile id can just as well hold a token
-  the user stored by hand. Tokens from before this change are not on any
-  record and stay.
+  the vault. `fetch_token` now records each name it writes together with a
+  fingerprint of the value, and a delete removes a name only while the vault
+  still holds that very value — unless another profile still references the
+  name or it falls into a platform prefix. Neither a name nor a record alone
+  is enough: a name derived from the profile id, or one an exchange wrote
+  earlier, can hold a token the user has stored there by hand. Tokens from
+  before this change are not on any record and stay.
 - `api_setup delete` names what it removed and what is still in the vault,
   and says to ask the user before removing the rest.
 - The `vault_keys` column of a connection also lists the token names an
@@ -26,8 +27,12 @@
   different client, are a client problem that leaves the grant alone;
   anything else changes nothing. Which client minted a token is stamped with
   the token, as fingerprints of both, so a refresh token stored later is
-  judged on its own. A token that a concurrent exchange in the same process
-  rotated while the request was out counts as a rotation, not a revocation.
+  judged on its own. When a concurrent exchange in the same process has
+  already rotated the refresh token by the time the rejection arrives, that is
+  a rotation, not a revocation: nothing is recorded, and the reply points to
+  the request itself, since a fresh access token is already stored. A
+  rejection that arrives before the other exchange finishes can still record a
+  revocation; that exchange's success clears it.
 - A revocation is recorded on the profile (`oauth_grant`, engine-owned like
   `custom_endpoint_ack`: a value in a create or update is discarded, and the
   reply says so) and projected into `connections.status`. `fetch_token` will

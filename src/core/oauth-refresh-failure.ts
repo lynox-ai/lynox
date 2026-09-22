@@ -100,9 +100,9 @@ export function reclassifyForeignGrant(
   presentedBy: string | undefined,
 ): RefreshFailureKind {
   if (failure !== 'grant-revoked') return failure;
-  // Falsy, not `!== undefined`: every writer gates its stamp on truthiness, so
-  // an empty string never means "minted by the empty client" — it means the
-  // same as absent, and reading it as a mismatch would keep a dead token.
+  // Falsy, not `!== undefined`: an empty string is treated the same as absent,
+  // never as "minted by the empty client" — reading it as a mismatch would keep
+  // a dead token.
   if (!mintedBy || !presentedBy) return failure;
   return mintedBy === presentedBy ? failure : 'client-misconfigured';
 }

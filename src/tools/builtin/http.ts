@@ -527,7 +527,10 @@ async function attachEngineManagedAuth(
     // vault still holds the token that was rejected (or none): a different one
     // is the way back, and it is also how a verdict another process reached on
     // a stale view of the vault steps aside once this one holds the newer token.
-    if (profile.oauth_grant?.state === 'revoked') {
+    // And only for a refresh-token profile — the only kind a revocation is ever
+    // recorded for; one moved to client credentials since has no refresh token
+    // to hand back, and the text would send the user after one.
+    if (profile.oauth_grant?.state === 'revoked' && profile.auth?.oauth?.grant_type === 'refresh_token') {
       const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
       const current = secretStore.resolve(refreshKey);
       if (current === null || tokenFingerprint(current) === profile.oauth_grant.revoked_fp) {

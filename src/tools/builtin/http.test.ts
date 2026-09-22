@@ -3138,6 +3138,44 @@ describe('httpRequestTool', () => {
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-2');
     });
 
+    it('judges the step-aside on the slot fetch_token reads, not on the derived one', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const { tokenFingerprint } = await import('../../core/oauth-refresh-failure.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { token_url: 'https://api.example.com/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', refresh_token_key: 'CRM_RT' } },
+        custom_endpoint_ack: ack,
+        oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      // The profile's own slot still holds the rejected token; the derived slot has another.
+      const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at', CRM_RT: 'rt-rejected', CRM_API_REFRESH_TOKEN: 'rt-other' });
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      expect(refused).toContain('as revoked or expired');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('does not hold a revocation against a profile that has since moved to client credentials', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const { tokenFingerprint } = await import('../../core/oauth-refresh-failure.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { token_url: 'https://api.example.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
+        custom_endpoint_ack: ack,
+        oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-cc', CRM_API_REFRESH_TOKEN: 'rt-rejected' }) } as never);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-cc');
+    });
+
     it('names the slot fetch_token actually reads when the profile sets refresh_token_key', async () => {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
