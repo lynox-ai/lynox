@@ -543,6 +543,31 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBe('rt-1');
   });
 
+  it('names the way out of a refresh-slot collision: the default name the attach reads', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const agent = makeAgent(store, vaultWithRefresh());
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: REFRESH }, agent) as string;
+
+    expect(result).toContain(`Leave output_secret_name out, so the access token goes to "${ACCESS}", the slot http_request reads.`);
+  });
+
+  it('names the profile\'s own field when its refresh slot is the name the access token would take', async () => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    // The one shape leaving output_secret_name out cannot fix: the profile reads its
+    // refresh token from the very name the access token defaults to.
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: ACCESS } } });
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'rt-1' }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain("If that name IS this profile's auth.oauth.refresh_token_key, point that field at a slot that holds only the refresh token");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('does not spend the profile\'s request budget on a refused output name', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ rate_limit: { requests_per_second: 1 } }));

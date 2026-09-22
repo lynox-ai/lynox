@@ -51,9 +51,10 @@
   clears the record. A profile that reads its refresh token from a slot of its
   own naming gets no verdict, because `fetch_token` stores rotated tokens under
   the derived name.
-- `fetch_token` checks `output_secret_name` before it posts anything, and
-  refuses a name where the profile keeps its refresh token: the access token
-  would be written over it.
+- `fetch_token` runs its checks on `output_secret_name` before it posts
+  anything, rather than after the exchange has already spent a refresh token,
+  and one check is new: a name where the profile keeps its refresh token is
+  refused, because the access token would be written over it.
 
 ### Changed: two API profiles can no longer share a host
 

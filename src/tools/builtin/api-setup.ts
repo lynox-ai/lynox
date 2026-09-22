@@ -1526,21 +1526,26 @@ Next steps before calling create:
       // the name, so one injected `fetch_token` could otherwise replace a mail
       // credential or a feed address with an OAuth token — and the only symptom
       // would be the feature quietly failing afterwards. `validateProfile` refuses
-      // an infrastructure secret as a basic-auth key name for the same reason; the
-      // check here covers both halves of what a tenant cannot recover, the
-      // infrastructure secrets and the slot holding their own provider key.
+      // an infrastructure secret as a basic-auth key name too, but against the
+      // mirror risk: that one is about handing a platform secret OUT to a host,
+      // this one about writing over it. The check covers both halves of what a
+      // tenant cannot recover, the infrastructure secrets and the slot holding
+      // their own provider key.
       if (isProtectedSecretWrite(outputName)) {
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
       }
       // Never a slot the refresh token lives in: the access token would be written
       // over it, and the grant would go with it. Both slots, because a profile can
       // read from one of its own naming AND still have rotations written to the
-      // derived one. The advice names a different output name, and — for the one
-      // shape where even the default collides, a profile whose `refresh_token_key`
-      // IS the derived access name — removing that field, which is what the
-      // split-slot reply asks for as well.
+      // derived one.
+      //
+      // The advice is "leave it out", not "pick another name": the attach reads the
+      // derived access name and nothing else, so any other chosen name clears this
+      // refusal and leaves a token no request can use. The one shape the default
+      // cannot fix is a profile whose `refresh_token_key` IS the derived access
+      // name; there the profile's own field has to move, and the token with it.
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
-        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Pick another output_secret_name; if the profile's own auth.oauth.refresh_token_key is what collides, remove that field so both ends use the derived name.`;
+        return `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it. Leave output_secret_name out, so the access token goes to "${accessTokenKey(input.id)}", the slot http_request reads. If that name IS this profile's auth.oauth.refresh_token_key, point that field at a slot that holds only the refresh token and put the token there with ask_secret.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
