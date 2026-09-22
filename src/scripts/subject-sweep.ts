@@ -270,11 +270,9 @@ export interface OrphanRow {
 
 /**
  * Plan the ORPHAN phase (side-effect-free): every subject {@link SubjectStore.referenceReason}
- * finds unreferenced — the backlog no at-erase reap can reach (DEF-orphan-subjects-prod-backlog:
- * after the cascade the junction is gone, so "minted by a deleted memory" and "created by a tool,
- * not yet linked" are indistinguishable AT the delete; only a standing sweep can see them).
+ * finds unreferenced — the backlog no at-erase reap can reach.
  *
- * The oracle is IMPORTED, never re-derived — the whole point of the row. Two consequences worth
+ * The oracle is IMPORTED, never re-derived. Two consequences worth
  * stating because they look like bugs otherwise:
  *  - ARCHIVED subjects are included: `archived_at` is not a reference, the row still carries the
  *    plaintext name. (A share of the measured backlog was archived — 2026-08-20, one instance.)
@@ -350,8 +348,8 @@ function blockReason(db: Db, s: SubjectRow, threadAnchors: ReadonlySet<string>):
   if (db.prepare('SELECT 1 FROM organizations WHERE subject_id = ? AND (domain IS NOT NULL OR vat_id IS NOT NULL) LIMIT 1').get(s.id)) return 'has-org-detail';
   if (db.prepare('SELECT 1 FROM products WHERE subject_id = ? AND (sku IS NOT NULL OR price_cents IS NOT NULL) LIMIT 1').get(s.id)) return 'has-product-detail';
   if (db.prepare('SELECT 1 FROM services WHERE subject_id = ? AND hourly_rate_cents IS NOT NULL LIMIT 1').get(s.id)) return 'has-service-detail';
-  // The holders below are NOT the memory axis and were missing until DEF-subject-sweep-oracle-
-  // duplicate: a junk-NAMED subject that carries a durable-knowledge entry, a real relationship
+  // The holders below are NOT the memory axis and were missing before: a junk-NAMED subject
+  // that carries a durable-knowledge entry, a real relationship
   // edge, or a merge redirect pointing at it is not junk — archiving it would break a live
   // structure. A self-loop relationship is the residue of merging two related subjects and
   // describes nothing but the subject itself, so it is not a holder (same rule as
@@ -371,7 +369,7 @@ function blockReason(db: Db, s: SubjectRow, threadAnchors: ReadonlySet<string>):
 
 /**
  * How the ARCHIVE phase treats every column the reference oracle counts
- * ({@link subjectReferenceCoverage}) — the guard behind DEF-subject-sweep-oracle-duplicate.
+ * ({@link subjectReferenceCoverage}).
  *
  * The two oracles answer DIFFERENT questions and must not be collapsed into one:
  * `referenceReason` asks "does anything hold this row?", `blockReason` asks "is this junk NAME

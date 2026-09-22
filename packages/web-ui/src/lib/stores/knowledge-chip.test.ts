@@ -195,8 +195,8 @@ describe('performReview — success-only transition, editor stays open on failur
 	});
 
 	it('a FAILED edit_approve keeps the editor open: text unchanged, chip unresolved', async () => {
-		// The verify-done case: applying `chip.text = editedText` before the ok-check (the
-		// mutation this kills) would render the edit as landed when the server refused it.
+		// Applying `chip.text = editedText` before the ok-check (the mutation this kills) would
+		// render the edit as landed when the server refused it.
 		const chip = pending();
 		const result = await performReview(
 			chip, 'edit_approve', 'edited wording',
@@ -452,7 +452,7 @@ describe('ChatView re-anchors for a late knowledge chip (source guard)', () => {
 	});
 });
 
-// ── DEF-dk-review-chip-resume-invisible: queue re-hydration ────────────────
+// ── queue re-hydration ──────────────────────────────────────────────────────
 
 describe('queueEntriesToChips', () => {
 	const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({

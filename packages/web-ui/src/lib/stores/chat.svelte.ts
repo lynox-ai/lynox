@@ -697,7 +697,7 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 	// any LLM error surfaces, the tier is known and error copy branches
 	// correctly.
 	void probeManagedTier();
-	// `source` records provenance (P1, DEF-0095): a NON-null pendingModel means the
+	// `source` records provenance: a NON-null pendingModel means the
 	// user actively picked → 'user'; an untouched new chat → 'default'. Resume sends
 	// no source (createThread is OR IGNORE on an existing thread, so the thread keeps
 	// its original provenance). ADVISORY-ONLY server-side — it gates nothing.
@@ -1228,7 +1228,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// the expensive one, on a turn that was already being billed.
 	// Which of the two it was is the SERVER's to answer, exactly as for a dropped
 	// stream — so an `error` now routes into the same probe instead of deciding
-	// blind. See DEF-stream-error-channel-ambiguous for the wire-side half.
+	// blind.
 	let sawTerminal = false;
 	let sawErrorEvent = false;
 
@@ -2665,8 +2665,6 @@ export function getQueueLength() {
 // decided for the user what was worth keeping, and it then had to guess whether
 // a later, rephrased suggestion was the same one — a string comparison the model
 // defeats every turn. It also cost a permanent row of chips on mobile.
-// The replacement is an explicit signal (pin what you want to keep), designed
-// separately: DEF-followup-pin-explicit.
 
 /** Run a follow-up pill: send it as a fresh in-context turn. */
 export function takeFollowUp(clicked: FollowUpSuggestion): void {
@@ -2911,7 +2909,7 @@ export function setPendingModel(tier: string | null): void {
 }
 
 /** Re-pick the model tier of the CURRENT live/historical thread — the mid-thread
- *  control (arc:model-selector P1 §5.1b, "continue a historical chat on another
+ *  control (§5.1b, "continue a historical chat on another
  *  model"). PATCHes /api/sessions/:id/model; on success the live session swaps and
  *  the thread row is persisted as a 'user' pick (sticky on resume). Returns a
  *  discriminated result so the caller can surface the downgrade-overflow refusal
@@ -3328,14 +3326,14 @@ export async function resumeThread(threadId: string): Promise<void> {
 				carryKnowledgeWrites(localMessages, serverMessages);
 				messages = serverMessages;
 				adoptedServer = true;
-				// DEF-dk-review-chip-resume-invisible: the carried chips cover what
-				// LOCAL storage remembered, but a reload on another device (or after
-				// the local cache dropped the thread) still started chip-less — the
-				// amber review chip only lived in the SSE side-channel. Re-hydrate
-				// this thread's PENDING queue entries as chips on the last message,
-				// so the keep/edit/discard decision happens where the conversation
-				// happened. Client-only display state; the wording never re-enters
-				// model context (the store field is documentation-pinned to that).
+				// The carried chips cover what LOCAL storage remembered, but a reload
+				// on another device (or after the local cache dropped the thread)
+				// still started chip-less — the amber review chip only lived in the
+				// SSE side-channel. Re-hydrate this thread's PENDING queue entries as
+				// chips on the last message, so the keep/edit/discard decision happens
+				// where the conversation happened. Client-only display state; the
+				// wording never re-enters model context (the store field is
+				// documentation-pinned to that).
 				try {
 					const qRes = await fetch(
 						`${getApiBase()}/knowledge/queue?threadId=${encodeURIComponent(threadId)}`,

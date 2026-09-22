@@ -146,7 +146,7 @@ describe('merge ledger survives backup→restore and export→import', () => {
     expect(verification.mergeLedgersImported).toBe(1);
 
     // Open the DESTINATION's restored stores and reverse the merge there. This is the
-    // clause the register row asks for: the merge a user made on the old instance is
+    // property under test: the merge a user made on the old instance is
     // still undoable on the new one.
     const dst = openStores(dstDir);
     expect(dst.store.getSubject(dup)?.archived_at).toBeTruthy();
@@ -313,8 +313,8 @@ describe('merge ledger survives backup→restore and export→import', () => {
     const srcDir = makeTmp('lynox-ledger-lookalike-src-');
     const dstDir = makeTmp('lynox-ledger-lookalike-dst-');
     const { store, threadStore } = openStores(srcDir);
-    const dup = store.createSubject({ kind: 'organization', name: 'Aurelva AG' });
-    const canon = store.createSubject({ kind: 'organization', name: 'Aurelva' });
+    const dup = store.createSubject({ kind: 'organization', name: 'Kestrel AG' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Kestrel' });
     expect(runMerge(store, null, threadStore, srcDir, dup, canon).ok).toBe(true);
 
     // Prefix matches, shape does not — exactly what a `startsWith('merge-')` filter admits.

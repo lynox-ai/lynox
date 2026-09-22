@@ -670,7 +670,7 @@ describe('AgentMemoryDb', () => {
   });
 
   /**
-   * DEF-debug-export-blind-to-dk, third clause. The doc on `listAllActiveMemories` called the
+   * The doc on `listAllActiveMemories` called the
    * legacy store "write-authoritative and complete regardless of the read-cutover flag" — true
    * in 2026-07, false since durable knowledge went default-on. The CLAIM did more damage than
    * the gap: it told the next reader not to look, so a debug export showing a memory store

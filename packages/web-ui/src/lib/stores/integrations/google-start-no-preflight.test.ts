@@ -74,12 +74,8 @@ describe('startManagedGoogleOAuth must not touch the start URL before navigating
   // to behaviour — and the list of ways a browser can fetch a URL is not one
   // anybody finishes.
   //
-  // What actually closes the class is server-side: the control plane must stop
-  // spending the nonce on the first request it answers. That is filed as
-  // `DEF-broker-start-nonce-dies-on-any-fetch` in the private repo, and this
-  // test is expected to become redundant when it lands — redundant, not wrong.
-  // Until then it catches the shape that actually occurred once, which is worth
-  // more than nothing and less than a guarantee.
+  // This test catches the shape that actually occurred once, which is worth more
+  // than nothing and less than a guarantee.
   it('reads the start URL exactly twice, in either notation, and only to navigate', () => {
     const uses = code.match(/\bdata(?:\.url\b|\[\s*['"`]url['"`]\s*\])/g) ?? [];
     expect(uses, 'a third read of the start URL is a second request against it').toHaveLength(2);

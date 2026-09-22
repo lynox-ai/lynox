@@ -1,8 +1,7 @@
 // === Exfil-injection MEASUREMENT runner ===
 //
 // Drives the harness across a model matrix × the corpus × (headless, interactive)
-// and prints the two-layer per-channel exfil report that decides the go/no-go on
-// opening untrusted signups (DEF-injection-exfil-defense-measure).
+// and prints the two-layer per-channel exfil report.
 //
 // Run (self-skips without keys):
 //   ANTHROPIC_API_KEY=… MISTRAL_API_KEY=… npx tsx scripts/exfil-injection/run.ts

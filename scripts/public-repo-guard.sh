@@ -13,7 +13,7 @@
 # cross-reference class below matches ONE form — the doubled-bracket link. Plain
 # prose citing a path inside the private repo still passes, deliberately, because
 # some of those citations are load-bearing (the release script coordinates both
-# repos and would be worse without them). Triaging the rest is tracked separately.
+# repos and would be worse without them).
 #
 # Enforcement:
 #   - pre-push hook   — scans the whole tracked tree, fast local feedback
@@ -320,7 +320,7 @@ REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 # and had already drifted by the time this branch reached main, and nothing keeps
 # it fresh — so the argument is stated without it. Re-derive it before acting on
 # this note rather than trusting a number in a comment. A permanently red guard
-# teaches bypassing rather than fixing, so that cleanup is tracked separately.
+# teaches bypassing rather than fixing.
 # The name is legitimately public in its own right (LICENSE,
 # TRADEMARK.md, README, package.json) — what does not belong here is a customer's,
 # and that is what the class above covers.

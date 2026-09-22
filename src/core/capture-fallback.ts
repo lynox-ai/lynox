@@ -242,8 +242,7 @@ export type FactSource = 'user_stated' | 'external';
  * covered by neither half of the routing when no external-content tool ran on the turn.
  * That gap PREDATES per-fact routing — with a turn-wide flag such a fact was written
  * `active` too — but it is the reason this comment must not state an invariant it does not
- * have. Filed rather than fixed here: wrapping that preamble changes what the main model
- * sees on every mail turn, which is a different change than this one.
+ * have.
  * The guarantee is the wrapping at the ingest sites, not the shape of `lastUserText`.
  *
  * Call it on the RAW halves, before {@link buildCaptureExcerpt} — that function wraps the

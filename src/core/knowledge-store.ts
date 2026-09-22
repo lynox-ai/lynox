@@ -22,7 +22,7 @@ import {
 
 /**
  * What approving a queued entry WOULD bind its `subject_hint` to, resolved WITHOUT
- * performing it (DEF-review-approve-target-opaque). The reviewer decides first and
+ * performing it. The reviewer decides first and
  * {@link KnowledgeStore.reviewEntry} resolves after, so until this shape existed the
  * approval bound a subject nobody had been shown.
  *
@@ -245,7 +245,7 @@ export class KnowledgeStore {
 
   /**
    * The SAME resolution {@link reviewEntry} performs on approval, run as a pure lookup so
-   * the reviewer sees the target BEFORE deciding (DEF-review-approve-target-opaque).
+   * the reviewer sees the target BEFORE deciding.
    *
    * It deliberately does NOT call {@link _resolveWriteSubject}, and that is the whole
    * point rather than a style preference: that method MINTS an organization for a name
@@ -731,7 +731,7 @@ export class KnowledgeStore {
     return rows.map(r => this._rowToEntry(r));
   }
 
-  /** Thread-scoped queue read (DEF-dk-review-chip-resume-invisible). Filters
+  /** Thread-scoped queue read. Filters
    *  in SQL BEFORE the limit: a limit-then-filter made a thread's entries
    *  invisible once 100+ pending rows of OTHER threads crowded the window,
    *  while the unbounded thread COUNT still counted them — pill and chips
@@ -1027,7 +1027,7 @@ export class KnowledgeStore {
   // (`tools/builtin/knowledge.ts`), and `KnowledgeStatus` says `rejected`/`superseded` are
   // "kept (auditable), not deleted" (`types/memory.ts`). A sweep would quietly break both.
   // Erasure is MEANT to be served by the targeted deletes below — no production caller
-  // reaches them yet (tracked; the GDPR export half shipped first). They are correct for the
+  // reaches them yet (the GDPR export half shipped first). They are correct for the
   // day they are wired, which is why the block-line drop belongs in them now rather than
   // being remembered later. Which is the shape a data-subject
   // request actually arrives in — retire-then-wait could never answer one anyway.
@@ -1334,7 +1334,7 @@ export class KnowledgeStore {
  * invariant "a stored tier is reproducible from its own stored columns" would hold only as long
  * as two mappings agreed, and nothing would notice when they stopped. `review_action` is the
  * audit column the review UPDATE already writes — rule 0 reads a value that was persisted
- * anyway, which is why closing (d) needed no new column.
+ * anyway, which is why deriving the approved tier needed no new column.
  */
 export function knowledgeEvidence(
   e: { sourceChannel: string | null; sourceUntrusted: boolean; reviewAction: string | null },

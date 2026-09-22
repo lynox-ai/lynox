@@ -81,8 +81,7 @@ export function freshUid(index) {
  * Did this write hit the store's dedup path?
  *
  * A TRIPWIRE, not the guarantee. The guarantee is freshness above; this only reports that
- * freshness failed, so a probe marks the cell instead of counting it silently — the honest
- * half of `DEF-dk-xprov-facts-not-fresh-across-runs`'s verify-done.
+ * freshness failed, so a probe marks the cell instead of counting it silently.
  *
  * ⚠️ It matches the tool's user-facing string, so a reword in `knowledge.ts` makes this
  * return false and the tripwire goes quiet. That coupling is stated rather than dressed up:

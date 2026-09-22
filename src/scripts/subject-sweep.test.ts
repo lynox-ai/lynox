@@ -295,7 +295,7 @@ describe('subject-sweep — a refused rollback must reach a SCRIPT, not just a r
 });
 
 /**
- * DEF-subject-sweep-oracle-duplicate — the sweep's guardrail list and the reference oracle
+ * The sweep's guardrail list and the reference oracle
  * must stay COMPLETE against each other without being collapsed into each other. The two
  * answer different questions (see `SWEEP_REFERENCE_PARTITION`), so the guard is a partition,
  * not a delegation.
@@ -406,7 +406,7 @@ describe('subject-sweep — reference-oracle coverage', () => {
   });
 
   /**
-   * The REGRESSION this whole partition exists for. The register prescribed delegating
+   * The REGRESSION this whole partition exists for. An earlier plan prescribed delegating
    * `blockReason` to `SubjectStore.referenceReason` wholesale ("archivable = unreferenced AND
    * isCleanupTarget"). Junk subjects are minted BY memories, so the memory axis holds nearly
    * every candidate — under that delegation the archive phase would block itself and quietly
@@ -426,7 +426,7 @@ describe('subject-sweep — reference-oracle coverage', () => {
 });
 
 /**
- * DEF-orphan-subjects-prod-backlog — the standing backlog no at-erase reap can reach.
+ * The standing backlog no at-erase reap can reach.
  * The phase reports over `SubjectStore.referenceReason` BY IMPORT; these tests pin that it
  * really is that oracle's answer (not a re-derived one) and that the cross-DB seam is honoured.
  */

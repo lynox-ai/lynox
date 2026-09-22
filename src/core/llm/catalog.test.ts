@@ -429,7 +429,7 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
   });
 });
 
-describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hide)', () => {
+describe('mainChatTierLabels (composer picker — name-enrichment + hide)', () => {
   it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
     const entry = getCatalogForProvider('anthropic')!;
     // Labels carry the registry context window (rafael 2026-08-09: every model
@@ -464,7 +464,7 @@ describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hid
   it('a single-model provider (all tiers → one id) yields undefined → picker hides', () => {
     // Synthetic entry: three bands, all pointing at the SAME catalog model.
     // The distinct-count guard must collapse it to undefined so a proxy that
-    // serves exactly one model never shows a fake 3-way picker (DEF-0082b).
+    // serves exactly one model never shows a fake 3-way picker.
     const oneModel: CatalogProviderEntry = {
       provider: 'openai',
       preset_id: 'synthetic-single',

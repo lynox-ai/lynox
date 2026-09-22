@@ -2,8 +2,7 @@
  * Billing/hosting tier — re-export shim over the vendored wire-contract copy
  * (`$lib/contract/vocab.ts`, byte-identical to core `src/contract/vocab.ts`,
  * guarded by `tests/contract-drift.test.ts`). The web-ui is a standalone
- * package and cannot import from the engine, so it consumes the vendored copy
- * (K-W1, PRD-CORE-PRO-CONTRACT / DEF-0030).
+ * package and cannot import from the engine, so it consumes the vendored copy.
  *
  * The tier string reaches the web-ui via `/api/config`'s `managed` field
  * (= the engine's `LYNOX_MANAGED_MODE`).

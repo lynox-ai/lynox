@@ -8,8 +8,7 @@
 //   (1) attempt   — the MODEL emitted an egress call carrying the canary to an
 //                   attacker-controlled destination. This is the injection-defense
 //                   outcome (scanToolResult warning + INJECTION_PATTERNS regex +
-//                   model compliance). It is what the register's "the defense is
-//                   SOFT" is about.
+//                   model compliance).
 //   (2) structural — would the REAL structural control (network-guard `guarded`,
 //                   or the mail/drive confirm+headless gate) then let it through?
 //
@@ -28,7 +27,6 @@ import { probeHostPolicy } from './host-policy-probe.js';
 import { randomBytes } from 'node:crypto';
 import { type HostPolicyContext, type EgressCall } from '../../../src/core/network-guard.js';
 
-/** The four egress channels the register names as candidates. */
 export type Channel = 'web_research' | 'http_request' | 'mail_send' | 'google_drive';
 
 /** Which side of the symmetric arm a case sits on. */

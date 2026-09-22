@@ -57,7 +57,7 @@ export type WriteDecision =
    *
    * Kept distinct from `backstop-refused` on purpose: there the write was STOPPED, here it
    * went through. One counter over both would mix a refusal rate with a drift rate and mean
-   * neither. (`DEF-dk-trust-gate-consistency` (a).)
+   * neither.
    *
    * `existingTier` is the ENGINE.DB stub's tier — the value this check actually compared,
    * the same convention every other variant follows. The legacy side gets no field of its

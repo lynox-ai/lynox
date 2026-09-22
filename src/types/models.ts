@@ -8,7 +8,7 @@ import type { ProviderDescriptor, ProviderKey, CacheProfile } from './provider-r
  * 2026-05-29 from the legacy Anthropic-brand names). The tier vocabulary +
  * `normalizeTier` are WIRE CONTRACT — the control plane emits tier values into
  * tenant envs — so their single source of truth lives in `src/contract/vocab.ts`
- * (K-W1, PRD-CORE-PRO-CONTRACT / DEF-0030). Re-exported here as a pure shim to
+ * (K-W1, PRD-CORE-PRO-CONTRACT). Re-exported here as a pure shim to
  * keep the public `@lynox-ai/core/types` surface unchanged. `ModelTierSchema`
  * in types/schemas.ts reuses `LEGACY_TIER_ALIASES`.
  */
@@ -21,9 +21,8 @@ export { LEGACY_TIER_ALIASES, normalizeTier, isModelProfile };
 export type { ModelTier, LLMProvider, ModelProfile };
 
 /**
- * Provenance of a thread's persisted `model_tier` (arc:model-selector Wave P1,
- * DEF-0095). Records WHO chose the tier so a sticky per-thread pick (D18) is
- * distinguishable from a machine default:
+ * Provenance of a thread's persisted `model_tier`. Records WHO chose the tier
+ * so a sticky per-thread pick (D18) is distinguishable from a machine default:
  *  - `'user'`    — a deliberate pick (the composer picker was touched, or the
  *                  mid-thread re-pick endpoint ran). STICKY: resume honours it.
  *  - `'default'` — a new thread whose creator did NOT touch the picker.
@@ -36,7 +35,7 @@ export type { ModelTier, LLMProvider, ModelProfile };
  * tier/cost/capability decision. The instant a policy keys off it, a client
  * could pin an expensive tier by lying. Kept a 3-value enum on purpose; because
  * the column is `TEXT`, a future value (e.g. `'inferred'`) is a zero-migration
- * string add (DEF-0127), so no speculative writers are named now.
+ * string add, so no speculative writers are named now.
  */
 export type ThreadModelSource = 'user' | 'default' | 'unknown';
 
@@ -106,10 +105,9 @@ export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
 /**
  * Models MEASURED to be weak at durable-knowledge capture — they rarely invoke
  * the `remember` tool, so on a DK-on tenant the durable tier stays effectively
- * inert while the store still advertises itself (the silent under-capture
- * DEF-dk-capture-tool-dependence exists for). Measured by the capture-fitness
- * benchmark (core#1130, 2026-08-06, live engine): `mistral-medium-2604` scored
- * 2/12 against Sonnet's 12/12 and Haiku's 10/12.
+ * inert while the store still advertises itself (the silent under-capture).
+ * Measured by the capture-fitness benchmark (core#1130, 2026-08-06, live engine):
+ * `mistral-medium-2604` scored 2/12 against Sonnet's 12/12 and Haiku's 10/12.
  *
  * A POSITIVE, evidence-anchored set — NOT an inferred one: only a model with a
  * MEASURED weak score belongs here, so a new or untested model never trips a
@@ -133,8 +131,7 @@ export function isCaptureWeakModel(modelId: string): boolean {
  * the UI advertises it. The couple is the whole point — DK OFF means capture is
  * already inert (no warning owed), and a strong `balanced` model captures fine.
  * Pure so the /api/config handler that surfaces the flag is unit-testable and
- * both directions (DK-off, strong-model) can be pinned. See
- * DEF-dk-capture-tool-dependence.
+ * both directions (DK-off, strong-model) can be pinned.
  */
 export function isDurableCaptureDegraded(opts: {
   hasDurableMemory: boolean;
@@ -1393,7 +1390,7 @@ export function clampTier(requested: ModelTier, maxTier: ModelTier | undefined):
 /**
  * Does an explicit model id resolve to a cost band ABOVE the ceiling? A raw model
  * id carries no tier to clamp — it names a specific model/endpoint that cannot be
- * substituted — so an over-ceiling id must be REFUSED, not clamped (DEF-0080). An
+ * substituted — so an over-ceiling id must be REFUSED, not clamped. An
  * id unknown to the registry has no tier and is treated as `deep` (fail closed),
  * matching FALLBACK_PRICING's conservative Opus default. Shared by the tier
  * chokepoint (`resolveRunModel`) and the spawn profile guard (`profileExceedsMaxTier`).

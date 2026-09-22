@@ -69,7 +69,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
  * in `prompt-markdown.authorship.test.ts`. Both name the same literal shape —
  * `[{ kind: 'value', text }]` — so a change on either side fails one of them.
  * A single round-trip test would need a harness spanning both packages, which
- * does not exist; that is a real gap and it is registered, not papered over.
+ * does not exist; that is a real gap.
  */
 describe('askUserTool', () => {
   it('calls promptUser with question and returns result', async () => {
@@ -218,7 +218,7 @@ describe('askUserTool', () => {
   });
 
   it('hands markdown-bearing text over as a VALUE, so the renderer cannot parse it', async () => {
-    // The row's own acceptance clause: call ask_user with text that carries
+    // Call ask_user with text that carries
     // markdown structure. What the renderer then does with such a segment is
     // pinned in packages/web-ui/src/lib/utils/prompt-markdown.authorship.test.ts.
     const promptUser = vi.fn().mockResolvedValue('Ja');

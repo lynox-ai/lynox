@@ -217,7 +217,7 @@ function translateTools(tools: Anthropic.Tool[]): OpenAITool[] {
  *
  * `visionSupport` gates how a user IMAGE block is handled (it never was before —
  * images were silently `.filter`ed out, so a tenant on the openai/Mistral wire
- * got a confident answer to an image the model never saw, DEF-0073):
+ * got a confident answer to an image the model never saw):
  *  - `true` / `undefined` (unknown or custom model) → translate the image to an
  *    OpenAI `image_url` data-URI part (works for a vision-capable endpoint).
  *  - `false` (a known non-vision model, e.g. codestral / open-mistral-nemo, and
@@ -271,7 +271,7 @@ export function translateMessages(
           }
           // The OpenAI wire has no is_error field on role:'tool' — an unmarked
           // error result reads as success to the model (agent.ts flags denied
-          // permissions and tool exceptions with is_error:true, DEF-openai-wire-toolerr).
+          // permissions and tool exceptions with is_error:true).
           if (tr.is_error === true) {
             content = content ? `[Tool error] ${content}` : '[Tool error]';
           }
@@ -279,9 +279,9 @@ export function translateMessages(
         }
 
         // 2. The user's OWN text + images → a user message. Preserved even when
-        //    tool_results share the turn (DEF-0074: the old code `pop()`ed and
-        //    discarded this text). Images become `image_url` parts (DEF-0073:
-        //    the old code silently dropped them).
+        //    tool_results share the turn (the old code `pop()`ed and
+        //    discarded this text). Images become `image_url` parts (the old
+        //    code silently dropped them).
         const parts: OpenAIContentPart[] = [];
         for (const b of blocks) {
           if (b.type === 'text') {
@@ -931,7 +931,7 @@ export class OpenAIAdapter {
     const looksAnthropic = requestedModel.startsWith('claude-');
     const model = requestedModel && !looksAnthropic ? requestedModel : this.modelId;
 
-    // Gate image handling on the resolved model's vision capability (DEF-0073):
+    // Gate image handling on the resolved model's vision capability:
     // a known non-vision model (codestral / nemo / legacy Mistral) → a clear error
     // instead of a silent image drop; a vision-capable (gen-3 Mistral) or
     // unknown/custom model → translate it.

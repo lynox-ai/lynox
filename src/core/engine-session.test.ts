@@ -26,7 +26,7 @@ const mockSend = vi.fn().mockResolvedValue('response');
 const mockReset = vi.fn();
 // Provider billing/quota classification the Agent exposes to Session on the
 // failure path. Defaults to null; a test sets it per-call to assert Session
-// carries it onto the RunContext (link 2 of DEF-provider-billing-alert).
+// carries it onto the RunContext.
 const mockGetLastProviderFailure = vi.fn().mockReturnValue(null);
 const mockAbort = vi.fn();
 const mockGetMessages = vi.fn().mockReturnValue([]);
@@ -711,9 +711,6 @@ describe('Engine + Session (Orchestrator)', () => {
     });
 
 
-    // The half of DEF-hung-run-books-no-cost that core#1267 is supposed to have
-    // closed, asserted rather than reasoned about.
-    //
     // The dogfooded run (rafael, prod 2026-08-24) sat parked on a prompt for 15 h
     // and reached the ledger with cost_usd = 0 / tokens 0-0 while the UI chip
     // showed $0.10 / 32k tokens for the same turn. The cause was NOT "the failure
@@ -1426,7 +1423,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
-  // -- arc:model-selector P1 §5.1b: the mid-thread re-pick (repickModel) --
+  // -- §5.1b: the mid-thread re-pick (repickModel) --
   describe('repickModel() — mid-thread tier change', () => {
     it('clamps to max_tier on the live session but persists the REQUESTED (unclamped) pick as "user"', async () => {
       const { engine, session } = await createEngineAndSession();
@@ -1544,7 +1541,7 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
-  describe('createSession — managed per-run cost ceiling ($10 CP-owned, C2 / DEF-0083)', () => {
+  describe('createSession — managed per-run cost ceiling ($10 CP-owned, C2)', () => {
     // The main-chat path sets no costGuard of its own (T-within), so createSession
     // defaults one from the CP-emitted, clamped LYNOX_MANAGED_RUN_COST_CEILING_USD.
     // Ships atomically with the balance mirror (managed-hook.ts) — FB-BOUND-3.
@@ -2265,9 +2262,9 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
-  // -- DEF-0067: a per-session opts.model is clamped to the cost ceiling at ctor --
+  // -- a per-session opts.model is clamped to the cost ceiling at ctor --
 
-  describe('ctor clamps opts.model to max_tier (DEF-0067)', () => {
+  describe('ctor clamps opts.model to max_tier', () => {
     // The composer model picker sends `model` on POST /api/sessions, and a resumed
     // thread's persisted tier reaches the ctor as opts.model via session-store — so
     // an over-ceiling per-session tier must be clamped HERE, else the picker escapes
@@ -2404,7 +2401,7 @@ describe('Engine + Session (Orchestrator)', () => {
       }
     });
 
-    it('reads the FRESH ceiling on the run-path clamp, not the stale tool context (DEF-0077)', async () => {
+    it('reads the FRESH ceiling on the run-path clamp, not the stale tool context', async () => {
       const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       await engine.init();
       const session = engine.createSession({ model: 'deep' });
@@ -2415,7 +2412,7 @@ describe('Engine + Session (Orchestrator)', () => {
       // (so engine.getUserConfig() is the FRESH object with max_tier `fast`) but
       // never re-binds `_toolContext.userConfig`, which still points at the OLD
       // object (no ceiling). The run-path clamp must read the fresh ceiling — or a
-      // post-downgrade compaction silently fails to bite (DEF-0077).
+      // post-downgrade compaction silently fails to bite.
       engine.getUserConfig().max_tier = 'fast';
       const toolCtx = engine.getToolContext();
       (toolCtx as { userConfig: import('../types/index.js').LynoxUserConfig }).userConfig = {

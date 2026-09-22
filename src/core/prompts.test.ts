@@ -539,7 +539,7 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
   });
 });
 
-// DEF-routing-self-knowledge (the fast/balanced inversion bug): before this,
+// The fast/balanced inversion bug: before this,
 // modelIdentityContext emitted a HARDCODED generic Mistral example, so the agent
 // hallucinated its own tier→model map when it PLANNED (correct only post-hoc).
 // The fix renders THIS instance's resolved map, computed by the caller through
@@ -859,7 +859,7 @@ describe('safeModelId — the one sanitiser all three prompt writers share', () 
   });
 });
 
-describe('the no-install policy (DEF-bash-install-workaround)', () => {
+describe('the no-install policy', () => {
   // The failure this pins is a COST failure, and it was measured: one dogfood
   // thread spent 41 bash calls trying `apt-get install`, `npm install`, five
   // hand-written PDF extractors and `strings | grep` over a binary before the

@@ -1266,9 +1266,9 @@ describe('LynoxHTTPApi', () => {
       // The message on this path is whatever the runtime or the provider said.
       // It renders into the tenant's error banner, an 8s toast and a one-click
       // copy button — and in the managed tiers the LLM key it may quote is ours,
-      // not theirs. Two asserts on purpose: the register row for this warned
-      // that a test which only checks the LENGTH measures the wrong half, since
-      // truncation hides a key by accident rather than removing it.
+      // not theirs. Two asserts on purpose: a test which only checks the LENGTH
+      // measures the wrong half, since truncation hides a key by accident rather
+      // than removing it.
       const key = `sk-ant-${'a'.repeat(60)}`;
       mockSessionRun.mockImplementationOnce(async () => {
         // Filler with SPACES on purpose: an unbroken 900-char run is itself a
@@ -3221,12 +3221,12 @@ describe('LynoxHTTPApi', () => {
 
 
     it('capabilities.durable_memory_capture_degraded is TRUE for DK-on + Mistral balanced (the wiring)', async () => {
-      // The WIRING test (DEF-dk-capture-tool-dependence): the pure couple is
-      // unit-tested in models.test.ts; what is only checkable here is that the
-      // route computes the flag from the REAL runtime values — the active
-      // KnowledgeStore and the active balanced model resolved via the provider
-      // registry. Hardcoding the field `false` or dropping the getActiveProvider
-      // resolution leaves models.test.ts green — this is the test that dies.
+      // The WIRING test: the pure couple is unit-tested in models.test.ts; what is
+      // only checkable here is that the route computes the flag from the REAL runtime
+      // values — the active KnowledgeStore and the active balanced model resolved via
+      // the provider registry. Hardcoding the field `false` or dropping the
+      // getActiveProvider resolution leaves models.test.ts green — this is the test
+      // that dies.
       const { setOpenAIModelResolver, MISTRAL_MODEL_MAP } = await import('../types/models.js');
       const llmClient = await import('../core/llm-client.js');
       const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
@@ -3290,9 +3290,8 @@ describe('LynoxHTTPApi', () => {
     it('degraded is TRUE for a hybrid balanced-Mistral preset on an ANTHROPIC base (the main case)', async () => {
       // The base-provider mapping would judge Sonnet here and miss the warning
       // entirely — but a `balanced`/`efficient` preset pins balanced to Mistral
-      // even on an Anthropic base, so the EXECUTED balanced model is weak. This is
-      // exactly the tenant DEF-dk-capture-tool-dependence is about. Kills a revert
-      // to the hybrid-blind base resolution.
+      // even on an Anthropic base, so the EXECUTED balanced model is weak. Kills a
+      // revert to the hybrid-blind base resolution.
       const { setTierSetResolver } = await import('../core/tier-resolver.js');
       setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'openai', model_id: 'mistral-medium-2604' } } });
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
@@ -5151,7 +5150,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     /**
-     * DEF-debug-export-blind-to-dk. The export read only `memories`; durable knowledge writes to
+     * The export read only `memories`; durable knowledge writes to
      * `knowledge_entries`, so on a DK tenant the snapshot showed a memory store frozen weeks in
      * the past and looked healthy. These pin the second substrate, its labelling, and — the part
      * that makes it a diagnostic rather than a guess — that an unreadable block SAYS so.
@@ -9004,10 +9003,10 @@ describe('mail custom-server defaults are the same on both routes', () => {
         for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
         return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
       }
-      // DEF-dk-review-chip-resume-invisible: the resume path asks for ONE
-      // conversation's queue. The filter branch is the whole point — without a
-      // test a mutation on it survives silently and every thread re-hydrates
-      // every other thread's pending wording into its chips.
+      // The resume path asks for ONE conversation's queue. The filter branch is
+      // the whole point — without a test a mutation on it survives silently and
+      // every thread re-hydrates every other thread's pending wording into its
+      // chips.
       function fakeQueueStore(): {
         pendingCount: ReturnType<typeof vi.fn>;
         listPending: ReturnType<typeof vi.fn>;
@@ -9015,7 +9014,7 @@ describe('mail custom-server defaults are the same on both routes', () => {
         withHintTargets: ReturnType<typeof vi.fn>;
       } {
         return {
-          // DEF-review-approve-target-opaque: the real store resolves each hint here.
+          // The real store resolves each hint here.
           // Stamped rather than re-implemented — the CORRECTNESS of the resolution is
           // pinned against the real `reviewEntry` in knowledge-store.test.ts; what this
           // double is for is whether the ROUTE can serve the queue without going
@@ -9065,7 +9064,7 @@ describe('mail custom-server defaults are the same on both routes', () => {
       });
 
       /**
-       * DEF-review-approve-target-opaque. `reviewEntry` resolves a pending entry's hint
+       * `reviewEntry` resolves a pending entry's hint
        * AFTER the human decides, so the approve surface used to show a NAME and hide the
        * subject it binds to — including the case where approving MINTS a new one. The
        * predicate is served-shape, not store-shape: drop `withHintTargets` from the route
@@ -9109,7 +9108,7 @@ describe('mail custom-server defaults are the same on both routes', () => {
       });
     });
 
-    describe('large uploads become files-area files (DEF-chat-upload-inline-only-no-file)', () => {
+    describe('large uploads become files-area files', () => {
       // The 8c09e50a shape: a 90 KB inline CSV made the model echo the whole
       // file through a write_file tool input → max_tokens mid-tool_use →
       // identical continuation loop. Above the threshold the upload must

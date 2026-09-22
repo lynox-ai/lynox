@@ -60,7 +60,7 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
     // large API responses (http.ts truncation hints), web_research for large web fetches.
     // allowTools is hard-enforced as a whitelist (resolve-tools.ts), so omitting the tool
     // a hint recommends left the collector unable to do the one job it was spawned for
-    // (DEF-0112) — the model would spawn a collector, the collector would lack the tool,
+    // — the model would spawn a collector, the collector would lack the tool,
     // and the fetch/read silently never happened. The role stays read-only: no write_file,
     // no edit_file, no bash.
     allowTools: ['ask_user', 'memory_store', 'memory_recall', 'remember', 'recall', 'archive_search', 'read_file', 'http_request', 'web_research'],

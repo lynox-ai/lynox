@@ -115,9 +115,9 @@ describe('scanBoundedJsonl', () => {
 describe('buildCaptureReport', () => {
   it('reports an EMPTY window as unmeasurable (null), not as a fire-rate of zero', async () => {
     const r = await buildCaptureReport();
-    // The distinction the row exists for: "capture is dead" (0) and "capture was never
-    // measurable" (null) are different findings, and conflating them is how the original
-    // anecdote survived. A 0 here would assert a measurement that did not happen.
+    // The distinction: "capture is dead" (0) and "capture was never measurable" (null) are
+    // different findings, and conflating them is how the original anecdote survived. A 0
+    // here would assert a measurement that did not happen.
     expect(r.fireRate).toBeNull();
     expect(r.totalEvents).toBe(0);
     expect(r.windowStart).toBeNull();
@@ -848,10 +848,10 @@ describe('capture_suppressed — the JOIN that makes its runId worth carrying', 
   });
 });
 
-describe('eligibleByCause — the substrate for part (b)', () => {
+describe('eligibleByCause', () => {
   it('computes the conversation-only share over ATTRIBUTED eligible turns', async () => {
     // Distinct counts per bucket so a swapped bucket shows. 2 of 8 attributed are
-    // conversation-only → 0.25, the upper bound on what data-scoped taint could flip.
+    // conversation-only → 0.25.
     await seed([
       entry({ event: 'capture_eligible', cause: 'none' }),
       entry({ event: 'capture_eligible', cause: 'none' }),
@@ -924,9 +924,7 @@ describe('eligibleByCause — the substrate for part (b)', () => {
 
 describe('rateByCause — the capture rate held constant for turn type', () => {
   it('forms a rate per cause from BOTH histograms, not from one', async () => {
-    // The quantity part (b) asks for: the row's 08-03 block demands the turn TYPE be held
-    // constant, and a single boolean cannot do it. Distinct numbers per stratum so a swapped
-    // bucket or a shared histogram shows.
+    // Distinct numbers per stratum so a swapped bucket or a shared histogram shows.
     await seed([
       entry({ event: 'capture_eligible', cause: 'none' }),
       entry({ event: 'capture_eligible', cause: 'none' }),

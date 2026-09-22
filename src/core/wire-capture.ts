@@ -159,7 +159,7 @@ export function buildWireSnapshot(input: WireSnapshotInput): WireSnapshot {
  * process on the box — including a tool call steered by injected content — could answer yes to
  * by creating one empty file. The data dir is the same directory that already holds the vault
  * and the databases: a writer who can reach it has the secrets anyway, so the marker stops being
- * the weakest link. (DEF-wire-sink-tmp-arming, DEF-wire-capture-prod-gate leg 2.)
+ * the weakest link.
  *
  * ⚠️ This MOVES the arming path. An operator who armed the old `/tmp/wire-sink-on` will find the
  * sink silently off after upgrading — deliberate: for a capture surface, failing closed on an
@@ -212,9 +212,7 @@ export function isProvisionedInstance(env: NodeJS.ProcessEnv = process.env): boo
  *
  * A blanket refusal on every provisioned instance would break a workflow that is in use: the
  * capture acceptance test — and Workstream 2's wire-replay input — arms the sink on the managed
- * QA tenant `qa-managed` via `staging-tenant-exec`. `DEF-wire-capture-prod-gate` says so in its
- * own source note ("a blanket prod-refuse would break the managed staging capture WS2 needs"),
- * which is why that row was downgraded rather than fixed this way the first time.
+ * QA tenant `qa-managed` via `staging-tenant-exec`.
  *
  * So the refusal is conditional on something the threat cannot supply. The threat is an
  * in-container actor — a tool call steered by injected content — which can create a file
@@ -231,7 +229,7 @@ export function isProvisionedInstance(env: NodeJS.ProcessEnv = process.env): boo
  * says the CP never emits them — yet the workflow this hatch exists for runs on managed tenants.
  * So today it must be hand-added to the tenant `.env`, and the next `sync-env` REWRITES that file
  * wholesale and drops it (`pro services/instance-env.ts` says so in its own header). Re-arm after
- * every sync-env, or give it a CP column. Tracked as DEF-wire-capture-hatch-not-cp-emitted.
+ * every sync-env, or give it a CP column.
  */
 export function provisionedCaptureAcknowledged(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED'] ?? '') === '1';
@@ -296,8 +294,7 @@ export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
  *
  * `mkdirSync(dir, { mode })` applies the mode only when it CREATES the directory. An existing
  * `~/.lynox/wire-sink` at 0755 keeps 0755, and an existing symlink is followed to wherever it
- * points — so a pre-planted path defeats the move off `/tmp` entirely. `DEF-wire-capture-prod-gate`
- * asks for exactly this ("incl. tightening a pre-existing loose/symlinked dir").
+ * points — so a pre-planted path defeats the move off `/tmp` entirely.
  *
  * It REFUSES a loose directory rather than tightening it, and that is the correction of a first
  * version which called `chmodSync`. The path comes from `LYNOX_DEBUG_WIRE_SINK`, i.e. entirely

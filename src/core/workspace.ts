@@ -190,11 +190,11 @@ export function _resetCache(): void {
 
 
 /**
- * DEF-chat-upload-inline-only-no-file: persist a chat upload that is too large
- * to inline into the message as a REAL FILE in the tenant's file area
- * (`uploads/<stamp>-<name>`), so the agent works on it with read_file / bash /
- * python instead of echoing the whole content through a tool input (which hit
- * max_tokens mid-tool_use and looped continuations — thread 8c09e50a, 2026-08-14).
+ * Persist a chat upload that is too large to inline into the message as a REAL
+ * FILE in the tenant's file area (`uploads/<stamp>-<name>`), so the agent works
+ * on it with read_file / bash / python instead of echoing the whole content
+ * through a tool input (which hit max_tokens mid-tool_use and looped
+ * continuations — thread 8c09e50a, 2026-08-14).
  *
  * Returns the file-area-RELATIVE path on success, or null when the area cannot
  * be written (missing dir rights, disk full) — the caller then falls back to

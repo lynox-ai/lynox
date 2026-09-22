@@ -935,7 +935,7 @@ describe('turn-end capture — the SILENT exits, now named', () => {
 });
 
 /**
- * The `cause` column — DEF-dk-capture-observability (b).
+ * The `cause` column.
  *
  * The killing mutation these are built for is NOT "the field is absent". It is the field
  * present at ONE end and missing at the other: a numerator stratified by cause against a
@@ -967,9 +967,7 @@ describe('cause — both ends of the ratio, or it is not a ratio', () => {
   });
 
   it('a conversation-tainted turn carries `conversation` at BOTH ends', async () => {
-    // The member the whole row turns on: priority order means `conversation` implies the other
-    // two did not fire, so its share over eligible turns is the upper bound on what the
-    // data-scoped-taint redesign could flip.
+    // Priority order means `conversation` implies the other two did not fire.
     const { inner } = makeAgent();
     inner._durableMemoryEnabled = true;
     inner.memory = {};

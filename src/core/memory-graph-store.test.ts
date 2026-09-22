@@ -295,9 +295,9 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
   });
 });
 
-// ── DEF-0015: the orphan-subject reap rides INSIDE the hard memory deletes ────
+// ── The orphan-subject reap rides INSIDE the hard memory deletes ────
 
-describe('MemoryGraphStore orphan-subject reap (DEF-0015)', () => {
+describe('MemoryGraphStore orphan-subject reap', () => {
   const tmpDirs: string[] = [];
   const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
 

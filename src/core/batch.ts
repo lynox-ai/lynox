@@ -21,7 +21,7 @@ import { SYSTEM_PROMPT } from './prompts.js';
  * This is a not-yet-implemented state, NOT a permanent design choice: Mistral
  * has its own Batch API (api.mistral.ai/v1/batch/jobs) with a different shape.
  * Making batching provider-agnostic — wiring the Mistral batch path alongside
- * Anthropic and switching MODEL_MAP→getModelId(tier, provider) — is a tracked
+ * Anthropic and switching MODEL_MAP→getModelId(tier, provider) — is a
  * follow-up. `batch.ts` has no live caller yet, so this guard just turns the
  * cryptic crash into a clear signpost until that work lands.
  */

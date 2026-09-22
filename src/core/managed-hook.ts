@@ -115,7 +115,7 @@ export function createManagedHook(): LynoxHooks {
   // Cumulative un-debited spend the hook has had to drop this process lifetime.
   let droppedReports = 0;
   let droppedCents = 0;
-  // ── Local balance mirror (C2 / DEF-0083(b′)) ────────────────────────────────
+  // ── Local balance mirror ─────────────────────────────────────────────────────
   // A best-effort, bounded local tightening of the coarse ≤5-min allow-boolean.
   // `undefined` until the first authoritative /status parse — a `0` sentinel would
   // refuse every run on a healthy fresh boot. The CP `debitUsage` stays the exact
@@ -304,7 +304,7 @@ export function createManagedHook(): LynoxHooks {
     return Date.now() - lastSyncedAtMs > staleThresholdMs;
   }
 
-  // ── Provider-incident reporting (DEF-provider-billing-alert) ────────────────
+  // ── Provider-incident reporting ────────────────
   // A provider billing/quota stop (a suspended or credit-exhausted pooled account)
   // is a full outage for every tenant on that provider, and it surfaces only as a
   // per-request error the CP never sees. Report it so the CP can alert the operator
@@ -312,11 +312,11 @@ export function createManagedHook(): LynoxHooks {
   const lastIncidentAtMsByHost = new Map<string, number>();
 
   function reportProviderIncident(failure: ProviderBillingFailure): void {
-    // SOURCE-SIDE gate, not a reliance on the CP filtering it (DEF-provider-billing-alert
-    // security review): only a CP-funded instance's provider failure is the CP's
-    // account to alert on. A BYOK/hosted instance runs on the tenant's own key, so
-    // its 402/credit-balance is the tenant's problem — and a tenant who controls
-    // their endpoint could otherwise forge an incident with an arbitrary host/status.
+    // SOURCE-SIDE gate, not a reliance on the CP filtering it: only a CP-funded
+    // instance's provider failure is the CP's account to alert on. A BYOK/hosted
+    // instance runs on the tenant's own key, so its 402/credit-balance is the
+    // tenant's problem — and a tenant who controls their endpoint could otherwise
+    // forge an incident with an arbitrary host/status.
     if (!cpFunded) return;
 
     const host = failure.providerHost || 'unknown';

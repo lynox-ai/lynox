@@ -2349,7 +2349,7 @@ export class LynoxHTTPApi {
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? normalizeTier(opts['model']) : undefined,
-        // Provenance (P1, DEF-0095): the picker declares 'user' vs 'default'.
+        // Provenance: the picker declares 'user' vs 'default'.
         // Only stamped for a genuinely NEW thread (createThread is OR IGNORE on
         // resume). Absent/invalid → 'unknown' at the ctor.
         source: normalizeThreadModelSource(opts['source']),
@@ -2595,8 +2595,8 @@ export class LynoxHTTPApi {
         const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
         const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
-        // DEF-chat-upload-inline-only-no-file: above this the upload becomes a
-        // real file in the tenant's file area instead of message content.
+        // Above this the upload becomes a real file in the tenant's file area
+        // instead of message content.
         const INLINE_FILE_MAX_CHARS = 20_000;
         const INLINE_FILE_PREVIEW_CHARS = 2_000;
         // Lazy import — consistent with the other workspace imports below.
@@ -2747,17 +2747,16 @@ export class LynoxHTTPApi {
             // active knowledge instead of the review queue. The formats that skipped the gate
             // were the majority, and the plainest ones.
             //
-            // DEF-chat-upload-inline-only-no-file (2026-08-14, thread 8c09e50a):
-            // above INLINE_FILE_MAX_CHARS the decoded text is NOT inlined. An
-            // inlined 90 KB CSV forced the model to echo the whole file through a
-            // write_file tool input to process it — which hit max_tokens MID
-            // tool_use, the truncated call was discarded, the continuation
-            // restarted the same text, and the loop burned every continuation of
-            // a 5-minute run (no tool call ever dispatched). Large uploads now
-            // land as a REAL FILE in the tenant's file area (served by
-            // /api/files/download, readable by read_file/bash/python via the
-            // workspace cwd), and the message carries the reference plus a short
-            // preview. The turn still counts as untrusted — the wrapper stays.
+            // Since 2026-08-14 (thread 8c09e50a), above INLINE_FILE_MAX_CHARS the decoded
+            // text is NOT inlined. An inlined 90 KB CSV forced the model to echo the
+            // whole file through a write_file tool input to process it — which hit
+            // max_tokens MID tool_use, the truncated call was discarded, the continuation
+            // restarted the same text, and the loop burned every continuation of a
+            // 5-minute run (no tool call ever dispatched). Large uploads now land as a
+            // REAL FILE in the tenant's file area (served by /api/files/download,
+            // readable by read_file/bash/python via the workspace cwd), and the message
+            // carries the reference plus a short preview. The turn still counts as
+            // untrusted — the wrapper stays.
             if (decoded.length > INLINE_FILE_MAX_CHARS) {
               // Persist the FULL decoded text (pre-cap): the 200k decode cap
               // limits what may ride INLINE — not what lands on disk (review).
@@ -3741,7 +3740,7 @@ export class LynoxHTTPApi {
       });
     }));
 
-    // Mid-thread model re-pick (arc:model-selector P1, §5.1b) — the "continue a
+    // Mid-thread model re-pick (§5.1b) — the "continue a
     // historical chat on another model" half of the ask. Resolves an EXISTING
     // live session (never mints — `get`, not `getOrCreate`, so an unknown id is a
     // 404 not a new thread; S2). Refuses 409 while a run is in flight (swapping
@@ -4244,18 +4243,17 @@ export class LynoxHTTPApi {
       if (!requireService(res, store, 'Durable memory')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 100, 500));
-      // DEF-dk-review-chip-resume-invisible: the chat resume re-hydrates a
-      // thread's pending review chips from THIS endpoint, so it can ask for
-      // exactly one conversation's queue. Thread-scoped reads filter in SQL
-      // BEFORE the limit (review F2) — a post-filter let 100+ foreign pending
-      // rows crowd this thread's entries out while the count still saw them.
+      // The chat resume re-hydrates a thread's pending review chips from THIS endpoint,
+      // so it can ask for exactly one conversation's queue. Thread-scoped reads filter in
+      // SQL BEFORE the limit (review F2) — a post-filter let 100+ foreign pending rows
+      // crowd this thread's entries out while the count still saw them.
       const threadId = url.searchParams.get('threadId');
       const entries = threadId === null
         ? store.listPending(limit)
         : store.listPendingForThread(threadId, limit);
-      // Each entry carries the subject its hint WOULD bind to on approval
-      // (DEF-review-approve-target-opaque). `reviewEntry` resolves the hint AFTER the
-      // human decision, so without this the reviewer approves a link nobody showed them
+      // Each entry carries the subject its hint WOULD bind to on approval.
+      // `reviewEntry` resolves the hint AFTER the human decision, so without this
+      // the reviewer approves a link nobody showed them
       // — including the case where approving MINTS a new organization. Resolved here,
       // on the response that already feeds the review surface, so a second surface
       // cannot serve the queue without the target.
@@ -4281,10 +4279,9 @@ export class LynoxHTTPApi {
       });
     });
 
-    // Capture funnel rates (DEF-dk-capture-observability) — the READ half of the
+    // Capture funnel rates — the READ half of the
     // capture telemetry. The counters have shipped since v2.9.0 but nothing ever read
-    // the sink, so "capture is dead" could not be answered with a number, and the row
-    // itself says the measurement must precede any capture-mechanism change.
+    // the sink, so "capture is dead" could not be answered with a number.
     //
     // Deliberately NOT gated on `getKnowledgeStore()`: the most interesting reading is
     // an instance where capture produced nothing, and a store that failed to wire is one
@@ -4969,16 +4966,15 @@ export class LynoxHTTPApi {
         // DK.2 durable-memory surface: true iff durable_memory_enabled wired the
         // KnowledgeStore → the Web UI shows/hides the review-queue tab on this probe.
         has_durable_memory: engine.getKnowledgeStore() !== null,
-        // DEF-dk-capture-tool-dependence: DK capture depends on the model INVOKING
-        // `remember`. A measured-weak balanced caller (Mistral Medium 2/12 vs
-        // Sonnet 12/12, core#1130) leaves the durable tier silently inert while the
-        // store advertises itself. Surface a degradation flag ONLY when DK is on AND
-        // the active balanced model is measured-weak, so the model-picker can warn at
-        // the point the operator can fix it. Resolve the EXECUTED balanced id via
-        // effectiveTierModelId (hybrid-aware): a `balanced`/`efficient` preset pins
-        // balanced to Mistral even on an Anthropic base, and `max-quality` pins it to
-        // Sonnet even on a Mistral base — the base-provider mapping would judge the
-        // wrong model in both directions.
+        // DK capture depends on the model INVOKING `remember`. A measured-weak balanced
+        // caller (Mistral Medium 2/12 vs Sonnet 12/12, core#1130) leaves the durable tier
+        // silently inert while the store advertises itself. Surface a degradation flag
+        // ONLY when DK is on AND the active balanced model is measured-weak, so the
+        // model-picker can warn at the point the operator can fix it. Resolve the
+        // EXECUTED balanced id via effectiveTierModelId (hybrid-aware): a
+        // `balanced`/`efficient` preset pins balanced to Mistral even on an Anthropic
+        // base, and `max-quality` pins it to Sonnet even on a Mistral base — the
+        // base-provider mapping would judge the wrong model in both directions.
         durable_memory_capture_degraded: isDurableCaptureDegraded({
           hasDurableMemory: engine.getKnowledgeStore() !== null,
           activeBalancedModelId: effectiveTierModelId('balanced', getActiveProvider()),
@@ -5121,7 +5117,7 @@ export class LynoxHTTPApi {
       // resolver guarantees the UI never sees `undefined` or a non-served id.
       redacted['balanced_model'] = resolveBalancedModel(config);
 
-      // main_chat_tiers (DEF-0082): the active provider's per-tier model LABEL,
+      // main_chat_tiers: the active provider's per-tier model LABEL,
       // for the composer picker's two follow-ups —
       //   (a) name-enrichment: render "Tief (Opus 4.6)" instead of a bare tier;
       //   (b) hide the picker on a single-model provider (a custom / OpenAI-compat
@@ -5216,8 +5212,7 @@ export class LynoxHTTPApi {
       // ⚠️ This is the tenant/operator-facing half only. The automatic
       // control-plane escalation that the crash-loop used to trigger is NOT
       // restored by this — the CP would have to read it, and the CP still
-      // reports the pin as set from its own row. Tracked as a follow-up rather
-      // than half-built here.
+      // reports the pin as set from its own row.
       // VALIDATE THE RAW VALUE, SANITISE ONLY FOR DISPLAY — and in that order.
       //
       // The loader decides on `process.env[...]?.trim()` and nothing else. If this

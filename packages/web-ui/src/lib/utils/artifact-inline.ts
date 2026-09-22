@@ -60,7 +60,7 @@ const ID_MARKER_RE = /<!--\s*lynox-artifact-id:\s*([^\s>]+)\s*-->\s*/i;
  *  an embedded newline could still land a spoof id at a line end above the
  *  real one → a dead gallery link, agent-controlled, no data risk. Parsing a
  *  human string is inherently fragile; the durable fix is a structured id
- *  field on the tool_result SSE event. Deferred — see REGISTER.) */
+ *  field on the tool_result SSE event.) */
 export function parseArtifactIdFromResult(result: string | undefined): string {
 	if (!result) return '';
 	const m = result.match(/\(id:\s*([^,)\s]+)\s*,\s*v\d+\)\.\s*$/m);

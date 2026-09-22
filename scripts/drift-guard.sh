@@ -53,14 +53,13 @@ REMOVED='[Tt]elegram|[Ww]hats[Aa]pp|MCP[ -]server'
 # every other.
 #
 # ⚠ The value here is PROSPECTIVE, and the first version of this comment claimed
-# otherwise. It said `file:line` was "the dominant citation form in the register" —
-# but the register lives in the pro repo (0 tracked files matching /register/i
-# here), and in the 36 files class C actually scans (`*CLAUDE.md`, `*README.md`,
+# otherwise. It said `file:line` was "the dominant citation form" — but in the 36
+# files class C actually scans (`*CLAUDE.md`, `*README.md`,
 # `docs/src/content/docs/*`) the count is 65 bare and **0** file:line. Measured
-# 2026-09-06 with a positive control, i.e. a real zero rather than a blind grep.
-# So this closes a blind spot before it is used, which is the right time for a
-# guard — but no citation in scope is unchecked today, and saying so was borrowing
-# a measurement's credibility for a claim it did not support.
+# 2026-09-06 with a positive control, i.e. a real zero rather than a blind grep. So
+# this closes a blind spot before it is used, which is the right time for a guard —
+# but no citation in scope is unchecked today, and saying so was borrowing a
+# measurement's credibility for a claim it did not support.
 PATH_RE='`(src|packages|scripts|tests|docs)/[A-Za-z0-9_./-]+(:[0-9]+(-[0-9]+)?)?`'
 
 is_excluded() {

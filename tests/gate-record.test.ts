@@ -348,10 +348,8 @@ describe('gate-record — the shipped template does not answer its own questions
 
   /**
    * The map is the mechanism; this template is where its INTENT is written down for
-   * a human, and the two drift apart silently. The register row that produced the
-   * `src/integrations/` widening records exactly that confusion: an earlier revision
-   * of it attributed the stated intent to the code comment, when the sentence lives
-   * here. So the list is derived from the source rather than typed out — adding an
+   * a human, and the two drift apart silently.
+   * So the list is derived from the source rather than typed out — adding an
    * entry nobody documents turns this red.
    */
   it('names every path the security map enforces', () => {
@@ -408,7 +406,7 @@ describe('gate-record — `closes:`, required with `none` allowed', () => {
     // The whole design in one test. An OPTIONAL field is missing both when a PR
     // closes nothing and when its author was in a hurry — and a query over a
     // field like that cannot tell those apart, which is exactly why the detector
-    // built on `git log --grep "<DEF-id>"` measured recall 0/2.
+    // built on `git log --grep` measured recall 0/2.
     const v = evaluate({ body: record({ closes: '' }), head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
     expect(v.errors?.join(' ')).toContain('`closes:` is missing');
@@ -419,7 +417,8 @@ describe('gate-record — `closes:`, required with `none` allowed', () => {
   });
 
   it('accepts one id and a list, in either separator this register uses', () => {
-    for (const value of ['DEF-merge-consent-inherited-mode',
+    // Invented ids; none names a real row.
+    for (const value of ['DEF-' + 'example-single-id',
                          'DEF-a-row, DEF-b-row',
                          'DEF-a-row · DEF-b-row']) {
       const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
@@ -517,12 +516,13 @@ describe('gate-record — a line nothing reads is a line that lost something', (
 });
 
 describe('gate-record — a real register id may carry a capital', () => {
-  it('⭐ accepts DEF-dk-engineDb-init-partial-wire, which is a row that exists', () => {
-    // The lower-case-only shape refused it, so that row could never be named in
-    // `closes:` — a guard that cannot express a correct answer. Core cannot check
-    // existence (the register is in the private repo), which makes getting the
-    // SHAPE right the only thing standing between a typo and a green tick here.
-    expect(evaluate({ body: record({ closes: 'DEF-dk-engineDb-init-partial-wire' }), head: HEAD, files: CODE }).ok)
+  it('⭐ accepts a closes: id containing a capital letter', () => {
+    // The lower-case-only shape refused such an id, so a row named that way
+    // could never appear in `closes:` — a guard that cannot express a correct
+    // answer. Core cannot check existence (the register is in the private repo),
+    // which makes getting the SHAPE right the only thing standing between a typo
+    // and a green tick here.
+    expect(evaluate({ body: record({ closes: 'DEF-' + 'example-camelCase-id' }), head: HEAD, files: CODE }).ok)
       .toBe(true);
   });
 

@@ -1722,7 +1722,7 @@ describe('spawn_agent tool', () => {
       await ctorArg.promptSecret('STRIPE_KEY', 'Paste it');
       expect(promptSecret, 'the child must reach the parent channel').toHaveBeenCalled();
       const names = ctorArg.tools.map((t) => t.definition.name);
-      expect(names, 'a child that cannot ask is a trigger this row does not cover').toContain(
+      expect(names, 'a spawned child must keep ask_secret').toContain(
         'ask_secret',
       );
       // And the control: SPAWN_EXCLUDED is not vacuous here — `spawn_agent` was
@@ -2815,7 +2815,7 @@ describe('spawn_agent tool', () => {
     });
   });
 
-  // DEF-0093: a spawn `profile` pins a concrete model that bypasses the max_tier
+  // A spawn `profile` pins a concrete model that bypasses the max_tier
   // clamp. Since `profile` is agent-settable (hence prompt-injectable), a profile
   // routing a child ABOVE the tenant's cost ceiling must be refused (a profile
   // cannot be clamped down — REFUSE, not clamp). Real registry ids:

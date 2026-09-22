@@ -481,7 +481,7 @@ export class DataStore {
    * Record-on-spine — the EXISTS form of {@link getRecordsForSubject}: does any row, in
    * any collection, link `subjectId` through a `subject`-typed column? One indexed probe
    * per collection (the R2a per-subject index), short-circuits on the first hit, never
-   * projects a row. The orphan-subject reap (DEF-0015) asks this for every subject an
+   * projects a row. The orphan-subject reap asks this for every subject an
    * erased memory was linked to, so it stays O(collections), not O(rows). Same
    * schema-validated identifiers + bound subject id as the full read.
    */

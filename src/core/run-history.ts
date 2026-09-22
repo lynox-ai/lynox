@@ -1150,8 +1150,8 @@ const MIGRATIONS: string[] = [
    ALTER TABLE threads ADD COLUMN primary_subject_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_threads_primary_subject ON threads(primary_subject_id);`,
 
-  // v47 — Model Execution Policy (arc:model-selector) Wave P1, provenance
-  // (DEF-0094/DEF-0095): record WHO chose a thread's `model_tier`, so a sticky
+  // v47 — Model Execution Policy Wave P1, provenance:
+  // record WHO chose a thread's `model_tier`, so a sticky
   // per-thread pick (D18) is distinguishable from a machine default. The picker
   // already ships (#958/#960/#964) writing real user picks into `model_tier` with
   // no way to tell them from defaults — this column starts capturing that. Three
@@ -1167,7 +1167,7 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
    ALTER TABLE threads ADD COLUMN model_tier_source TEXT NOT NULL DEFAULT 'unknown';`,
 
-  // v48 — Model Execution Policy Wave P1, run attribution (DEF-0097, D21): a
+  // v48 — Model Execution Policy Wave P1, run attribution (D21): a
   // cron/WorkerLoop-fired run must be distinguishable from a user chat turn so the
   // policy is auditable ("what did my nightly automation burn?"). A SEPARATE
   // nullable column, NOT a new `run_type` value — `run_type` is a closed structural
@@ -1180,7 +1180,7 @@ const MIGRATIONS: string[] = [
    ALTER TABLE runs ADD COLUMN trigger_origin TEXT;`,
 
   // v49 — Model Execution Policy Wave P1: the exactly-once marker for the
-  // provenance RECOVERY backfill (DEF-0095). The v47 column starts every existing
+  // provenance RECOVERY backfill. The v47 column starts every existing
   // row at 'unknown'; a boot-backfill in engine.ts then labels a thread whose tier
   // differs from the instance default as a likely deliberate pick ('user'). That
   // recovery needs the per-instance `default_tier` + legacy brand-name
@@ -1496,7 +1496,7 @@ export class RunHistory {
     roleId?: string | undefined;
     kind?: 'llm' | 'voice_stt' | 'voice_tts' | undefined;
     units?: number | undefined;
-    /** What fired this run (DEF-0097, v48): e.g. `'cron'` / `'watch'` for a
+    /** What fired this run (v48): e.g. `'cron'` / `'watch'` for a
      *  WorkerLoop-scheduled turn, absent (→ NULL) for a live user chat turn or a
      *  legacy row. A SEPARATE dimension from `run_type` (the closed structural
      *  union) so automation is auditable without polluting the billing filters. */
@@ -1932,7 +1932,7 @@ export class RunHistory {
     return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
   }
 
-  // ── Model-provenance backfill (arc:model-selector P1, DEF-0095) ──
+  // ── Model-provenance backfill ──
   // The exactly-once gate for the boot-backfill in engine.ts, mirroring engine.db's
   // `verb_backfill_marker`. The recovery itself lives here (it owns the threads DB)
   // but is DRIVEN from engine.ts because it needs the per-instance default tier.
@@ -1954,7 +1954,7 @@ export class RunHistory {
   }
 
   /**
-   * One-shot recovery of pre-column provenance (DEF-0095): the v47 column starts
+   * One-shot recovery of pre-column provenance: the v47 column starts
    * every existing thread at `'unknown'`. A thread whose NORMALISED tier differs
    * from the instance default was almost certainly a deliberate pick (the composer
    * picker shipped before this column), so label it `'user'` — strictly better
@@ -1965,7 +1965,7 @@ export class RunHistory {
    * treated as the default (NOT claimed as a pick — conservative). BEST-EFFORT +
    * ADVISORY-ONLY: an internal `fast`/escalation thread on a non-default instance is
    * over-labelled `'user'`, which is harmless because `source` gates nothing (v47
-   * caveat; the `'inferred'` refinement is register-deferred DEF-0127). Returns the
+   * caveat). Returns the
    * number of rows labelled.
    */
   backfillModelTierSourceFromDefault(defaultTier: ModelTier): number {

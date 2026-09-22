@@ -15,16 +15,11 @@ import { EngineDb } from './engine-db.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
 
 /**
- * DEF-mail-chat-context-unwrapped — the set-drawing guard.
+ * The set-drawing guard.
  *
- * The register row is explicit that a list of the three known call sites does
- * NOT satisfy it: the finding itself survived two review rounds precisely
- * because the set was drawn over the NEIGHBOURHOOD OF THE WRAPPER
- * (`grep -l wrap… -- mail/*`), and this path lives outside the mail directory,
- * so it was structurally invisible. The predicate it demands instead is
- * behavioural: *every place that turns mail content into a string the model
- * reads* either wraps it or justifies the deviation on the spot — and a test
- * DRAWS that set rather than enumerating today's members.
+ * The intended predicate is behavioural: *every place that turns mail content into a string
+ * the model reads* either wraps it or justifies the deviation on the spot — and a
+ * test DRAWS that set rather than enumerating today's members.
  *
  * ## How the set is drawn — two axes, and neither is a list somebody maintains
  *
@@ -57,7 +52,7 @@ import type { InboxItem, PlannedPipeline } from '../types/index.js';
  * not model-facing — and the one that IS model-facing,
  * `inbox/classifier/prompt.ts`, already wraps (`:147`). So the guard would find
  * one compliant file and six it has to excuse, and a guard that is mostly
- * exemptions teaches people to add exemptions. The residue is registered instead.
+ * exemptions teaches people to add exemptions.
  */
 
 // Canaries carry no whitespace and no control characters, so `oneLine()` cannot
@@ -153,7 +148,7 @@ function makePlanned(): PlannedPipeline {
   };
 }
 
-describe('chat-context untrusted-data sweep (DEF-mail-chat-context-unwrapped)', () => {
+describe('chat-context untrusted-data sweep', () => {
   // Hoisted: neither DB depends on the `uid` branch, and rebuilding them per
   // iteration was ~40% of this file's runtime. Both kinds that read them
   // (`workflow`, `run`) must RESOLVE — a fixture that fails to resolve takes its
@@ -349,7 +344,7 @@ describe('chat-context untrusted-data sweep (DEF-mail-chat-context-unwrapped)', 
   });
 
   it('an injection in the mail body emits the security event this path had no way to raise', () => {
-    // The register's core sentence: the same body reaches the model through
+    // The point: the same body reaches the model through
     // mail_read with a frame, a warning and an EVENT — and reached it here with
     // none of them, so an incident on this path left no trace at all. The event
     // is emitted by wrapUntrustedData and by nothing else, which is why this

@@ -916,7 +916,7 @@ export class WorkerLoop {
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
     }
 
-    // Attribute the run to its trigger source (P1, DEF-0097) so this scheduled
+    // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     const result = await session.run(prompt, { triggerOrigin: task.source });
     const truncatedResult = result.length > MAX_TASK_RESULT_CHARS

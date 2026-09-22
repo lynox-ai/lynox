@@ -77,10 +77,6 @@ const API_URL = 'https://api.mistral.ai/v1/audio/speech';
 // duplicates — but 20 voices are unreachable, INCLUDING the six French
 // `fr_marie_*` ones. `offset`/`limit` is what actually paginates this
 // endpoint and returns all 30.
-//
-// Not fixed here deliberately — see `DEF-tts-language-voice-selection` in the
-// deferred register. Fixing it is a precondition for any future non-English
-// voice being visible at all, since it would land past offset 10.
 const VOICES_BASE_URL = 'https://api.mistral.ai/v1/audio/voices';
 // Hard page ceiling so a buggy `total_pages` response can't spin forever.
 // 30 voices × 10/page = 3 pages today; 100 pages would be 1000 voices.

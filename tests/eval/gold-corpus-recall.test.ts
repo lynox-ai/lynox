@@ -180,7 +180,7 @@ describe.skipIf(!RUN)('gold-corpus recall quality (real ONNX)', () => {
     // attribute-specific queries graph-expand LOWERS MRR (0.79→0.61) because
     // resolving the project pulls the WHOLE project's memories (all attributes),
     // diluting the top attribute hit. Levers: GRAPH_BOOST down-weight vs vector,
-    // attribute-aware expansion, or MMR_LAMBDA. Tracked for post-A1 tuning.
+    // attribute-aware expansion, or MMR_LAMBDA.
     if (on.mrr < off.mrr - 1e-9) {
       process.stdout.write(`[gold-corpus] NOTE: graph-expand lowers MRR by ${(off.mrr - on.mrr).toFixed(3)} (ranking-dilution lever — see comment)\n`);
     }

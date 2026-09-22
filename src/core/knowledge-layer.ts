@@ -150,7 +150,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    */
   private _anchorThreadStore: ThreadStore | null | undefined;
   /**
-   * DEF-0015 — the datastore.db half of the orphan-subject reference oracle. Set by
+   * The datastore.db half of the orphan-subject reference oracle. Set by
    * {@link setRecordStore} from `Engine._initCoreTools()` the moment the DataStore exists
    * (before the HTTP surface serves) — deliberately NOT from `_initKnowledge()`, which runs
    * BEFORE the DataStore is constructed, so anything guarded on it there can never fire.
@@ -201,7 +201,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.subjectStore = new SubjectStore(this.engineDb);
       this.relationshipStore = new RelationshipStore(this.engineDb);
       this.memoryGraphStore = new MemoryGraphStore(this.engineDb);
-      // DEF-0015: the orphan-subject reap rides INSIDE every engine.db memory delete
+      // The orphan-subject reap rides INSIDE every engine.db memory delete
       // (erase / thread-purge / gc). Installed here because only this layer can see every
       // reference a subject may still have — engine.db, the history.db thread anchor and
       // the datastore.db cells — and it is fail-closed: with either cross-DB oracle
@@ -259,7 +259,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   getDb(): AgentMemoryDb { return this.db; }
 
   /**
-   * DEF-0015 — hand the layer the live DataStore so the orphan reap can ask whether a
+   * Hand the layer the live DataStore so the orphan reap can ask whether a
    * table row still links a subject. Called by the engine as soon as the DataStore exists;
    * until then (and forever on an engine without one) the reap stays fail-closed.
    */
@@ -778,7 +778,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
-   * DEF-0015 — the cross-DB half of the subject reference oracle, or `null` when it cannot
+   * The cross-DB half of the subject reference oracle, or `null` when it cannot
    * be answered (no history.db handle, or no record store handed over yet). `null` means
    * the reap must NOT run. Each probe answers `true` (referenced) on a read failure — e.g.
    * a pre-v46 history.db without the anchor column — so an oracle error can never fail
@@ -799,7 +799,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
-   * DEF-0015 — the reaper {@link MemoryGraphStore} calls inside every hard memory delete.
+   * The reaper {@link MemoryGraphStore} calls inside every hard memory delete.
    * Fail-closed: without the cross-DB oracle the candidates are left standing — logged once
    * per layer instance with the count, because a skipped candidate is permanent residue (the
    * deleted memory is never a candidate again) and should at least be quantifiable — never
@@ -1228,7 +1228,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // bridge: read the thread's ids from legacy (which owns source_thread_id)
     // BEFORE the legacy purge deletes them, then delete the same stub ids from
     // engine.db (cascades reap the junction; a subject nothing else references is reaped
-    // with it, DEF-0015 — a cross-thread / verb-layer subject survives).
+    // with it — a cross-thread / verb-layer subject survives).
     //
     // Gated on the STORE existing, NOT the reversible `subjectGraphEnabled` write
     // flag: stubs are durable rows, so a stub written during a flag-ON window must
@@ -1649,7 +1649,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * RE-THROW, so an awaiting caller fails the delete instead of reporting a false success.
    * The legacy purge cascade reaps mentions, relations, supersedes and orphan entities.
    *
-   * engine.db residue, closed (DEF-0015): `purgeMemories` reaps the relationships SOURCED
+   * engine.db residue, closed: `purgeMemories` reaps the relationships SOURCED
    * from the erased memories in the same step, and — inside the same transaction — hands
    * every subject they were linked to the orphan-subject reaper installed in the
    * constructor, which deletes the ones NOTHING else references (verb layer, knowledge
@@ -1891,14 +1891,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /**
    * Report the tier disagreements a supersession mirror COMPARED AND SAW — the runtime
-   * observable `DEF-dk-trust-gate-consistency` (a) was missing, where the mirror refused with
-   * a bare `return` and told no one.
+   * observable that used to be missing, where the mirror refused with a bare `return` and
+   * told no one.
    *
    * "Compared" is the limit, and it is narrower than "every mirror": the consolidation mirror
    * in {@link consolidateMemories} passes no `newTier` at all, so it runs no comparison and
    * can report nothing. Its keeper-sort ranks tiers inside agent-memory.db, which is exactly
-   * the store a stub can drift from — so that path is a known blind spot, not a covered one
-   * (`DEF-mirror-consolidation-tier-blind`).
+   * the store a stub can drift from — so that path is a known blind spot, not a covered one.
    *
    * Reporting is ALL this does. The retire went through (see
    * {@link MemoryGraphStore.markSuperseded} for why a mirror cannot be a gate), so unlike

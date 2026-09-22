@@ -562,8 +562,7 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     // through the UI would complete it ACROSS ERAS — the exact two-era pair this
     // change exists to prevent. If the second write throws, undo the first and
     // leave config.json untouched, so the operator's pair stays in one piece.
-    // A hard kill between the two is not reachable from here and is carried as
-    // DEF-vault-pair-write-not-atomic.
+    // A hard kill between the two is not reachable from here.
     try {
       vault.set('GOOGLE_CLIENT_ID', gId, 'any');
       vault.set('GOOGLE_CLIENT_SECRET', gSecret, 'any');

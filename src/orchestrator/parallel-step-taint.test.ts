@@ -11,7 +11,7 @@ import { rememberTool } from '../tools/builtin/knowledge.js';
 import { createStepStreamHandler, newRunTaint, noteStepTaintLive, runTaintArmed } from './runtime-adapter.js';
 
 /**
- * DEF-parallel-step-taint-not-armed — the SEMANTIC half of the fix, on REAL
+ * The SEMANTIC half of the fix, on REAL
  * agents and a REAL store (no LLM: the agents never send; the chain is driven
  * through the same functions the adapter wires).
  *

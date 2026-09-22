@@ -124,11 +124,10 @@ describe('drift-guard — fires on planted drift', () => {
   });
 });
 
-// `file:line` is the dominant citation form in the register and in these scripts'
-// own comments, and class C could not see it: PATH_RE excluded `:` from its
-// character class, so `` `src/core/agent.ts:1010` `` matched nothing while the bare
-// path was checked. A guard over one spelling is blind to every other — and this
-// one was blind to the form people actually write.
+// Class C could not see `file:line`: PATH_RE excluded `:` from its character class, so
+// `` `src/core/agent.ts:1010` `` matched nothing while the bare path was checked. A
+// guard over one spelling is blind to every other — and this one was blind to the
+// form people actually write.
 describe('drift-guard — class C reads the citation form people use', () => {
   // The fixture path is not arbitrary: class C scans `*CLAUDE.md`, `*README.md`
   // and `docs/src/content/docs/*` only. A doc placed anywhere else is never read,

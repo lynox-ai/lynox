@@ -26,9 +26,9 @@
  * `host-disclosure.ts` — this module makes no retention claim.
  *
  * Model choice is driven by COST + SOVEREIGNTY + CONTEXT, not a quality claim:
- * the fitness harness cannot separate the strong fleet at reachable difficulty
- * (`DEF-model-fitness-frontier-hard`), so the cheap CN-via-Fireworks deep models
- * are harness-equivalent to Sonnet 5 on lynox long-horizon jobs.
+ * the fitness harness cannot separate the strong fleet at reachable difficulty,
+ * so the cheap CN-via-Fireworks deep models are harness-equivalent to Sonnet 5
+ * on lynox long-horizon jobs.
  *
  * WHAT THE MAIN SLOT IS **NOT** CHOSEN BY, corrected 2026-08-10. This header used to
  * cite the WS2 wire-replay R1/R3 "orchestration floor" (does the main DELEGATE a

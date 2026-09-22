@@ -215,7 +215,7 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
   // carrying the tool reaches; `capture_eligible` fires only from the turn-end hook, which
   // returns early for several run shapes. Without `runId` on BOTH the report can divide
   // the two but cannot show they describe the same runs — a real sink carried 910
-  // numerator events against 0 denominator events (DEF-firerate-mixes-two-populations).
+  // numerator events against 0 denominator events.
   // Dropping the field from this emit is a live mutation and dies here.
   it('remember_invoked carries the run id, so the numerator can be joined to the denominator', async () => {
     mockSink.mockClear();

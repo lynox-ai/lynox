@@ -20,7 +20,7 @@ describe('BUILTIN_ROLES', () => {
     expect(BUILTIN_ROLES['collector']!.model).toBe('fast');
   });
 
-  it('collector can fetch + read — the engine recommends it to work large payloads in isolation (DEF-0112)', () => {
+  it('collector can fetch + read — the engine recommends it to work large payloads in isolation', () => {
     // The truncation hints in fs.ts (large files), http.ts (large API responses)
     // and the web-fetch path actively tell the model to spawn role='collector' to
     // work a payload too big for the main context in isolation. allowTools is

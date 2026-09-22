@@ -3031,7 +3031,7 @@
 					     past that. What a sighted mouse user gets without hovering is
 					     the OPENING of the instruction, not the whole of it. That is
 					     strictly better than a label alone and strictly less than
-					     informed consent — tracked as DEF-followup-task-invisible.
+					     informed consent.
 					     No `sr-only` copy here: a CSS clamp hides nothing from assistive
 					     tech, so the visible span is already announced in full and a
 					     second one would read the task twice.

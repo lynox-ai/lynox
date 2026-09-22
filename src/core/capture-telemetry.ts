@@ -3,7 +3,7 @@ import type { UntrustedCause } from './untrusted-signals.js';
 
 /**
  * Durable-knowledge CAPTURE telemetry — the measure-first substrate for the
- * capture-architecture rework (DEF-dk-capture-observability).
+ * capture-architecture rework.
  *
  * The DK canary showed `knowledge_entries` = 0 despite the flag being on — and
  * there was NO metric to see it: no propose/fire/confirm rate, an ignored write
@@ -247,33 +247,15 @@ export interface CaptureTelemetryEntry {
    * `external-tool` | `conversation`, straight from `describeTurnUntrusted`.
    *
    * Not redundant beside the boolean, and the difference is the whole point. `untrusted` says
-   * a turn WAS tainted; `DEF-data-scoped-taint` changes WHICH RULE taints, so a before/after
-   * stratified on the boolean compares two populations defined by two different functions
-   * sharing one field name. The cause survives that boundary: it names the member, and the
-   * member is what the redesign removes.
+   * a turn WAS tainted; `cause` says WHICH rule did it.
    *
    * The PRIORITY ORDER of `describeTurnUntrusted` (marker → external-tool → conversation) makes
    * `cause === 'conversation'` imply the other two are false, so that count is exactly the set
    * of turns held tainted by the conversation-sticky latch ALONE.
    *
-   * ⚠ What that number is NOT, corrected after an adversarial round refuted the first version.
-   * It is **not** an upper bound on what `DEF-data-scoped-taint` would flip. That PRD scopes
-   * Part A to engine-written, model-untouched values and says so in as many words — *"Explicitly
-   * NOT `remember` (regime B)"* (§5 A1) — while §6 B5 decides *"Do not weaken the latch for
-   * regime B."* Every event this field rides is regime B: the model produced the value, or the
-   * recovery pass extracted it from the model's output. Under the PRD as written the flip count
-   * for this population is ZERO BY SCOPE, so calling the share an upper bound bounds a known
-   * zero: true, and empty.
-   *
-   * What it IS, and this is the useful reading: **the price the regime-B latch charges.**
-   * `DEF-data-scoped-taint` carries a `gating` claim that the latch is why capture looks dead
-   * fleet-wide. That claim and B5 cannot both stand — if the latch is that expensive, the
-   * decision not to weaken it for regime B is the expensive one, and it is B5 that needs
-   * re-opening rather than Part A. This share is the number that settles which.
-   *
-   * ⚠ And it settles ROUTING only. `knowledge-store.ts` maps taint to status with a ternary,
+   * ⚠ That count settles ROUTING only. `knowledge-store.ts` maps taint to status with a ternary,
    * so where a write lands is computable from the taint — but the ternary runs per WRITE while
-   * this share is per TURN (the pass writes up to four), so the two are not the same quantity.
+   * that count is per TURN (the pass writes up to four), so the two are not the same quantity.
    * Worse for the "no after-window" claim: the taint is MODEL-VISIBLE. `knowledge.ts` returns a
    * cause-naming string to the model and sends a review chip to the user, so changing the rule
    * changes what both do next. The routing half is predictable; the behavioural half is not,

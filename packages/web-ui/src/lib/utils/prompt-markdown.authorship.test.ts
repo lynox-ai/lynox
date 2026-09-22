@@ -13,9 +13,9 @@ import type { RenderablePromptSegment } from './prompt-markdown.js';
  *
  * The engine side pins that `ask_user` now hands over ONE `value` segment
  * (`ask-user.test.ts`). This file pins the other half of the seam: what the
- * renderer does with such a segment. Both are needed — the row's own
- * `verify-done` says so, because a wire-only test would pass while the live
- * path (the markdown fallback) stayed exactly as it was.
+ * renderer does with such a segment. Both are needed, because a wire-only test
+ * would pass while the live path (the markdown fallback) stayed exactly as it
+ * was.
  */
 const value = (text: string): RenderablePromptSegment[] => [{ kind: 'value', text }];
 const frame = (text: string): RenderablePromptSegment[] => [{ kind: 'frame', text }];

@@ -1194,7 +1194,7 @@ export class Agent implements IAgent {
    * Turn-end capture hook. Legacy behaviour when the DK flag is OFF: auto-extract
    * (skipped for untrusted/internal turns). When DK is ON the legacy extraction is
    * gated off by design — here we instead emit a `capture_eligible` telemetry line
-   * (the DENOMINATOR of the capture fire-rate, DEF-dk-capture-observability), so
+   * (the DENOMINATOR of the capture fire-rate), so
    * "why is capture dead on the canary?" becomes a measured number. Preserves the
    * exact prior gate: legacy extraction fires only when NOT untrusted AND DK OFF.
    */
@@ -1224,8 +1224,7 @@ export class Agent implements IAgent {
    * before it runs as a full agent turn. That asymmetry predates this method,
    * but this method now feeds it from a call whose input can quote untrusted
    * content — hence `buildFollowUpExcerpt` (boundary-wrapped) and the `task`
-   * length cap. Neither makes a misleading chip impossible; closing that needs
-   * the UI to show what it is about to run (DEF-followup-task-invisible).
+   * length cap. Neither makes a misleading chip impossible.
    *
    * Best-effort throughout: any failure leaves the turn exactly as it was.
    */
@@ -1265,7 +1264,7 @@ export class Agent implements IAgent {
       //
       // So the wrong client stays until the right one can be chosen WITH its credentials, and
       // the catch below now says when this path fails — which is what was missing to measure
-      // how often it actually fires. See DEF-followup-recovery-wire-client.
+      // how often it actually fires.
       const client = clientForTierSnapshot(fastSnap, this.client, provider);
       const stream = client.beta.messages.stream({
         model: fastSnap.modelId,
@@ -1316,9 +1315,7 @@ export class Agent implements IAgent {
         // tool" — in ENGLISH, and a `task` is a plain user-voice instruction that
         // needs none of that, in whatever language the thread runs in (this
         // feature's own prompt asks for German). It stops the copy-paste payload
-        // and nothing subtler. The real gate is that a human clicks the chip —
-        // which is why the task being invisible to that human is the open issue
-        // here, not the strength of this filter. See DEF-followup-task-invisible.
+        // and nothing subtler. The real gate is that a human clicks the chip.
         .filter((sug) => !detectInjectionAttempt(sug.task).detected);
       if (suggestions.length === 0) return; // same outcome as the model declining
 
@@ -1380,7 +1377,7 @@ export class Agent implements IAgent {
    *  - **capped excerpt**, so a long research turn cannot turn this into a large call.
    *  - **at most four facts**, because the precision worth keeping is 7 of 10
    *    proposals confirmed by the user, and a pass that returns fifteen turns an
-   *    approval into a wall. That ceiling is SET, not measured — see the row.
+   *    approval into a wall. That ceiling is SET, not measured.
    *
    * Silent by design when it finds nothing: most turns hold no durable fact, and
    * the classifier is told that an empty list is the expected answer.
@@ -1679,7 +1676,7 @@ export class Agent implements IAgent {
     // would corrupt the comparison it exists for. What changes is that the exit stops being
     // SILENT — until now all three returned with no event at all, which is why the report can
     // say the two populations are disjoint but not why. Whether the DK path should depend on
-    // the legacy object at all is a separate decision, filed rather than taken here.
+    // the legacy object at all is a separate decision.
     const gate = this._captureGate();
     if (gate.suppressed !== null) {
       void appendCaptureTelemetry(this._durableMemoryEnabled, {
@@ -1722,7 +1719,7 @@ export class Agent implements IAgent {
         // The join key. This site sits behind the three guards above; the NUMERATOR's
         // site (`knowledge.ts`) sits behind none of them, so the two ends of the fire
         // -rate can describe different runs. `runId` is what lets the report SHOW that
-        // instead of dividing regardless (DEF-firerate-mixes-two-populations).
+        // instead of dividing regardless.
         runId: this.currentRunId,
       });
       // The mechanism, restored. Until this line the DK branch logged the
@@ -3382,7 +3379,7 @@ export class Agent implements IAgent {
    * through verbatim — so `read_file`'s ENOENT with a model-chosen path writes
    * its CRLF straight into that row. An earlier version of this comment said
    * the column "carries the RESULT, not a reason" and made a live hole read as
-   * a schema question. It is filed rather than fixed here because the same sink
+   * a schema question. It is not fixed here because the same sink
    * needs one decision — what that column MEANS on that path — and flattening
    * it alone would harden a field whose meaning is still wrong.
    *
@@ -3922,7 +3919,7 @@ export function isRetryable(err: unknown): boolean {
   // LONG output (observed on Fireworks glm-5p2 deep turns — the efficient preset's deep slot)
   // surfaces NOT as an APIError but as a `TransformError` or a 'terminated' TypeError from the
   // fetch/undici stream, so the status/body checks above miss it. Without this the Agent would
-  // fail the whole turn instead of retrying the transient drop (DEF-fireworks-longstream-retry).
+  // fail the whole turn instead of retrying the transient drop.
   if (err instanceof Error) {
     return isTransportError(err, 0);
   }

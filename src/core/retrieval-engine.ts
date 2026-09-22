@@ -50,7 +50,7 @@ const THREAD_BOOST = 0.10;
  * `user_asserted` truths; refute RF-ARCH1).
  *
  * ⚠️ Stays 0 (measure-only, byte-identical: `rawCosine >= 0` is always true) — and stays there
- * for THIS embedding model. The shadow window was measured, not guessed (DEF-0010, rafael prod,
+ * for THIS embedding model. The shadow window was measured, not guessed (rafael prod,
  * 2026-08-20: 60 retrievals, 3000 scored candidates, `multilingual-e5-small`): candidates the
  * admission gate PASSES and candidates it FAILS sit on the same raw-cosine band (p10/p50/p90 =
  * 0.803/0.829/0.854 vs 0.805/0.831/0.854, both floored at 0.75, identical per provenance

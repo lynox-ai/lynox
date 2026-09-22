@@ -42,4 +42,4 @@ Rules:
   cannot hold. Its comment says why, and what it binds.
 
 Design + wave plan: `lynox-pro` `docs/internal/PRD-CORE-PRO-CONTRACT.md` <!-- drift-guard:allow: doc lives in the private lynox-pro repo -->
-(ROOT A / DEF-0030).
+(ROOT A).

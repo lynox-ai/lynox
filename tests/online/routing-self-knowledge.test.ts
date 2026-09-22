@@ -1,5 +1,5 @@
 /**
- * Online eval: routing self-knowledge (DEF-routing-self-knowledge).
+ * Online eval: routing self-knowledge.
  *
  * The bug: when the agent PLANNED ("spawne ein Team … verschiedene Modelle"),
  * it hallucinated its own tier→model map (fast/balanced inverted), correct only

@@ -165,19 +165,19 @@ export interface RunOptions {
    *  registry, so a reconnecting client can replay-then-tail from exactly the
    *  durable boundary (Tier-2 resumable re-attach, no double-render). */
   onPersistCheckpoint?: (() => void) | undefined;
-  /** What fired this run (arc:model-selector P1, DEF-0097): the WorkerLoop passes
-   *  the trigger source (`cron`/`watch`/`webhook`/`inbox_event`/`manual`) so a
-   *  scheduled automation turn is distinguishable from a user chat turn (which
-   *  leaves this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension
-   *  from `run_type`; observability only, never gates money. */
+  /** What fired this run: the WorkerLoop passes the trigger source
+   *  (`cron`/`watch`/`webhook`/`inbox_event`/`manual`) so a scheduled
+   *  automation turn is distinguishable from a user chat turn (which leaves
+   *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
+   *  `run_type`; observability only, never gates money. */
   triggerOrigin?: string | undefined;
 }
 
 export interface SessionOptions {
   sessionId?: string | undefined;
   model?: ModelTier | undefined;
-  /** Provenance of `model` for a NEW thread (arc:model-selector P1, DEF-0095).
-   *  CLIENT-supplied — only the picker UI knows an explicit pick from an
+  /** Provenance of `model` for a NEW thread. CLIENT-supplied — only the
+   *  picker UI knows an explicit pick from an
    *  untouched default. Stamped into `threads.model_tier_source` at creation;
    *  ignored on resume (the thread already carries its provenance). Absent → the
    *  schema default `'unknown'` (a programmatic session that did not observe it).
@@ -518,7 +518,7 @@ export class Session {
       try {
         threadStore.createThread(this.sessionId, {
           model_tier: this._model,
-          // Provenance (P1, DEF-0095): the picker UI declares 'user' (explicit
+          // Provenance: the picker UI declares 'user' (explicit
           // pick) vs 'default' (untouched); a programmatic creator sends nothing
           // → 'unknown'. OR IGNORE means a resume never re-stamps this.
           model_tier_source: opts?.source ?? 'unknown',
@@ -792,7 +792,7 @@ export class Session {
       // clamp use, so an operator-set compaction_model above the tenant's
       // max_tier cost ceiling is still clamped (would otherwise bypass the cap).
       // Fresh config (engine.getUserConfig), not the stale toolCtx.userConfig —
-      // same reload-staleness reason as the pendingHint clamp above (DEF-0077).
+      // same reload-staleness reason as the pendingHint clamp above.
       const uc = this.engine.getUserConfig();
       const overrideTier = resolveRunModel({
         requested: runOptions.modelTier,
@@ -858,8 +858,8 @@ export class Session {
     // Both the tier map and the identity provider come from the SAME helpers
     // `_createAgent` calls, so the hybrid-slot case can no longer diverge here.
     // This mirror still APPROXIMATES _createAgent — it reproduces the
-    // durable-substrate suffix and identity context, but not yet every other
-    // suffix delta (tracked in the deferred register).
+    // durable-substrate suffix and identity context, but not every other
+    // suffix delta.
     const runIdentityContext = this._identityContext(runSnap, runBaseProvider, model);
     // DK.1: _createAgent appends this suffix to basePrompt when the substrate is on; mirror it
     // so a durable-on run's snapshot/hash isn't silently divergent from the real agent prompt.
@@ -2170,8 +2170,7 @@ export class Session {
    * the drift that comes from editing one site's ARGUMENTS; it does not stop
    * someone replacing the call. A review verified that: re-introducing the exact
    * pre-fix bug at the mirror still passes every test that touches the identity
-   * prompt. A Session-level test that records a snapshot under a hybrid tier set
-   * and compares it to the live prompt is owed — see the deferred register.
+   * prompt.
    */
   private _identityContext(
     tierSnap: ReturnType<typeof resolveTierModel>,

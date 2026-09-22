@@ -50,10 +50,9 @@
  * that reaches a shape WITHOUT naming its class — `ul[role="list"] > li`,
  * `input[type=checkbox]` — is invisible here, because knowing it lands on the inbox row
  * needs the rendered DOM. That is a browser's job; the complete fix is to render the app
- * and photograph it, the way the design-system PAGE is rendered on the pro side. It is
- * deferred, on the record, as DEF-0130 — not pretended closed. app.css is a token and
- * base file by convention (fifteen selectors, all scrollbar utilities), which is the
- * social half of the same guarantee.
+ * and photograph it, the way the design-system PAGE is rendered on the pro side. app.css
+ * is a token and base file by convention (fifteen selectors, all scrollbar utilities),
+ * which is the social half of the same guarantee.
  *
  * Run: node packages/web-ui/scripts/check-shape-contract.mjs   (`pnpm shapes:contract`)
  */
@@ -216,7 +215,7 @@ for (const [name, shape] of Object.entries(contract.shapes)) {
 // shape WITHOUT naming its class — `ul[role="list"] > li { … }`, `input[type=checkbox]` —
 // is invisible here, because knowing it lands on the inbox row needs the rendered DOM,
 // which is a browser's job. The complete fix is to render the app and photograph it (as
-// the design-system page IS rendered on the pro side); that is deferred (DEF-0130). What
+// the design-system page IS rendered on the pro side). What
 // IS closed: any rule that names a guarded class, by any spelling — `.foo`, the escaped
 // `.rounded-\[…\]`, `[class~=foo]`, and the substring forms `[class*=fo]` / `^` / `$`.
 

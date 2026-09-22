@@ -168,7 +168,7 @@ describe('clampTier', () => {
   });
 });
 
-describe('modelIdExceedsMaxTier — the shared refuse predicate (DEF-0080)', () => {
+describe('modelIdExceedsMaxTier — the shared refuse predicate', () => {
   const DEEP = getModelId('deep', 'anthropic');
   const BALANCED = getModelId('balanced', 'anthropic');
   const FAST = getModelId('fast', 'anthropic');
@@ -273,7 +273,7 @@ describe('Mistral tier-set', () => {
   });
 });
 
-describe('durable-knowledge capture degradation (DEF-dk-capture-tool-dependence)', () => {
+describe('durable-knowledge capture degradation', () => {
   it('flags the measured-weak balanced caller, not the strong ones', () => {
     // Anchored to the capture-fitness benchmark (core#1130): Mistral Medium 2/12,
     // Sonnet 12/12, Haiku 10/12. Only the measured-weak id is in the set.

@@ -303,7 +303,7 @@ describe('askSecretTool', () => {
   });
 });
 
-describe('askSecretTool — discovery + reconciliation (DEF-vault-name-discovery)', () => {
+describe('askSecretTool — discovery + reconciliation', () => {
   const cleanSecretEnv = (): void => {
     for (const key of Object.keys(process.env)) {
       if (key.startsWith('LYNOX_SECRET_')) delete process.env[key];

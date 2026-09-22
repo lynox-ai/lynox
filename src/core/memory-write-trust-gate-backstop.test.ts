@@ -14,8 +14,8 @@ import type { MemoryScopeRef } from '../types/index.js';
 
 /**
  * Memory Foundation Wave 2 — what each store does when the two disagree about a row's tier.
- * Both halves of `DEF-dk-trust-gate-consistency` live here because they are one condition seen
- * from two sides: (b) agent-memory.db REFUSES and its answer must be consulted; (a) engine.db
+ * Both halves live here because they are one condition seen
+ * from two sides: agent-memory.db REFUSES and its answer must be consulted; engine.db
  * cannot refuse — it is a mirror of a store that already committed — so it REPORTS instead.
  *
  * `AgentMemoryDb.supersedMemory` returns `false` when it refuses a lower-trust retire.
@@ -30,7 +30,7 @@ import type { MemoryScopeRef } from '../types/index.js';
  * DIFFERENT stores: the caller's decision takes it from the recall row (engine.db under
  * the S5b read cutover, via `_dedupRecall`), the backstop looks it up in agent-memory.db.
  * Setting engine.db's copy of one row's tier below its legacy copy is exactly the
- * dual-store divergence `DEF-dk-trust-gate-consistency` (a) describes, and it is what
+ * dual-store divergence, and it is what
  * these tests do — with raw SQL, so the divergence is data, not a mocked verdict.
  */
 

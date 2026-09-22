@@ -3,11 +3,11 @@ import { CAPTURE_TELEMETRY_LOG_FILE, PRE_ELIGIBLE_SUPPRESSED_REASONS, type Captu
 import type { UntrustedCause } from './untrusted-signals.js';
 
 /**
- * The READ half of the durable-knowledge capture telemetry (DEF-dk-capture-observability).
+ * The READ half of the durable-knowledge capture telemetry.
  *
  * The counters have shipped since v2.9.0, but the sink was write-only: nothing outside
  * `bounded-jsonl-log` ever read the file, so "capture is dead" stayed an anecdote. The
- * whole point of the row is that it becomes a NUMBER, and a number needs an aggregator.
+ * whole point is that it becomes a NUMBER, and a number needs an aggregator.
  *
  * Why it lives in code rather than an ad-hoc query: deriving this rate by hand against a
  * live instance needed three attempts, and the two wrong ones failed the same way — the
@@ -317,23 +317,18 @@ export interface CaptureReport {
    * `suppressedRunsAlsoRemembering` reads it instead of restating the split.
    */
   /**
-   * Capture-eligible turns by WHICH untrusted rule fired — the substrate for
-   * `DEF-dk-capture-observability` part (b).
+   * Capture-eligible turns by WHICH untrusted rule fired.
    *
-   * `conversationOnlyShare` is what the row is for. `describeTurnUntrusted` is priority-ordered,
+   * `conversationOnlyShare` is what this breakdown is for. `describeTurnUntrusted` is priority-ordered,
    * so a `conversation` cause implies the other two members did not fire; this share is
    * therefore exactly the fraction of eligible turns that would come clean if the
    * conversation-sticky half were removed. Since `knowledge-store.ts` maps taint to status with
    * a ternary, that share IS the effect on the active/queued split — no after-window needed.
    *
-   * ⚠ An UPPER bound: the data-scoped-taint PRD is two-part and only Regime A becomes
-   * data-scoped, so at most this many turns flip. Decision-grade in one direction — near zero
-   * means the redesign cannot move capture materially, whatever else holds.
-   *
    * ⚠ `unattributed` counts eligible lines with no usable cause (written before the field, or
    * out-of-enum). The share is computed over ATTRIBUTED lines only and is null when there are
    * none: a denominator that silently included lines which cannot carry the answer would drag
-   * the bound toward zero for a reason unrelated to the taint rule.
+   * the share toward zero for a reason unrelated to the taint rule.
    */
   readonly eligibleByCause: Readonly<{
     none: number; marker: number; 'external-tool': number; conversation: number;
@@ -347,9 +342,8 @@ export interface CaptureReport {
    * This is what makes the numerator's `cause` load-bearing rather than decorative. An earlier
    * cut wrote the field at every writer and consumed it only on `capture_eligible`, which is
    * precisely the inert-field defect this sink has produced repeatedly: written, validated,
-   * read by nothing. Here both ends are consumed, and the per-cause rate is the quantity part
-   * (b) actually asks for — the capture rate held constant for turn type, which the row's own
-   * 08-03 block demands and a single boolean cannot deliver.
+   * read by nothing. Here both ends are consumed, and the per-cause rate is the capture rate
+   * held constant for turn type, which a single boolean cannot deliver.
    *
    * ⚠ `rate` is null where a cause has no eligible turns: an absent stratum is "cannot tell",
    * never zero.
@@ -357,10 +351,9 @@ export interface CaptureReport {
   /**
    * What the recovery pass PRODUCED, split by turn type.
    *
-   * The row's own 08-03 block demands holding the turn TYPE constant, and that demand does not
-   * stop at the rate: if the pass finds fewer facts on research turns for reasons that have
-   * nothing to do with trust, a rate difference by cause is partly its yield difference. This
-   * is the term that lets the two be told apart.
+   * Holding the turn TYPE constant does not stop at the rate: if the pass finds fewer facts on
+   * research turns for reasons that have nothing to do with trust, a rate difference by cause is
+   * partly its yield difference. This is the term that lets the two be told apart.
    *
    * It also exists because the alternative was worse. `cause` was being written on both
    * `capture_ran` emits and read by nothing — the fifth instance of the written-validated-
