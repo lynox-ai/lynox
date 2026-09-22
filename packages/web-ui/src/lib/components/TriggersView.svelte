@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
-	import { awaitsConfirmation } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, watchUrlOf } from '../utils/trigger-consent.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -27,6 +27,9 @@
 		source?: string;
 		effect?: string;
 		watch_config?: string;
+		// Where the run's result is delivered. Named in the consent block: part of
+		// what an unattended run does is who hears about it.
+		notification_channel?: string;
 		pipeline_id?: string;
 		// SQLite kill-switch: 1/undefined = enabled, 0 = paused (schedule skipped).
 		enabled?: number;
@@ -101,16 +104,20 @@
 	// Confirm = a person allows this trigger to run unattended. Stamps
 	// `confirmed_at` through `POST /api/tasks/:id/confirm`; the trigger keeps its
 	// schedule and becomes due in place — nothing else about it changes.
+	//
+	// The message says only what confirming did. It used to add "runs on its
+	// schedule", which is false for every row the scheduler holds back for a
+	// second reason — a paused one above all, and Pause sits on this same card.
 	async function confirmTrigger(trigger: Trigger): Promise<void> {
 		if (busy[trigger.id]) return;
 		busy[trigger.id] = true;
 		try {
 			const res = await fetch(`${getApiBase()}/tasks/${trigger.id}/confirm`, { method: 'POST' });
 			if (!res.ok) throw new Error();
-			addToast(t('triggers.confirmed'), 'success');
+			addToast(trigger.enabled === 0 ? t('triggers.confirmed_paused') : t('triggers.confirmed'), 'success');
 			await loadTriggers();
 		} catch {
-			addToast(t('common.save_failed'), 'error');
+			addToast(t('triggers.confirm_failed'), 'error');
 		} finally {
 			busy[trigger.id] = false;
 		}
@@ -247,8 +254,10 @@
 										{cronToHuman(trigger.schedule_cron)}
 									</span>
 								{/if}
-								<!-- A waiting trigger keeps its next_run_at, often a date already past that
-								     never arrives, so it is not shown as the next run. -->
+								<!-- A waiting trigger keeps its next_run_at, and that date is usually in the
+								     past — it is not a next run, so it is not labelled as one. It is said
+								     in the consent block below instead, where it is the thing a person
+								     needs: what confirming starts, and when. -->
 								{#if trigger.next_run_at && trigger.enabled !== 0 && !awaitsConfirmation(trigger)}
 									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
@@ -257,32 +266,49 @@
 								{/if}
 							</div>
 							{#if awaitsConfirmation(trigger)}
-								<!-- Confirming is consent to run this instruction without the owner present,
-								     so the instruction is shown next to the button. An agent run is told the
-								     title plus the description; when the two match, the title above is all of it. -->
+								<!-- Confirming allows this to run without the owner present, so what would
+								     run is shown next to the button: the instruction an agent run is given
+								     (title plus description), the page a watch reads, and when the first run
+								     falls. `displaySafe` removes what could forge that text — it is written
+								     by the agent and can quote what the agent read elsewhere. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
 									<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>
-									{#if trigger.description && trigger.description.trim() !== trigger.title.trim()}
-										<div class="text-xs text-text-muted">
-											<span class="font-medium">{t('triggers.instruction')}:</span>
-											<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{trigger.description}</p>
-										</div>
+									<div class="text-xs text-text-muted">
+										<span class="font-medium">{t('triggers.instruction')}:</span>
+										<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf(trigger))}</p>
+									</div>
+									{#if watchUrlOf(trigger)}
+										<p class="text-xs text-text-muted break-all"><span class="font-medium">{t('triggers.watch_url')}:</span> {displaySafe(watchUrlOf(trigger) ?? '')}</p>
+									{/if}
+									{#if trigger.notification_channel}
+										<p class="text-xs text-text-muted"><span class="font-medium">{t('triggers.result_goes_to')}:</span> {displaySafe(trigger.notification_channel)}</p>
+									{/if}
+									{#if trigger.enabled === 0}
+										<p class="text-xs text-text-muted">{t('triggers.awaiting_paused')}</p>
+									{:else if trigger.next_run_at}
+										<p class="text-xs text-text-muted">
+											{new Date(trigger.next_run_at).getTime() <= Date.now()
+												? tf('triggers.awaiting_due_since', { date: fmtDate(trigger.next_run_at) })
+												: tf('triggers.awaiting_first_run', { date: fmtDate(trigger.next_run_at) })}
+										</p>
 									{/if}
 									<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/15 disabled:opacity-40">{t('triggers.confirm')}</button>
 								</div>
 							{/if}
 						</div>
-						<!-- Below `sm` the controls stay visible: a phone has no hover, so they only
-						     appeared when a tap happened to leave the card in `:hover`. -->
-						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5 [&>button]:opacity-100 sm:[&>button]:opacity-0 sm:group-hover:[&>button]:opacity-100 sm:[&>button:focus-visible]:opacity-100">
+						<!-- The controls hide until hover where hovering exists, and stay visible
+						     where it does not — keyed on the POINTER, not on a width: a touch screen
+						     wider than `sm` has no hover either, and there they only appeared when a
+						     tap happened to leave the card in `:hover`. -->
+						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. -->
 							{#if !awaitsConfirmation(trigger)}
-								<button onclick={() => runNow(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
+								<button onclick={() => runNow(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
-							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
-							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
-							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
+							<button onclick={() => togglePause(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity disabled:opacity-40">{trigger.enabled === 0 ? t('triggers.resume') : t('triggers.pause')}</button>
+							<button onclick={() => manageInChat(trigger)} aria-label={t('triggers.manage_in_chat')} title={t('triggers.manage_in_chat')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-0.5 text-[10px] text-text-muted hover:text-text transition-opacity"><Icon name="chat" size="xs" /></button>
+							<button onclick={() => deleteTrigger(trigger)} disabled={busy[trigger.id]} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity disabled:opacity-40">{t('triggers.delete')}</button>
 						</div>
 					</div>
 				</div>

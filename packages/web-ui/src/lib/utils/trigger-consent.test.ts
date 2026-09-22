@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
 import { TriggerStore, type TriggerRow } from '../../../../../src/core/trigger-store.js';
-import { awaitsConfirmation } from './trigger-consent.js';
+import { awaitsConfirmation, displaySafe, instructionOf, watchUrlOf } from './trigger-consent.js';
 
 describe('awaitsConfirmation', () => {
 	it('is true for an agent run with no confirmation, whether the field is absent or null', () => {
@@ -24,12 +24,75 @@ describe('awaitsConfirmation', () => {
 	});
 });
 
+describe('instructionOf — what the run is told, not what the row shows', () => {
+	it('is title and description together, the way the engine composes them', () => {
+		expect(instructionOf({ title: 'Mahnungen', description: 'Ab 14 Tagen, als Entwurf.' }))
+			.toBe('Mahnungen\n\nAb 14 Tagen, als Entwurf.');
+	});
+
+	it('is the title alone when there is no description — the case the view used to show nothing for', () => {
+		expect(instructionOf({ title: 'Mahnungen' })).toBe('Mahnungen');
+		expect(instructionOf({ title: 'Mahnungen', description: '' })).toBe('Mahnungen');
+		expect(instructionOf({ title: 'Mahnungen', description: '   ' })).toBe('Mahnungen');
+	});
+
+	it('does not repeat a description that only echoes the title', () => {
+		expect(instructionOf({ title: 'Mahnungen', description: ' Mahnungen ' })).toBe('Mahnungen');
+	});
+});
+
+describe('watchUrlOf — the page a watch would fetch', () => {
+	it('reads the url out of the stored config', () => {
+		expect(watchUrlOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise', selector: '.p' }) }))
+			.toBe('https://example.com/preise');
+	});
+
+	it('yields nothing rather than an empty label', () => {
+		expect(watchUrlOf({})).toBeUndefined();
+		expect(watchUrlOf({ watch_config: '' })).toBeUndefined();
+		expect(watchUrlOf({ watch_config: '{"url":""}' })).toBeUndefined();
+		expect(watchUrlOf({ watch_config: '{"url":123}' })).toBeUndefined();
+		expect(watchUrlOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
+	});
+
+	it('survives a config that is not JSON at all', () => {
+		expect(watchUrlOf({ watch_config: 'https://example.com' })).toBeUndefined();
+		expect(watchUrlOf({ watch_config: '{broken' })).toBeUndefined();
+	});
+});
+
+describe('displaySafe', () => {
+	it('drops the characters that can make the text read as something else', () => {
+		expect(displaySafe('Zahle \u202Eeuro 10\u202C aus')).toBe('Zahle euro 10 aus');
+		expect(displaySafe('lösch\u200Be alles')).toBe('lösche alles');
+		expect(displaySafe('a\u2066b\u2069c\uFEFFd\u200Ee')).toBe('abcde');
+	});
+
+	it('keeps the line breaks and tabs the instruction is written with', () => {
+		expect(displaySafe('Schritt 1\nSchritt 2\n\tEinschub')).toBe('Schritt 1\nSchritt 2\n\tEinschub');
+	});
+
+	it('drops the control characters that are not breaks', () => {
+		expect(displaySafe('a\u0000b\u001Bc\u007Fd\u2028e')).toBe('abcde');
+	});
+
+	it('leaves ordinary text alone, umlauts and emoji included', () => {
+		expect(displaySafe('Prüfe „Debitoren" — 14 Tage · 📈')).toBe('Prüfe „Debitoren" — 14 Tage · 📈');
+	});
+});
+
 /**
- * The view and the scheduler must agree on which triggers wait. This is a
- * Node-side test, so it runs the engine's own store: every row below is due in
- * every respect except consent (enabled, open, `next_run_at` in the past), so
- * the only thing that keeps one out of `getDue` is the consent rule — and the
- * view has to call exactly those rows waiting.
+ * The view and the scheduler must agree on which triggers wait FOR CONSENT.
+ * This is a Node-side test, so it runs the engine's own store: every row in the
+ * first case is due in every respect except consent (enabled, open,
+ * `next_run_at` in the past), so the only thing that keeps one out of `getDue`
+ * is the consent rule — and the view has to call exactly those rows waiting.
+ *
+ * That matrix varies ONE axis, effect × confirmation. The second case is the
+ * other direction and the weaker claim, which is all that holds in general: a
+ * trigger the view calls waiting is never due. A paused one is held back for a
+ * second reason, and the view is not entitled to say what happens after a
+ * confirmation there — which is what the toast used to get wrong.
  *
  * The records go through `listFiltered`, the query behind `GET /api/triggers`,
  * and through a JSON round trip, because that is the shape the view receives:
@@ -93,5 +156,43 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 			.filter((t) => awaitsConfirmation(t) !== !due.has(t.id))
 			.map((t) => `${t.id}: view says ${awaitsConfirmation(t) ? 'waiting' : 'runs'}, scheduler says ${due.has(t.id) ? 'due' : 'held back'}`);
 		expect(disagreements).toEqual([]);
+	});
+
+	it('and a trigger the view calls waiting is never due, whatever else holds it back', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
+		dirs.push(dir);
+		const engine = new EngineDb(join(dir, 'engine.db'), '');
+		engines.push(engine);
+		const store = new TriggerStore(engine);
+
+		// The second reasons, beside consent, that keep a row out of `getDue`. The
+		// row the equality case above pins is the ONE combination where consent is
+		// the only one — these are the rest, and the view may not speak for them.
+		const base = {
+			title: 'x', description: '', source: 'cron' as TriggerRow['source'], effect: 'run_agent' as TriggerRow['effect'],
+			conditionJson: JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }),
+			paramsJson: '{}', retryCount: 0, nextRunAt: PAST,
+		};
+		const rows: TriggerRow[] = [
+			{ ...base, id: 'paused-unconfirmed', status: 'open', enabled: false, confirmedAt: null },
+			{ ...base, id: 'paused-confirmed', status: 'open', enabled: false, confirmedAt: CONFIRMED },
+			{ ...base, id: 'completed-unconfirmed', status: 'completed', enabled: true, confirmedAt: null },
+			{ ...base, id: 'no-next-run-unconfirmed', status: 'open', enabled: true, confirmedAt: null, nextRunAt: null },
+		];
+		for (const row of rows) store.upsert(row);
+
+		const listed = JSON.parse(JSON.stringify(store.listFiltered())) as Array<{
+			id: string; effect?: string; confirmed_at?: string | null;
+		}>;
+		expect(listed).toHaveLength(rows.length);
+		const due = new Set(store.getDue().map((t) => t.id));
+		// None of these is due — so this case cannot tell a broken predicate from a
+		// working one on its own, and it is not asked to. It holds the one direction
+		// that must never break: waiting means not running.
+		expect(due.size).toBe(0);
+		expect(listed.filter((t) => awaitsConfirmation(t) && due.has(t.id))).toEqual([]);
+		// …and it really does call three of them waiting, so the filter is not empty.
+		expect(listed.filter((t) => awaitsConfirmation(t)).map((t) => t.id).sort())
+			.toEqual(['completed-unconfirmed', 'no-next-run-unconfirmed', 'paused-unconfirmed']);
 	});
 });
