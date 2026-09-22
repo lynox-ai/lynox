@@ -15,7 +15,7 @@
  */
 
 import { join } from 'node:path';
-import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
@@ -142,6 +142,13 @@ function validateProfile(profile: ApiProfile): string | null {
       if (isInfraSecret(key)) {
         return `Invalid ${field} "${key}": that is an infrastructure secret managed by the platform. It is never attached to an outbound request — use a credential the user supplied for this API.`;
       }
+    }
+    // A list of names, or nothing. The attach reads `vault_keys` by index, so any
+    // other value still hands it a name, and every other reader would have to
+    // guess the same way.
+    const vaultKeys: unknown = profile.auth.vault_keys;
+    if (vaultKeys !== undefined && !(Array.isArray(vaultKeys) && vaultKeys.every((k) => typeof k === 'string'))) {
+      return 'Invalid auth.vault_keys: must be a list of vault key names, e.g. ["MY_API_KEY"]';
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
@@ -1003,13 +1010,32 @@ function persistGrant(
 /**
  * The record's writes after an exchange: what it held, with each name this
  * exchange wrote replaced by the value it wrote now. A name keeps one entry —
- * the fingerprint of the latest value is the only one a delete may match.
+ * the fingerprint of the latest value is the only one a delete may match. That
+ * holds within one exchange too: an `output_secret_name` equal to the derived
+ * refresh name is written twice, and the vault keeps the second value.
  */
 function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
-  const rewritten = new Set(writes.map((w) => w.name));
+  const latest = new Map<string, WrittenSecret>();
+  for (const w of writes) latest.set(w.name, w);
   const kept = recordedWrites({ id: '', name: '', base_url: '', description: '', oauth_grant: current })
-    .filter((w) => !rewritten.has(w.name));
-  return [...kept, ...writes];
+    .filter((w) => !latest.has(w.name));
+  return [...kept, ...latest.values()];
+}
+
+/**
+ * The reply for an exchange that finished after its profile was deleted: the
+ * delete already ran, so nothing is left to hold a record of what the exchange
+ * wrote — it is taken out again now, where it can be, and the reply says what
+ * was and what was not.
+ */
+function deletedMeanwhile(
+  apiStore: ApiStore,
+  profile: ApiProfile,
+  writes: WrittenSecret[],
+  secretStore: SecretStoreLike,
+): string {
+  const purge = purgeRecordedTokens(apiStore, { ...profile, oauth_grant: { written: writes } }, secretStore);
+  return `Token exchange completed, but api_profile "${profile.id}" was deleted while it ran.${purgeMessage(purge)}`;
 }
 
 // ── Tool definition ───────────────────────────────────────────────────────────
@@ -1405,6 +1431,7 @@ Next steps before calling create:
       // `-`/`_` pair — and a record read from such a row is not one this
       // process's exchanges wrote.
       if (!existing) return `Deleted API profile "${id}".`;
+      if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
       return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
     }
 
@@ -1607,16 +1634,22 @@ Next steps before calling create:
         // A second writer in THIS process can rotate the token while the request
         // is out: tool calls run concurrently, so two exchanges for one profile can
         // overlap, and the provider then rejects the one that lost as spent. If
-        // the slot no longer holds what went out, that is a rotation, not a
-        // revocation. This reads the process's own view of the vault; a writer in
+        // the slot no longer holds what went out, the rejection says nothing about
+        // what it holds now, so it is no revocation. This reads the process's own view of the vault; a writer in
         // another process is not seen here — the attach's fingerprint check is
         // what lets a restart that loads the newer token past such a verdict.
-        // When that happened, the other exchange has also stored its access token
-        // already (it writes the access token before the refresh token), so the
-        // useful next step is the request itself, not another exchange that would
-        // spend the refresh token the other one just stored.
-        if (kind === 'grant-revoked' && resolveOne(refreshKey) !== presentedRefresh) {
-          return `Token exchange failed with HTTP ${response.status}: the refresh token it sent had just been replaced by another exchange for api_profile "${input.id}" that ran at the same time. That exchange stored a fresh access token. Nothing was recorded. Retry the API request; do not call fetch_token again now, it would spend the refresh token that was just stored. ${responseBody}`;
+        // The re-read shows only THAT the slot changed, not who changed it: a
+        // concurrent exchange, or a token stored by hand meanwhile. The reply says
+        // no more than that. An emptied slot is its own case — the token was
+        // removed, possibly with the profile.
+        if (kind === 'grant-revoked') {
+          const nowHeld = resolveOne(refreshKey);
+          if (nowHeld === null) {
+            return `Token exchange failed with HTTP ${response.status}, but the refresh token it sent is no longer in the vault under "${refreshKey}", so this answer says nothing about the grant. Nothing was recorded. Check with api_setup list that api_profile "${input.id}" still exists before anything else. ${responseBody}`;
+          }
+          if (nowHeld !== presentedRefresh) {
+            return `Token exchange failed with HTTP ${response.status}, but the refresh token under "${refreshKey}" was replaced while the request was out — by another exchange running at the same time, or by a token stored meanwhile — so this answer says nothing about the token stored now. Nothing was recorded. Retry the API request; if it is refused or answers 401, call fetch_token once. ${responseBody}`;
+          }
         }
         // A profile that names its own refresh slot reads from there, while every
         // exchange stores a rotated token under the derived name. The token that
@@ -1667,24 +1700,35 @@ Next steps before calling create:
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
+      // A refresh token counts as new only if it differs from what the derived slot
+      // held before this exchange wrote anything. A provider that does not rotate
+      // can answer with the very token it was sent; rewriting that and putting it on
+      // the record would make the user's own grant look like the exchange's, and a
+      // delete would take it.
+      const refreshName = refreshTokenKey(input.id);
+      const heldRefresh = resolveOne(refreshName);
+      const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' && parsed.refresh_token !== heldRefresh
+        ? parsed.refresh_token
+        : null;
       secretStore.set(outputName, accessToken);
-      // Stash refresh_token too if the response carries one (for later refresh_token grants).
-      if (parsed.refresh_token && typeof parsed.refresh_token === 'string') {
+      // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
+      if (rotated !== null) {
         // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
         // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
         // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
         // close the door and leave the window.
-        const refreshName = refreshTokenKey(input.id);
         if (isProtectedSecretWrite(refreshName)) {
           // The access token is written already; it goes on the record like any
           // other write, or no later delete could take it.
-          persistGrant(apiStore, input.id, apisDir, (current) => ({
+          const accessWrite: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
+          const saved = persistGrant(apiStore, input.id, apisDir, (current) => ({
             ...current,
-            written: mergeWrites(current, [{ name: outputName, fp: tokenFingerprint(accessToken) }]),
+            written: mergeWrites(current, accessWrite),
           }));
+          if (saved === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, accessWrite, secretStore);
           return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
         }
-        secretStore.set(refreshName, parsed.refresh_token);
+        secretStore.set(refreshName, rotated);
       }
       // Persist the expiry, absolute and in milliseconds. Until now `expires_in`
       // was formatted into the reply below and then dropped, so nothing on this
@@ -1716,9 +1760,8 @@ Next steps before calling create:
       // A success also ends a revocation verdict: a token that works is not
       // revoked. Every value this exchange wrote joins the record with its
       // fingerprint, which is what a later delete removes — and all it removes.
-      const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' ? parsed.refresh_token : null;
       const writes: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
-      if (rotated !== null) writes.push({ name: refreshTokenKey(input.id), fp: tokenFingerprint(rotated) });
+      if (rotated !== null) writes.push({ name: refreshName, fp: tokenFingerprint(rotated) });
       // The refresh token now in play: a rotated one if the answer carried it,
       // otherwise the one that just worked. The stamp names that token, so it
       // says nothing about any token stored after it.
@@ -1738,12 +1781,9 @@ Next steps before calling create:
       // Deleted while the exchange was out: there is no profile to hold the
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.
-      if (outcome === 'gone' && apiStore) {
-        purgeRecordedTokens(apiStore, { ...profile, oauth_grant: { written: writes } }, secretStore);
-        return `Token exchange completed, but api_profile "${input.id}" was deleted meanwhile, so the tokens it returned were removed again. Nothing is stored for this profile.`;
-      }
+      if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
-      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${refreshTokenKey(input.id)}\`.` : ''}`;
+      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
     }
 
     return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", or "fetch_token".';

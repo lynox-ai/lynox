@@ -355,6 +355,19 @@ function migrateV1Profile(profile: ApiProfile): ApiProfile {
 const IMPORT_SENTINEL = '.imported-to-connections';
 
 /**
+ * Whether a revocation verdict is in force: recorded, on a profile that still
+ * exchanges a refresh token — the only kind a verdict is ever recorded for. One
+ * moved to client credentials since has no user grant left to revoke. The attach
+ * and the `connections.status` projection both ask this, so the column never
+ * says `revoked` for a profile the attach lets through.
+ */
+export function hasRevokedGrant(profile: ApiProfile): boolean {
+  return profile.auth?.type === 'oauth2'
+    && profile.auth.oauth?.grant_type === 'refresh_token'
+    && profile.oauth_grant?.state === 'revoked';
+}
+
+/**
  * Collect the vault secret NAMES a profile references, for the `vault_keys`
  * name-array column. Denormalized on write so a delete/GDPR path can later purge
  * the referenced secrets without re-parsing `config_json`. Never holds secret
@@ -362,11 +375,19 @@ const IMPORT_SENTINEL = '.imported-to-connections';
  */
 function collectVaultKeys(profile: ApiProfile): string[] {
   const keys = new Set<string>();
-  // Guarded: a hand-edited or imported `vault_keys` that is not an array must not
-  // throw here, because the purge runs this over every OTHER profile too.
+  // Guarded: a `vault_keys` that is not an array must not throw here, because the
+  // purge runs this over every OTHER profile too. `api_setup` refuses one, but a
+  // stored row is not re-checked. Such a value is still read the way the attach
+  // reads it — by index, `vault_keys?.[0]` and `?.[1]` — so whatever name it
+  // hands the attach counts here as well.
   const vaultKeys: unknown = profile.auth?.vault_keys;
   if (Array.isArray(vaultKeys)) {
     for (const k of vaultKeys) if (typeof k === 'string') keys.add(k);
+  } else if (vaultKeys !== undefined && vaultKeys !== null) {
+    for (const i of [0, 1]) {
+      const k: unknown = (vaultKeys as Record<number, unknown>)[i];
+      if (typeof k === 'string') keys.add(k);
+    }
   }
   // Every name the attach can read: the basic pair as well, or a purge would
   // count a profile that reads a name as one that does not.
@@ -406,9 +427,10 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     // A projection of the engine-owned grant record, never read back: the record
     // in `config_json` is the one writer, so the column cannot disagree with it.
     // It was hard-wired to 'active', which left a revoked grant nowhere to land.
-    // Only for oauth2: a profile moved to another auth type keeps its old record,
-    // and nothing could clear a revocation that no longer describes it.
-    status: profile.auth?.type === 'oauth2' && profile.oauth_grant?.state === 'revoked' ? 'revoked' : 'active',
+    // Only while the verdict is in force (`hasRevokedGrant`): a profile moved to
+    // another auth type or to client credentials keeps its old record, and
+    // nothing could clear a revocation that no longer describes it.
+    status: hasRevokedGrant(profile) ? 'revoked' : 'active',
   };
 }
 

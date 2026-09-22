@@ -1,7 +1,7 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
-import { accessTokenKey, refreshTokenKey } from '../../core/api-store.js';
+import { accessTokenKey, hasRevokedGrant, refreshTokenKey } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -530,11 +530,11 @@ async function attachEngineManagedAuth(
     // And only for a refresh-token profile — the only kind a revocation is ever
     // recorded for; one moved to client credentials since has no refresh token
     // to hand back, and the text would send the user after one.
-    if (profile.oauth_grant?.state === 'revoked' && profile.auth?.oauth?.grant_type === 'refresh_token') {
+    if (hasRevokedGrant(profile)) {
       const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
       const current = secretStore.resolve(refreshKey);
-      if (current === null || tokenFingerprint(current) === profile.oauth_grant.revoked_fp) {
-        return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant.revoked_at) };
+      if (current === null || tokenFingerprint(current) === profile.oauth_grant?.revoked_fp) {
+        return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant?.revoked_at) };
       }
     }
     // Profile drives — the agent should NOT have to remember which vault key holds
@@ -661,9 +661,9 @@ async function attachEngineManagedAuth(
 /**
  * Header, query-param and vault-key names come from the PROFILE, and a
  * prompt-injected agent can author one: `validateProfile` shape-checks
- * `username_key`/`password_key` but never `vault_keys`, `header_name` or
- * `query_param`. These land in a hint that is appended OUTSIDE the
- * `untrusted_data` wrap on purpose — system guidance, which the model is meant to
+ * `username_key`/`password_key`, checks `vault_keys` only for being a list of
+ * strings, and never checks `header_name` or `query_param`. These land in a
+ * hint that is appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the model is meant to
  * trust — so a name carrying newlines can forge a reminder of its own.
  *
  * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`

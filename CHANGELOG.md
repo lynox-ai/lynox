@@ -11,12 +11,17 @@
   still holds that very value — unless another profile still references the
   name or it falls into a platform prefix. Neither a name nor a record alone
   is enough: a name derived from the profile id, or one an exchange wrote
-  earlier, can hold a token the user has stored there by hand. Tokens from
-  before this change are not on any record and stay.
-- `api_setup delete` names what it removed and what is still in the vault,
-  and says to ask the user before removing the rest.
+  earlier, can hold a token the user has stored there by hand. A refresh token
+  the provider hands back unchanged is neither rewritten nor recorded, so it
+  stays the user's. Tokens from before this change are not on any record and
+  stay.
+- `api_setup delete` names what it removed and which of the names the
+  profile used still hold a value, and says to ask the user before removing
+  the rest.
 - The `vault_keys` column of a connection also lists the token names an
-  oauth2 profile uses at runtime.
+  oauth2 profile uses at runtime, the names its exchanges recorded, and a
+  basic profile's `username_key`/`password_key`.
+- `api_setup` refuses an `auth.vault_keys` that is not a list of names.
 
 ### Changed: a failed token refresh says whether the grant was revoked
 
@@ -27,18 +32,18 @@
   different client, are a client problem that leaves the grant alone;
   anything else changes nothing. Which client minted a token is stamped with
   the token, as fingerprints of both, so a refresh token stored later is
-  judged on its own. When a concurrent exchange in the same process has
-  already rotated the refresh token by the time the rejection arrives, that is
-  a rotation, not a revocation: nothing is recorded, and the reply points to
-  the request itself, since a fresh access token is already stored. A
-  rejection that arrives before the other exchange finishes can still record a
-  revocation; that exchange's success clears it.
+  judged on its own. When the refresh token in the vault has changed or gone
+  by the time the rejection arrives — a concurrent exchange in the same
+  process rotated it, or a token was stored or removed meanwhile — nothing is
+  recorded, and the reply says what changed. A rejection that arrives before a
+  concurrent exchange finishes can still record a revocation; that exchange's
+  success clears it.
 - A revocation is recorded on the profile (`oauth_grant`, engine-owned like
   `custom_endpoint_ack`: a value in a create or update is discarded, and the
-  reply says so) and projected into `connections.status`. `fetch_token` will
-  not resend the rejected refresh token, and `http_request` refuses the
-  profile with the way back, instead of a 401 whose hint called it an expired
-  token. A different refresh token in the vault clears the way for both; the
+  reply says so) and projected into `connections.status` while the profile
+  exchanges a refresh token. `fetch_token` will not resend the rejected
+  refresh token, and `http_request` refuses the profile with the way back,
+  instead of a 401 whose hint called it an expired token. A different refresh token in the vault clears the way for both; the
   next successful exchange clears the record. A profile that reads its refresh
   token from a slot of its own naming gets no verdict, because `fetch_token`
   stores rotated tokens under the derived name.

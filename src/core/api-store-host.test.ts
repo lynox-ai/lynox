@@ -250,8 +250,35 @@ describe('ApiStore — grant record projections', () => {
     const cs = makeCs();
     const store = new ApiStore();
     store.setConnectionStore(cs);
-    store.save({ ...oauthProfile({ oauth_grant: { state: 'revoked' } }), auth: { type: 'bearer', vault_keys: ['CRM_KEY'] } });
+    // The oauth block is left over from before; the type decides.
+    const leftover = oauthProfile().auth!.oauth!;
+    store.save({ ...oauthProfile({ oauth_grant: { state: 'revoked' } }), auth: { type: 'bearer', vault_keys: ['CRM_KEY'], oauth: leftover } });
     expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
+  it('does not project a revocation for an oauth2 profile moved to client credentials — the attach lets it through', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    const base = oauthProfile({ oauth_grant: { state: 'revoked' } });
+    store.save({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, grant_type: 'client_credentials' } } });
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
+  it('lists only string entries of vault_keys in the trail', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save({ ...oauthProfile(), auth: { type: 'bearer', vault_keys: [5, 'CRM_KEY'] as unknown as string[] } });
+    expect(cs.get('crm-api')?.vaultKeys).toEqual(['CRM_KEY']);
+  });
+
+  it('lists what the attach reads from an array-like vault_keys: its first two entries', () => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.save({ ...oauthProfile(), auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: { 0: 'CRM_USER', 1: 'CRM_PASS', 2: 'CRM_UNREAD' } as unknown as string[] } });
+    expect(cs.get('crm-api')?.vaultKeys).toEqual(['CRM_USER', 'CRM_PASS']);
   });
 
   it('lists the derived token names in the trail only for an oauth2 profile', () => {

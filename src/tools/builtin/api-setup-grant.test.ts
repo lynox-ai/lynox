@@ -234,13 +234,13 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
     expect(store.get('crm-api')?.oauth_grant).toEqual(stamp('client-1', 'rt-1'));
   });
 
-  it('reads invalid_grant as a rotation, not a revocation, when a concurrent exchange replaced the token mid-flight', async () => {
+  it('records no verdict when the refresh token was replaced mid-flight, and claims no more than that', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     const vault = vaultWithRefresh('rt-1');
     const agent = makeAgent(store, vault);
-    // The other writer in this process: while the POST is out, the slot is
-    // rotated to rt-2, and the provider then rejects the spent rt-1.
+    // Another writer in this process — a concurrent exchange, or a token stored
+    // by hand — replaces rt-1 while the POST is out; the provider rejects rt-1.
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
       vault.set(REFRESH, 'rt-2');
       return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
@@ -248,7 +248,43 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
 
     const result = await fetchToken(agent);
 
-    expect(result).toContain('Retry the API request; do not call fetch_token again now');
+    expect(result).toContain(`the refresh token under "${REFRESH}" was replaced while the request was out`);
+    expect(result).toContain('Nothing was recorded. Retry the API request; if it is refused or answers 401, call fetch_token once.');
+    expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
+  });
+
+  it('records no verdict when the refresh token was removed mid-flight, and sends the model to check the profile', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    const vault = vaultWithRefresh('rt-1');
+    const agent = makeAgent(store, vault);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      vault.deleteSecret?.(REFRESH);
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    });
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain(`the refresh token it sent is no longer in the vault under "${REFRESH}"`);
+    expect(result).toContain('Check with api_setup list that api_profile "crm-api" still exists');
+    expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
+  });
+
+  it('says the slot changed, not that its refresh token is stale, when a profile\'s own slot changes mid-flight', async () => {
+    const store = new ApiStore();
+    const base = crmProfile({ oauth_grant: stamp('client-1', 'rt-1') });
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT' } } });
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT: 'rt-1' });
+    const agent = makeAgent(store, vault);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      vault.set('CRM_RT', 'rt-2');
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    });
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('the refresh token under "CRM_RT" was replaced while the request was out');
+    expect(result).not.toContain('stores a rotated one');
     expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
   });
 
@@ -373,14 +409,100 @@ describe('fetch_token — what a successful exchange records', () => {
     const store = new ApiStore();
     // `lynox-x` derives LYNOX_X_REFRESH_TOKEN, a platform prefix; the access token goes to a chosen name.
     // Reachable with client credentials: the answer carries a refresh token nobody reads.
-    store.register({ ...crmProfile({}, 'client_credentials'), id: 'lynox-x', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] } });
+    store.register({ ...crmProfile({}, 'client_credentials'), id: 'lynox-x', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] }, oauth_grant: { written: wrote({ LX_EARLIER: 'e-1' }) } });
     const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', LYNOX_X_REFRESH_TOKEN: 'platform-owned' }));
     tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
 
     const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'lynox-x', output_secret_name: 'LX_TOKEN' }, agent) as string;
 
     expect(result).toContain('the refresh token was NOT stored');
-    expect(store.get('lynox-x')?.oauth_grant?.written).toEqual(wrote({ LX_TOKEN: 'at-1' }));
+    // Added to what the record held, not in place of it.
+    expect(store.get('lynox-x')?.oauth_grant?.written).toEqual(wrote({ LX_EARLIER: 'e-1', LX_TOKEN: 'at-1' }));
+  });
+
+  it('takes that access token out again when the profile was deleted while the exchange ran', async () => {
+    const store = new ApiStore();
+    store.register({ ...crmProfile({}, 'client_credentials'), id: 'lynox-x', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] } });
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', LYNOX_X_REFRESH_TOKEN: 'platform-owned' });
+    const agent = makeAgent(store, vault);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      store.unregister('lynox-x');
+      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'lynox-x', output_secret_name: 'LX_TOKEN' }, agent) as string;
+
+    expect(result).toContain('was deleted while it ran. Removed the tokens its exchanges wrote: LX_TOKEN.');
+    expect(vault.peek('LX_TOKEN')).toBeUndefined();
+  });
+
+  it('neither rewrites nor records a refresh token the provider hands back unchanged, so a delete leaves it', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const vault = vaultWithRefresh('rt-pasted');
+    const agent = makeAgent(store, vault);
+    const setSpy = vi.spyOn(vault, 'set');
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-pasted', expires_in: 3600 }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('Token exchange OK');
+    expect(result).not.toContain('Refresh token stored as');
+    expect(setSpy.mock.calls.map(([name]) => name)).toEqual([ACCESS]);
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1' }));
+    expect(store.get('crm-api')?.oauth_grant?.minted_for).toBe(tokenFingerprint('rt-pasted'));
+
+    const deleted = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(vault.peek(REFRESH)).toBe('rt-pasted');
+    expect(deleted).toContain(`Removed the tokens its exchanges wrote: ${ACCESS}.`);
+    expect(deleted).toContain(`Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET, ${REFRESH}.`);
+  });
+
+  it('compares a returned refresh token with the slot it writes to, not the one a split profile reads', async () => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT' } } });
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT: 'rt-1' });
+    const agent = makeAgent(store, vault);
+    // The provider hands back the token it was sent; the derived slot held nothing.
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    // A copy the exchange made under the derived name is its own write.
+    expect(vault.peek(REFRESH)).toBe('rt-1');
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1', [REFRESH]: 'rt-1' }));
+    expect(vault.peek('CRM_RT')).toBe('rt-1');
+  });
+
+  it('keeps one entry per name when the chosen output name is the derived refresh name', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const vault = vaultWithRefresh('rt-1');
+    const agent = makeAgent(store, vault);
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
+
+    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: REFRESH }, agent);
+
+    // Written twice; the vault keeps the second value, and so does the record.
+    expect(vault.peek(REFRESH)).toBe('rt-2');
+    expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [REFRESH]: 'rt-2' }));
+  });
+
+  it('keeps the tokens it wrote when only the save of its record fails', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const vault = vaultWithRefresh();
+    const agent = makeAgent(store, vault);
+    vi.spyOn(store, 'save').mockReturnValue({ ok: false } as never);
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('Token exchange OK');
+    expect(vault.peek(ACCESS)).toBe('at-1');
+    expect(vault.peek(REFRESH)).toBe('rt-2');
   });
 
   it('takes the tokens out again when the profile was deleted while its exchange was in flight', async () => {
@@ -395,9 +517,30 @@ describe('fetch_token — what a successful exchange records', () => {
 
     const result = await fetchToken(agent);
 
-    expect(result).toContain('was deleted meanwhile');
+    expect(result).toContain(`was deleted while it ran. Removed the tokens its exchanges wrote: ${ACCESS}, ${REFRESH}.`);
     expect(vault.peek(ACCESS)).toBeUndefined();
     expect(vault.peek(REFRESH)).toBeUndefined();
+  });
+
+  it('names what it could not take out when the profile was deleted while its exchange ran', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    // Another profile reads the name this exchange writes its access token to.
+    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    const vault = vaultWithRefresh();
+    const agent = makeAgent(store, vault);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      store.unregister('crm-api');
+      return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const result = await fetchToken(agent);
+
+    expect(vault.peek(ACCESS)).toBe('at-1');
+    expect(vault.peek(REFRESH)).toBeUndefined();
+    expect(result).toContain(`Removed the tokens its exchanges wrote: ${REFRESH}.`);
+    expect(result).toContain(`Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET, ${ACCESS}.`);
+    expect(result).not.toContain('Nothing is stored');
   });
 
   it('writes its record onto the profile as it is after the exchange, not the copy read before it', async () => {
@@ -457,6 +600,23 @@ describe('fetch_token — what a successful exchange records', () => {
     await fetchToken(agent);
 
     expect(cs.get('crm-api')?.status).toBe('revoked');
+  });
+});
+
+describe('create — vault_keys is a list of names', () => {
+  it.each([
+    ['an object', { 0: 'CRM_KEY' }],
+    ['a string', 'CRM_KEY'],
+    ['a list holding a non-string', ['CRM_KEY', 5]],
+  ])('refuses %s', async (_label, vaultKeys) => {
+    const store = new ApiStore();
+    const agent = makeAgent(store, makeVault({}), async () => 'allow');
+    const result = await apiSetupTool.handler({ action: 'create', profile: {
+      ...crmProfile(), auth: { type: 'bearer', vault_keys: vaultKeys as unknown as string[] },
+    } }, agent) as string;
+
+    expect(result).toContain('Invalid auth.vault_keys: must be a list of vault key names');
+    expect(store.get('crm-api')).toBeUndefined();
   });
 });
 
@@ -573,6 +733,21 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
     store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    const vault = makeVault({ [ACCESS]: 'shared' });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(vault.peek(ACCESS)).toBe('shared');
+    expect(result).not.toContain('Removed');
+    expect(result).toContain(`Still in the vault: ${ACCESS}.`);
+  });
+
+  it('keeps a recorded token a neighbour reads through an array-like vault_keys', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
+    // Not an array, but the attach reads `vault_keys?.[0]` from it all the same.
+    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: { 0: ACCESS } as unknown as string[] } });
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -697,12 +872,83 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
 
     expect(result).toContain(`Could NOT remove ${ACCESS}`);
+    // Named once, as not removable — not also as something the user may keep.
+    expect(result).not.toContain('Still in the vault');
+    expect(vault.peek(ACCESS)).toBe('at-1');
+  });
+
+  it('names as not removable only a recorded value that is still there', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
+    const vault = makeVault({ [ACCESS]: 'the-users-own-token' }, { canDelete: false });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).not.toContain('Could NOT remove');
+    expect(result).toContain(`Still in the vault: ${ACCESS}.`);
+  });
+
+  it('says so when the vault throws on a delete', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
+    const vault = makeVault({ [ACCESS]: 'at-1' });
+    vault.deleteSecret = () => { throw new Error('vault locked'); };
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toContain(`Could NOT remove ${ACCESS}`);
+  });
+
+  it('finishes the delete when reading one name throws', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', [ACCESS]: 'at-1' });
+    const plain = vault.resolve;
+    vault.resolve = (name) => { if (name === 'CRM_CLIENT_ID') throw new Error('expired'); return plain(name); };
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toBe(`Deleted API profile "crm-api". Removed the tokens its exchanges wrote: ${ACCESS}.`);
+  });
+
+  it('passes over a recorded name that holds nothing any more', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
+    const agent = makeAgent(store, makeVault({}));
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toBe('Deleted API profile "crm-api".');
+  });
+
+  it('says so when no vault is available, instead of a bare delete', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
+    const agent = makeAgent(store, null as never);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toBe('Deleted API profile "crm-api". No vault is available here, so no token was checked or removed.');
+  });
+
+  it('tolerates a record whose written field is not a list at all', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { written: ACCESS as unknown as OAuthGrantRecord['written'] } }));
+    const vault = makeVault({ [ACCESS]: 'at-1' });
+    const agent = makeAgent(store, vault);
+
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+
+    expect(result).toContain('Deleted API profile "crm-api".');
     expect(vault.peek(ACCESS)).toBe('at-1');
   });
 
   it('tolerates a record whose written list is not an array of entries', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written: [ACCESS, { name: ACCESS }] as unknown as OAuthGrantRecord['written'] } }));
+    store.register(crmProfile({ oauth_grant: { written: [null, ACCESS, { name: ACCESS }] as unknown as OAuthGrantRecord['written'] } }));
     const vault = makeVault({ [ACCESS]: 'at-1' });
     const agent = makeAgent(store, vault);
 
