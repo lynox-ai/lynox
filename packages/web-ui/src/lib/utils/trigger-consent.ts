@@ -41,6 +41,38 @@ export function showsInstruction(trigger: {
 }
 
 /**
+ * The address a waiting watch would fetch, when the view can actually show it.
+ *
+ * A watch is confirmed on its TARGET, not on an instruction it never receives,
+ * so the consent needs the address — and if the stored config cannot be read,
+ * there is nothing to consent to and the block falls back to the waiting state
+ * alone. Saying "confirm this" over an address the view could not produce would
+ * be the same mistake as showing a watch the instruction text.
+ */
+export function showsWatchTarget(trigger: {
+	effect?: string | undefined;
+	source?: string | undefined;
+	confirmed_at?: string | null | undefined;
+	watch_config?: string | undefined;
+}): boolean {
+	return awaitsConfirmation(trigger) && trigger.source === 'watch' && watchOf(trigger) !== undefined;
+}
+
+/**
+ * Whether the block may offer the button at all — ONE gate, so the button
+ * cannot outlive the thing it consents to. Each side has its own display and
+ * its own test; this is where they meet.
+ */
+export function offersConfirmation(trigger: {
+	effect?: string | undefined;
+	source?: string | undefined;
+	confirmed_at?: string | null | undefined;
+	watch_config?: string | undefined;
+}): boolean {
+	return showsInstruction(trigger) || showsWatchTarget(trigger);
+}
+
+/**
  * Characters that put text where a reader sees none, or render a run in an order
  * it is not written in: the bidi embeddings, overrides and isolates, the
  * zero-width and invisible-format characters, and the TAG block, which encodes a
@@ -115,3 +147,40 @@ export function instructionOf(trigger: { title: string; description?: string | u
 	if (description === '' || description === trigger.title.trim()) return trigger.title;
 	return `${trigger.title}\n\n${description}`;
 }
+
+/**
+ * The page a watch trigger reads, out of its stored config.
+ *
+ * A watch does not run the text above: `executeWatch` builds its prompt from
+ * this URL and from what it fetched there (*"You are monitoring <url> for
+ * changes"*), and the description reaches it nowhere. The title appears only
+ * afterwards, as the heading of the notification. Confirming a watch without
+ * seeing the address would be consent to a repeated fetch of a page the view
+ * never showed.
+ *
+ * `watch_config` is JSON that reaches here as a string from the wire; anything
+ * that is not an object with a non-empty string `url` yields nothing, and the
+ * block that shows it disappears rather than rendering an empty label.
+ */
+export function watchOf(trigger: { watch_config?: string | undefined }):
+	{ url: string; intervalMinutes?: number | undefined } | undefined {
+	if (!trigger.watch_config) return undefined;
+	try {
+		const config = JSON.parse(trigger.watch_config) as { url?: unknown; interval_minutes?: unknown };
+		if (typeof config.url !== 'string' || config.url === '') return undefined;
+		// A model-authored "url" is a string of any length, and `break-all` would
+		// wrap it into a wall that pushes the button off the screen — the failure
+		// `prompt-origin.ts` names: the person cannot see what they are agreeing
+		// to. Cut on code points so an emoji or a surrogate pair is not halved.
+		const chars = [...config.url];
+		const url = chars.length > URL_DISPLAY_MAX ? `${chars.slice(0, URL_DISPLAY_MAX - 1).join('')}…` : config.url;
+		return typeof config.interval_minutes === 'number' && Number.isFinite(config.interval_minutes)
+			? { url, intervalMinutes: config.interval_minutes }
+			: { url };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Long enough for a real URL with a path, short enough to leave the button on screen. */
+const URL_DISPLAY_MAX = 160;

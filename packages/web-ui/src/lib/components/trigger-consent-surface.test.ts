@@ -62,9 +62,9 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';",
 		);
-		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'showsInstruction']) {
+		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'offersConfirmation', 'showsInstruction', 'showsWatchTarget', 'watchOf']) {
 			expect(SCRIPT, name).not.toMatch(new RegExp(`function\\s+${name}|${name}\\s*=`));
 		}
 	});
@@ -105,27 +105,38 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 	it('what would run comes BEFORE the button, not after it', () => {
 		const { body } = ifBlockAround('data-trigger-consent');
 		const button = body.indexOf('<button onclick={() => confirmTrigger(trigger)}');
-		for (const marker of ['data-consent-instruction', "t('triggers.awaiting_hint')"]) {
+		for (const marker of ['data-consent-instruction', 'data-consent-watch', "t('triggers.awaiting_hint')"]) {
 			expect(body.indexOf(marker), marker).toBeGreaterThan(-1);
 			expect(body.indexOf(marker), marker).toBeLessThan(button);
 		}
 	});
 
-	it('the instruction and the button are gated on showsInstruction, together', () => {
-		// One conditional for both: the button may not outlive the text it consents
-		// to. A watch reaches the block (it waits too) and gets the state only.
-		const { cond, body } = ifBlockAround('data-consent-instruction');
-		expect(cond).toBe('showsInstruction(trigger)');
-		expect(body).toContain('<button onclick={() => confirmTrigger(trigger)}');
+	it('the instruction is gated on showsInstruction, the watch target on showsWatchTarget', () => {
+		const instruction = ifBlockAround('data-consent-instruction');
+		expect(instruction.cond).toBe('showsInstruction(trigger)');
 		expect(line('data-consent-instruction')).toBe('<div class="text-xs text-text-muted" data-consent-instruction>');
 		expect(line('{displaySafe(instructionOf(trigger))}')).toBe(
 			'<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words'
 			+ ' rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
 			+ '{displaySafe(instructionOf(trigger))}</p>',
 		);
-		// The hint is OUTSIDE that branch: a waiting watch still says it is waiting.
-		const block = ifBlockAround('data-trigger-consent').body;
-		expect(block.indexOf("t('triggers.awaiting_hint')")).toBeLessThan(block.indexOf('showsInstruction(trigger)'));
+		const watch = ifBlockAround('data-consent-watch');
+		expect(watch.cond).toBe('showsWatchTarget(trigger)');
+		expect(line('data-consent-watch')).toBe('<div class="text-xs text-text-muted" data-consent-watch>');
+		expect(watch.body).toContain("{displaySafe(watchOf(trigger)?.url ?? '')}");
+		expect(watch.body).toContain("tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })");
+		// The two never both render: an instruction belongs to the standard run, a
+		// target to the watch, and `showsWatchTarget` requires the watch source.
+		expect(instruction.body).not.toContain('data-consent-watch');
+		expect(watch.body).not.toContain('data-consent-instruction');
+	});
+
+	it('ONE gate decides the button, for both kinds', () => {
+		// The button may not outlive the thing it consents to, and it may not be
+		// duplicated per kind — one conditional, asserted whole, plus the count.
+		const button = ifBlockAround('confirmTrigger(trigger)');
+		expect(button.cond).toBe('offersConfirmation(trigger)');
+		expect(TEMPLATE.split('confirmTrigger(trigger)')).toHaveLength(2);
 	});
 
 	it('says nothing about WHEN the run comes', () => {

@@ -157,6 +157,28 @@ describe('Task Tools', () => {
       expect(result).toContain('every 5min');
     });
 
+    it('tells the truth about what happens next — the row does not run yet', async () => {
+      // Both answers used to describe a running automation: "watching <url> every
+      // 60min" and a bare "next run: <date>". An agent-made trigger lands
+      // unconfirmed, and the scheduler skips it with no failure and no note — so
+      // the tool was the only thing that spoke, and it spoke wrongly. The pending
+      // step is named because the Triggers view now offers it.
+      const watch = await taskCreateTool.handler(
+        { title: 'Preise', watch_url: 'https://example.com', watch_interval_minutes: 30 },
+        makeAgent(),
+      );
+      expect(watch).toMatch(/confirm it in Triggers/);
+      expect(watch).not.toMatch(/^.*— watching /);
+
+      const scheduled = await taskCreateTool.handler(
+        { title: 'Bericht', schedule: '0 9 * * 1' },
+        makeAgent(),
+      );
+      expect(scheduled).toMatch(/confirm it in Triggers/);
+      // …and it still says WHEN, because that half was never the problem.
+      expect(scheduled).toContain('next run:');
+    });
+
     it('keeps a watch interval that is already above the floor', async () => {
       const result = await taskCreateTool.handler(
         { title: 'Watch', watch_url: 'https://example.com', watch_interval_minutes: 30 },

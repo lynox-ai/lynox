@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
-	import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction } from '../utils/trigger-consent.js';
+	import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
 	// table split out of `tasks` in v42. This is the editable *home* for them:
@@ -269,8 +269,11 @@
 								     would carry out is shown beside the button — a button next to nothing but an
 								     agent-written heading is a rubber stamp. `displaySafe` removes what could
 								     forge that text; it is written by the agent and can quote what the agent read
-								     elsewhere. A watch runs on a page instead and never receives this text, so it
-								     shows its waiting state and no button at all (`showsInstruction`). -->
+								     elsewhere. A watch runs on a PAGE and never receives that text, so it is asked
+								     about its address and cadence instead (`showsWatchTarget`) — and if the stored
+								     address cannot be read, it is asked nothing at all, because there would be
+								     nothing to agree to. One gate for the button (`offersConfirmation`), so it can
+								     never outlive the thing it consents to. -->
 								<div class="mt-2 space-y-1.5" data-trigger-consent>
 									<p class="text-xs text-warning">{t('triggers.awaiting_hint')}</p>
 									{#if showsInstruction(trigger)}
@@ -278,6 +281,17 @@
 											<span class="font-medium">{t('triggers.instruction')}:</span>
 											<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(instructionOf(trigger))}</p>
 										</div>
+									{/if}
+									{#if showsWatchTarget(trigger)}
+										<div class="text-xs text-text-muted" data-consent-watch>
+											<span class="font-medium">{t('triggers.watch_url')}:</span>
+											<p class="mt-0.5 break-words rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">{displaySafe(watchOf(trigger)?.url ?? '')}</p>
+											{#if watchOf(trigger)?.intervalMinutes}
+												<p class="mt-0.5">{tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })}</p>
+											{/if}
+										</div>
+									{/if}
+									{#if offersConfirmation(trigger)}
 										<button onclick={() => confirmTrigger(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.confirm_label')} title={t('triggers.confirm_label')} class="rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1 text-xs text-accent-text hover:bg-accent/15 disabled:opacity-40">{t('triggers.confirm')}</button>
 									{/if}
 								</div>

@@ -216,7 +216,10 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           scheduleCron: input.schedule,
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-        return `Scheduled task created: ${formatTaskLine(task)}${nextRun}`;
+        // Says the pending step, because the row does NOT run yet: an agent-made
+        // trigger lands unconfirmed and the scheduler skips it silently. Reporting
+        // only the next run made the tool promise something the engine holds back.
+        return `Scheduled task created: ${formatTaskLine(task)}${nextRun} — it runs once you confirm it in Triggers.`;
       }
 
       if (input.watch_url) {
@@ -228,7 +231,9 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           watchUrl: input.watch_url,
           watchIntervalMinutes: intervalMinutes,
         });
-        return `Watch task created: ${formatTaskLine(task)} — watching ${input.watch_url} every ${String(intervalMinutes)}min`;
+        // Same correction as the scheduled branch, and the older of the two lies:
+        // "watching X every Nmin" described a row the scheduler never returns.
+        return `Watch task created: ${formatTaskLine(task)} — it checks ${input.watch_url} every ${String(intervalMinutes)}min once you confirm it in Triggers.`;
       }
 
       if (input.run_at) {

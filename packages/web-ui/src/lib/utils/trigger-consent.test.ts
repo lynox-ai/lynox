@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
 import { TriggerStore, type TriggerRow } from '../../../../../src/core/trigger-store.js';
-import { awaitsConfirmation, displaySafe, instructionOf, showsInstruction } from './trigger-consent.js';
+import {
+	awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf,
+} from './trigger-consent.js';
 
 describe('awaitsConfirmation', () => {
 	it('is true for an agent run with no confirmation, whether the field is absent or null', () => {
@@ -54,6 +56,78 @@ describe('instructionOf — what the run is told, not what the row shows', () =>
 
 	it('does not repeat a description that only echoes the title', () => {
 		expect(instructionOf({ title: 'Mahnungen', description: ' Mahnungen ' })).toBe('Mahnungen');
+	});
+});
+
+describe('watchOf — the page a watch would fetch, and how often', () => {
+	it('reads the url and the interval out of the stored config', () => {
+		expect(watchOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise', interval_minutes: 60, selector: '.p' }) }))
+			.toEqual({ url: 'https://example.com/preise', intervalMinutes: 60 });
+	});
+
+	it('gives the url alone when the config carries no usable interval', () => {
+		expect(watchOf({ watch_config: '{"url":"https://example.com"}' })).toEqual({ url: 'https://example.com' });
+		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":"60"}' })).toEqual({ url: 'https://example.com' });
+	});
+
+	it('yields nothing rather than an empty label', () => {
+		expect(watchOf({})).toBeUndefined();
+		expect(watchOf({ watch_config: '' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":""}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":123}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
+	});
+
+	it('survives a config that is not JSON at all', () => {
+		expect(watchOf({ watch_config: 'https://example.com' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{broken' })).toBeUndefined();
+	});
+
+	it('cuts a url that would push the button off the screen', () => {
+		// Nothing bounds this string on the way in, and the block renders it next to
+		// the Confirm button: an unbounded one buries the thing being agreed to.
+		const long = `https://example.com/${'a'.repeat(5000)}`;
+		const shown = watchOf({ watch_config: JSON.stringify({ url: long }) })?.url ?? '';
+		expect(shown.length).toBeLessThan(200);
+		expect(shown.endsWith('\u2026')).toBe(true);
+		expect(long.startsWith(shown.slice(0, -1))).toBe(true);
+	});
+
+	it('cuts on code points, so a surrogate pair is not halved', () => {
+		const url = `https://example.com/${'\uD83D\uDCC8'.repeat(400)}`;
+		const shown = watchOf({ watch_config: JSON.stringify({ url }) })?.url ?? '';
+		expect(shown).not.toContain('\uFFFD');
+		expect([...shown].every((c) => c.codePointAt(0) !== 0xD83D)).toBe(true);
+	});
+});
+
+describe('showsWatchTarget / offersConfirmation — who may be asked, and for what', () => {
+	const watch = { effect: 'run_agent', source: 'watch', watch_config: JSON.stringify({ url: 'https://example.com/p', interval_minutes: 30 }) };
+
+	it('asks for a watch on its TARGET, never on the instruction it does not receive', () => {
+		expect(showsWatchTarget(watch)).toBe(true);
+		expect(showsInstruction(watch)).toBe(false);
+		expect(offersConfirmation(watch)).toBe(true);
+	});
+
+	it('asks for a scheduled run on its instruction, and not on a target it has none of', () => {
+		const cron = { effect: 'run_agent', source: 'cron' };
+		expect(showsInstruction(cron)).toBe(true);
+		expect(showsWatchTarget(cron)).toBe(false);
+		expect(offersConfirmation(cron)).toBe(true);
+	});
+
+	it('does NOT ask when the address cannot be read — there would be nothing to agree to', () => {
+		for (const config of [undefined, '', '{broken', '{"url":""}', '{"selector":".p"}']) {
+			const row = { effect: 'run_agent', source: 'watch', ...(config === undefined ? {} : { watch_config: config }) };
+			expect(showsWatchTarget(row), String(config)).toBe(false);
+			expect(offersConfirmation(row), String(config)).toBe(false);
+		}
+	});
+
+	it('asks nobody once the trigger is confirmed, and nobody for the effects that never wait', () => {
+		expect(offersConfirmation({ ...watch, confirmed_at: '2026-01-01T00:00:00.000Z' })).toBe(false);
+		expect(offersConfirmation({ effect: 'run_workflow', source: 'cron' })).toBe(false);
 	});
 });
 
