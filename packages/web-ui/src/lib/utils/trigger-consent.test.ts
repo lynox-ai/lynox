@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../../../../src/core/engine-db.js';
 import { TriggerStore, type TriggerRow } from '../../../../../src/core/trigger-store.js';
-import { awaitsConfirmation, displaySafe, instructionOf, watchUrlOf } from './trigger-consent.js';
+import { awaitsConfirmation, confirmationOutcome, displaySafe, instructionOf, watchOf } from './trigger-consent.js';
 
 describe('awaitsConfirmation', () => {
 	it('is true for an agent run with no confirmation, whether the field is absent or null', () => {
@@ -41,31 +41,58 @@ describe('instructionOf — what the run is told, not what the row shows', () =>
 	});
 });
 
-describe('watchUrlOf — the page a watch would fetch', () => {
-	it('reads the url out of the stored config', () => {
-		expect(watchUrlOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise', selector: '.p' }) }))
-			.toBe('https://example.com/preise');
+describe('watchOf — the page a watch would fetch, and how often', () => {
+	it('reads the url and the interval out of the stored config', () => {
+		expect(watchOf({ watch_config: JSON.stringify({ url: 'https://example.com/preise', interval_minutes: 60, selector: '.p' }) }))
+			.toEqual({ url: 'https://example.com/preise', intervalMinutes: 60 });
+	});
+
+	it('gives the url alone when the config carries no usable interval', () => {
+		expect(watchOf({ watch_config: '{"url":"https://example.com"}' })).toEqual({ url: 'https://example.com' });
+		expect(watchOf({ watch_config: '{"url":"https://example.com","interval_minutes":"60"}' })).toEqual({ url: 'https://example.com' });
 	});
 
 	it('yields nothing rather than an empty label', () => {
-		expect(watchUrlOf({})).toBeUndefined();
-		expect(watchUrlOf({ watch_config: '' })).toBeUndefined();
-		expect(watchUrlOf({ watch_config: '{"url":""}' })).toBeUndefined();
-		expect(watchUrlOf({ watch_config: '{"url":123}' })).toBeUndefined();
-		expect(watchUrlOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
+		expect(watchOf({})).toBeUndefined();
+		expect(watchOf({ watch_config: '' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":""}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"url":123}' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{"selector":".p"}' })).toBeUndefined();
 	});
 
 	it('survives a config that is not JSON at all', () => {
-		expect(watchUrlOf({ watch_config: 'https://example.com' })).toBeUndefined();
-		expect(watchUrlOf({ watch_config: '{broken' })).toBeUndefined();
+		expect(watchOf({ watch_config: 'https://example.com' })).toBeUndefined();
+		expect(watchOf({ watch_config: '{broken' })).toBeUndefined();
+	});
+
+	it('cuts a url that would push the button off the screen', () => {
+		// Nothing bounds this string on the way in, and the block renders it next to
+		// the Confirm button: an unbounded one buries the thing being agreed to.
+		const long = `https://example.com/${'a'.repeat(5000)}`;
+		const shown = watchOf({ watch_config: JSON.stringify({ url: long }) })?.url ?? '';
+		expect(shown.length).toBeLessThan(200);
+		expect(shown.endsWith('\u2026')).toBe(true);
+		expect(long.startsWith(shown.slice(0, -1))).toBe(true);
+	});
+
+	it('cuts on code points, so a surrogate pair is not halved', () => {
+		const url = `https://example.com/${'\uD83D\uDCC8'.repeat(400)}`;
+		const shown = watchOf({ watch_config: JSON.stringify({ url }) })?.url ?? '';
+		expect(shown).not.toContain('\uFFFD');
+		expect([...shown].every((c) => c.codePointAt(0) !== 0xD83D)).toBe(true);
 	});
 });
 
 describe('displaySafe', () => {
-	it('drops the characters that can make the text read as something else', () => {
+	it('drops the overrides and isolates that reverse what a sentence says', () => {
 		expect(displaySafe('Zahle \u202Eeuro 10\u202C aus')).toBe('Zahle euro 10 aus');
-		expect(displaySafe('lösch\u200Be alles')).toBe('lösche alles');
-		expect(displaySafe('a\u2066b\u2069c\uFEFFd\u200Ee')).toBe('abcde');
+		expect(displaySafe('a\u2066b\u2069c')).toBe('abc');
+		expect(displaySafe('a\u202Ab\u202Bc\u202Dd')).toBe('abcd');
+	});
+
+	it('drops the invisible spaces that hide a clause inside a full-looking sentence', () => {
+		expect(displaySafe('l\u00f6sch\u200Be alles')).toBe('l\u00f6sche alles');
+		expect(displaySafe('a\uFEFFb')).toBe('ab');
 	});
 
 	it('keeps the line breaks and tabs the instruction is written with', () => {
@@ -76,8 +103,20 @@ describe('displaySafe', () => {
 		expect(displaySafe('a\u0000b\u001Bc\u007Fd\u2028e')).toBe('abcde');
 	});
 
+	it('keeps what a language needs to spell its own words', () => {
+		// The narrower class, and the reason it is narrower: stripping these made the
+		// text wrong in the languages that use them. LRM/RLM order digits around a
+		// right-to-left word; ZWNJ separates Persian letters into a different word;
+		// ZWJ is what holds an emoji sequence together.
+		expect(displaySafe('\u05D0\u05D1\u05D9 \u200E+41 79 123')).toBe('\u05D0\u05D1\u05D9 \u200E+41 79 123');
+		expect(displaySafe('\u0645\u06CC\u200C\u0631\u0648\u062F')).toBe('\u0645\u06CC\u200C\u0631\u0648\u062F');
+		expect(displaySafe('\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67')).toBe('\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67');
+		expect(displaySafe('\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08')).toBe('\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08');
+	});
+
 	it('leaves ordinary text alone, umlauts and emoji included', () => {
-		expect(displaySafe('Prüfe „Debitoren" — 14 Tage · 📈')).toBe('Prüfe „Debitoren" — 14 Tage · 📈');
+		expect(displaySafe('Pr\u00fcfe \u201eDebitoren\u201c \u2014 14 Tage \u00b7 \uD83D\uDCC8'))
+			.toBe('Pr\u00fcfe \u201eDebitoren\u201c \u2014 14 Tage \u00b7 \uD83D\uDCC8');
 	});
 });
 
@@ -156,6 +195,66 @@ describe('the view calls exactly the triggers the scheduler holds back waiting',
 			.filter((t) => awaitsConfirmation(t) !== !due.has(t.id))
 			.map((t) => `${t.id}: view says ${awaitsConfirmation(t) ? 'waiting' : 'runs'}, scheduler says ${due.has(t.id) ? 'due' : 'held back'}`);
 		expect(disagreements).toEqual([]);
+	});
+
+	it('and what the block PROMISES after confirming is what the scheduler then does', () => {
+		// The claim this pins is the one the first version got wrong twice: it told
+		// the owner of a paused, completed or never-scheduled trigger that it would
+		// run "shortly after you confirm". Here the test does the confirming — it
+		// stamps the consent through the store and asks the scheduler whether the
+		// row runs, at the moment the block names.
+		const dir = mkdtempSync(join(tmpdir(), 'lynox-trigger-consent-'));
+		dirs.push(dir);
+		const engine = new EngineDb(join(dir, 'engine.db'), '');
+		engines.push(engine);
+		const store = new TriggerStore(engine);
+		const FUTURE = '2027-01-01T00:00:00.000Z';
+		const LATER = '2030-01-01T00:00:00.000Z';
+		const base = {
+			title: 'x', description: '', source: 'cron' as TriggerRow['source'], effect: 'run_agent' as TriggerRow['effect'],
+			conditionJson: JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }),
+			paramsJson: '{}', retryCount: 0, confirmedAt: null,
+		};
+		const rows: TriggerRow[] = [
+			{ ...base, id: 'due', status: 'open', enabled: true, nextRunAt: PAST },
+			{ ...base, id: 'scheduled', status: 'open', enabled: true, nextRunAt: FUTURE },
+			{ ...base, id: 'paused', status: 'open', enabled: false, nextRunAt: PAST },
+			{ ...base, id: 'completed', status: 'completed', enabled: true, nextRunAt: PAST },
+			{ ...base, id: 'waiting', status: 'waiting', enabled: true, nextRunAt: PAST },
+			{ ...base, id: 'no-next-run', status: 'open', enabled: true, nextRunAt: null },
+			{
+				...base, id: 'failed-once', status: 'failed', enabled: true, nextRunAt: PAST,
+				conditionJson: JSON.stringify({ schedule_cron: null, watch_config: null }),
+			},
+		];
+		for (const row of rows) store.upsert(row);
+
+		const listed = JSON.parse(JSON.stringify(store.listFiltered())) as Array<{
+			id: string; status?: string; enabled?: number; next_run_at?: string; schedule_cron?: string;
+		}>;
+		expect(listed).toHaveLength(rows.length);
+
+		// The block speaks BEFORE the confirmation, so its promise is read first.
+		const promised = new Map(listed.map((t) => [t.id, confirmationOutcome(t, Date.parse('2026-09-22T12:00:00.000Z'))]));
+		expect([...promised.values()].filter((o) => o === 'due-now')).toHaveLength(1);
+		expect([...promised.values()].filter((o) => o === 'scheduled')).toHaveLength(1);
+		expect([...promised.values()].filter((o) => o === 'paused')).toHaveLength(1);
+		expect([...promised.values()].filter((o) => o === 'not-scheduled')).toHaveLength(4);
+
+		// …then the consent is actually given, and the scheduler is asked.
+		for (const row of rows) store.setConfirmedAt(row.id, CONFIRMED);
+		const dueNow = new Set(store.getDue('2026-09-22T12:00:00.000Z').map((t) => t.id));
+		const dueLater = new Set(store.getDue(LATER).map((t) => t.id));
+
+		const broken: string[] = [];
+		for (const [id, outcome] of promised) {
+			if (outcome === 'due-now' && !dueNow.has(id)) broken.push(`${id}: promised a run now, scheduler holds it back`);
+			if (outcome === 'scheduled' && (dueNow.has(id) || !dueLater.has(id))) broken.push(`${id}: promised a run at its date, scheduler disagrees`);
+			if ((outcome === 'paused' || outcome === 'not-scheduled') && (dueNow.has(id) || dueLater.has(id))) {
+				broken.push(`${id}: promised nothing, scheduler runs it`);
+			}
+		}
+		expect(broken).toEqual([]);
 	});
 
 	it('and a trigger the view calls waiting is never due, whatever else holds it back', () => {

@@ -58,9 +58,9 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		// behaviour tests. A copy in the component would be a second rule with no
 		// test, and the source assertions here cannot see what a copy does.
 		expect(SCRIPT).toContain(
-			"import { awaitsConfirmation, displaySafe, instructionOf, watchUrlOf } from '../utils/trigger-consent.js';",
+			"import { awaitsConfirmation, confirmationOutcome, displaySafe, instructionOf, watchOf } from '../utils/trigger-consent.js';",
 		);
-		for (const name of ['awaitsConfirmation', 'displaySafe', 'instructionOf', 'watchUrlOf']) {
+		for (const name of ['awaitsConfirmation', 'confirmationOutcome', 'displaySafe', 'instructionOf', 'watchOf']) {
 			expect(SCRIPT, name).not.toMatch(new RegExp(`function\\s+${name}|${name}\\s*=`));
 		}
 	});
@@ -74,11 +74,14 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
-	it('the consent block is gated on exactly the predicate, and says the trigger will not run', () => {
+	it('the consent block is pinned whole at its root, and says the trigger will not run', () => {
 		const { cond, body } = ifBlockAround('data-trigger-consent');
 		expect(cond).toBe('awaitsConfirmation(trigger)');
-		// Both ends of the slice: it starts at the block's own element and reaches its
-		// button, so nothing below can pass on a truncated slice.
+		// The ROOT tag, compared whole. A delta round put `class="hidden"` on this
+		// one element and every assertion below still passed: the block vanished,
+		// the button with it, and the suite was green. Pinning the button alone was
+		// not enough — the element ABOVE it decides whether any of it renders.
+		expect(line('data-trigger-consent')).toBe('<div class="mt-2 space-y-1.5" data-trigger-consent>');
 		expect(body.trim().startsWith('<div')).toBe(true);
 		expect(body).toContain('<button onclick={() => confirmTrigger(trigger)}');
 		expect(line("t('triggers.awaiting_hint')")).toBe(
@@ -95,11 +98,35 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
-	it('the instruction is shown for EVERY waiting trigger, not only when a description differs', () => {
+	it('what would run comes BEFORE the button, not after it', () => {
 		const { body } = ifBlockAround('data-trigger-consent');
-		// No condition around it: a run_agent trigger with no description runs on its
-		// title, and that title is clipped to two lines in the header above.
-		expect(body).toContain("<span class=\"font-medium\">{t('triggers.instruction')}:</span>");
+		const button = body.indexOf('<button onclick={() => confirmTrigger(trigger)}');
+		for (const marker of ['data-consent-watch', 'data-consent-instruction', "t('triggers.awaiting_hint')"]) {
+			expect(body.indexOf(marker), marker).toBeGreaterThan(-1);
+			expect(body.indexOf(marker), marker).toBeLessThan(button);
+		}
+	});
+
+	it('a watch is shown its page and its cadence INSTEAD of an instruction it never gets', () => {
+		// `executeWatch` builds its prompt from the URL and the fetched page and
+		// reads neither title nor description, so showing "Instruction" there named
+		// something the run does not receive.
+		const { cond, body } = ifBlockAround('data-consent-watch');
+		expect(cond).toBe('watchOf(trigger)');
+		expect(line('data-consent-watch')).toBe('<div class="text-xs text-text-muted" data-consent-watch>');
+		// The two are the branches of ONE conditional, so they can never both show
+		// and a watch can never fall through to the wrong one. Split at the `{:else}`
+		// that separates them and check each side holds what it should.
+		const elseAt = body.indexOf('{:else}');
+		expect(elseAt, 'the watch branch has no {:else}').toBeGreaterThan(-1);
+		const watchSide = body.slice(0, elseAt);
+		const instructionSide = body.slice(elseAt);
+		expect(watchSide).toContain("{displaySafe(watchOf(trigger)?.url ?? '')}");
+		expect(watchSide).toContain("tf('triggers.watch_every', { minutes: String(watchOf(trigger)?.intervalMinutes) })");
+		expect(watchSide).not.toContain('data-consent-instruction');
+		expect(watchSide).not.toContain('instructionOf(trigger)');
+		expect(instructionSide).toContain('data-consent-instruction');
+		expect(line('data-consent-instruction')).toBe('<div class="text-xs text-text-muted" data-consent-instruction>');
 		expect(line('{displaySafe(instructionOf(trigger))}')).toBe(
 			'<p class="mt-0.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words'
 			+ ' rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1.5">'
@@ -107,32 +134,34 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		);
 	});
 
-	it('a watch trigger names the page it would fetch, and a routed result names where it goes', () => {
-		const url = ifBlockAround("t('triggers.watch_url')");
-		expect(url.cond).toBe('watchUrlOf(trigger)');
-		expect(url.body).toContain("{displaySafe(watchUrlOf(trigger) ?? '')}");
-		const channel = ifBlockAround("t('triggers.result_goes_to')");
-		expect(channel.cond).toBe('trigger.notification_channel');
-		expect(channel.body).toContain('{displaySafe(trigger.notification_channel)}');
-	});
-
 	it('every agent-authored string in the block goes through displaySafe', () => {
 		const { body } = ifBlockAround('data-trigger-consent');
-		// A bare `{trigger.x}` renders what the agent wrote with its bidi overrides and
-		// zero-width runs intact — in the text a person reads before granting the run.
+		// A bare `{trigger.x}` renders what the agent wrote with its overrides and
+		// invisible spaces intact — in the text a person reads before granting the run.
 		expect(body.match(/\{trigger\.[a-z_]+\}/g) ?? []).toEqual([]);
 		expect(body).not.toContain('{@html');
 	});
 
-	it('the block says when the first run falls, and does not promise a schedule while paused', () => {
+	it('each outcome gets its own sentence, and the sentences are not swapped', () => {
 		const { body } = ifBlockAround('data-trigger-consent');
-		expect(body).toContain("{t('triggers.awaiting_paused')}");
-		expect(body).toContain("tf('triggers.awaiting_due_since', { date: fmtDate(trigger.next_run_at) })");
-		expect(body).toContain("tf('triggers.awaiting_first_run', { date: fmtDate(trigger.next_run_at) })");
-		// Which of the two is a comparison against now, not a guess from the cron.
-		expect(body).toContain('new Date(trigger.next_run_at).getTime() <= Date.now()');
-		// The paused branch comes FIRST: a paused trigger gets no run-time promise at all.
-		expect(body.indexOf("{t('triggers.awaiting_paused')}")).toBeLessThan(body.indexOf("tf('triggers.awaiting_due_since'"));
+		// Swapping the two date sentences passed a `toContain` pair, so the branch
+		// and its key are pinned together: a paused trigger promises nothing, a past
+		// date says it runs now, a future date names the date, and anything the
+		// scheduler will not run at all says so.
+		for (const [outcome, key] of [
+			['paused', "{t('triggers.awaiting_paused')}"],
+			['due-now', "{tf('triggers.awaiting_due_since', { date: fmtDate(trigger.next_run_at ?? '') })}"],
+			['scheduled', "{tf('triggers.awaiting_first_run', { date: fmtDate(trigger.next_run_at ?? '') })}"],
+		] as const) {
+			const branch = `confirmationOutcome(trigger) === '${outcome}'`;
+			const at = body.indexOf(branch);
+			expect(at, branch).toBeGreaterThan(-1);
+			const nextBranch = body.indexOf('confirmationOutcome(trigger) ===', at + branch.length);
+			const slice = body.slice(at, nextBranch === -1 ? undefined : nextBranch);
+			expect(slice, branch).toContain(key);
+		}
+		expect(body).toContain("{:else}");
+		expect(body).toContain("{t('triggers.awaiting_not_scheduled')}");
 	});
 
 	it('confirming calls the existing confirm route with POST, and reports what it did', () => {
@@ -142,7 +171,10 @@ describe('the triggers view shows the waiting state and offers the confirmation'
 		expect(fn).toContain("fetch(`${getApiBase()}/tasks/${trigger.id}/confirm`, { method: 'POST' })");
 		expect(fn).toContain('await loadTriggers()');
 		// The message may not claim a schedule the scheduler does not honour.
-		expect(fn).toContain("trigger.enabled === 0 ? t('triggers.confirmed_paused') : t('triggers.confirmed')");
+		// The message speaks from the row the route returned, not from list state.
+		expect(fn).toContain("const stored = (await res.json().catch(() => null)) as Trigger | null;");
+		expect(fn).toContain("const paused = (stored ?? trigger).enabled === 0;");
+		expect(fn).toContain("addToast(paused ? t('triggers.confirmed_paused') : t('triggers.confirmed'), 'success')");
 		expect(fn).toContain("addToast(t('triggers.confirm_failed'), 'error')");
 	});
 
