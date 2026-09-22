@@ -136,6 +136,24 @@ describe('ApiStore — one profile per host', () => {
     expect(store.checkRateLimit('api.crm.example')).toBeNull();
   });
 
+  it('gives the remaining profile its OWN rate limit back once the other one leaves', () => {
+    const store = new ApiStore();
+    store.register(profile('crm-a', 'https://api.crm.example/v1', { rate_limit: { requests_per_second: 1 } }));
+    // The later profile's generous limit is the one on the host while both stay.
+    store.register(profile('crm-b', 'https://api.crm.example/v2', { rate_limit: { requests_per_second: 100 } }));
+    store.unregister('crm-b');
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+    // crm-a's own 1/s applies again, not none and not crm-b's.
+    expect(store.checkRateLimit('api.crm.example')).not.toBeNull();
+  });
+
+  it('names the ids of a shared host in a stable order, whichever booted first', () => {
+    const store = new ApiStore();
+    store.register(profile('crm-b', 'https://api.crm.example/v2'));
+    store.register(profile('crm-a', 'https://api.crm.example/v1'));
+    expect(store.getHostConflict('api.crm.example')).toEqual(['crm-a', 'crm-b']);
+  });
+
   it('drops a rate bucket when an update removes the profile\'s rate_limit', () => {
     const store = new ApiStore();
     store.save(profile('crm-a', 'https://api.crm.example/v1', { rate_limit: { requests_per_second: 1 } }));

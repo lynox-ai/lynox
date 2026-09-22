@@ -288,6 +288,34 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeGreaterThan(Date.now());
   });
 
+  it('writes its record onto the profile as it is after the exchange, not the copy read before it', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const agent = makeAgent(store, vaultWithRefresh());
+    // An update lands while the token POST is out.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      store.register(crmProfile({ description: 'updated mid-exchange' }));
+      return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')?.description).toBe('updated mid-exchange');
+    expect(store.get('crm-api')?.oauth_grant?.minted_by).toBe('client-1');
+  });
+
+  it('asks for a missing refresh token before posting anything', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const agent = makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain(`missing the OAuth credentials for profile "crm-api": "${REFRESH}"`);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('records a caller-chosen access-token slot for the purge trail, and not the derived one', async () => {
     const store = new ApiStore();
     store.register(crmProfile());

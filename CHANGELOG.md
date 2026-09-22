@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Fixed: deleting an API profile removes the tokens it minted
+
+- `api_setup delete` removed the profile and left every token `fetch_token`
+  had written for it in the vault. It now removes the two it derives from the
+  profile id (`<ID>_ACCESS_TOKEN`, `<ID>_REFRESH_TOKEN`) and says so. What the
+  user stored for the API (client id and secret, the configured `vault_keys`)
+  and an `output_secret_name` a caller chose stay, because another profile may
+  use the same slot; the delete message names them. A name that falls into a
+  platform prefix is never removed.
+- The `vault_keys` column of a connection also lists the runtime token names,
+  so it names every slot the profile can fill.
+
+### Changed: a failed token refresh says whether the grant was revoked
+
+- `fetch_token` reads a failed token exchange the way the Google path already
+  did (the classifier now lives in `src/core/oauth-refresh-failure.ts` for
+  both): `invalid_grant` from the client that minted the refresh token is a
+  revocation; `invalid_client` and its siblings, or `invalid_grant` from a
+  different client, are a client problem that leaves the grant alone;
+  anything else changes nothing. A token another writer rotated while the
+  request was in flight counts as a rotation, not a revocation.
+- A revocation is recorded on the profile (`oauth_grant`, engine-owned like
+  `custom_endpoint_ack`: a value in a create or update is discarded) and
+  projected into `connections.status`. `fetch_token` will not resend the
+  rejected refresh token, and `http_request` refuses the profile with the way
+  back, instead of a 401 whose hint called it an expired token. A new refresh
+  token in the vault clears the way; the next successful exchange clears the
+  record.
+
+### Changed: two API profiles can no longer share a host
+
+- `http_request` picks a profile's credential by hostname alone, so two
+  profiles on one host were last-write-wins: the credential of whichever loaded
+  last went out, without a word. Saving a second profile on a host another
+  profile holds is now refused, with the holder's name. Profiles that already
+  share a host keep loading; the host is marked, the boot logs it, and a
+  request there that would carry a credential is refused, naming both, until
+  one is removed or moved. Moving a profile to a new host releases the old one.
+- Two public (`auth.type: none`) profiles on one host are not refused at
+  request time; there is no credential to mix up.
+- An update that removes a profile's `rate_limit` now also drops its rate
+  bucket, and when one of two profiles on a host goes, the one that stays
+  gets its own limit back.
+
 ### Fixed: a new instance can create its first table
 
 - The six `data_store_*` tools were registered at boot only if the store
