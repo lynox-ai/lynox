@@ -101,6 +101,7 @@
 	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
+	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
@@ -964,45 +965,24 @@
 	let mediaRecorder: MediaRecorder | null = null;
 	let isStartingRecording = $state(false);
 	// Persistent mic resources — reused across recordings within the session.
-	let micStream: MediaStream | null = null;
-	let micReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+	// The acquire/reuse/release/recycle policy lives in utils/mic-session.ts so
+	// it can be tested; this component cannot be imported in vitest.
 	const MIC_IDLE_RELEASE_MS = 60_000;
+	const micSession = createMicSession<MediaStream>({
+		acquire: () => navigator.mediaDevices.getUserMedia({ audio: true }),
+		setTimer: (fn, ms) => setTimeout(fn, ms),
+		clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+		// The only trace this failure leaves anywhere. The blob never reaches the
+		// server, and web-ui has no client telemetry sink, so without this line
+		// the next report is again "voice just stopped working".
+		onRecycle: (bytes, durationMs) => {
+			console.warn('[voice] capture had no audio, dropped the mic session', { bytes, durationMs });
+		},
+	}, MIC_IDLE_RELEASE_MS);
 
-	async function ensureMicStream(): Promise<MediaStream> {
-		// A pending release means we're inside the idle window — cancel it
-		// and return the still-live stream.
-		if (micReleaseTimer) {
-			clearTimeout(micReleaseTimer);
-			micReleaseTimer = null;
-		}
-		if (micStream && micStream.getAudioTracks().some((t) => t.readyState === 'live')) {
-			return micStream;
-		}
-		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-		micStream = stream;
-		return stream;
-	}
-
-	function scheduleMicRelease(): void {
-		// No stream to release (e.g. cleanupRecording fired after the
-		// component already tore down the mic on afterNavigate) → don't
-		// arm a no-op timer that would just expire and call releaseMicNow
-		// against null state.
-		if (!micStream) return;
-		if (micReleaseTimer) return;
-		micReleaseTimer = setTimeout(releaseMicNow, MIC_IDLE_RELEASE_MS);
-	}
-
-	function releaseMicNow(): void {
-		if (micReleaseTimer) {
-			clearTimeout(micReleaseTimer);
-			micReleaseTimer = null;
-		}
-		if (micStream) {
-			micStream.getTracks().forEach((t) => t.stop());
-			micStream = null;
-		}
-	}
+	const ensureMicStream = (): Promise<MediaStream> => micSession.ensure();
+	const scheduleMicRelease = (): void => micSession.scheduleRelease();
+	const releaseMicNow = (): void => micSession.releaseNow();
 
 	function cleanupRecording() {
 		recording = false;
@@ -1038,19 +1018,22 @@
 			const chunks: Blob[] = [];
 
 			recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+			let startedAt = 0;
 			recorder.onstop = async () => {
+				const durationMs = startedAt === 0 ? 0 : Date.now() - startedAt;
 				cleanupRecording();
 
 				const blob = new Blob(chunks, { type: actualMime });
 
-				// iOS Safari sometimes hands back a header-only WebM blob (~60
-				// bytes, no audio frames) on second-and-later MediaRecorder
-				// runs after a clean stop+cleanup cycle — confirmed 2026-05-06
-				// when consecutive captures all returned a 60-byte body that
-				// Mistral refused with "Transcription failed". Bail before we
-				// burn a transcribe call on data we can already see is empty.
-				if (blob.size < 1024) {
-					addToast(t('chat.voice_too_short'), 'error');
+				// Weigh the recording before spending a transcribe call on it. The
+				// session decides what a small blob MEANS — a brief tap, a wedged
+				// audio session, or a teardown mid-recording — because the three
+				// need different answers and only one of them is a fault.
+				const verdict = micSession.afterCapture(blob.size, durationMs);
+				if (verdict !== 'captured') {
+					if (verdict === 'short') addToast(t('chat.voice_too_short'), 'error');
+					if (verdict === 'empty') addToast(t('chat.voice_empty_capture'), 'error');
+					// 'aborted' says nothing: the user backgrounded or navigated away.
 					return;
 				}
 
@@ -1166,11 +1149,13 @@
 			// timeslice the chunks accumulate as audio flows, so even a glitched
 			// session still hands us populated chunks.
 			recorder.start(1000);
+			startedAt = Date.now();
 			recording = true;
 			recordingSeconds = 0;
 			recordingTimer = setInterval(() => { recordingSeconds++; }, 1000);
 			mediaRecorder = recorder;
 		} catch (err) {
+			if (err instanceof MicSessionReleased) return; // user left mid-prompt
 			if (err instanceof DOMException && err.name === 'NotAllowedError') {
 				addToast(t('chat.mic_denied'), 'error');
 			} else {
