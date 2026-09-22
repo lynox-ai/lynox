@@ -5754,9 +5754,11 @@ export class LynoxHTTPApi {
       // Consent gate — mirror the worker-loop cron gate (worker-loop.ts:574).
       // This Run path executes the workflow headless with autonomy:'autonomous'
       // (no per-action approval prompt), so it must not run a workflow whose steps
-      // the user has never seen. A self-built workflow is first-run-confirmed at
-      // save (process.ts); an IMPORTED workflow lands unconfirmed on purpose, its
-      // steps being attacker-authorable. Refuse an unconfirmed workflow here
+      // the user has never seen. NO workflow is confirmed at save any more — the
+      // tool that saves one is called by the model, so a stamp there was a
+      // permission it wrote itself; consent is stamped where a person schedules
+      // the workflow, and an imported one lands unconfirmed as it always did,
+      // its steps being attacker-authorable. Refuse an unconfirmed workflow here
       // rather than headless-running arbitrary imported bash. (Resolve via
       // getPipeline so a prefix id + the post-confirm cache eviction are handled;
       // a not-found id falls through to runGuardedSavedWorkflow's 404.)

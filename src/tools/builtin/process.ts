@@ -332,7 +332,7 @@ export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {
       'Omit workflow_id to save the work you just completed in this session ' +
       '(the actual tool steps are analysed automatically). Pass workflow_id ' +
       'to turn an existing plan_task plan into a reusable workflow. ' +
-      'Returns a workflow_id you can pass to run_workflow or task_create.',
+      'Returns a workflow_id.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
