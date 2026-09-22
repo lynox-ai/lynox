@@ -262,9 +262,9 @@ export function check(end, ctx) {
   // the moment it is given, so one stamped AT a write came after it.
   const items = e => (e.changes ?? []).filter(c => !c.error).map(c => ({ id: Number(c.id), to: c.to }));
   // Compared in whole centimes: 39.900000000000006 computed in code and 39.9 typed out
-  // are the same price. (null and 0 share a key; writing either to a product is judged
-  // above as a wrong number or a write outside the rule, so the cover check need not
-  // tell them apart.)
+  // are the same price. (null and 0 share a key, which is harmless here: no product
+  // starts at 0 and every rule value is at least 15.20, so a write of 0 always changes a
+  // product and is judged above, and a write of null over null changes nothing.)
   const key = c => `${c.id}=${Math.round(Number(c.to) * 100)}`;
   executions.forEach((x, i) => {
     const n = i + 1;

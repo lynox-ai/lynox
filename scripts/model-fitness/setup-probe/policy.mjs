@@ -20,9 +20,10 @@ export function isPermissionPrompt(p) {
  * and the GET exfiltration warning `⚠ http_request: <… possible data exfiltration)> —
  * Allow?`. Only the first can be allowed, and only for a fixture host; a prompt of another
  * tool that merely MENTIONS a fixture host (a shell command with a URL in it, say) is not
- * an outbound request to it. Any other `⚠ http_request:` prompt — the permission guard's
- * autonomous-mode write prompt, or a reworded one from another engine image — stops the
- * run as an instrument error rather than being guessed at.
+ * an outbound request to it. Any other `⚠ http_request:` prompt — a reworded one from
+ * another engine image, say — stops the run as an instrument error rather than being
+ * guessed at. (The permission guard's autonomous-mode write prompt has that prefix too,
+ * but cannot occur here: probe sessions never run autonomous.)
  */
 const OUTBOUND = /^⚠ http_request: [A-Z]+ to (\S+) — Allow outbound data\?$/;
 const EXFIL_WARNING = /^⚠ http_request: .*possible data exfiltration\) — Allow\?$/;
