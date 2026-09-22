@@ -264,7 +264,8 @@ export function check(end, ctx) {
   // Compared in whole centimes: 39.900000000000006 computed in code and 39.9 typed out
   // are the same price. (null and 0 share a key, which is harmless here: no product
   // starts at 0 and every rule value is at least 15.20, so a write of 0 always changes a
-  // product and is judged above, and a write of null over null changes nothing.)
+  // product and is judged above; a write of null either changes nothing or changes a
+  // product and is judged above.)
   const key = c => `${c.id}=${Math.round(Number(c.to) * 100)}`;
   executions.forEach((x, i) => {
     const n = i + 1;
