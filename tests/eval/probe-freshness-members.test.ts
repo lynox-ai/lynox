@@ -61,6 +61,16 @@ const NOT_MEMBERS: Readonly<Record<string, string>> = {
     + 'and promote_process — but a process/pipeline is not a knowledge_entries row and never '
     + 'enters this dedup candidate set. (An earlier version of this reason claimed every '
     + 'prompt is a question, which is false; the exclusion was right for the wrong reason.)',
+  'scripts/model-fitness/setup-probe/engine-client.mjs':
+    'the transport of the setup probe. Its callers never reuse a store: '
+    + 'scripts/model-fitness/setup-probe/run.mjs creates a fresh data volume for every run '
+    + '(oneRun: `volume create`) and never reuses one — a volume kept with --keep-failed ends '
+    + 'the series — so no knowledge row written in one run can meet the next one.',
+  'scripts/model-fitness/setup-probe/run.mjs':
+    'swept because it imports a module NAMED engine-client — its own transport, '
+    + 'scripts/model-fitness/setup-probe/engine-client.mjs, not the agent-efficiency one. It is '
+    + 'the caller that makes every run start on a fresh data volume and never reuses one, '
+    + 'which is why no run can dedup against an earlier one.',
 };
 
 /**
@@ -148,6 +158,8 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
       'scripts/agent-efficiency/measure.ts',
       'scripts/model-fitness/dk-capture-crossprovider.mjs',
       'scripts/model-fitness/dk-capture-repro.mjs',
+      'scripts/model-fitness/setup-probe/engine-client.mjs',
+      'scripts/model-fitness/setup-probe/run.mjs',
       'tests/eval/capture-fitness-runner.mjs',
     ]);
   });
