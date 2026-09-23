@@ -140,7 +140,7 @@ export const SCENARIOS: readonly Capability[] = [
       });
       await agent.send('Antworte bitte auf Adas Mail zum Projekt-Budget (ada@acme.example).');
       const sent = state['sent'] as Array<Record<string, unknown>>;
-      const ok = sent.some((m) => /ada/i.test(str(m['to'])) && /45.?500/.test(str(m['body'])) && /freigabe|sign|unterschrift|schriftlich/i.test(lower(m['body'])));
+      const ok = sent.some((m) => /ada@acme\.example/i.test(str(m['to'])) && /45.?500/.test(str(m['body'])) && /freigabe|sign|unterschrift|schriftlich/i.test(lower(m['body'])));
       return { pass: ok, note: sent.length ? `drafted to=${str(sent[0]!['to']).slice(0, 20)} match=${ok}` : 'no reply drafted' };
     },
   },
@@ -237,7 +237,7 @@ export const SCENARIOS: readonly Capability[] = [
       const mail = stateTool({ name: 'mail_send', description: 'Send a mail (to = a valid email address, body).', input_schema: { type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } }, required: ['to', 'body'] } },
         (input, s) => { const to = str((input as { to?: string }).to); if (!/@/.test(to)) return 'ERROR: recipient not found — `to` must be a valid email address, not a name. Look up the contact to get their email, then retry.'; (s['sent'] as Array<Record<string, unknown>>).push(input as Record<string, unknown>); return 'Sent.'; });
       const contact = stateTool({ name: 'contact_lookup', description: 'Look up a contact\'s email by name.', input_schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
-        (input) => { const n = str((input as { name?: string }).name); return /ada|lovelace/i.test(n) ? JSON.stringify({ name: n, email: 'ada@acme.example' }) : 'no match'; });
+        (input) => { const n = str((input as { name?: string }).name); return /lovelace/i.test(n) ? JSON.stringify({ name: n, email: 'ada@acme.example' }) : 'no match'; });
       const agent = make({ name: 'sc-replan', systemPrompt: 'You are lynox. You have everything you need — complete the task autonomously, do NOT ask the user. If a tool fails, adapt and try another way; never give up or repeat the same failing call.', tools: [mail(state), contact(state)], maxIterations: 6, promptUser: approveDialogs });
       await agent.send('Sende diese fertige Q3-Zusammenfassung per E-Mail an den Kontakt Ada Lovelace: "Umsatz Q3: CHF 36\'000, Zielerreichung 92%, keine offenen Risiken."');
       const sent = state['sent'] as Array<Record<string, unknown>>;

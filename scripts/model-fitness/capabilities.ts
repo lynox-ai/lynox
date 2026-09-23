@@ -126,7 +126,7 @@ const PNG = redBluePngBase64();
  *     `name` matched every wanted name — a clean 4/4 from a single blank.
  *  2. Dropping blanks left the same rule accepting any FRAGMENT, so `['a','b','c','x']`
  *     still scored 4/4.
- *  3. Substring matching in the other direction accepted PADDING (`xmaxx`), and
+ *  3. Substring matching in the other direction accepted PADDING (`xlovelacex`), and
  *     nothing stopped ONE entity from satisfying every wanted name at once — a model
  *     that answers with a sentence instead of entities scored full marks.
  *
@@ -199,9 +199,10 @@ export const CAPABILITIES: readonly Capability[] = [
       // automatically; one string, reported as two findings.
       //
       // THE STANDARD: "sounds invented" is a feeling, not a test. Either the name is
-      // UNMISTAKABLY fictional — `Ada Lovelace`, a historical figure nobody reads as
-      // a customer — or it is verified free: `Beispielware` returns NXDOMAIN on .ch,
-      // .com and .io. `Acme` is the archetypal placeholder and is the convention
+      // unmistakably NOT A CUSTOMER — `Ada Lovelace` is a long-dead historical figure,
+      // which is not the same as fictional and is the point: she cannot be anyone's
+      // client — or it is verified free: `Beispielware` returns NXDOMAIN on .ch, .com
+      // and .io. Every coined alternative tried was taken on .com. `Acme` is the archetypal placeholder and is the convention
       // already used elsewhere in these files. Addresses use RFC-reserved spaces
       // (`.example`, `.invalid`), which never resolve at all.
       //
@@ -249,11 +250,11 @@ export const CAPABILITIES: readonly Capability[] = [
     detail: 'Summarize a short transcript carrying 3 concrete facts (customer, amount, deadline/task); all 3 must survive. A lossy compaction silently degrades every long thread.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       const transcript = [
-        'User: Der neue Kunde ist Ada Lovelace von der Acme AG.',
+        'User: Die neue Kundin ist Ada Lovelace von der Acme AG.',
         'Assistant: Notiert. Worum geht es?',
-        'User: Er hat das revidierte Budget von CHF 45\'500 mündlich zugesagt.',
+        'User: Sie hat das revidierte Budget von CHF 45\'500 mündlich zugesagt.',
         'Assistant: Gut. Nächste Schritte?',
-        'User: Wir müssen ihm bis Freitag das Angebot senden.',
+        'User: Wir müssen ihr bis Freitag das Angebot senden.',
       ].join('\n');
       const agent = make({ name: 'fit-compact', systemPrompt: 'You compact a conversation into a concise summary. PRESERVE every concrete fact: names, companies, amounts, dates, and open tasks. Never drop a detail.', tools: [], maxIterations: 1 });
       const out = await agent.send(`Summarize this conversation so far, preserving all concrete facts:\n\n${transcript}`);
@@ -266,7 +267,7 @@ export const CAPABILITIES: readonly Capability[] = [
       // Bilingual: a faithful compaction may keep German OR render it in English
       // (some models summarize in English) — the FACT survives either way, so the
       // deadline/task matcher accepts both (Freitag/Friday, Angebot/offer/proposal).
-      const facts: Array<[string, RegExp]> = [['customer', /acme|lovelace|ada/i], ['amount', /45\D{0,2}500/], ['deadline/task', /freitag|friday|angebot|offer|proposal|senden|\bsend|frist|deadline/i]];
+      const facts: Array<[string, RegExp]> = [['customer', /acme|lovelace/i], ['amount', /45\D{0,2}500/], ['deadline/task', /freitag|friday|angebot|offer|proposal|senden|\bsend|frist|deadline/i]];
       const kept = facts.filter(([, re]) => re.test(l));
       return { pass: kept.length === 3, note: `kept ${kept.length}/3${kept.length < 3 ? ` missing[${facts.filter(([, re]) => !re.test(l)).map(([n]) => n).join(',')}]` : ''}` };
     },
@@ -305,7 +306,7 @@ export const CAPABILITIES: readonly Capability[] = [
       // German (fb_measure_pixel — fix the setup before trusting the finding).
       const agent = make({
         name: 'fit-lang',
-        systemPrompt: 'You are lynox, a business assistant. Always reply in the language of the user\'s latest message.\n\n[Recalled memory]\nDer Kunde Ada Lovelace bevorzugt kurze, direkte Antworten. Das Projektbudget ist eng kalkuliert.',
+        systemPrompt: 'You are lynox, a business assistant. Always reply in the language of the user\'s latest message.\n\n[Recalled memory]\nDie Kundin Ada Lovelace bevorzugt kurze, direkte Antworten. Das Projektbudget ist eng kalkuliert.',
         tools: [], maxIterations: 1,
       });
       const out = await agent.send('In one sentence, what is a good reason to automate recurring business tasks?');

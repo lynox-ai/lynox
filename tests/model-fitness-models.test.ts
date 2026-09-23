@@ -149,8 +149,8 @@ describe('the entity-extraction assertion cannot be satisfied by nothing', () =>
     // its own line so a future narrowing cannot quietly drop one.
     const want = ['ada lovelace', 'acme', 'beispielware', 'zürich'];
     expect(countMatched(want, ['a', 'b', 'c', 'x']), 'one-character noise').toBe(0);
-    expect(countMatched(want, ['kus', 'unn']), 'fragments').toBe(0);
-    expect(countMatched(want, ['xadax', 'xacmex', 'xbeispielwarex', 'xzürichx']), 'padding').toBe(0);
+    expect(countMatched(want, ['lace', 'cme']), 'fragments of the new keys').toBe(0);
+    expect(countMatched(want, ['xlovelacex', 'xacmex', 'xbeispielwarex', 'xzürichx']), 'padding').toBe(0);
     expect(countMatched(want, ['ada lovelace acme beispielware zürich']), 'one entity for all four').toBe(1);
     // …while the legitimate forms still count: the whole name, a longer form of it,
     // and the distinctive token on its own.
