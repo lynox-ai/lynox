@@ -181,6 +181,11 @@ describe('the start route decides everything before it mints anything', () => {
     ['the rest of 127/8', '127.0.0.2'],
     ['the metadata address', '169.254.169.254'],
     ['carrier-grade NAT', '100.64.0.1'],
+    // Not an address at all, and the reason the IP predicate is not the whole
+    // rule: an on-premise NAME resolves inside the operator's network and no
+    // numeric check will ever see it. Dropping the pattern half left every
+    // other case in this file green.
+    ['an on-premise name', 'shop.local'],
     // The bracketed, NORMALISED spelling, and it has to be that one: measured
     // here rather than assumed, `new URL('https://::ffff:127.0.0.1/')` throws
     // and `https://[::ffff:127.0.0.1]/` comes back with hostname
@@ -221,6 +226,20 @@ describe('the start route decides everything before it mints anything', () => {
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
 
     expect(isRefusal(decision) && decision.kind).toBe('bad-preset-param');
+  });
+
+  it('lets a vetted host through without an acceptance, which is what vetting means', () => {
+    // The control for the ack rule, and it has to exist: without it, a guard
+    // that ignored the vetting entirely and demanded an acceptance from
+    // everyone would pass every other case in this file. What is vetted is
+    // vouched for by the engine, so nobody is asked to accept it.
+    const vetted = presetRegisterOf([{
+      id: 'example-shop', label: 'vetted', host: { kind: 'constant', host: 'api.openai.com' },
+      authorizePath: '/authorize', tokenPath: '/token', params: [],
+    }]);
+    const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, vetted);
+
+    expect(isRefusal(decision)).toBe(false);
   });
 
   it('refuses an unauthenticated open before it says whether the profile exists', () => {
