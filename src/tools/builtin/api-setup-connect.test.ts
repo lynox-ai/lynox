@@ -673,7 +673,9 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     // `http://nas.local.` from accepted to refused and nothing went red. Numeric
     // forms never needed it — the parser normalises `127.0.0.1.` away — so the
     // line only ever mattered for NAMES.
-    process.env['ORIGIN'] = 'http://nas.local.:3000';
+    // Two dots, not one: a single-dot strip passes the one-dot case and is
+    // invisible, which is how the first version of this line survived.
+    process.env['ORIGIN'] = 'http://nas.local..:3000';
     const store = new ApiStore();
     store.register(shopProfile());
 

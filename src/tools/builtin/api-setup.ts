@@ -1471,21 +1471,27 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonVetted.length > 0 || redirectAccepted) {
+      const hostsOf = (urls: readonly string[]): string[] => Array.from(new Set(
+        urls
+          .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+          .filter((h): h is string => h !== null),
+      ));
+      // Computed BEFORE the branch, and the branch reads it. Two expressions
+      // said the same thing while this was `redirectAccepted` in the condition
+      // and a ternary inside: neither was observable, because every reachable
+      // path agreed. Now the guarded value is the only statement of the rule,
+      // so dropping the guard turns a test red instead of nothing.
+      const redirectHosts = redirectAccepted ? hostsOf(redirectUrls) : [];
+      if (nonVetted.length > 0 || redirectHosts.length > 0) {
         // Reachable only after the human accepted above (else returned, or —
         // for the redirect half in autonomous mode — fell through with
         // `redirectAccepted` still false, which is what keeps the record honest).
-        const hostsOf = (urls: readonly string[]): string[] => Array.from(new Set(
-          urls
-            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
-            .filter((h): h is string => h !== null),
-        ));
+
         // Two lists from two sources, never one list used twice. `hosts` still
         // answers only the data question, so nothing that reads it starts
         // meaning something wider; `redirect_hosts` is fed from the derived
         // authorize URL alone, so an acceptance earned by a `base_url` cannot
         // authorize a redirect even when the two hostnames coincide.
-        const redirectHosts = redirectAccepted ? hostsOf(redirectUrls) : [];
         profile.custom_endpoint_ack = {
           accepted: true,
           hosts: hostsOf(nonVetted),
@@ -1623,10 +1629,16 @@ Next steps before calling create:
       // repo's own predicate, two imports away, calls private. A feature with
       // two definitions of one phrase has the ending the redirect guard's own
       // docstring describes.
-      const originHost = base.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+      // ONE normalisation, read by all three questions. While the third
+      // normalised the hostname again on its own, the first strip was
+      // unobservable: removing it changed nothing any test could see, because
+      // the LAN check was quietly doing the same work. Brackets stay on for the
+      // URL form, which is why there are two names and not one.
+      const originRooted = base.hostname.replace(/\.+$/, '');
+      const originHost = originRooted.replace(/^\[|\]$/g, '');
       const originIsInsideNetwork = originHost === 'localhost'
         || isPrivateIP(originHost)
-        || isPrivateLanEndpoint(`https://${base.hostname.replace(/\.+$/, '')}/`);
+        || isPrivateLanEndpoint(`https://${originRooted}/`);
       if (base.protocol !== 'https:' && !(base.protocol === 'http:' && originIsInsideNetwork)) {
         return 'Error: ORIGIN must be an https address. The provider sends the authorization back to it, and plain http exposes that in transit; http is accepted only for an address inside the operator\'s own network.';
       }
