@@ -190,7 +190,14 @@ export const CAPABILITIES: readonly Capability[] = [
     run: async (make: MakeAgent): Promise<CaseResult> => {
       // Fixture names are invented and the domains are RFC-reserved (`.example`,
       // `.invalid`). An earlier version of this case bound invented budget approvals
-      // to a real insurer's name and its live domain, in a public repository.
+      // to a generated company name that may correspond to a real firm, in a public
+      // repository. Two things were corrected about that description afterwards,
+      // because it had become a factual claim about a third party that nobody
+      // checked: whether such a firm exists was never looked up, and the domain was
+      // not independent evidence — it was the name plus `.ch`, so a chance hit on
+      // the name produces the domain hit automatically. The fix stands regardless:
+      // an invented business transaction under a name that could exist reads the
+      // same to whoever holds it.
       // Ground truth: Markus Oehrli (person), Brunnmatt AG (company/project), Talfeld
       // (product), Zürich (place). All four should appear in the extraction.
       let found: string[] = [];
