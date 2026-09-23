@@ -7,7 +7,7 @@
  * vision, …). Each point is a triggering case + an asserted-correct behaviour,
  * run across candidate models to produce a per-model FITNESS matrix that says
  * "which model does which job (tier)". NOT a generic benchmark rank — the value
- * is testing on lynox's OWN tools + prompt discipline (DEF-model-compat-harness).
+ * is testing on lynox's OWN tools + prompt discipline.
  *
  * v1 is deliberately CHEAP: a small suite of short cases on the tier-routed
  * candidates × ≥2 providers, few repeats. Public leaderboards (BFCL v4 /
