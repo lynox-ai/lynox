@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -160,6 +160,29 @@ describe('no-ai-attribution — when the search itself fails', () => {
     // Without this, the case above passes for a message nothing would have changed.
     expect(strip(MESSAGE)).toBe('Add a thing\n');
   });
+
+  it('ignores a leftover temp file instead of copying it over the message', () => {
+    // Found by a refuter: with a FIXED temp path, a leftover from a hard interruption
+    // that is also unwritable makes the redirect fail with 1 — not 2 — while the file
+    // exists, so neither guard fires and `cat` reads somebody else's content over the
+    // message, silently, exit 0. Reproduced against both the old code and the first
+    // version of this fix. `mktemp` closes the class: the name cannot be left behind.
+    writeFileSync(`${msgPath}.tmp`, 'STALE FROM AN INTERRUPTED RUN\n', { mode: 0o444 });
+    expect(strip(MESSAGE)).toBe('Add a thing\n');
+  }, 30_000);
+
+  it('leaves the message alone when no temp file can be created at all', () => {
+    writeFileSync(msgPath, MESSAGE);
+    chmodSync(dir, 0o555);
+    try {
+      const res = spawnSync('bash', [SCRIPT, 'strip', msgPath], { encoding: 'utf-8' });
+      expect(res.status).toBe(0); // still never blocks a commit
+      expect(res.stderr).toMatch(/cannot create a temp file/);
+      expect(readFileSync(msgPath, 'utf-8')).toBe(MESSAGE);
+    } finally {
+      chmodSync(dir, 0o755); // afterEach cannot remove a read-only directory
+    }
+  }, 30_000);
 
   it('treats "no line survived" as the answer it is, not as a failure', () => {
     // `grep -v` exits 1 when everything matched. That is legitimate — a message made

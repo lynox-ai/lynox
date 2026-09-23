@@ -54,11 +54,24 @@ strip_file() {
   [ -n "$f" ] || usage
   [ -f "$f" ] || { echo "no-ai-attribution: no such file: $f" >&2; exit 0; }
 
+  # A FRESH temp file, and that is the point rather than tidiness. The fixed path
+  # `$f.tmp` can survive a hard interruption between the grep and the cleanup; if such
+  # a leftover is then unwritable, the redirect fails with 1 — not 2 — and the file
+  # exists, so neither guard below fires and `cat` reads SOMEBODY ELSE'S content over
+  # the commit message, silently and with exit 0. Measured against both the old and the
+  # first version of this fix: the message became the stale line. `mktemp` gives a name
+  # nothing can have left behind, so the class is closed rather than the instance.
+  local tmp
+  tmp="$(mktemp "${f}.XXXXXX" 2>/dev/null)" || {
+    echo "no-ai-attribution: cannot create a temp file next to $f — leaving the message untouched" >&2
+    exit 0
+  }
+
   # `|| true` used to cover both of grep's non-zero exits, and they are not the same
   # thing. Exit 1 means "no line survived the filter" — legitimate, and the empty
   # result is the correct answer. Exit 2 means the SEARCH failed, and the old line
-  # then wrote an empty `$f.tmp`, which the printf below copied over the commit
-  # message. Same for a failed redirect: no tmp file at all, and an empty `body`.
+  # then wrote an empty temp file, which the printf below copied over the commit
+  # message. Same for a failed redirect: nothing written, and an empty `body`.
   #
   # The direction that made this worth fixing is not data loss — git refuses an empty
   # message, so the commit aborts and the committer sees it. It is that the abort says
@@ -66,19 +79,19 @@ strip_file() {
   # block. So: on anything but 0 or 1, warn on stderr and leave the file ALONE.
   # Stripping still fails open — the CI job is the gate for the unstripped case.
   local rc=0
-  grep -viE "$PATTERN" -- "$f" > "$f.tmp" || rc=$?
-  if [ "$rc" -gt 1 ] || [ ! -f "$f.tmp" ]; then
+  grep -viE "$PATTERN" -- "$f" > "$tmp" || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$tmp" ]; then
     echo "no-ai-attribution: grep exited $rc for $f — leaving the message untouched" >&2
-    rm -f "$f.tmp"
+    rm -f "$tmp"
     exit 0
   fi
 
   # Deleting a trailer block can leave the message ending in blank lines. Trim them
   # (command substitution eats trailing newlines), then restore exactly one.
   local body
-  body="$(cat "$f.tmp")"
+  body="$(cat "$tmp")"
   printf '%s\n' "$body" > "$f"
-  rm -f "$f.tmp"
+  rm -f "$tmp"
   exit 0
 }
 
