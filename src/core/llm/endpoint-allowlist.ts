@@ -283,6 +283,24 @@ export interface CustomEndpointAck {
   accepted: true;
   /** Non-allowlisted hostnames the user accepted controller-responsibility for. */
   hosts: string[];
+  /**
+   * Hosts the user accepted being SENT TO, in their own browser, to authorize.
+   *
+   * A second field rather than a second use of {@link hosts}, because they
+   * record two different acts and {@link hosts} records the wrong one for this
+   * question. Accepting a sub-processor is a statement about where DATA goes;
+   * it says nothing about whether the person in front of the browser agreed to
+   * be handed to that site and asked for their provider password. While one
+   * list answered both, an acceptance earned by a `base_url` authorised a
+   * redirect the moment the two hostnames coincided — and the text the human
+   * read never mentioned a redirect at all.
+   *
+   * Stamped ONLY from the derived authorize URL of a preset profile, and only
+   * when the prompt that names that act was answered. Absent on every profile
+   * saved before the redirect flow existed, which is the correct default: those
+   * people were never asked.
+   */
+  redirect_hosts?: string[] | undefined;
   /** ISO-8601 timestamp of acceptance. */
   accepted_at: string;
 }
@@ -297,6 +315,27 @@ export interface CustomEndpointAck {
  * this module stays free of an `api-store` import — no dependency cycle.
  */
 export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
+  return ackCovers(ack, url, (a) => a.hosts);
+}
+
+/**
+ * True iff the user accepted being sent to the host of `url` in their browser.
+ *
+ * Deliberately NOT `isEndpointAcked` with a different list passed in, and
+ * deliberately not a parameter on it: the two questions are asked by different
+ * code for different reasons, and a shared function with a flag is how they
+ * drift back together. Same fail-closed rules — no ack, no list, wrong host or
+ * an unparseable URL all answer false.
+ */
+export function isRedirectAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
+  return ackCovers(ack, url, (a) => a.redirect_hosts ?? []);
+}
+
+function ackCovers(
+  ack: CustomEndpointAck | undefined,
+  url: string,
+  pick: (ack: CustomEndpointAck) => readonly string[],
+): boolean {
   if (!ack || ack.accepted !== true) return false;
   let host: string;
   try {
@@ -304,7 +343,7 @@ export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string)
   } catch {
     return false;
   }
-  return ack.hosts.includes(host);
+  return pick(ack).includes(host);
 }
 
 /**

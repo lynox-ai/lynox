@@ -17,7 +17,7 @@
  */
 import type { ApiProfile } from './api-store.js';
 import type { PresetEndpoints } from './oauth-presets.js';
-import { isVettedEgressHost, isPrivateLanEndpoint, isEndpointAcked } from './llm/endpoint-allowlist.js';
+import { isPrivateLanEndpoint, isRedirectAcked } from './llm/endpoint-allowlist.js';
 import { isPrivateIP } from './network-guard.js';
 
 /**
@@ -46,27 +46,49 @@ export function checkRedirectTarget(
   // covers RFC1918 in dotted-quad and `.local`/`.lan`/`.intranet` — and misses
   // the rest of 127/8, link-local (including the cloud metadata address), CGNAT,
   // `fe80::`, `fc00::` and IPv4-mapped loopback. The predicate that already knows
-  // all of them lives one import away. Brackets come off first, because a URL
-  // hands back an IPv6 hostname wearing them and the predicate takes the address.
+  // all of them lives one import away. Two normalisations first, and both are
+  // the parser's leavings rather than defensive habit: a URL hands back an IPv6
+  // hostname wearing brackets, and it preserves a trailing FQDN-root dot byte
+  // for byte — so `localhost.` and `shop.local.` reach here as names that no
+  // string comparison and no suffix pattern below matches. The derivation
+  // refuses that spelling too; this line is what makes the exported function
+  // right for a caller that did not derive, which its argument type cannot
+  // promise.
+  const rootedHost = redirectHost.replace(/\.$/, '');
+  const bareHost = rootedHost.replace(/^\[|\]$/g, '');
   if (redirectHost === ''
-    || redirectHost === 'localhost'
-    || isPrivateIP(redirectHost.replace(/^\[|\]$/g, ''))
-    || isPrivateLanEndpoint(endpoints.authorizeUrl)) {
+    || bareHost === 'localhost'
+    || isPrivateIP(bareHost)
+    // The brackets stay on for this one: it takes a URL, and an IPv6 address
+    // without them does not parse. Only the dot comes off here.
+    || isPrivateLanEndpoint(`https://${rootedHost}/`)) {
     return {
       kind: 'inside-network',
       message: 'This profile would send you to a page inside this engine\'s own network to authorize. That is not the provider, and nobody can accept it on your behalf — the profile has to name a provider this engine knows.',
     };
   }
 
-  // What the ack buys, stated exactly: it is the tenant's acceptance of THIS
-  // host for THIS profile, taken out of band from a human. It is not the engine
-  // vouching for the host, and above it does not stretch to a host inside the
-  // operator's network. The save-time prompt discloses the derived authorize
-  // host too, so what the human accepted and what happens agree.
-  if (!isVettedEgressHost(endpoints.authorizeUrl) && !isEndpointAcked(ack, endpoints.authorizeUrl)) {
+  // ONE question, and it is the one about this act: did a human agree to be sent
+  // to this host in their browser to authorize?
+  //
+  // Not `isEndpointAcked`, and not `isVettedEgressHost` either — both answer
+  // where DATA may go, and this file exists because that is a different
+  // question. The egress ack's own text says the user accepts controller
+  // responsibility for a data-processing relationship; it never mentions being
+  // redirected anywhere, so reading it as permission for a redirect takes a
+  // consent for one act as consent for another. The vetted list is the same
+  // mistake with a different author: it records hosts lynox vouches for as
+  // sub-processors, which says nothing about handing a person to that site to
+  // type a provider password.
+  //
+  // The advice below is followable because the save path now asks this question
+  // for EVERY preset profile, vetted or not — so the prompt it points at is
+  // always reachable. That is the whole reason the acceptance is collected
+  // there rather than only for non-vetted hosts.
+  if (!isRedirectAcked(ack, endpoints.authorizeUrl)) {
     return {
       kind: 'no-egress-ack',
-      message: `Nobody has accepted ${endpoints.host} for this profile yet. Save the profile again and accept the provider when asked, then open this link again.`,
+      message: `Nobody has agreed to be sent to ${endpoints.host} to authorize this profile. Save the profile again and accept when asked where you will be sent, then open this link again.`,
     };
   }
 

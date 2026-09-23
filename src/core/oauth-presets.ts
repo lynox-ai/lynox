@@ -90,10 +90,21 @@ export const OAUTH_PRESETS: PresetRegister = Object.freeze({
 });
 
 /** What a derivation refused, in a form the caller can turn into a message. */
+/**
+ * Why there are FOUR of these and not three: `bad-preset` names a defect in a
+ * compiled preset, and it is a different failure from a profile whose value was
+ * refused — different author, different way out, different sentence. While both
+ * arrived as `bad-param` carrying a synthesised pseudo-parameter, every consumer
+ * turned them into the same advice, and for a preset whose path lacks a leading
+ * slash that advice read "set auth.oauth.preset_params.path" — a field that does
+ * not exist, about a defect the operator cannot fix. A union member costs a
+ * branch; a pseudo-parameter costs a sentence that cannot be followed.
+ */
 export type PresetDerivationError =
   | { readonly kind: 'unknown-preset'; readonly presetId: string }
   | { readonly kind: 'missing-param'; readonly param: OAuthPresetParam }
-  | { readonly kind: 'bad-param'; readonly param: OAuthPresetParam; readonly value: string };
+  | { readonly kind: 'bad-param'; readonly param: OAuthPresetParam; readonly value: string }
+  | { readonly kind: 'bad-preset'; readonly detail: string };
 
 export interface PresetEndpoints {
   readonly host: string;
@@ -154,7 +165,7 @@ export function derivePresetEndpoints(
     // mutating the `?? ''` that used to paper over it.
     const value = values.get(preset.host.param);
     if (value === undefined) {
-      return { kind: 'bad-param', param: { name: preset.host.param, pattern: /$^/, describe: 'the host parameter, which this preset does not declare' }, value: preset.host.template };
+      return { kind: 'bad-preset', detail: `its host template names the parameter "${preset.host.param}", which the preset does not declare` };
     }
     // A function replacement, not a string: `String.replace` scans a replacement
     // STRING for `$&`, `$'` and friends, so a parameter value carrying them would
@@ -170,10 +181,22 @@ export function derivePresetEndpoints(
   try {
     parsed = new URL(`https://${host}`);
   } catch {
-    return { kind: 'bad-param', param: preset.params[0] ?? { name: 'host', pattern: /.*/, describe: 'the provider host' }, value: host };
+    return { kind: 'bad-preset', detail: 'the host it builds is not a valid host name' };
   }
   if (parsed.hostname !== host || parsed.username !== '' || parsed.password !== '') {
-    return { kind: 'bad-param', param: preset.params[0] ?? { name: 'host', pattern: /.*/, describe: 'the provider host' }, value: host };
+    return { kind: 'bad-preset', detail: 'the host it builds is not the host a URL parser reads back from it' };
+  }
+  // The FQDN root dot, refused separately because the identity check above
+  // cannot see it. Every other odd spelling of a host dies there by being
+  // NORMALISED — `127.1`, `2130706433`, `0177.0.0.1`, `LOCALHOST` and
+  // `127.0.0.1.` all come back from the parser as something else, so they no
+  // longer equal what went in. A trailing dot on a NAME is the exception: the
+  // parser preserves `localhost.` and `shop.local.` byte for byte, and every
+  // predicate downstream compares strings — `=== 'localhost'` misses it,
+  // `/\.local$/` misses it. One spelling, one boundary, refused where the
+  // others already die.
+  if (host.endsWith('.')) {
+    return { kind: 'bad-preset', detail: 'the host it builds ends in a root dot, which every check downstream reads as a different host' };
   }
 
   // The paths are appended and the result parsed AGAIN, so `host` is read off the
@@ -186,7 +209,7 @@ export function derivePresetEndpoints(
   // re-parsed here, because a preset author is the one writing these strings.
   // A path that does not start with `/` is not a path — it joins the authority.
   if (!preset.authorizePath.startsWith('/') || !preset.tokenPath.startsWith('/')) {
-    return { kind: 'bad-param', param: { name: 'path', pattern: /$^/, describe: 'the provider path, which this preset states' }, value: preset.authorizePath };
+    return { kind: 'bad-preset', detail: 'one of its paths does not start with a slash, so it would merge into the host instead of following it' };
   }
   const authorizeUrl = `https://${parsed.hostname}${preset.authorizePath}`;
   const tokenUrl = `https://${parsed.hostname}${preset.tokenPath}`;
@@ -194,7 +217,7 @@ export function derivePresetEndpoints(
   try {
     authorizeParsed = new URL(authorizeUrl);
   } catch {
-    return { kind: 'bad-param', param: { name: 'path', pattern: /$^/, describe: 'the provider path, which this preset states' }, value: preset.authorizePath };
+    return { kind: 'bad-preset', detail: 'the authorize address it builds is not a valid URL' };
   }
   // No comparison against `parsed.hostname` here, and that is deliberate: with
   // the leading slash required above, the authority is already committed and the

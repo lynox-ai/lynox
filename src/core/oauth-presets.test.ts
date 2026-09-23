@@ -152,7 +152,7 @@ describe('derivation happens at use, from the register alone', () => {
       params: [{ name: 'shop', pattern: /[a-z]+/, describe: 'the shop name' }],
     }]);
     expect(derivePresetEndpoints('example-constant', { shop: 'acme' }, withPath))
-      .toMatchObject({ kind: 'bad-param' });
+      .toMatchObject({ kind: 'bad-preset' });
   });
 
   it('treats an empty parameter as missing, whatever the pattern would allow', () => {
@@ -175,7 +175,7 @@ describe('derivation happens at use, from the register alone', () => {
       params: [{ name: 'shop', pattern: /[a-z]+/, describe: 'the shop name' }],
     }]);
     expect(derivePresetEndpoints('example-shop', { shop: 'acme', store: 'acme' }, undeclared))
-      .toMatchObject({ kind: 'bad-param' });
+      .toMatchObject({ kind: 'bad-preset' });
   });
 
   it('does not let a parameter value splice the template back into the host', () => {
@@ -190,6 +190,43 @@ describe('derivation happens at use, from the register alone', () => {
     expect(out).toMatchObject({ host: "a$'b.shops.example.com" });
   });
 
+  it.each([
+    ['a name with the FQDN root dot', 'localhost.'],
+    ['an on-premise name with one', 'shop.local.'],
+  ])('refuses %s, the one spelling the parser hands back unchanged', (_label, host) => {
+    // Every other odd spelling of a host dies at the identity check by being
+    // NORMALISED — measured: `127.1`, `2130706433`, `0177.0.0.1`, `LOCALHOST`
+    // and `127.0.0.1.` all come back from the parser as something else, so they
+    // no longer equal what went in. A trailing dot on a NAME is the exception:
+    // `localhost.` and `shop.local.` survive byte for byte, and every check
+    // downstream compares strings — `=== 'localhost'` misses it and `/\.local$/`
+    // misses it, so the one class nothing can override would have been
+    // overridable by appending a dot.
+    const rooted = presetRegisterOf([{ ...CONSTANT, host: { kind: 'constant', host } }]);
+    expect(derivePresetEndpoints('example-constant', undefined, rooted))
+      .toMatchObject({ kind: 'bad-preset' });
+  });
+
+  it('keeps accepting the same names without the dot, so the rule is about the dot', () => {
+    // The control. Without it, a refusal of every name would pass the two cases
+    // above and nobody would notice.
+    const plain = presetRegisterOf([{ ...CONSTANT, host: { kind: 'constant', host: 'shops.example.com' } }]);
+    expect(derivePresetEndpoints('example-constant', undefined, plain))
+      .toMatchObject({ host: 'shops.example.com' });
+  });
+
+  it('holds every shipped preset id to the grammar the tool validates', () => {
+    // Nothing bound the two together. A preset shipped as `azure_ad` would be
+    // derivable here and unsaveable there — and because the validator also runs
+    // over a STORED profile on the refine path, every later edit of a profile
+    // naming it would fail too. Vacuously green while the register is empty,
+    // red the day it matters, which is the same trick the emptiness alarm uses.
+    for (const id of presetIds()) {
+      expect(id, `preset id "${id}" is not one api_setup would accept in a profile`)
+        .toMatch(/^[a-z][a-z0-9-]{0,63}$/);
+    }
+  });
+
   it('refuses a path that would join the authority instead of the path', () => {
     // Measured, and the first measurement was wrong: ten shapes WITH a leading
     // slash all keep the host, so the rule looked unnecessary. Without the slash
@@ -199,7 +236,7 @@ describe('derivation happens at use, from the register alone', () => {
     for (const authorizePath of ['@evil.example/x', ':8080@evil.example/x', 'evil.example']) {
       const moved = presetRegisterOf([{ ...CONSTANT, authorizePath }]);
       expect(derivePresetEndpoints('example-constant', undefined, moved), authorizePath)
-        .toMatchObject({ kind: 'bad-param' });
+        .toMatchObject({ kind: 'bad-preset' });
     }
   });
 

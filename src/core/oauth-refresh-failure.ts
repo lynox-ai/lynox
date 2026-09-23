@@ -114,8 +114,7 @@ export function reclassifyForeignGrant(
  * reads them as one rule. It names the one way back (a new refresh token from
  * the user) and says plainly not to fetch again with the old one: the 401 hint
  * used to send the model round exactly that loop.
- */
-/**
+ *
  * ⚠ Written before a profile could be authorized by redirect, and it shows: it
  * sends the model to collect a pasted refresh token, which is the path the
  * connect link replaces. Deliberately not changed in the first wave — this is

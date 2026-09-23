@@ -27,7 +27,7 @@ import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { describeDisclosure, isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
+import { describeDisclosure, isEndpointAcked, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
 import { isInfraSecret, isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -190,8 +190,21 @@ function validateProfile(profile: ApiProfile): string | null {
       // non-string later and that refusal is the real boundary; what this adds is
       // that a structurally broken profile never persists to fail far from
       // whoever could fix it.
-      if (o.preset_id !== undefined && !/^[a-z][a-z0-9-]{0,63}$/.test(o.preset_id)) {
-        return `Invalid auth.oauth.preset_id "${o.preset_id}": must be a lowercase provider id, letters/digits/hyphens, starting with a letter.`;
+      if (o.preset_id !== undefined) {
+        // The value is NOT repeated back, and the asymmetry with the two
+        // refusals below is what gave this away: they name the field and never
+        // the value, this one did the opposite. Tool input passes through the
+        // secret resolver before the handler runs, and the consent it asks for
+        // is per-NAME and remembered — so a name consented to once for some
+        // other call is substituted here with no prompt, and a refusal that
+        // quotes what arrived would put the resolved value into the model's
+        // context. It is a provider id; naming the field is enough to fix it.
+        if (new RegExp(SECRET_REF_PATTERN.source).test(o.preset_id)) {
+          return 'Invalid auth.oauth.preset_id: a vault reference cannot name a provider. This field selects a built-in provider by name — pass the id itself, never a credential.';
+        }
+        if (!/^[a-z][a-z0-9-]{0,63}$/.test(o.preset_id)) {
+          return 'Invalid auth.oauth.preset_id: must be a lowercase provider id — letters, digits and hyphens, starting with a letter. Use api_setup connect to see which providers this engine knows.';
+        }
       }
       const presetParams: unknown = o.preset_params;
       if (presetParams !== undefined) {
@@ -1337,15 +1350,39 @@ Next steps before calling create:
       // worse: a provider retired from the register would make every profile
       // naming it unsaveable, including the update that would remove the field.
       let presetNote: string | undefined;
+      const redirectUrls: string[] = [];
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id) {
         const presetId = profile.auth.oauth.preset_id;
         const derived = derivePresetEndpoints(presetId, profile.auth.oauth.preset_params);
         if (!('kind' in derived)) {
           egressUrls.push(derived.authorizeUrl, derived.tokenUrl);
+          // …and the SAME host again, on its own list, because a second act is
+          // being asked about. The token exchange sends data there, which is the
+          // egress question; the connect link sends the USER there, which is
+          // not. One host, two consents, and they are stamped separately —
+          // see `CustomEndpointAck.redirect_hosts`.
+          redirectUrls.push(derived.authorizeUrl);
         } else if (derived.kind === 'unknown-preset') {
-          presetNote = `No authorization address could be derived: "${presetId}" is not a provider this engine has built in, so there is nothing here to disclose or accept. api_setup connect will refuse until it names one.`;
-        } else {
+          // The id is NOT repeated back here, and that is the one place in this
+          // note where the omission is deliberate: `auth.oauth.preset_id` is a
+          // model-authored field, tool input passes through the secret resolver
+          // before this handler runs, and a resolved value that happens to look
+          // like a provider id would be echoed into the model's context and into
+          // a human's prompt. When the id IS known the two arms below do name it
+          // — that string equals one of ours, so it discloses nothing.
+          const known = presetIds();
+          presetNote = known.length > 0
+            ? `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known.join(', ')}.`
+            : 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.';
+        } else if (derived.kind === 'bad-preset') {
+          presetNote = `No authorization address could be derived: the built-in provider "${presetId}" is defined wrongly in this engine — ${derived.detail}. Nothing on this profile fixes that; report it.`;
+        } else if (derived.kind === 'missing-param') {
           presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+        } else {
+          // Supplied and REFUSED, which is a different sentence: telling someone
+          // to set a value they already set is the advice that sends them round
+          // a loop. The value itself is not repeated back.
+          presetNote = `No authorization address could be derived: the value this profile supplies for ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}) is not one the provider "${presetId}" accepts. Correct it with api_setup update — the host is disclosed then.`;
         }
       }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
@@ -1355,7 +1392,14 @@ Next steps before calling create:
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
-      if (nonVetted.length > 0) {
+      // Two questions, one prompt, and the redirect half is asked even when the
+      // host IS vetted. That is not thoroughness: it is what keeps the refusal
+      // at connect time followable. If this only ran for non-vetted hosts, a
+      // preset pointing at a vetted one would save with no prompt, the redirect
+      // would refuse for want of an acceptance, and its advice — save again and
+      // accept — would point at a prompt that never appears. That dead end is
+      // the one this file already carries a scar from.
+      if (nonVetted.length > 0 || redirectUrls.length > 0) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -1365,18 +1409,35 @@ Next steps before calling create:
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
         // EVERY non-vetted egress host so the single accept is informed.
-        const disclosure = [nonVetted.map((u) => describeDisclosure(u)).join('\n\n'), presetNote]
-          .filter((part): part is string => part !== undefined && part !== '')
-          .join('\n\n');
+        // Each act gets its own sentence. The egress half says what the ENGINE
+        // will send and where; the redirect half says what will happen to the
+        // PERSON reading it. A consent whose text does not describe the act is
+        // not a consent for that act, and for a while this text described only
+        // the first one while the second was being authorized by it.
+        const redirectHostNames = Array.from(new Set(
+          redirectUrls
+            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+            .filter((h): h is string => h !== null),
+        ));
+        const disclosureParts = [
+          nonVetted.length > 0
+            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${nonVetted.map((u) => describeDisclosure(u)).join('\n\n')}`
+            : undefined,
+          redirectHostNames.length > 0
+            ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
+            : undefined,
+          presetNote,
+        ].filter((part): part is string => part !== undefined && part !== '');
+        const disclosure = disclosureParts.join('\n\n');
         if (!agent.promptUser) {
-          return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
+          return `Blocked: profile "${profile.id}" needs an explicit human acceptance before it can be saved, and no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
         }
         const answer = await agent.promptUser(
-          pv`⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
+          pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: profile "${profile.id}" not saved — user declined controller-responsibility for the non-vetted host(s).`;
+          return `Blocked: profile "${profile.id}" not saved — user declined.`;
         }
       }
 
@@ -1388,16 +1449,23 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonVetted.length > 0) {
+      if (nonVetted.length > 0 || redirectUrls.length > 0) {
         // Reachable only after the human accepted above (else returned).
-        const ackHosts = Array.from(new Set(
-          nonVetted
+        const hostsOf = (urls: readonly string[]): string[] => Array.from(new Set(
+          urls
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
             .filter((h): h is string => h !== null),
         ));
+        // Two lists from two sources, never one list used twice. `hosts` still
+        // answers only the data question, so nothing that reads it starts
+        // meaning something wider; `redirect_hosts` is fed from the derived
+        // authorize URL alone, so an acceptance earned by a `base_url` cannot
+        // authorize a redirect even when the two hostnames coincide.
+        const redirectHosts = hostsOf(redirectUrls);
         profile.custom_endpoint_ack = {
           accepted: true,
-          hosts: ackHosts,
+          hosts: hostsOf(nonVetted),
+          ...(redirectHosts.length > 0 ? { redirect_hosts: redirectHosts } : {}),
           accepted_at: new Date().toISOString(),
         };
       } else {
@@ -1521,8 +1589,18 @@ Next steps before calling create:
       } catch {
         return 'Error: ORIGIN is not a valid address, so no link can be built from it. Set it to this engine\'s full public address including the scheme, e.g. https://lynox.example.com.';
       }
-      const originHost = base.hostname.replace(/^\[|\]$/g, '');
-      if (base.protocol !== 'https:' && !(base.protocol === 'http:' && (originHost === 'localhost' || isPrivateIP(originHost)))) {
+      // The same three questions the redirect guard asks, and deliberately the
+      // same three: this message says "inside the operator's own network", and
+      // while it checked only loopback and numeric private ranges it refused
+      // `http://nas.local:3000` — an ordinary self-hosted address that this
+      // repo's own predicate, two imports away, calls private. A feature with
+      // two definitions of one phrase has the ending the redirect guard's own
+      // docstring describes.
+      const originHost = base.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '');
+      const originIsInsideNetwork = originHost === 'localhost'
+        || isPrivateIP(originHost)
+        || isPrivateLanEndpoint(`https://${base.hostname.replace(/\.$/, '')}/`);
+      if (base.protocol !== 'https:' && !(base.protocol === 'http:' && originIsInsideNetwork)) {
         return 'Error: ORIGIN must be an https address. The provider sends the authorization back to it, and plain http exposes that in transit; http is accepted only for an address inside the operator\'s own network.';
       }
       if (base.username !== '' || base.password !== '') {
@@ -1540,7 +1618,15 @@ Next steps before calling create:
         if (endpoints.kind === 'unknown-preset') {
           return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
         }
-        return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
+        if (endpoints.kind === 'bad-preset') {
+          // A defect in a compiled preset. Neither the model nor the user can
+          // fix it, so neither is told to try.
+          return `Error: the built-in provider profile "${id}" names is defined wrongly in this engine — ${endpoints.detail}. There is nothing to set on the profile; collect the credentials with ask_secret and use action=fetch_token, and report the provider as broken.`;
+        }
+        if (endpoints.kind === 'missing-param') {
+          return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
+        }
+        return `Error: the value profile "${id}" supplies for ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}) is not one its provider accepts. Ask the user to correct it and set it with api_setup update.`;
       }
       // The same question the start route asks, from the same function — so a
       // link is not handed out that the route will then refuse. While only the
@@ -1550,7 +1636,7 @@ Next steps before calling create:
       if (redirect) {
         return redirect.kind === 'inside-network'
           ? `Error: profile "${id}" would send the user to ${endpoints.host}, which is inside this engine's own network. That is not the provider, and there is no acceptance that would make it one — the profile has to name a built-in provider.`
-          : `Error: nobody has accepted ${endpoints.host} for profile "${id}" yet, and this link would be refused. Save the profile again with api_setup update and let the user accept the provider when asked, then connect.`;
+          : `Error: nobody has agreed to be sent to ${endpoints.host} for profile "${id}" yet, and this link would be refused. Save the profile again with api_setup update and let the user accept where they will be sent, then connect.`;
       }
       const clientIdKey = profile.auth.oauth?.client_id_key;
       const clientSecretKey = profile.auth.oauth?.client_secret_key;

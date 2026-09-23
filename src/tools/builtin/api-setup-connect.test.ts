@@ -30,6 +30,25 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     params: [],
+  }, {
+    // A provider whose host is on the VETTED list. It exists to isolate the
+    // redirect consent: nothing about this profile is a non-vetted egress, so
+    // if a prompt appears at save time it appeared for the other reason.
+    id: 'vetted-shop',
+    label: 'Vetted Shop',
+    host: { kind: 'constant', host: 'api.openai.com' },
+    authorizePath: '/admin/oauth/authorize',
+    tokenPath: '/admin/oauth/access_token',
+    params: [],
+  }, {
+    // Written wrongly on purpose: no leading slash, so the path would merge
+    // into the authority. The operator cannot fix this one.
+    id: 'broken-path',
+    label: 'Broken Path',
+    host: { kind: 'constant', host: 'shops.example.com' },
+    authorizePath: 'admin/oauth/authorize',
+    tokenPath: '/admin/oauth/access_token',
+    params: [],
   }]);
   return {
     ...real,
@@ -77,7 +96,16 @@ function shopProfile(over: Partial<ApiProfile> = {}): ApiProfile {
     // authorizes at — the disclosure above that prompt is what puts it there.
     // Without it here every reply below would be the un-acked refusal, which is
     // a case of its own further down rather than the backdrop of all of them.
-    custom_endpoint_ack: { accepted: true, hosts: ['acme.shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' },
+    custom_endpoint_ack: {
+      accepted: true,
+      hosts: ['acme.shops.example.com'],
+      // The second half, and it is a separate field because it records a
+      // separate act: being sent there in a browser, rather than the engine
+      // sending data there. A profile with only the first is a real shape and
+      // has its own case below.
+      redirect_hosts: ['acme.shops.example.com'],
+      accepted_at: '2026-09-22T00:00:00.000Z',
+    },
     ...over,
   };
 }
@@ -158,11 +186,30 @@ describe('the preset fields are checked at the door, not at the derivation', () 
     // leaves alone, and an unresolvable name. Those are what this can refuse,
     // and the refusal teaches the rule for all of them.
     ['a vault reference as a parameter', { preset_id: 'example-shop', preset_params: { shop: 'secret:LYNOX_ADMIN_TOKEN' } }, 'auth.oauth.preset_params.shop'],
+    ['a vault reference as the provider id', { preset_id: 'secret:LYNOX_ADMIN_TOKEN' }, 'auth.oauth.preset_id'],
   ])('refuses %s', async (_label, oauth, field) => {
     const result = await createWith(oauth);
 
     expect(result).toContain('Validation error');
     expect(result).toContain(field);
+  });
+
+  it.each([
+    ['a value that fails the grammar', 'Example Shop'],
+    ['a vault reference', 'secret:LYNOX_ADMIN_TOKEN'],
+  ])('names the field and never the value when preset_id carries %s', async (_label, presetId) => {
+    // The asymmetry that gave this away: the two `preset_params` refusals name
+    // the field and never the value, and `preset_id` did the opposite — twice.
+    // Tool input passes through the secret resolver before this handler runs,
+    // and the consent that resolver asks for is per-NAME and remembered, so a
+    // name accepted once for an unrelated call is substituted here with no
+    // prompt at all. A refusal that quotes what arrived puts the resolved value
+    // into the model's context.
+    const result = await createWith({ preset_id: presetId });
+
+    expect(result).toContain('Validation error');
+    expect(result).toContain('auth.oauth.preset_id');
+    expect(result).not.toContain(presetId);
   });
 
   it('lets a well-formed pair through, so the refusals above are about shape and not about presence', async () => {
@@ -198,8 +245,41 @@ describe('a save that cannot derive the authorize host says so', () => {
     const result = await saveWith({ preset_id: 'not-a-provider' }, { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined });
 
     expect(result).toContain('Created');
-    expect(result).toContain('not-a-provider');
     expect(result).toContain('No authorization address could be derived');
+    // And it does NOT repeat the id back. Tool input passes through the secret
+    // resolver before this handler runs, so an unknown `preset_id` can be a
+    // resolved vault value that merely looks like a provider name — and this
+    // string goes into the model's context and into a human's prompt. The
+    // engine's OWN ids are safe to print, so the message says what it knows
+    // instead of what it was given.
+    expect(result).not.toContain('not-a-provider');
+  });
+
+  it.each([
+    ['a preset whose path would join the authority', 'broken-path'],
+  ])('blames the engine, not the operator, for %s', async (_label, presetId) => {
+    // A defect in a compiled preset is not a missing profile field. While both
+    // arrived as the same refusal, the note read "the provider needs the
+    // provider path (auth.oauth.preset_params.path), which this profile does not
+    // supply. Set it with api_setup update" — a field that does not exist, about
+    // something the operator cannot fix.
+    const result = await saveWith({ preset_id: presetId }, { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined });
+
+    expect(result).toContain('defined wrongly in this engine');
+    expect(result).not.toContain('preset_params.path');
+    expect(result).not.toMatch(/Set it with api_setup update/);
+  });
+
+  it('says a refused value was refused, not that it is missing', async () => {
+    // The other half of the same split: telling someone to set a value they
+    // already set sends them round a loop. `ACME` fails the shop pattern.
+    const result = await saveWith(
+      { preset_id: 'example-shop', preset_params: { shop: 'ACME' } },
+      { base_url: 'http://shop.local/api', custom_endpoint_ack: undefined },
+    );
+
+    expect(result).toContain('is not one the provider');
+    expect(result).not.toContain('does not supply');
   });
 
   it('names the parameter it is missing, and says the host is disclosed once it is set', async () => {
@@ -220,6 +300,61 @@ describe('a save that cannot derive the authorize host says so', () => {
     );
 
     expect(asked.join(' ')).toContain('No authorization address could be derived');
+  });
+});
+
+describe('the save asks about being sent somewhere, not only about data', () => {
+  // The acceptance the redirect reads used to be the data-egress one, whose text
+  // says the user accepts controller responsibility for a data-processing
+  // relationship. It never mentions being handed to a site to type a password.
+  // A consent whose text does not describe the act is not a consent for that
+  // act, so the act now has a sentence and a list of its own.
+  const saveVetted = async (prompt: (q: unknown) => Promise<string>, store = new ApiStore()): Promise<{ store: ApiStore; reply: string }> => {
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
+    const reply = await apiSetupTool.handler({ action: 'create', profile: {
+      ...shopProfile(),
+      // Vetted base_url AND a vetted authorize host: the data question has
+      // nothing to ask about, so the prompt below can only be the other one.
+      base_url: 'http://shop.local/api',
+      custom_endpoint_ack: undefined,
+      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+        client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+        preset_id: 'vetted-shop', preset_params: {},
+      } },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent) as string;
+    return { store, reply };
+  };
+
+  it('asks even when every host is vetted, because vetting answers the other question', async () => {
+    const asked: string[] = [];
+    await saveVetted(async (q: unknown) => { asked.push(typeof q === 'string' ? q : JSON.stringify(q)); return 'no'; });
+
+    expect(asked).toHaveLength(1);
+    const question = asked[0] ?? '';
+    expect(question).toContain('api.openai.com');
+    expect(question).toContain('browser');
+    // And it says who the user signs in to, because that is the part a person
+    // gets wrong: they are not signing in to this engine.
+    expect(question).toContain('not to lynox');
+  });
+
+  it('stamps the two acceptances on separate lists', async () => {
+    const { store } = await saveVetted(async () => 'allow');
+    const ack = store.get('shop-api')?.custom_endpoint_ack;
+
+    expect(ack?.redirect_hosts).toEqual(['api.openai.com']);
+    // Nothing non-vetted here, so the data list stays empty — one act accepted,
+    // not two. A single list would have recorded a consent nobody gave.
+    expect(ack?.hosts).toEqual([]);
+  });
+
+  it('does not save the profile when the user declines being sent there', async () => {
+    const { store, reply } = await saveVetted(async () => 'no');
+
+    expect(reply).toContain('Blocked');
+    expect(store.get('shop-api')).toBeUndefined();
   });
 });
 
@@ -407,6 +542,21 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
+  it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {
+    // A real acceptance, covering exactly this host, given by a human — for the
+    // other act. The engine may send data there; nobody said the user agreed to
+    // be handed to it and asked for a password.
+    const store = new ApiStore();
+    store.register(shopProfile({
+      custom_endpoint_ack: { accepted: true, hosts: ['acme.shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' },
+    }));
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toContain('sent to acme.shops.example.com');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
   it('A10 · refuses a provider inside the operator network without offering an acceptance', async () => {
     // The other half of the same question, and the half with no way out: a
     // private host is vouched for by the egress vetting, so it never reaches the
@@ -431,7 +581,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     // fixture is the suspect there, not the message.
     ['not an address at all', 'tenant.lynox.example'],
     ['plain http on a public host', 'http://lynox.example.com'],
-    ['a username and password in the address', 'https://someone:hunter2@tenant.lynox.example'],
+    ['a username and password in the address', 'https://someone:not-a-real-password-only-a-fixture@tenant.lynox.example'],
     ['a query string', 'https://tenant.lynox.example/?x=1'],
     ['a fragment', 'https://tenant.lynox.example/#x'],
   ])('refuses an ORIGIN carrying %s, without echoing it', async (_label, origin) => {
@@ -449,6 +599,18 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     // A misconfigured ORIGIN can hold anything somebody pasted, including a
     // credential, and this string lands in the model's context.
     expect(result).not.toContain(origin);
+  });
+
+  it('accepts plain http for an on-premise NAME, which is what its own message promises', async () => {
+    // The message says "inside the operator's own network" while the check knew
+    // only loopback and numeric private ranges — so an ordinary self-hosted
+    // address was refused by a sentence saying it was allowed. One predicate
+    // now answers the phrase in both places.
+    process.env['ORIGIN'] = 'http://nas.local:3000';
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    expect(await connect(agentWith(store))).toContain('http://nas.local:3000/api/oauth/connect/shop-api');
   });
 
   it('accepts plain http for an address inside the operator network', async () => {

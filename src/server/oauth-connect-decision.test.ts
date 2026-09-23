@@ -20,7 +20,16 @@ const REGISTER = presetRegisterOf([{
 const decide = (facts: ConnectFacts, register = REGISTER): ReturnType<typeof decideConnect> =>
   decideConnect(facts, register);
 
-const ACK = { accepted: true as const, hosts: ['acme.shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' };
+// Both acceptances, because they answer two different questions and the
+// redirect asks only the second one. A profile carrying the data-egress half
+// alone is a real shape — every profile saved before this flow existed is one —
+// and it has its own case below.
+const ACK = {
+  accepted: true as const,
+  hosts: ['acme.shops.example.com'],
+  redirect_hosts: ['acme.shops.example.com'],
+  accepted_at: '2026-09-22T00:00:00.000Z',
+};
 
 function profile(over: Partial<ApiProfile> = {}): ApiProfile {
   return {
@@ -69,6 +78,9 @@ const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
     const p = profile();
     return { ...good, profile: { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: {} } } } };
   })(),
+  // A defect in the compiled preset rather than in the profile — same fixture,
+  // a register whose preset is written wrongly (see REGISTER_FOR below).
+  'broken-preset': { ...good },
   'no-egress-ack': { ...good, profile: profile({ custom_endpoint_ack: undefined }) },
   'no-http-secret': { ...good, httpSecretSet: false },
 };
@@ -80,6 +92,13 @@ describe('the start route decides everything before it mints anything', () => {
     'inside-network': presetRegisterOf([{
       id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: '169.254.169.254' },
       authorizePath: '/authorize', tokenPath: '/token', params: [],
+    }]),
+    'broken-preset': presetRegisterOf([{
+      id: 'example-shop', label: 'Broken', host: { kind: 'constant', host: 'shops.example.com' },
+      // No leading slash: the path would merge into the authority. Nobody
+      // standing in front of the page can fix that, which is the whole reason
+      // this is its own refusal.
+      authorizePath: 'admin/oauth/authorize', tokenPath: '/token', params: [],
     }]),
   };
 
@@ -98,9 +117,9 @@ describe('the start route decides everything before it mints anything', () => {
 
   it('covers every refusal the type allows, and runs each one', () => {
     // The pairing that makes the table worth having: the compiler keeps it
-    // complete, this keeps it used. Eleven today; a twelfth kind fails to compile
-    // above and fails this count here.
-    expect(Object.keys(BEFORE_MINT)).toHaveLength(11);
+    // complete, this keeps it used. Twelve today; a thirteenth kind fails to
+    // compile above and fails this count here.
+    expect(Object.keys(BEFORE_MINT)).toHaveLength(12);
   });
 
   it('lets a click from this instance through, with the derived target', () => {
@@ -133,7 +152,10 @@ describe('the start route decides everything before it mints anything', () => {
     // user would be sent to a provider nobody accepted.
     const p = profile({
       base_url: 'https://api.acme-cdn.example/v1',
-      custom_endpoint_ack: { ...ACK, hosts: ['api.acme-cdn.example'] },
+      // BOTH lists point at the other host — spreading ACK and overriding only
+      // `hosts` would leave the redirect acceptance naming the derived host, and
+      // the test would pass the profile through for the wrong reason.
+      custom_endpoint_ack: { ...ACK, hosts: ['api.acme-cdn.example'], redirect_hosts: ['api.acme-cdn.example'] },
     });
     const decision = decide({ ...good, profile: p });
     expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
@@ -225,21 +247,43 @@ describe('the start route decides everything before it mints anything', () => {
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
 
-    expect(isRefusal(decision) && decision.kind).toBe('bad-preset-param');
+    // `broken-preset`, not `bad-preset-param`: the refusal is about how the
+    // preset is written, and the host identity rule that catches these spellings
+    // is a statement about the compiled preset rather than about a value the
+    // profile supplied.
+    expect(isRefusal(decision) && decision.kind).toBe('broken-preset');
   });
 
-  it('lets a vetted host through without an acceptance, which is what vetting means', () => {
-    // The control for the ack rule, and it has to exist: without it, a guard
-    // that ignored the vetting entirely and demanded an acceptance from
-    // everyone would pass every other case in this file. What is vetted is
-    // vouched for by the engine, so nobody is asked to accept it.
+  it('refuses a VETTED host that nobody agreed to be sent to', () => {
+    // The rule this pins used to run the other way, and the change is the point.
+    // Being on the vetted list is lynox vouching for a host as a sub-processor —
+    // a statement about where DATA may go. It says nothing about whether the
+    // person in front of the browser agreed to be handed to that site and asked
+    // for a password. So vetting no longer buys a redirect; only the acceptance
+    // that names the act does.
     const vetted = presetRegisterOf([{
       id: 'example-shop', label: 'vetted', host: { kind: 'constant', host: 'api.openai.com' },
       authorizePath: '/authorize', tokenPath: '/token', params: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, vetted);
 
-    expect(isRefusal(decision)).toBe(false);
+    expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
+  });
+
+  it('refuses a data-egress acceptance used as permission to send a browser', () => {
+    // The construction the two lists exist for. This profile carries a real,
+    // human-given acceptance covering exactly the host it authorizes at — the
+    // one that says the engine may send DATA there. Reading that as agreement to
+    // be redirected is taking a consent for one act as consent for another, and
+    // it is what a single `hosts` list did whenever the two hostnames coincided.
+    const dataOnly = profile({
+      custom_endpoint_ack: { accepted: true, hosts: ['acme.shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' },
+    });
+    const decision = decide({ ...good, profile: dataOnly });
+
+    expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
+    // And the advice points at the question that is actually asked at save time.
+    expect(isRefusal(decision) && decision.message).toContain('sent to');
   });
 
   it('refuses an unauthenticated open before it says whether the profile exists', () => {

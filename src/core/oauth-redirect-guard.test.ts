@@ -21,9 +21,43 @@ describe('a target the URL parser refuses is treated as inside the network', () 
       { accepted: true, hosts: ['provider.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' },
     );
 
-    // The ack would have said yes — it names the host the endpoints claim. What
-    // decides is the address the browser would actually be sent to, and there
-    // isn't one.
+    // What decides is the address the browser would actually be sent to, and
+    // there isn't one. The fixture carries an ack naming the host the endpoints
+    // CLAIM, which is the shape a caller would hand in — but measured, that ack
+    // cannot influence this outcome either way: the acceptance check parses the
+    // same unparseable URL and returns false. An earlier version of this comment
+    // said "the ack would have said yes", which is the kind of sentence that
+    // reads as a measurement and is not one. The mutant still dies here —
+    // deleting the empty-host arm turns this into `no-egress-ack`.
     expect(decision?.kind).toBe('inside-network');
+  });
+
+  it.each([
+    ['loopback', 'https://localhost./authorize'],
+    ['an on-premise name', 'https://shop.local./authorize'],
+  ])('reads %s with a root dot as the host it actually is', (_label, authorizeUrl) => {
+    // The derivation refuses this spelling too, so neither caller can reach
+    // here with one. This function is exported and its argument is a shape, not
+    // a proof — and the dot is the one spelling `new URL` preserves byte for
+    // byte, so `=== 'localhost'` and `/\.local$/` both miss it. Tested here
+    // rather than only through a caller, because the two fixes would otherwise
+    // hide each other: delete either one alone and something still stays red.
+    const decision = checkRedirectTarget(
+      { host: 'provider.example.com', authorizeUrl, tokenUrl: authorizeUrl },
+      { accepted: true, hosts: [], redirect_hosts: ['localhost.', 'shop.local.'], accepted_at: '2026-09-22T00:00:00.000Z' },
+    );
+
+    // The acceptance names the host exactly, which is what makes this a test of
+    // the network rule rather than of the consent rule.
+    expect(decision?.kind).toBe('inside-network');
+  });
+
+  it('lets an ordinary public host through, so the dot is what decides', () => {
+    const decision = checkRedirectTarget(
+      { host: 'shops.example.com', authorizeUrl: 'https://shops.example.com/authorize', tokenUrl: 'https://shops.example.com/token' },
+      { accepted: true, hosts: [], redirect_hosts: ['shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' },
+    );
+
+    expect(decision).toBeNull();
   });
 });

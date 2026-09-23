@@ -31,6 +31,7 @@ export type ConnectRefusalKind =
   | 'not-oauth2'
   | 'no-preset'
   | 'bad-preset-param'
+  | 'broken-preset'
   | 'no-egress-ack'
   | 'inside-network'
   | 'no-http-secret';
@@ -144,6 +145,16 @@ export function decideConnect(
         message: known.length > 0
           ? `This profile does not name a provider this engine knows. It knows: ${known.join(', ')}.`
           : 'This engine has no built-in providers yet, so there is nothing to connect to.',
+      };
+    }
+    if (endpoints.kind === 'bad-preset') {
+      // Not the profile's fault and not the user's, so the message says so
+      // rather than asking them for a value. Nobody standing in front of this
+      // page can fix a preset that was compiled in wrong.
+      return {
+        kind: 'broken-preset',
+        status: 500,
+        message: 'The built-in provider this profile names is defined wrongly in this engine, so there is no page to send you to. Nothing you can change on the profile fixes it.',
       };
     }
     return {
