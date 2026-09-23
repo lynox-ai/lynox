@@ -54,7 +54,24 @@ strip_file() {
   [ -n "$f" ] || usage
   [ -f "$f" ] || { echo "no-ai-attribution: no such file: $f" >&2; exit 0; }
 
-  grep -viE "$PATTERN" -- "$f" > "$f.tmp" || true
+  # `|| true` used to cover both of grep's non-zero exits, and they are not the same
+  # thing. Exit 1 means "no line survived the filter" — legitimate, and the empty
+  # result is the correct answer. Exit 2 means the SEARCH failed, and the old line
+  # then wrote an empty `$f.tmp`, which the printf below copied over the commit
+  # message. Same for a failed redirect: no tmp file at all, and an empty `body`.
+  #
+  # The direction that made this worth fixing is not data loss — git refuses an empty
+  # message, so the commit aborts and the committer sees it. It is that the abort says
+  # nothing about the cause, in a hook whose whole design is to be silent and never
+  # block. So: on anything but 0 or 1, warn on stderr and leave the file ALONE.
+  # Stripping still fails open — the CI job is the gate for the unstripped case.
+  local rc=0
+  grep -viE "$PATTERN" -- "$f" > "$f.tmp" || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$f.tmp" ]; then
+    echo "no-ai-attribution: grep exited $rc for $f — leaving the message untouched" >&2
+    rm -f "$f.tmp"
+    exit 0
+  fi
 
   # Deleting a trailer block can leave the message ending in blank lines. Trim them
   # (command substitution eats trailing newlines), then restore exactly one.

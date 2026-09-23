@@ -12,7 +12,7 @@
  *   - prose that merely MENTIONS a trailer is not
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -131,6 +131,43 @@ describe('no-ai-attribution — does not eat prose about the trailers', () => {
 // base exits 128 with an empty list, the body never ran, and the function
 // printed `clean ✓ (0 commits scanned)` and exited 0 — a green tick for a range
 // it could not read.
+describe('no-ai-attribution — when the search itself fails', () => {
+  /** A `grep` on PATH that fails the way a missing file or a bad option does. */
+  function withFailingGrep(code: number): { status: number | null; stderr: string } {
+    const binDir = join(dir, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, 'grep'), `#!/usr/bin/env bash\nexit ${String(code)}\n`, { mode: 0o755 });
+    const res = spawnSync('bash', [SCRIPT, 'strip', msgPath], {
+      encoding: 'utf-8',
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+    });
+    return { status: res.status, stderr: res.stderr };
+  }
+
+  const MESSAGE = 'Add a thing\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n';
+
+  it('leaves the message untouched, and says so on stderr', () => {
+    // Before: the empty tmp file was copied over the message, git then refused an empty
+    // one, and the abort named no cause — in a hook designed never to block.
+    writeFileSync(msgPath, MESSAGE);
+    const { status, stderr } = withFailingGrep(2);
+    expect(status).toBe(0); // a hook that aborts teaches --no-verify; it must not
+    expect(stderr).toMatch(/grep exited 2/);
+    expect(readFileSync(msgPath, 'utf-8')).toBe(MESSAGE);
+  });
+
+  it('…and the control: the same message IS stripped when grep works', () => {
+    // Without this, the case above passes for a message nothing would have changed.
+    expect(strip(MESSAGE)).toBe('Add a thing\n');
+  });
+
+  it('treats "no line survived" as the answer it is, not as a failure', () => {
+    // `grep -v` exits 1 when everything matched. That is legitimate — a message made
+    // only of trailers has nothing left — so the bail-out must not swallow exit 1.
+    expect(strip('Co-Authored-By: Claude <noreply@anthropic.com>\n')).toBe('\n');
+  });
+});
+
 describe('no-ai-attribution — the range it was asked to scan', () => {
   let repo: string;
 
