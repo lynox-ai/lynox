@@ -34,12 +34,18 @@ interface OpenAIChatResponse {
 }
 
 /**
- * Score one answer 1-5 against a rubric with the independent judge. Returns null
- * when the judge is unavailable or its reply can't be parsed (fail-soft — a
- * missing judge score never fails a candidate, it just leaves the quality axis
- * blank). GLM 5.2 reasons before answering, so we allow room + parse the score
- * from anywhere in the reply (prefer an explicit JSON, then `N/5`, then a bare
- * 1-5), taking the LAST match (its conclusion) not the first (its scratch work).
+ * Score one answer 1-5 against a rubric with the independent judge.
+ *
+ * Two outcomes that used to look identical and must not: `null` means the judge
+ * is NOT CONFIGURED (no key) — the caller soft-passes, the quality axis is simply
+ * blank. A configured judge that FAILS (non-2xx, unreachable, unparseable) now
+ * THROWS, so the run records an error instead of a pass. That distinction is the
+ * point: `grounding-discipline` gates all three tiers, so a judge outage used to
+ * turn silently into FIT for every candidate.
+ *
+ * Kimi reasons before answering, so we allow room + parse the score from anywhere
+ * in the reply (prefer an explicit JSON, then `N/5`, then a bare 1-5), taking the
+ * LAST match (its conclusion) not the first (its scratch work).
  */
 export async function judgeQuality(opts: { task: string; answer: string; rubric: string }): Promise<{ score: number; reason: string } | null> {
   const key = process.env['FIREWORKS_API_KEY'];
@@ -56,12 +62,13 @@ export async function judgeQuality(opts: { task: string; answer: string; rubric:
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: JUDGE_MODEL, messages: [{ role: 'user', content: prompt }], max_tokens: 1200, temperature: 0 }),
     });
+    if (!res.ok) throw new Error(`judge HTTP ${res.status} — a configured judge that fails is an error, not a pass`);
     const data = (await res.json()) as OpenAIChatResponse;
     text = data.choices?.[0]?.message?.content ?? '';
-  } catch {
-    return null;
+  } catch (e) {
+    throw e instanceof Error ? e : new Error(`judge call failed: ${String(e)}`);
   }
-  // Take the LAST score-like match — GLM reasons first, concludes last.
+  // Take the LAST score-like match — Kimi reasons first, concludes last.
   const patterns = [/SCORE:\s*([1-5])\s*\/\s*5/gi, /\b([1-5])\s*\/\s*5\b/g, /"?score"?\s*[:=]\s*([1-5])\b/gi];
   for (const re of patterns) {
     const matches = [...text.matchAll(re)];

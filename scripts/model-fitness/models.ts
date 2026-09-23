@@ -26,10 +26,18 @@ const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 export const MIN_CONTEXT_WINDOW = 200_000;
 
 /** Context-window + pricing for candidates NOT in lynox's registry (a model
- *  under evaluation that the engine doesn't ship yet). Pricing marked ~ is a
- *  provider list-price estimate — VERIFY before any routing decision.
+ *  under evaluation that the engine doesn't ship yet). Every price here is a
+ *  provider list-price ESTIMATE — the grid prints them with a leading `~`
+ *  (`isEstimatedPrice`), and none of them may decide a routing question before
+ *  someone checks the provider's own page.
  *
- *  A FALLBACK, never a second opinion about an id the registry carries. Two rows
+ *  ⚠ The check below is id-exact, and an id is not a model: the same weights can
+ *  sit here under an OpenRouter id and in the registry under a Fireworks one, at
+ *  genuinely different host prices. That is not a duplicate row and the check
+ *  will not flag it — the `~` is what keeps the cheaper, unverified figure from
+ *  reading as the billed one when both appear in the same cost-sorted grid.
+ *
+ *  A FALLBACK, never a second opinion about an id the registry carries. Three rows
  *  here shadowed the registry (`mistral-medium-2604`, `glm-5p2`, plus a third the
  *  eye missed — `deepseek-v4-pro` on Fireworks, priced 0.43/0.87 against 1.74/3.48)
  *  because the engine gained those ids after this table was written, and the grid
@@ -50,8 +58,23 @@ const OVERRIDES: Record<string, { contextWindow: number; pricing: { input: numbe
  *  empty (`tests/model-fitness-models.test.ts`); `scripts/` is outside the vitest
  *  include, which is why the assertion lives under `tests/` — same arrangement as
  *  `tests/model-fitness-replay.test.ts`. */
+export function collisionsIn(
+  overrides: Readonly<Record<string, unknown>>,
+  registry: Readonly<Record<string, unknown>>,
+): string[] {
+  return Object.keys(overrides).filter((id) => registry[id] !== undefined);
+}
+
 export function overrideCollisions(): string[] {
-  return Object.keys(OVERRIDES).filter((id) => MODEL_CAPABILITIES[id] !== undefined);
+  return collisionsIn(OVERRIDES, MODEL_CAPABILITIES);
+}
+
+/** True when this candidate's price comes from OVERRIDES — a hand-typed provider
+ *  list-price estimate, not the figure the engine bills on. The grid marks these
+ *  with `~`: an unmarked estimate sorted cheapest is how a candidate wins a
+ *  cost-decided tier on a number nobody verified. */
+export function isEstimatedPrice(id: string): boolean {
+  return MODEL_CAPABILITIES[id]?.pricing === undefined && OVERRIDES[id]?.pricing !== undefined;
 }
 
 /** Refuse to run the harness on a duplicated row: the grid would price a candidate

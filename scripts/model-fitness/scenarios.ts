@@ -138,7 +138,7 @@ export const SCENARIOS: readonly Capability[] = [
         maxIterations: 8,
         promptUser: simulatedUser('You are the operator. Goal: a friendly reply to Markus that CONFIRMS the revised budget of CHF 45,500 and ASKS for written sign-off by Friday. If asked what to write, state exactly those two facts (the amount CHF 45,500 and the request for written sign-off).'),
       });
-      await agent.send('Antworte bitte auf Markus\' Mail zum Projekt-Budget (markus@helvetia.ch).');
+      await agent.send('Antworte bitte auf Markus\' Mail zum Projekt-Budget (markus@brunnmatt.example).');
       const sent = state['sent'] as Array<Record<string, unknown>>;
       const ok = sent.some((m) => /markus/i.test(str(m['to'])) && /45.?500/.test(str(m['body'])) && /freigabe|sign|unterschrift|schriftlich/i.test(lower(m['body'])));
       return { pass: ok, note: sent.length ? `drafted to=${str(sent[0]!['to']).slice(0, 20)} match=${ok}` : 'no reply drafted' };
@@ -231,17 +231,17 @@ export const SCENARIOS: readonly Capability[] = [
     id: 'scenario:replanning',
     point: 'DEEP ceiling — re-planning: the first tool path is BLOCKED; must adapt, not stall',
     tiers: ['deep'],
-    detail: 'A SELF-CONTAINED send (content + an unambiguous recipient given) whose only obstacle is that mail_send needs an email, not a name → the model must contact_lookup + retry. Pass = the mail reaches markus@helvetia.ch. (The task is fully specified on purpose: an under-specified task would reward reckless guessing and penalize a careful model that asks — that confound is removed.)',
+    detail: 'A SELF-CONTAINED send (content + an unambiguous recipient given) whose only obstacle is that mail_send needs an email, not a name → the model must contact_lookup + retry. Pass = the mail reaches markus@brunnmatt.example. (The task is fully specified on purpose: an under-specified task would reward reckless guessing and penalize a careful model that asks — that confound is removed.)',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       const state: State = { sent: [] as Array<Record<string, unknown>> };
       const mail = stateTool({ name: 'mail_send', description: 'Send a mail (to = a valid email address, body).', input_schema: { type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } }, required: ['to', 'body'] } },
         (input, s) => { const to = str((input as { to?: string }).to); if (!/@/.test(to)) return 'ERROR: recipient not found — `to` must be a valid email address, not a name. Look up the contact to get their email, then retry.'; (s['sent'] as Array<Record<string, unknown>>).push(input as Record<string, unknown>); return 'Sent.'; });
       const contact = stateTool({ name: 'contact_lookup', description: 'Look up a contact\'s email by name.', input_schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
-        (input) => { const n = str((input as { name?: string }).name); return /markus|oehrli/i.test(n) ? JSON.stringify({ name: n, email: 'markus@helvetia.ch' }) : 'no match'; });
+        (input) => { const n = str((input as { name?: string }).name); return /markus|oehrli/i.test(n) ? JSON.stringify({ name: n, email: 'markus@brunnmatt.example' }) : 'no match'; });
       const agent = make({ name: 'sc-replan', systemPrompt: 'You are lynox. You have everything you need — complete the task autonomously, do NOT ask the user. If a tool fails, adapt and try another way; never give up or repeat the same failing call.', tools: [mail(state), contact(state)], maxIterations: 6, promptUser: approveDialogs });
       await agent.send('Sende diese fertige Q3-Zusammenfassung per E-Mail an den Kontakt Markus Oehrli: "Umsatz Q3: CHF 36\'000, Zielerreichung 92%, keine offenen Risiken."');
       const sent = state['sent'] as Array<Record<string, unknown>>;
-      const pass = sent.some((m) => /markus@helvetia\.ch/i.test(str(m['to'])));
+      const pass = sent.some((m) => /markus@brunnmatt\.example/i.test(str(m['to'])));
       return { pass, note: sent.length ? `sent to=${str(sent[0]!['to'])}` : 'never sent (stalled/asked instead of looking up)' };
     },
   },
@@ -339,9 +339,9 @@ export const SCENARIOS: readonly Capability[] = [
   },
   {
     id: 'balanced:conversation-quality',
-    point: 'BALANCED quality — an INDEPENDENT judge (GLM, not Claude/Mistral) rates the main-chat reply',
+    point: 'BALANCED quality — an INDEPENDENT judge (a model that is NOT among the candidates) rates the main-chat reply',
     tiers: ['balanced'],
-    detail: 'A realistic customer message; the model replies; GLM 5.2 scores the reply 1-5 on a business-quality rubric (accurate, actionable, right tone, concise). Pass = score ≥ 4. Skips (pass) if no FIREWORKS_API_KEY. The SCORE (in the note) is the ranking signal, not just pass/fail.',
+    detail: 'A realistic customer message; the model replies; the independent judge scores it 1-5 on a business-quality rubric (accurate, actionable, right tone, concise). Pass = score ≥ 4. Skips (pass) if no FIREWORKS_API_KEY. The SCORE (in the note) is the ranking signal, not just pass/fail.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       if (!judgeAvailable()) return { pass: true, note: 'skipped (no FIREWORKS_API_KEY for the independent judge)' };
       const task = 'Ein Kunde schreibt: "Hallo, wir überlegen von der Konkurrenz zu wechseln. Was macht euer Angebot besser und wie schnell wären wir startklar?" Antworte als lynox-Geschäftsassistent.';

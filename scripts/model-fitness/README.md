@@ -51,19 +51,22 @@ concern's) triggering case × a deterministic assertion, tagged with its `job`:
 
 - **FAST** — forced-tool structured extraction (`kg-entity-extraction` ✓, `inbox-classify` ✓,
   `search-rerank` ○, `dag-plan` ○, `process-capture` ○) + short free-text gen
-  (`thread-title` ○, `hyde-query` ○, `compaction-summary` ○). The behaviour form ("did it
+  (`thread-title` ○, `hyde-query` ○, `compaction-summary` ✓). The behaviour form ("did it
   call X") does not separate a strong fleet; **correctness** ("did it get it right") does.
-- **BALANCED** — the main chat: `main-chat-multistep` ✓ (in `scenarios.ts`),
-  `main-chat-terminal` ✓, `main-chat-language` ✓ + `sub-agent` ○, `pipeline-step` ○,
-  `api-setup-docs` ○.
-- **DEEP** — `heavy-multistep` ✓ (the policy scenario in `scenarios.ts`).
+- **BALANCED** — the main chat: `main-chat-multistep` ✓, `main-chat-terminal` ✓,
+  `main-chat-language` ✓, `sub-agent` ✓ + `pipeline-step` ○, `api-setup-docs` ○.
+- **DEEP** — `heavy-multistep` ✓, `big-context-analysis` ✓ (the latter carries its own
+  context floor, below).
 - **CROSS-CUTTING** (every job leans on these) — `tool-select` ✓, `tool-call-reliability` ✓,
   `schema-fidelity` ✓, `vision` ✓, `durable-memory` recall discipline ✓,
-  `injection-resistance` ✓, `terminal-under-load` ✓.
+  `injection-resistance` ✓, `terminal-under-load` ✓, `grounding-discipline` ✓.
 
 `TIER_JOBS` is the coverage index — ✓ = a case exists, ○ = an open gap
-(`DEF-model-fitness-job-coverage-gaps`). Give a new case the matching `job` tag and it joins
-the index automatically.
+(`DEF-model-fitness-job-coverage-gaps`). The ✓ is a hand-typed `covers` pointing at a case
+id, so a new case joins the index only when you set it; what is mechanical is that the two
+cannot drift — `tests/model-fitness-models.test.ts` fails if any `covers` names a case that
+does not exist. **This list is read off the code, not maintained beside it:** an earlier
+version of it marked two covered jobs as gaps and omitted two more entirely.
 
 ### The structural gate: context window (free, no API)
 
@@ -88,7 +91,14 @@ axis the cost grid exists to decide.
 Several models clear a tier's gates, and deterministic asserts **cannot see output QUALITY**.
 So the run prints a **tier fitness GRID**: every context-clearing candidate judged against
 every tier's gates (not just its current role), annotated with cost and context from
-`MODEL_CAPABILITIES[id].pricing`. It gives you the fit set; quality decides among them.
+`MODEL_CAPABILITIES[id].pricing`. A price printed with a leading **`~` is an estimate** — a
+hand-typed provider list price for a model the engine does not ship, not the figure it bills
+on. It gives you the fit set; quality decides among them.
+
+A tier with **no case in the current suite prints `NOT MEASURED`**, not a fit set. It used to
+print the whole roster: `[].every(…)` is `true`, and `--scenarios` carries no fast-tier case
+at all. A screen that manufactures a verdict from zero evidence is the failure this whole
+page is about, so the decision is a pure function (`grid.ts`) with its own tests.
 Per-tier priority (rafael 2026-07-19):
 
 - **FAST** — *cheap and fast, just clear the bar.*
@@ -103,11 +113,18 @@ purely because a stronger one was not a candidate. A missing row reads exactly l
 
 For the subjective axis a pass/fail cannot reach. **Why independent:** an LLM judge has a
 self-preference bias — a judge scores its own family higher (rafael 2026-07-19). Our
-candidates span Claude and Mistral, so the judge is a **third family, neither** (Kimi K2.6
-via Fireworks, `judge.ts`). Bias
+roster spans several families, so the judge is picked to be **none of them** — today Kimi
+via Fireworks (`judge.ts`; the id is printed at the top of every run, because a judge named
+in prose drifts from the one that runs, and this one did: the docs said GLM long after GLM
+had become a scored *candidate*). Bias
 mitigation is **absolute rubric scoring** (1-5 against a fixed rubric, never pairwise → no
 position bias); residual verbosity/style bias is a documented caveat, and the objective cases
 stay the primary, bias-free discriminator.
+
+An **unconfigured** judge soft-passes its cases — the quality axis is simply blank. A
+**configured** judge that fails (a 401, a 429, an unreachable host) is an ERROR, not a pass:
+`grounding-discipline` gates all three tiers, so an outage that soft-passed would have turned
+silently into FIT for the whole roster.
 
 ## The multi-step golden set (`scenarios.ts`)
 
@@ -173,5 +190,8 @@ against the harness until proven otherwise.
 | `dk-capture-repro.mjs`, `dk-capture-crossprovider.mjs` | Durable-knowledge capture A/B against a REAL engine, swept cross-provider. | 3, single behaviour |
 | `probe-freshness.mjs` | The shared trap for all of the above: a fact already active on the target engine turns a capture probe into a dedup probe. | — |
 
-`types.ts` is the shared type home for the instruments in this directory
-(`DEF-model-fitness-shared-lib`); do not re-declare its types locally.
+`types.ts` is **meant** to be the shared type home for this directory
+(`DEF-model-fitness-shared-lib`). It is not yet: `replay.ts` and `artefact.ts` still declare
+their own `Candidate`, and the provider base URLs are spelled out in four files. Import from
+`types.ts` in anything new; de-duplicating the existing three is that row's job, not a claim
+this file gets to make in the present tense.

@@ -6,22 +6,26 @@
  * Runs the capability suite (capabilities.ts) across the candidate models
  * (models.ts) and prints a FITNESS MATRIX (capability × model → pass-rate) plus
  * a per-tier "which model does which job" read. Only candidates whose provider
- * key is present are run. Deterministic assertions; NO LLM judge in v1.
+ * key is present are run. Assertions are deterministic except for two cases
+ * scored by the independent judge (judge.ts), which are marked as such.
  *
  * `--scenarios` swaps the cheap single-capability probes for the MULTI-STEP
  * scenario substrate (scenarios.ts — τ-bench triad: task + simulated user +
  * state assertion). Costlier (each case is a full tool-loop + maybe a sim-user
  * turn), so it's an explicit opt-in, not part of the default pass.
  *
- * Cost: ~ (#capabilities × #candidates × repeats) short calls. Default repeats=2
- * over the 7 candidates × 11 caps ≈ 150 calls ≈ a few cents. Use --candidate to
- * re-run one model cheaply. --scenarios runs heavier; pair it with --repeats 1.
+ * Cost: ~ (#capabilities × #candidates × repeats) short calls, and the roster
+ * grows, so the run PRINTS its own arithmetic at startup rather than carrying a
+ * number here that goes stale (it did: this line said 7 × 11 while the roster had
+ * reached 15 × 15). Use --candidate or --provider to re-run a slice cheaply.
  */
 import { Agent } from '../../src/core/agent.js';
 import { initLLMProvider } from '../../src/core/llm-client.js';
 import { createToolContext } from '../../src/core/tool-context.js';
-import { ALL_CANDIDATES, assertNoOverrideCollisions, contextWindowOf, costOf, MIN_CONTEXT_WINDOW } from './models.js';
+import { ALL_CANDIDATES, assertNoOverrideCollisions, contextWindowOf, costOf, isEstimatedPrice, MIN_CONTEXT_WINDOW } from './models.js';
+import { judgeAvailable, JUDGE_ID } from './judge.js';
 import { CAPABILITIES } from './capabilities.js';
+import { tierFit } from './grid.js';
 import { SCENARIOS } from './scenarios.js';
 import type { Candidate, Capability, CaseResult, MakeAgent, MatrixCell, Tier } from './types.js';
 
@@ -33,14 +37,20 @@ function arg(name: string, dflt: string): string {
 const REPEATS = Math.max(1, parseInt(arg('--repeats', '2'), 10) || 2);
 const ONLY = arg('--only', '').split(',').map((s) => s.trim()).filter(Boolean);
 const CANDIDATE = arg('--candidate', '').toLowerCase(); // label substring, for cheap targeted re-runs
-const PROVIDER = arg('--provider', '').toLowerCase(); // 'anthropic' | 'openai' — chunk a run by provider to dodge the duration KILL (Mistral 429-backoffs + judge latency compound over a full 8-candidate run)
+const PROVIDER = arg('--provider', '').toLowerCase(); // 'anthropic' | 'openai' — chunk a run by provider to dodge the duration KILL (Mistral 429-backoffs + judge latency compound over a full-roster run)
 const SCENARIO_MODE = process.argv.includes('--scenarios');
 const SUITE = SCENARIO_MODE ? SCENARIOS : CAPABILITIES;
 
 /** Run a case, retrying ONLY on a rate-limit (429) with exponential backoff —
  *  Mistral's tier limits are shallow (fb_mistral_stable_tag), and a 429 is an
  *  infra artifact, NOT a capability failure; without this it pollutes the matrix
- *  (a rate-limited model reads as unfit). Real errors still surface immediately. */
+ *  (a rate-limited model reads as unfit). Real errors still surface immediately.
+ *
+ *  It REDUCES that pollution, it does not remove it: a 429 that survives all four
+ *  attempts is rethrown and recorded as an error like any other, and an error
+ *  disqualifies the candidate from the fitness grid. The run prints `E` and the
+ *  message, so it is visible — but "rate-limited" and "broken" still land in the
+ *  same cell. Splitting them needs a skip state the cell does not have. */
 async function runWithRetry(cap: Capability, make: MakeAgent): Promise<CaseResult> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -49,7 +59,8 @@ async function runWithRetry(cap: Capability, make: MakeAgent): Promise<CaseResul
       lastErr = e;
       const msg = e instanceof Error ? e.message : String(e);
       if (!/429|rate.?limit|too many requests/i.test(msg)) throw e;
-      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1s, 2s, 4s, 8s
+      if (attempt === 3) break; // no point sleeping 8s before giving up
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1s, 2s, 4s
     }
   }
   throw lastErr;
@@ -88,6 +99,11 @@ async function main(): Promise<void> {
     return true;
   });
   if (!candidates.length) { process.stderr.write('No candidates runnable (missing keys).\n'); process.exit(1); }
+
+  // The run states its own size and its own judge, because a number written into
+  // a comment goes stale and a judge named in prose drifts from the one that runs.
+  console.log(`# ${caps.length} case(s) × ${candidates.length} candidate(s) × ${REPEATS} repeat(s) = up to ${caps.length * candidates.length * REPEATS} calls`);
+  console.log(`# quality axis: ${judgeAvailable() ? JUDGE_ID : 'no judge (FIREWORKS_API_KEY unset) — judge-scored cases soft-pass'}`);
 
   const providersInit = new Set<string>();
   // The multi-step scenarios drive their simulated user through a fixed Haiku
@@ -161,26 +177,29 @@ async function main(): Promise<void> {
   //    (which the deterministic asserts can't see) still pick among the fit. ──
   console.log('\n## Tier fitness grid (FIT = clears the context gate AND passes every capability gating that tier)');
   console.log('   The harness measures the FIT FLOOR + cost + context; it does NOT rank output QUALITY (deterministic');
-  console.log('   asserts are blind to it) — use an LLM-judge (deferred) or the public leaderboards to pick among the fit.');
+  console.log('   asserts are blind to it beyond the two judge-scored cases) — weigh quality from the judge score or the public leaderboards.');
   console.log('   Per-tier priority (how to weigh the fit set): fast = cheap+fast · balanced = QUALITY then cost (main chat) · deep = QUALITY, cost-tolerant.');
   const tiers: Tier[] = ['fast', 'balanced', 'deep'];
   const PRIORITY: Record<Tier, string> = { fast: 'cheap+fast', balanced: 'quality>cost', deep: 'quality' };
   const price = (id: string): number => costOf(id)?.input ?? Infinity;
   for (const tier of tiers) {
     const gating = caps.filter((c) => c.tiers.includes(tier));
-    const fit = candidates.filter((cand) => {
-      if (!ctxFit(cand.id)) return false; // structural gate first — a small window can't hold the job
-      return gating.every((cap) => {
-        const cell = cells.find((x) => x.capabilityId === cap.id && x.candidateId === cand.id);
-        return cell && cell.passes === cell.runs && cell.errors === 0;
-      });
-    });
+    const decision = tierFit(gating, candidates, cells, ctxFit);
+    if (!decision.measured) {
+      console.log(`  ${pad(`${tier} [${PRIORITY[tier]}]`, 24)} →  NOT MEASURED — no case in this run gates ${tier}`);
+      continue;
+    }
+    const fit = decision.fit;
     // Listed cheapest-first as a stable order + a cost signal — NOT a ranking:
     // for balanced/deep, quality (which the asserts can't see) decides among these.
     const ranked = [...fit].sort((a, b) => price(a.id) - price(b.id)).map((f) => {
       const c = costOf(f.id);
       const cw = contextWindowOf(f.id);
-      const cost = c ? `$${c.input}/${c.output}` : '$?';
+      // `~` marks a price that came from OVERRIDES, i.e. a hand-typed provider
+      // list-price estimate rather than the number the engine bills on. Reading
+      // an estimate as a billed price is how this grid once ranked a candidate
+      // cheapest on a figure nothing had verified.
+      const cost = c ? `${isEstimatedPrice(f.id) ? '~' : ''}$${c.input}/${c.output}` : '$?';
       const k = cw === undefined ? '' : ` ${Math.round(cw / 1000)}k`;
       return `${f.label}${f.tierHint === tier ? '*' : ''} (${cost}${k})`;
     });
