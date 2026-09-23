@@ -304,6 +304,21 @@ describe('ApiStore — grant record projections', () => {
     expect(cs.get('crm-api')?.status).toBe('active');
   });
 
+  it('does not project a revocation for a profile that names no grant type', () => {
+    // `fetch_token` reads a missing `grant_type` as client credentials, so such a
+    // profile has no user grant to revoke. Nothing pinned the difference between
+    // "is refresh_token" and "is not client_credentials" until this.
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    const base = oauthProfile({ oauth_grant: { state: 'revoked' } });
+    const oauth = { ...base.auth!.oauth! };
+    delete (oauth as { grant_type?: unknown }).grant_type;
+    store.save({ ...base, auth: { ...base.auth!, oauth } });
+
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
   it.each(['connected', 'no-refresh', 'refresh-dead'] as const)('does not project %s as revoked', (state) => {
     const cs = makeCs();
     const store = new ApiStore();

@@ -178,26 +178,29 @@ export function derivePresetEndpoints(
 
   // The paths are appended and the result parsed AGAIN, so `host` is read off the
   // URL the user will actually be sent to rather than off the string that went
-  // into it. NOT because a path can move the host — ten shapes were measured
-  // (`//host`, `/@host`, `\\host`, `/:80@host`, a tab, a fragment) and none does,
-  // since the origin is written first and the parser commits the authority there.
-  // It is so that the host the ack is decided on and the host the user is told
-  // about are the same object rather than two strings that agree today.
+  // into it. A path CAN move the host, and the first measurement of this said it
+  // could not — because it only tried shapes with a leading slash. Without one,
+  // the appended text merges into the authority: `@evil.example/x` parses with
+  // hostname `evil.example`, and `:8080@evil.example/x` does the same. So both
+  // halves stay: the leading slash is required below, and the assembled URL is
+  // re-parsed here, because a preset author is the one writing these strings.
+  // A path that does not start with `/` is not a path — it joins the authority.
+  if (!preset.authorizePath.startsWith('/') || !preset.tokenPath.startsWith('/')) {
+    return { kind: 'bad-param', param: { name: 'path', pattern: /$^/, describe: 'the provider path, which this preset states' }, value: preset.authorizePath };
+  }
   const authorizeUrl = `https://${parsed.hostname}${preset.authorizePath}`;
   const tokenUrl = `https://${parsed.hostname}${preset.tokenPath}`;
-  const badPath = { kind: 'bad-param', param: { name: 'path', pattern: /$^/, describe: 'the provider path, which this preset states' }, value: preset.authorizePath } as const;
   let authorizeParsed: URL;
-  let tokenParsed: URL;
   try {
     authorizeParsed = new URL(authorizeUrl);
-    tokenParsed = new URL(tokenUrl);
   } catch {
-    return badPath;
+    return { kind: 'bad-param', param: { name: 'path', pattern: /$^/, describe: 'the provider path, which this preset states' }, value: preset.authorizePath };
   }
-  if (authorizeParsed.hostname !== parsed.hostname || tokenParsed.hostname !== parsed.hostname) {
-    return badPath;
-  }
-
+  // No comparison against `parsed.hostname` here, and that is deliberate: with
+  // the leading slash required above, the authority is already committed and the
+  // two can no longer differ — a comparison would be a branch that cannot fire,
+  // which is worse than no branch because it reads as a guard. The re-parse stays
+  // because `host` should be read off the URL that is handed out.
   return {
     host: authorizeParsed.hostname,
     authorizeUrl,

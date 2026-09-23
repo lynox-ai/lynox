@@ -92,6 +92,32 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLI
 const connect = (agent: never, id = 'shop-api'): Promise<string> =>
   apiSetupTool.handler({ action: 'connect', id }, agent) as Promise<string>;
 
+describe('a preset profile discloses the host it will authorize at', () => {
+  it('puts the derived authorize host into the save-time egress question', async () => {
+    // Without this the connect route asks for an acceptance of a host the save
+    // never offered, and its advice — save it again and accept — cannot be
+    // followed. The profile calls one host and authorizes at another, so the
+    // fixture separates them: an ack that covers only base_url is not enough.
+    const store = new ApiStore();
+    const asked: string[] = [];
+    const agent = agentWith(store);
+    // The prompt is a tagged template, so what arrives is a structure, not a
+    // string — stringify it rather than assume, or the assertion reads
+    // '[object Object]' and passes for the wrong reason.
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async (q: unknown) => {
+      asked.push(typeof q === 'string' ? q : JSON.stringify(q));
+      return 'no';
+    };
+
+    await apiSetupTool.handler({ action: 'create', profile: {
+      ...shopProfile(), base_url: 'https://api.acme-cdn.example/v1', custom_endpoint_ack: undefined,
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent);
+
+    expect(asked.join(' ')).toContain('acme.shops.example.com');
+  });
+});
+
 describe('the action list and the enum say the same thing', () => {
   // How this guard was earned: `connect` shipped in the enum and nowhere else,
   // and the only thing that noticed was a token-budget test — by arithmetic,

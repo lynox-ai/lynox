@@ -1,26 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
+
 import type { ApiProfile } from '../core/api-store.js';
 import { decideConnect, isRefusal, type ConnectFacts, type ConnectRefusalKind } from './oauth-connect-decision.js';
+import { presetRegisterOf, type PresetRegister } from '../core/oauth-presets.js';
 
-// The register ships empty, so the decision gets its provider the same way
-// production would if one were decided: through the register, not the profile.
-vi.mock('../core/oauth-presets.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../core/oauth-presets.js')>();
-  const register = real.presetRegisterOf([{
-    id: 'example-shop',
-    label: 'Example Shop',
-    host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
-    authorizePath: '/admin/oauth/authorize',
-    tokenPath: '/admin/oauth/access_token',
-    params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
-  }]);
-  return {
-    ...real,
-    derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) =>
-      real.derivePresetEndpoints(id, params, register),
-    presetIds: () => register.ids(),
-  };
-});
+// No module mock: the decision takes its register as a parameter, so a test
+// hands in its own and production keeps the frozen, empty one. A seam that is a
+// parameter needs no interception.
+const REGISTER = presetRegisterOf([{
+  id: 'example-shop',
+  label: 'Example Shop',
+  host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
+  authorizePath: '/admin/oauth/authorize',
+  tokenPath: '/admin/oauth/access_token',
+  params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
+}]);
+
+/** Every case here decides against the test register unless it brings its own. */
+const decide = (facts: ConnectFacts, register = REGISTER): ReturnType<typeof decideConnect> =>
+  decideConnect(facts, register);
 
 const ACK = { accepted: true as const, hosts: ['acme.shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' };
 
@@ -74,7 +72,7 @@ const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
 
 describe('the start route decides everything before it mints anything', () => {
   it.each(Object.entries(BEFORE_MINT))('refuses %s, and names no authorize URL', (kind, facts) => {
-    const decision = decideConnect(facts as ConnectFacts);
+    const decision = decide(facts as ConnectFacts);
 
     expect(isRefusal(decision)).toBe(true);
     if (!isRefusal(decision)) return;
@@ -94,7 +92,7 @@ describe('the start route decides everything before it mints anything', () => {
   });
 
   it('lets a click from this instance through, with the derived target', () => {
-    const decision = decideConnect(good);
+    const decision = decide(good);
 
     expect(isRefusal(decision)).toBe(false);
     if (isRefusal(decision)) return;
@@ -106,13 +104,13 @@ describe('the start route decides everything before it mints anything', () => {
   });
 
   it('lets an address-bar open through, which sends site=none', () => {
-    expect(isRefusal(decideConnect({ ...good, fetchSite: 'none' }))).toBe(false);
+    expect(isRefusal(decide({ ...good, fetchSite: 'none' }))).toBe(false);
   });
 
   it('refuses same-site, which is a neighbouring host and not this one', () => {
     // `same-site` means the registrable domain matches — a sibling subdomain
     // counts, and a sibling is not this instance.
-    const decision = decideConnect({ ...good, fetchSite: 'same-site' });
+    const decision = decide({ ...good, fetchSite: 'same-site' });
     expect(isRefusal(decision) && decision.kind).toBe('cross-site');
   });
 
@@ -125,7 +123,7 @@ describe('the start route decides everything before it mints anything', () => {
       base_url: 'https://api.acme-cdn.example/v1',
       custom_endpoint_ack: { ...ACK, hosts: ['api.acme-cdn.example'] },
     });
-    const decision = decideConnect({ ...good, profile: p });
+    const decision = decide({ ...good, profile: p });
     expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
   });
 
@@ -135,18 +133,33 @@ describe('the start route decides everything before it mints anything', () => {
     // another site learns that their open was wrong — not whether this instance
     // carries that profile. Only one of the nine orderings was pinned before; this
     // is the one where getting it backwards leaks something.
-    const known = decideConnect({ ...good, fetchSite: 'cross-site' });
-    const unknown = decideConnect({ ...good, fetchSite: 'cross-site', profile: undefined });
+    const known = decide({ ...good, fetchSite: 'cross-site' });
+    const unknown = decide({ ...good, fetchSite: 'cross-site', profile: undefined });
 
     expect(isRefusal(known) && known.kind).toBe('cross-site');
     expect(isRefusal(unknown) && unknown.kind).toBe('cross-site');
     expect(isRefusal(known) && isRefusal(unknown) && known.message).toBe(isRefusal(unknown) ? unknown.message : '');
   });
 
+  it('refuses to send a browser to a host inside the operator network', () => {
+    // The egress vetting says yes to `localhost` and `.local`, because for
+    // OUTBOUND traffic a host in the operator's own network carries no
+    // third-party exposure. A CONSENT SCREEN there is a different matter: the
+    // user cannot judge it, and it is not the provider they think they are
+    // authorizing. Nothing pinned that difference until this.
+    const lan = presetRegisterOf([{
+      id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: 'localhost' },
+      authorizePath: '/authorize', tokenPath: '/token', params: [],
+    }]);
+    const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, lan);
+
+    expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
+  });
+
   it('checks the secret last, so a wrong link never reports a server fault', () => {
     // Order matters for what the user sees: a cross-site open on an engine
     // without the secret is the user's cross-site open, not a 500.
-    const decision = decideConnect({ ...good, fetchSite: 'cross-site', httpSecretSet: false });
+    const decision = decide({ ...good, fetchSite: 'cross-site', httpSecretSet: false });
     expect(isRefusal(decision) && decision.kind).toBe('cross-site');
   });
 });

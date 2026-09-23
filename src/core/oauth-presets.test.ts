@@ -179,15 +179,25 @@ describe('derivation happens at use, from the register alone', () => {
     expect(out).toMatchObject({ host: "a$'b.shops.example.com" });
   });
 
+  it('refuses a path that would join the authority instead of the path', () => {
+    // Measured, and the first measurement was wrong: ten shapes WITH a leading
+    // slash all keep the host, so the rule looked unnecessary. Without the slash
+    // the appended text merges into the authority — `@evil.example/x` parses with
+    // hostname `evil.example`, `:8080@evil.example/x` likewise. The sample had
+    // answered a narrower question than the one being asked.
+    for (const authorizePath of ['@evil.example/x', ':8080@evil.example/x', 'evil.example']) {
+      const moved = presetRegisterOf([{ ...CONSTANT, authorizePath }]);
+      expect(derivePresetEndpoints('example-constant', undefined, moved), authorizePath)
+        .toMatchObject({ kind: 'bad-param' });
+    }
+  });
+
   it('reports the host of the URL it hands out, whatever the path looks like', () => {
-    // A review asked for a refusal here, on the theory that a path like
-    // `//evil.example` re-points the URL while the host string stays innocent.
-    // Measured instead of argued: ten such shapes (`//host`, `/@host`, `\\host`,
-    // `/:80@host`, a tab, a fragment) and NONE moves the host — once the origin
-    // is written as `https://<hostname>`, the parser has already committed the
-    // authority. So there is nothing to refuse; what the code does is read `host`
-    // off the assembled URL, which makes the two identical by construction rather
-    // than by argument. This test pins that, and records the measurement.
+    // The other half of the same measurement: WITH a leading slash, ten shapes
+    // (`//host`, `/@host`, `\\host`, `/:80@host`, a tab, a fragment) all keep the
+    // host, because the origin is written first and the parser commits the
+    // authority there. So an odd-looking path is not refused — it is simply a
+    // path — and `host` is read off the assembled URL either way.
     const odd = presetRegisterOf([{ ...CONSTANT, authorizePath: '//evil.example/authorize' }]);
     const out = derivePresetEndpoints('example-constant', undefined, odd);
 

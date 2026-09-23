@@ -18,7 +18,7 @@
  * proves nothing, so the test iterates it.
  */
 import type { ApiProfile } from '../core/api-store.js';
-import { derivePresetEndpoints, presetIds } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
 import { isVettedEgressHost, isPrivateLanEndpoint, isEndpointAcked } from '../core/llm/endpoint-allowlist.js';
 
 /** Every way the start route refuses before anything is minted. */
@@ -69,7 +69,14 @@ export interface ConnectTarget {
  * absence is refused here although the logout precedent treats it as a
  * navigation: a missed logout is harmless, a silent re-connect is not.
  */
-export function decideConnect(facts: ConnectFacts): ConnectRefusal | ConnectTarget {
+export function decideConnect(
+  facts: ConnectFacts,
+  // The same test seam the register itself carries: a parameter with the frozen
+  // constant as its default. Production passes nothing, and a test that needs a
+  // provider the shipped register does not have hands in its own rather than
+  // reaching around the module.
+  register: PresetRegister = OAUTH_PRESETS,
+): ConnectRefusal | ConnectTarget {
   if (facts.fetchSite === undefined || facts.fetchDest === undefined) {
     return {
       kind: 'no-fetch-metadata',
@@ -108,10 +115,10 @@ export function decideConnect(facts: ConnectFacts): ConnectRefusal | ConnectTarg
   // parameters. The profile's own `token_url` is display only: a profile can
   // enter the store without passing a save, so a host checked at save time is
   // not a boundary.
-  const endpoints = derivePresetEndpoints(profile.auth.oauth?.preset_id ?? '', profile.auth.oauth?.preset_params);
+  const endpoints = derivePresetEndpoints(profile.auth.oauth?.preset_id ?? '', profile.auth.oauth?.preset_params, register);
   if ('kind' in endpoints) {
     if (endpoints.kind === 'unknown-preset') {
-      const known = presetIds();
+      const known = presetIds(register);
       return {
         kind: 'no-preset',
         status: 400,
@@ -137,8 +144,25 @@ export function decideConnect(facts: ConnectFacts): ConnectRefusal | ConnectTarg
   // machine in the operator's LAN is one the user cannot judge, and it is not
   // the provider they think they are authorizing. So the private half is
   // excluded here and the public vetting kept.
-  const mayRedirect = (isVettedEgressHost(endpoints.authorizeUrl) && !isPrivateLanEndpoint(endpoints.authorizeUrl))
-    || isEndpointAcked(profile.custom_endpoint_ack, endpoints.authorizeUrl);
+  // ⚠ `isPrivateLanEndpoint` alone does not answer this: `localhost`, `127.0.0.1`
+  // and `0.0.0.0` are in the VETTED list, not in the private-LAN patterns (which
+  // carry the RFC1918 blocks plus `.local`, `.lan`, `.intranet`). Reading the two
+  // as a partition let loopback through, and a test written for the LAN case is
+  // what caught it. Loopback is named here rather than assumed to be covered.
+  const loopback = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
+  let redirectHost: string;
+  try {
+    redirectHost = new URL(endpoints.authorizeUrl).hostname;
+  } catch {
+    redirectHost = '';
+  }
+  const insideThisNetwork = redirectHost === '' || loopback.has(redirectHost) || isPrivateLanEndpoint(endpoints.authorizeUrl);
+  // An ack cannot buy this one. Accepting a sub-processor is a statement about
+  // where DATA goes; it is not a statement that the person in front of the
+  // browser can judge a consent screen served from inside the operator's own
+  // network, which is what a redirect there would ask of them.
+  const mayRedirect = !insideThisNetwork
+    && (isVettedEgressHost(endpoints.authorizeUrl) || isEndpointAcked(profile.custom_endpoint_ack, endpoints.authorizeUrl));
   if (!mayRedirect) {
     return {
       kind: 'no-egress-ack',
