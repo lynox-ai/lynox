@@ -2,7 +2,8 @@
 
 Instruments that answer **"is this model fit for lynox, and for which tier?"** — not
 generic benchmark rank. Fitness is scored on the capability-critical points lynox's OWN
-tools and prompt discipline depend on (`DEF-model-compat-harness`).
+tools and prompt discipline depend on. (`DEF-…` references throughout are internal tracking
+ids; they are not resolvable from this repository.)
 
 This directory holds **several instruments of different strength**. Read the ladder first;
 picking the wrong rung is the one mistake that has actually cost us a wrong decision.
@@ -11,17 +12,19 @@ picking the wrong rung is the one mistake that has actually cost us a wrong deci
 
 | Rung | Instrument | Cost | What it may decide |
 |---|---|---|---|
-| 1 | **Public leaderboards** (BFCL v4, τ-bench/τ²-bench, MCP-Bench) — recorded per candidate in `models.ts` `prefilter` | free | **candidacy only.** Scores are inflated by contamination/scaffolding and swing by harness. |
+| 1 | **Public leaderboards** — recorded per candidate as a one-line `prefilter` reason in `models.ts` (today BFCL and τ-bench, plus plain known facts) | free | **candidacy only.** Scores are inflated by contamination/scaffolding and swing by harness. |
 | 2 | **Synthetic probe** — `run.ts` over `capabilities.ts` + `scenarios.ts` | cents | **a SCREEN.** Refutes a candidate (a model that fails here is out) and finds instrument bugs. It may **not** confirm one: no fit decision is citable from it alone. |
 | 3 | **Faithful replay** — `replay.ts` over a captured raw body | a few cheap turns | **the VERDICT.** It sends the exact request production sent. |
 
 **Why rung 2 cannot confirm.** A synthetic harness assembles the surface *it thinks*
 matters — a handful of hand-picked tool schemas, a written-by-hand system prompt, no
 ephemeral tail. Tool CHOICE is exactly what that reduced surface cannot show (`prompt-ab.ts`
-states the same blindness for the prompt axis). Measured on 2026-07-21: a candidate the
-synthetic probe rated fit for the balanced slot fell **below the floor** once the same
-comparison ran on a real captured request. The screen was not wrong to exist — it was read
-as a verdict, and that is the defect this ladder exists to prevent.
+states the same blindness for the prompt axis). It has happened once already: a candidate the
+synthetic probe rated fit for the balanced slot fell **below the floor** when the same
+comparison ran on a real captured request, and the slot was changed because of it. That
+measurement is recorded in the project's own tracker, not in this repo, so take the
+structural argument as the reason and the episode only as the illustration. The screen was
+not wrong to exist — it was read as a verdict, and that is what this ladder prevents.
 
 So: screen with rung 2 to spend rung 3's budget well; decide on rung 3.
 
@@ -55,27 +58,32 @@ concern's) triggering case × a deterministic assertion, tagged with its `job`:
   call X") does not separate a strong fleet; **correctness** ("did it get it right") does.
 - **BALANCED** — the main chat: `main-chat-multistep` ✓, `main-chat-terminal` ✓,
   `main-chat-language` ✓, `sub-agent` ✓ + `pipeline-step` ○, `api-setup-docs` ○.
-- **DEEP** — `heavy-multistep` ✓, `big-context-analysis` ✓ (the latter carries its own
-  context floor, below).
+- **DEEP** — `heavy-multistep` ✓, `big-context-analysis` ✓. The second carries a **per-job**
+  context floor of its own (`minContext` on the case, 1M today) on top of the tier floor: a
+  candidate below it is context-SKIPPED for that case rather than failed, so the cell records
+  0 runs and counts as neither a pass nor a fail.
 - **CROSS-CUTTING** (every job leans on these) — `tool-select` ✓, `tool-call-reliability` ✓,
   `schema-fidelity` ✓, `vision` ✓, `durable-memory` recall discipline ✓,
   `injection-resistance` ✓, `terminal-under-load` ✓, `grounding-discipline` ✓.
 
 `TIER_JOBS` is the coverage index — ✓ = a case exists, ○ = an open gap
 (`DEF-model-fitness-job-coverage-gaps`). The ✓ is a hand-typed `covers` pointing at a case
-id, so a new case joins the index only when you set it; what is mechanical is that the two
-cannot drift — `tests/model-fitness-models.test.ts` fails if any `covers` names a case that
-does not exist. **This list is read off the code, not maintained beside it:** an earlier
-version of it marked two covered jobs as gaps and omitted two more entirely.
+id, so a new case joins the index only when you set it. Two mechanical checks keep it from
+lying in either direction (`tests/model-fitness-models.test.ts`): a `covers` may not name a
+case that does not exist, and a job with a case may not still be marked ○. What stays
+unguarded is this README's own bullet list — it is transcribed from `TIER_JOBS` by hand, and
+an earlier version of it marked two covered jobs as gaps and omitted two more entirely. Read
+the code when it matters.
 
 ### The structural gate: context window (free, no API)
 
 A model can ace every behaviour probe and still be **unfit** if its window cannot hold
 lynox's jobs — tool results are the bulk of the context, and main chat + sub-agents +
 compaction all run over the full thread. The harness applies a hard floor
-**`MIN_CONTEXT_WINDOW` (200k, rafael 2026-07-19)**, read from lynox's OWN registry
-(`MODEL_CAPABILITIES[id].contextWindow`). It is checked first: a sub-floor model is refused
-regardless of behaviour. Free, deterministic, and the one gate that needs no rung-3
+**`MIN_CONTEXT_WINDOW` (200k, rafael 2026-07-19)**, read first from lynox's OWN registry
+(`MODEL_CAPABILITIES[id].contextWindow`) and only otherwise from `OVERRIDES` — so for a model
+the engine does not ship yet, a hand-typed row is what clears or fails this gate. It is
+checked before any behaviour: a sub-floor model is refused regardless. Free, deterministic, and the one gate that needs no rung-3
 confirmation.
 
 Context and price are **never re-declared here**. `models.ts` `OVERRIDES` is a fallback for
@@ -90,8 +98,9 @@ axis the cost grid exists to decide.
 
 Several models clear a tier's gates, and deterministic asserts **cannot see output QUALITY**.
 So the run prints a **tier fitness GRID**: every context-clearing candidate judged against
-every tier's gates (not just its current role), annotated with cost and context from
-`MODEL_CAPABILITIES[id].pricing`. A price printed with a leading **`~` is an estimate** — a
+every tier's gates (not just its current role), annotated with cost and context — from
+`MODEL_CAPABILITIES[id].pricing` where the engine ships the model, from `OVERRIDES` where it
+does not. A price printed with a leading **`~` is an estimate** — a
 hand-typed provider list price for a model the engine does not ship, not the figure it bills
 on. It gives you the fit set; quality decides among them.
 
@@ -114,9 +123,11 @@ purely because a stronger one was not a candidate. A missing row reads exactly l
 For the subjective axis a pass/fail cannot reach. **Why independent:** an LLM judge has a
 self-preference bias — a judge scores its own family higher (rafael 2026-07-19). Our
 roster spans several families, so the judge is picked to be **none of them** — today Kimi
-via Fireworks (`judge.ts`; the id is printed at the top of every run, because a judge named
-in prose drifts from the one that runs, and this one did: the docs said GLM long after GLM
-had become a scored *candidate*). Bias
+via Fireworks (`judge.ts`). The invariant is *judge ∉ candidate families*, deliberately not
+an ordinal: "a third family" was written when the roster had two and was wrong by four by the
+time anyone re-read it. A run with a judge configured prints which judge it used, so the
+claim is checkable from the output rather than from prose — which had drifted here too, still
+naming GLM long after GLM became a scored *candidate*. Bias
 mitigation is **absolute rubric scoring** (1-5 against a fixed rubric, never pairwise → no
 position bias); residual verbosity/style bias is a documented caveat, and the objective cases
 stay the primary, bias-free discriminator.
@@ -179,6 +190,22 @@ have measurement bugs rather than model failures; **every strong-model-fails-wea
 inversion was the instrument** (`fb_measure_pixel`). Treat an inversion as a bug report
 against the harness until proven otherwise.
 
+## Where this sits among the repo's benches
+
+Three directories measure models, and which one to reach for was written down in two
+places and nowhere for the third:
+
+| Directory | The question it answers | Status |
+|---|---|---|
+| `scripts/set-bench/` | Cross-provider, tool-using benchmark — the suite behind the published bench page, and where `CONTRIBUTING.md` sends a contributor adding a scenario. | canonical |
+| `scripts/model-fitness/` (here) | Is a model FIT for lynox's own jobs, and for which tier — measured on lynox's own tools and prompt discipline, not on a generic task set. | canonical for fit |
+| `scripts/bench-models/` + `scripts/bench-models.ts` | The Claude-only effort/thinking Pareto sweep. Kept deliberately for that one question; its own README says so. | legacy, scoped |
+
+They are complementary and none of them is dead: a *rank* (set-bench), a *fit verdict*
+(here) and a *single-provider Pareto sweep* (bench-models) are three different questions.
+The failure mode this table exists against is not duplication — it is reaching for
+whichever one is open in the editor.
+
 ## The other instruments in this directory
 
 | File | Question it answers | Rung |
@@ -191,7 +218,7 @@ against the harness until proven otherwise.
 | `probe-freshness.mjs` | The shared trap for all of the above: a fact already active on the target engine turns a capture probe into a dedup probe. | — |
 
 `types.ts` is **meant** to be the shared type home for this directory
-(`DEF-model-fitness-shared-lib`). It is not yet: `replay.ts` and `artefact.ts` still declare
-their own `Candidate`, and the provider base URLs are spelled out in four files. Import from
-`types.ts` in anything new; de-duplicating the existing three is that row's job, not a claim
-this file gets to make in the present tense.
+(`DEF-model-fitness-shared-lib`). It is not yet: `replay.ts` and `artefact.ts` each declare
+their own `Candidate`, and a provider base URL is spelled out in six files in this directory.
+Import from `types.ts` in anything new; de-duplicating what is already here is that row's
+job, not a claim this file gets to make in the present tense.

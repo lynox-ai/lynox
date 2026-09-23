@@ -3,11 +3,19 @@
  *
  * WHY independent: an LLM judge has a SELF-PREFERENCE bias — a Claude judge
  * scores Claude higher, a Mistral judge scores Mistral higher (rafael
- * 2026-07-19). The judge MUST share a family with NO candidate. The candidates
- * are now Claude + Mistral + **GLM** (added as a cheaper-Opus deep candidate),
- * so the judge moved OFF GLM to **Kimi K2** (`kimi-k2p6`), a 4th family — over
- * the Fireworks OpenAI-compatible endpoint with FIREWORKS_API_KEY. (Invariant:
- * if you add a candidate from Kimi's family, move the judge again.)
+ * 2026-07-19). The invariant is simply **judge ∉ candidate families** — not an
+ * ordinal. It is stated that way because the ordinal version went stale twice:
+ * the roster grew past "Claude + Mistral", GLM became a candidate while the docs
+ * still named it the judge, and comments counting "a third family" now undercount
+ * a roster spanning six. Today: Kimi K2 (`kimi-k2p6`) over the Fireworks
+ * OpenAI-compatible endpoint with FIREWORKS_API_KEY. Add a candidate from Kimi's
+ * family and the judge moves again; `run.ts` prints the judge it used, so the
+ * claim is checkable from a run rather than from this comment.
+ *
+ * SCOPE: "candidates" means `models.ts` `ALL_CANDIDATES`, the roster this judge
+ * actually scores — verified: no Kimi in it. The sibling instruments in this
+ * directory carry their own rosters (`replay.ts` and `artefact.ts` both list a
+ * Kimi) and do not import this judge, so seeing one there is not a violation.
  *
  * Bias mitigations: ABSOLUTE rubric scoring (score each answer 1-5 against a
  * fixed rubric) — NOT pairwise A-vs-B — which sidesteps POSITION bias entirely.
@@ -26,7 +34,13 @@ export function judgeAvailable(): boolean {
 }
 
 /** The judge model id + provider, for provenance in reports. */
-export const JUDGE_ID = 'Kimi K2 (Fireworks, independent of Claude+Mistral+GLM)';
+export const JUDGE_ID = `Kimi K2 via Fireworks (${JUDGE_MODEL}) — chosen because it is NOT in the candidate roster`;
+
+/** A failure of the JUDGE, not of the candidate. Tagged so the runner does not
+ *  mistake the judge's rate limit for the candidate's and re-run a paid case. */
+export class JudgeError extends Error {
+  override readonly name = 'JudgeError';
+}
 
 interface OpenAIChatResponse {
   choices?: Array<{ message?: { content?: string } }>;
@@ -37,11 +51,17 @@ interface OpenAIChatResponse {
  * Score one answer 1-5 against a rubric with the independent judge.
  *
  * Two outcomes that used to look identical and must not: `null` means the judge
- * is NOT CONFIGURED (no key) — the caller soft-passes, the quality axis is simply
- * blank. A configured judge that FAILS (non-2xx, unreachable, unparseable) now
- * THROWS, so the run records an error instead of a pass. That distinction is the
- * point: `grounding-discipline` gates all three tiers, so a judge outage used to
- * turn silently into FIT for every candidate.
+ * did not SPEAK — no key configured, or it answered with nothing scorable — and
+ * the caller soft-passes, leaving the quality axis blank. A configured judge that
+ * FAILS TO ANSWER (non-2xx, unreachable) throws a `JudgeError`, so the run records
+ * an error instead of a pass. That distinction is the point: `grounding-discipline`
+ * gates all three tiers, so a judge outage used to turn silently into FIT for every
+ * candidate.
+ *
+ * The residual, stated rather than glossed: a reachable judge that replies without
+ * a parseable score still soft-passes. Throwing there would let one malformed reply
+ * disqualify a candidate for something that is not the candidate's doing, which is
+ * the worse of the two errors — but it is the same hole in miniature.
  *
  * Kimi reasons before answering, so we allow room + parse the score from anywhere
  * in the reply (prefer an explicit JSON, then `N/5`, then a bare 1-5), taking the
@@ -62,11 +82,11 @@ export async function judgeQuality(opts: { task: string; answer: string; rubric:
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: JUDGE_MODEL, messages: [{ role: 'user', content: prompt }], max_tokens: 1200, temperature: 0 }),
     });
-    if (!res.ok) throw new Error(`judge HTTP ${res.status} — a configured judge that fails is an error, not a pass`);
+    if (!res.ok) throw new JudgeError(`judge HTTP ${res.status} — a configured judge that fails is an error, not a pass`);
     const data = (await res.json()) as OpenAIChatResponse;
     text = data.choices?.[0]?.message?.content ?? '';
   } catch (e) {
-    throw e instanceof Error ? e : new Error(`judge call failed: ${String(e)}`);
+    throw e instanceof JudgeError ? e : new JudgeError(`judge call failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   // Take the LAST score-like match — Kimi reasons first, concludes last.
   const patterns = [/SCORE:\s*([1-5])\s*\/\s*5/gi, /\b([1-5])\s*\/\s*5\b/g, /"?score"?\s*[:=]\s*([1-5])\b/gi];

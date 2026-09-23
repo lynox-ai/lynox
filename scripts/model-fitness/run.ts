@@ -25,7 +25,7 @@ import { createToolContext } from '../../src/core/tool-context.js';
 import { ALL_CANDIDATES, assertNoOverrideCollisions, contextWindowOf, costOf, isEstimatedPrice, MIN_CONTEXT_WINDOW } from './models.js';
 import { judgeAvailable, JUDGE_ID } from './judge.js';
 import { CAPABILITIES } from './capabilities.js';
-import { tierFit } from './grid.js';
+import { isRetryableRunError, tierFit } from './grid.js';
 import { SCENARIOS } from './scenarios.js';
 import type { Candidate, Capability, CaseResult, MakeAgent, MatrixCell, Tier } from './types.js';
 
@@ -57,8 +57,7 @@ async function runWithRetry(cap: Capability, make: MakeAgent): Promise<CaseResul
     try { return await cap.run(make); }
     catch (e) {
       lastErr = e;
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/429|rate.?limit|too many requests/i.test(msg)) throw e;
+      if (!isRetryableRunError(e)) throw e;
       if (attempt === 3) break; // no point sleeping 8s before giving up
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1s, 2s, 4s
     }
@@ -102,7 +101,10 @@ async function main(): Promise<void> {
 
   // The run states its own size and its own judge, because a number written into
   // a comment goes stale and a judge named in prose drifts from the one that runs.
-  console.log(`# ${caps.length} case(s) × ${candidates.length} candidate(s) × ${REPEATS} repeat(s) = up to ${caps.length * candidates.length * REPEATS} calls`);
+  // CASE RUNS, not API calls: a case is a tool loop (up to `maxIterations`) plus,
+  // in scenario mode, simulated-user and judge turns. The real call count is a
+  // multiple of this — the point of the line is that it is computed, not typed.
+  console.log(`# ${caps.length} case(s) × ${candidates.length} candidate(s) × ${REPEATS} repeat(s) = ${caps.length * candidates.length * REPEATS} case runs`);
   console.log(`# quality axis: ${judgeAvailable() ? JUDGE_ID : 'no judge (FIREWORKS_API_KEY unset) — judge-scored cases soft-pass'}`);
 
   const providersInit = new Set<string>();

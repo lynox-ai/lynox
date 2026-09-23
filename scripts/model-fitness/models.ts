@@ -155,12 +155,12 @@ export const COMPARATORS: readonly Candidate[] = [
   { id: 'ministral-3b-2512', label: 'Ministral 3B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
     prefilter: 'cheapest gen-3 Mistral; candidate for a cheaper fast slot' },
   // GLM 5.2 (Fireworks) — a cheaper Opus REPLACEMENT for deep (rafael 2026-07-19).
-  // 1M ctx, ~10× under Opus, and a THIRD family (diversifies Claude+Mistral).
-  // NOTE: GLM is now a CANDIDATE, so it can no longer be the JUDGE — judge.ts
-  // moved to Kimi K2 (a 4th family) to keep judge ∉ candidate families.
+  // 1M ctx, ~10× under Opus, and a family no other candidate shares at the time
+  // it was added. NOTE: GLM is a CANDIDATE, so it can no longer be the JUDGE —
+  // judge.ts moved off it to keep the judge ∉ candidate families invariant.
   // Data-residency caveat: Zhipu (CN) — for an EU-sovereign tenant that matters.
   { id: 'accounts/fireworks/models/glm-5p2', label: 'GLM 5.2', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
-    prefilter: 'cheaper Opus replacement for deep; 1M ctx; independent 3rd family; ~$0.55/$2.19 (verify)' },
+    prefilter: 'cheaper Opus replacement for deep; 1M ctx; own model family; ~$0.55/$2.19 (verify)' },
   // OpenRouter roster (rafael 2026-07-19). The LMArena/BFCL leaderboards name
   // Gemini 3 Pro (vision leader + big ctx), GPT-5.x (frontier), DeepSeek (cheap
   // 1M reasoner) as the interesting untested candidates.

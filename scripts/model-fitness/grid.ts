@@ -3,11 +3,32 @@
  *
  * It lives here rather than inline in run.ts for the reason replay.ts states for
  * its own helpers: this decides which model is called fit for a production slot,
- * and `scripts/` is executed by nothing in CI, so anything verdict-shaped has to
- * be importable by a test under `tests/`. run.ts cannot be that import — it calls
- * `main()` at module scope, so importing it would start a paid run.
+ * and `scripts/` is outside the vitest include, so anything verdict-shaped has to
+ * be importable by a test under `tests/` to run at all. run.ts cannot be that
+ * import — it calls `main()` at module scope, so importing it would start a paid
+ * run.
  */
+import { JudgeError } from './judge.js';
 import type { Candidate, Capability, MatrixCell } from './types.js';
+
+/**
+ * Should a failed case be retried?
+ *
+ * Only a rate limit on the CANDIDATE. Mistral's tier limits are shallow, and a 429
+ * there is an infra artifact rather than a capability failure — without a retry a
+ * rate-limited model reads as unfit.
+ *
+ * The exclusion is the part worth testing: a `JudgeError` carries the judge's
+ * status text, so a judge 429 matches the same pattern and would re-run the WHOLE
+ * case — re-calling the paid candidate model up to four times for someone else's
+ * rate limit. It lives beside `tierFit` for the same reason that one does: it is a
+ * decision run.ts makes, and run.ts cannot be imported by a test.
+ */
+export function isRetryableRunError(e: unknown): boolean {
+  if (e instanceof JudgeError) return false;
+  const msg = e instanceof Error ? e.message : String(e);
+  return /429|rate.?limit|too many requests/i.test(msg);
+}
 
 export interface TierFit {
   /** False when this run measured NOTHING that gates the tier. */

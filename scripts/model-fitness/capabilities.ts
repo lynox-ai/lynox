@@ -119,14 +119,21 @@ const PNG = redBluePngBase64();
 /**
  * How many WANTED entity names the model actually produced.
  *
- * Empty names are dropped first, and that is the whole point: the match is
- * two-directional (`found` may be a fragment of `want` or the reverse), so an
- * entity with a missing `name` yields `''`, and `want.includes('')` is true for
- * every wanted name — one nameless entity used to score a clean 4/4.
+ * A found name counts when it CONTAINS the wanted name's first token ("Brunnmatt
+ * AG" for "brunnmatt") or IS one of its tokens ("oehrli" for "markus oehrli").
+ * Both directions are needed, but the second one used to be `w.includes(f)`, which
+ * accepts any fragment: an entity named `''` matched every wanted name, and even
+ * after empty names were dropped, `['a','b','c','x']` still scored a clean 4/4.
+ * Whole tokens instead of substrings is what makes the assertion unsatisfiable by
+ * noise.
  */
 export function countMatched(want: readonly string[], found: readonly string[]): number {
-  const named = found.filter((f) => f.length > 0);
-  return want.filter((w) => named.some((f) => f.includes(w.split(' ')[0]!) || w.includes(f))).length;
+  return want.filter((w) => {
+    const tokens = w.split(' ').filter((t) => t.length > 0);
+    const head = tokens[0];
+    if (head === undefined) return false;
+    return found.some((f) => f.length > 0 && (f.includes(head) || tokens.includes(f)));
+  }).length;
 }
 
 export const CAPABILITIES: readonly Capability[] = [
@@ -139,7 +146,7 @@ export const CAPABILITIES: readonly Capability[] = [
     job: 'kg-entity-extraction',
     detail: 'A business sentence with 4 known entities → a forced extract call must surface all 4 (people/company/product). Weaker models drop or mangle entities.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
-      // Ground truth: Markus Oehrli (person), Brunnmatt AG (company/project), Bexio
+      // Ground truth: Markus Oehrli (person), Brunnmatt AG (company/project), Talfeld
       // (product), Zürich (place). All four should appear in the extraction.
       let found: string[] = [];
       const extract = recordingTool(
@@ -150,8 +157,8 @@ export const CAPABILITIES: readonly Capability[] = [
           found = e.map((x) => String(x.name ?? '').toLowerCase());
         }, 'Extracted.');
       const agent = make({ name: 'fit-extract', systemPrompt: 'You extract named entities. Call extract_entities exactly once with every entity you find.', tools: [extract], maxIterations: 2 });
-      await agent.send('Erfasse die Entitäten: "Markus Oehrli von der Brunnmatt AG hat unser Bexio-Setup in Zürich abgenommen."');
-      const want = ['markus oehrli', 'brunnmatt', 'bexio', 'zürich'];
+      await agent.send('Erfasse die Entitäten: "Markus Oehrli von der Brunnmatt AG hat unser Talfeld-Setup in Zürich abgenommen."');
+      const want = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
       const hit = countMatched(want, found);
       return { pass: hit === want.length, note: `found ${hit}/4 [${found.join(', ').slice(0, 50)}]` };
     },

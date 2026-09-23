@@ -2,12 +2,14 @@
  * The tier-fitness decision (`scripts/model-fitness/grid.ts`).
  *
  * Regression tests for the defect that mattered most in this harness: it printed
- * a model as FIT for a tier it had measured nothing for. `scripts/` is executed by
- * nothing in CI, which is why the decision was extracted into an importable module
- * and is asserted here — same arrangement as `tests/model-fitness-replay.test.ts`.
+ * a model as FIT for a tier it had measured nothing for. `scripts/` is outside the
+ * vitest include, so a test living next to the code would never be collected — the
+ * decision was extracted into an importable module and is asserted from here, the
+ * same arrangement as `tests/model-fitness-replay.test.ts`.
  */
 import { describe, it, expect } from 'vitest';
-import { tierFit } from '../scripts/model-fitness/grid.js';
+import { isRetryableRunError, tierFit } from '../scripts/model-fitness/grid.js';
+import { JudgeError } from '../scripts/model-fitness/judge.js';
 import type { Candidate, Capability, MatrixCell } from '../scripts/model-fitness/types.js';
 
 const cand = (id: string): Candidate => ({
@@ -58,9 +60,30 @@ describe('tierFit', () => {
     expect(d.fit).toEqual([]);
   });
 
-  it('applies the structural context gate before any behaviour', () => {
+  it('excludes a candidate that fails the structural context gate, however it scored', () => {
+    // Not an ordering assertion — `tierFit` may evaluate the two in any order. What
+    // is pinned is that a sub-floor candidate cannot be FIT on behaviour alone.
     const d = tierFit([cap('c1')], [cand('a')], [cell('c1', 'a')], () => false);
     expect(d.measured).toBe(true);
     expect(d.fit).toEqual([]);
+  });
+});
+
+describe('isRetryableRunError', () => {
+  it('retries a rate limit from the candidate', () => {
+    expect(isRetryableRunError(new Error('429 Too Many Requests'))).toBe(true);
+    expect(isRetryableRunError(new Error('rate limit exceeded'))).toBe(true);
+  });
+
+  it('does NOT retry a judge failure, even one that says 429', () => {
+    // The whole point: a JudgeError carries the judge's status text, so the plain
+    // pattern match would re-run the case and re-call the PAID candidate model up
+    // to four times because somebody else's rate limit was hit.
+    expect(isRetryableRunError(new JudgeError('judge HTTP 429 — a configured judge that fails is an error, not a pass'))).toBe(false);
+  });
+
+  it('does not retry an ordinary failure', () => {
+    expect(isRetryableRunError(new Error('the model returned nothing'))).toBe(false);
+    expect(isRetryableRunError('a thrown string')).toBe(false);
   });
 });

@@ -2,8 +2,11 @@
  * Invariants of the model-fitness harness that decide what its output MEANS.
  *
  * Covered here rather than in the scripts because `scripts/` is outside the vitest
- * include, so nothing there is executed by CI — the same arrangement, and the same
- * reason, as `tests/model-fitness-replay.test.ts`.
+ * include: nothing there is COLLECTED, so a test written next to the code would never
+ * run. A test under `tests/` can import and execute it, which is what these do — the
+ * same arrangement, and the same reason, as `tests/model-fitness-replay.test.ts`.
+ * Note that `tests/model-fitness-*.test.ts` are not in `tsconfig.tests.json` either,
+ * so this executes the harness; it does not typecheck it.
  *
  * Each suite below is a regression test for a defect the harness shipped with.
  */
@@ -50,10 +53,17 @@ describe('OVERRIDES is a fallback, not a second source of truth', () => {
   });
 
   it('marks a price as estimated exactly when it did not come from the registry', () => {
+    // Named pairs, not a restatement of the implementation: a sweep that compares
+    // the helper against its own first conjunct passes under an implementation that
+    // has dropped the second one.
+    expect(isEstimatedPrice('openai/gpt-5.2'), 'in OVERRIDES only').toBe(true);
+    expect(isEstimatedPrice('mistral-medium-2604'), 'in the registry').toBe(false);
+    // The case that pins the second conjunct: an id in NEITHER table has no price,
+    // so there is no estimate to mark.
+    expect(isEstimatedPrice('no-such-model-anywhere'), 'in neither table').toBe(false);
     for (const c of ALL_CANDIDATES) {
       expect(isEstimatedPrice(c.id), `${c.id}`).toBe(MODEL_CAPABILITIES[c.id]?.pricing === undefined);
     }
-    expect(ALL_CANDIDATES.some((c) => isEstimatedPrice(c.id)), 'the marker must have something to mark').toBe(true);
   });
 });
 
@@ -82,6 +92,17 @@ describe('the coverage index and the cases do not drift apart', () => {
       .filter((c) => !ids.has(c));
     expect(dangling).toEqual([]);
   });
+
+  it('no job is still marked ○ once a case claims it', () => {
+    // The other direction, and the one that actually went wrong: the README's map
+    // showed two covered jobs as open gaps because nothing checked this way round.
+    const jobsWithACase = new Set([...CAPABILITIES, ...SCENARIOS]
+      .map((c) => c.job).filter((j): j is string => j !== undefined));
+    const understated = Object.values(TIER_JOBS).flat()
+      .filter((j) => j.covers === null && jobsWithACase.has(j.job))
+      .map((j) => j.job);
+    expect(understated).toEqual([]);
+  });
 });
 
 describe('the entity-extraction assertion cannot be satisfied by nothing', () => {
@@ -93,7 +114,17 @@ describe('the entity-extraction assertion cannot be satisfied by nothing', () =>
   it('scores an entity with a missing name as nothing, not as everything', () => {
     // The shipped defect: `want.includes('')` is true for every wanted name, so
     // one entity with no `name` field passed the whole case.
-    expect(countMatched(['markus oehrli', 'brunnmatt', 'bexio', 'zürich'], [''])).toBe(0);
+    expect(countMatched(['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'], [''])).toBe(0);
     expect(countMatched(['markus oehrli'], ['', 'markus oehrli'])).toBe(1);
+  });
+
+  it('is not satisfied by fragments either', () => {
+    // Dropping empty names was not enough: the reverse direction used to be
+    // `want.includes(found)`, so four one-character entities scored a clean 4/4.
+    const want = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
+    expect(countMatched(want, ['a', 'b', 'c', 'x'])).toBe(0);
+    expect(countMatched(want, ['kus', 'unn'])).toBe(0);
+    // …while the legitimate short form still counts: a whole token of the name.
+    expect(countMatched(['markus oehrli'], ['oehrli'])).toBe(1);
   });
 });
