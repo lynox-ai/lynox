@@ -83,6 +83,34 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLI
 const connect = (agent: never, id = 'shop-api'): Promise<string> =>
   apiSetupTool.handler({ action: 'connect', id }, agent) as Promise<string>;
 
+describe('the action list and the enum say the same thing', () => {
+  // How this guard was earned: `connect` shipped in the enum and nowhere else,
+  // and the only thing that noticed was a token-budget test — by arithmetic,
+  // three tokens, for an entirely different reason. A model reading a schema
+  // with an action it has no gloss for narrates it by guessing, and the guess
+  // here is the behaviour the action was built to replace: asking the user to
+  // paste a token. So the pairing gets a check of its own rather than a second
+  // helping of luck.
+  it('names every action of the enum in the description', () => {
+    const schema = apiSetupTool.definition.input_schema as { properties: { action: { enum: string[] } } };
+    const description = apiSetupTool.definition.description;
+    const unexplained = schema.properties.action.enum.filter((action) => !description.includes(action));
+
+    expect(unexplained, `action(s) in the enum that the description never mentions: ${unexplained.join(', ')}`).toEqual([]);
+  });
+
+  it('claims no action the enum does not offer', () => {
+    // The other direction, because a description that promises an action the
+    // schema refuses teaches a call that always fails.
+    const schema = apiSetupTool.definition.input_schema as { properties: { action: { enum: string[] } } };
+    const listed = [...apiSetupTool.definition.description.matchAll(/^- ([a-z_]+(?: \/ [a-z_]+)*):/gm)]
+      .flatMap((m) => (m[1] ?? '').split(' / '));
+
+    expect(listed.length).toBeGreaterThan(4);
+    for (const action of listed) expect(schema.properties.action.enum).toContain(action);
+  });
+});
+
 describe('api_setup connect — one answer per shape that can reach it', () => {
   it('A1 · says the web interface is needed when the engine runs without one', async () => {
     delete process.env['ORIGIN'];

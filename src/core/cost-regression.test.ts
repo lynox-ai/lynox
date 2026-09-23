@@ -382,7 +382,23 @@ function measureStaticPrefixTokens(): number {
 // something the model cannot express, because `task_update`'s enum does not
 // offer the value and TaskManager.update throws on it. A refusal the schema
 // already makes unreachable is not worth a per-turn line.
-const STATIC_PREFIX_BUDGET = 23913;
+// +35 (23913 → 23948): `connect` joins api_setup's action enum, with a line in
+// the tool's action list. Measured in halves, like the entry above: the enum
+// VALUE alone is +3, the line is the other +32.
+//
+// Why the +32 is bought. The value alone would have shipped an action name the
+// model has no reading for — and the reading is the whole point of the action:
+// it is the one place that says a provider is connected by handing the USER a
+// link, instead of asking them to paste a token. A model that does not know
+// that asks for the token, which is the behaviour the action exists to replace.
+// An enum member whose gloss is missing is narrated by guessing, and here the
+// guess is the status quo.
+//
+// What was cut, measured rather than asserted: the first draft ran +40 — it
+// spelled out "to authorize a provider" and "show it to them". Naming the
+// provider is redundant inside a tool that is entirely about one API profile,
+// and the second clause repeated the verb. Same rule, eight tokens less.
+const STATIC_PREFIX_BUDGET = 23948;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
