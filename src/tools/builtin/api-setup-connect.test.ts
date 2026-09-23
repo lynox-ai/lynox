@@ -388,6 +388,65 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     expect(reply).toContain('non-vetted sub-processor');
   });
 
+  it('says nothing about a browser on a save that sends nobody anywhere', async () => {
+    // The mirror of the guard on the egress sentence, and the half that was
+    // left unasserted. An egress-only save has an empty redirect list, so
+    // forcing that sentence on would read "You will be sent to  in your own
+    // browser" — a consent asserting an act that is not happening, which is
+    // the defect this whole arc is about. Reachable today: an egress-only save
+    // needs no preset at all.
+    const asked: string[] = [];
+    const agent = agentWith(new ApiStore());
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async (q: unknown) => {
+      asked.push(typeof q === 'string' ? q : JSON.stringify(q));
+      return 'no';
+    };
+    const p = shopProfile({ custom_endpoint_ack: undefined });
+    await apiSetupTool.handler({ action: 'create', profile: {
+      ...p, auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent);
+
+    const question = asked.join(' ');
+    expect(question).toContain('outside lynox');
+    expect(question).not.toContain('in your own browser');
+  });
+
+  it('says an UPDATE removed the acceptance, not that it merely lacks one', async () => {
+    // The save rebuilds the record from the incoming profile, so an update run
+    // where nobody can be asked does not just fail to add an acceptance — it
+    // DROPS one a human gave earlier. Fail-closed in direction, but a single
+    // sentence let that read as the harmless case, and a model has no other
+    // way to learn it destroyed prior state.
+    const store = new ApiStore();
+    await saveVetted(async () => 'allow', store);
+    expect(store.get('shop-api')?.custom_endpoint_ack?.redirect_hosts).toEqual(['api.openai.com']);
+
+    const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
+
+    expect(reply).toContain('Updated');
+    expect(reply).toContain('was REMOVED');
+    expect(store.get('shop-api')?.custom_endpoint_ack).toBeUndefined();
+  });
+
+  it('leaves redirect_hosts absent when nobody was ever asked about a redirect', async () => {
+    // Absence carries meaning here — the field's own docstring says it means
+    // "those people were never asked" — so a profile that egresses but sends
+    // nobody anywhere must not acquire an empty list that reads like a record.
+    const store = new ApiStore();
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const p = shopProfile({ custom_endpoint_ack: undefined });
+    await apiSetupTool.handler({ action: 'create', profile: {
+      ...p, auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent);
+
+    const ack = store.get('shop-api')?.custom_endpoint_ack;
+    expect(ack?.hosts).toEqual(['acme.shops.example.com']);
+    expect(ack && 'redirect_hosts' in ack).toBe(false);
+  });
+
   it('does not save the profile when the user declines being sent there', async () => {
     const { store, reply } = await saveVetted(async () => 'no');
 
@@ -674,8 +733,29 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     // forms never needed it — the parser normalises `127.0.0.1.` away — so the
     // line only ever mattered for NAMES.
     // Two dots, not one: a single-dot strip passes the one-dot case and is
-    // invisible, which is how the first version of this line survived.
+    // invisible, which is how the first version of this line survived. An
+    // earlier version of this comment added that "numeric forms never needed
+    // it, the parser normalises `127.0.0.1.` away" — measured, that is true for
+    // one dot and false for two: `new URL('http://127.0.0.1..')` keeps the
+    // hostname as written, so the numeric form needs the `+` exactly as much.
     process.env['ORIGIN'] = 'http://nas.local..:3000';
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    expect(await connect(agentWith(store))).toContain('/api/oauth/connect/shop-api');
+  });
+
+  it.each([
+    ['loopback with a root dot', 'http://localhost.:3000'],
+    ['loopback with two', 'http://localhost..:3000'],
+    ['a numeric address with two', 'http://127.0.0.1..:3000'],
+    ['an IPv6 loopback in brackets', 'http://[::1]:3000'],
+  ])('reads %s as inside the operator network', async (_label, origin) => {
+    // Four shapes this one line decides and none of them had a test: three need
+    // the dot strip and the fourth needs the bracket strip. The LAN patterns
+    // carry neither `localhost` nor 127/8, so for those the strip is not
+    // redundant with anything — it is simply what makes them work.
+    process.env['ORIGIN'] = origin;
     const store = new ApiStore();
     store.register(shopProfile());
 

@@ -328,13 +328,16 @@ export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string)
  * not one, a wrong host or an unparseable URL all answer false.
  */
 export function isRedirectAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
-  return ackCovers(ack, url, (a) => a.redirect_hosts ?? []);
+  return ackCovers(ack, url, (a) => a.redirect_hosts);
 }
 
 function ackCovers(
   ack: CustomEndpointAck | undefined,
   url: string,
-  pick: (ack: CustomEndpointAck) => readonly string[],
+  // `unknown`, because what comes back is whatever was on disk. A signature
+  // promising `readonly string[]` here would make every caller look safe and
+  // move the lie one line up.
+  pick: (ack: CustomEndpointAck) => unknown,
 ): boolean {
   if (!ack || ack.accepted !== true) return false;
   let host: string;

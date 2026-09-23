@@ -1459,7 +1459,10 @@ Next steps before calling create:
           if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
             return `Blocked: profile "${profile.id}" not saved — user declined.`;
           }
-          redirectAccepted = redirectUrls.length > 0;
+          // `true`, not `redirectUrls.length > 0`: the guarded value below is
+          // `hostsOf(redirectUrls)`, which is empty when the list is, so the
+          // second test said the same thing twice.
+          redirectAccepted = true;
         }
       }
 
@@ -1476,11 +1479,10 @@ Next steps before calling create:
           .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
           .filter((h): h is string => h !== null),
       ));
-      // Computed BEFORE the branch, and the branch reads it. Two expressions
-      // said the same thing while this was `redirectAccepted` in the condition
-      // and a ternary inside: neither was observable, because every reachable
-      // path agreed. Now the guarded value is the only statement of the rule,
-      // so dropping the guard turns a test red instead of nothing.
+      // Computed BEFORE the branch, and the branch reads it, so the guarded
+      // value is the only statement of the rule. While the guard sat in a
+      // ternary and the condition tested `redirectAccepted` separately,
+      // deleting the ternary changed nothing any test could see.
       const redirectHosts = redirectAccepted ? hostsOf(redirectUrls) : [];
       if (nonVetted.length > 0 || redirectHosts.length > 0) {
         // Reachable only after the human accepted above (else returned, or —
@@ -1578,7 +1580,15 @@ Next steps before calling create:
       // otherwise leave no trace anywhere.
       if (presetNote) parts.push(presetNote);
       if (redirectUrls.length > 0 && !redirectAccepted) {
-        parts.push('Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
+        // Two sentences, because the two cases are not the same event. On a
+        // create nothing was added; on an update an acceptance a human gave
+        // earlier was just DROPPED — the save rebuilds the record from the
+        // incoming profile, and there is no acceptance to carry over when
+        // nobody could be asked. A single sentence let an update read as the
+        // harmless case.
+        parts.push(isUpdate
+          ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
+          : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
       }
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
@@ -1629,11 +1639,9 @@ Next steps before calling create:
       // repo's own predicate, two imports away, calls private. A feature with
       // two definitions of one phrase has the ending the redirect guard's own
       // docstring describes.
-      // ONE normalisation, read by all three questions. While the third
-      // normalised the hostname again on its own, the first strip was
-      // unobservable: removing it changed nothing any test could see, because
-      // the LAN check was quietly doing the same work. Brackets stay on for the
-      // URL form, which is why there are two names and not one.
+      // ONE normalisation, read by all three questions — the third used to
+      // normalise the hostname again on its own. Brackets stay on for the URL
+      // form, which is why there are two names and not one.
       const originRooted = base.hostname.replace(/\.+$/, '');
       const originHost = originRooted.replace(/^\[|\]$/g, '');
       const originIsInsideNetwork = originHost === 'localhost'
