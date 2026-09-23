@@ -21,6 +21,7 @@ import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGr
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { derivePresetEndpoints, presetIds } from '../../core/oauth-presets.js';
+import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
@@ -28,7 +29,8 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isInfraSecret, isProtectedSecretWrite } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -176,6 +178,42 @@ function validateProfile(profile: ApiProfile): string | null {
         const v = o[field];
         if (v !== undefined && !keyPattern.test(v)) {
           return `Invalid auth.oauth.${field} "${v}": must be UPPER_SNAKE_CASE, start with a letter, 1-64 chars`;
+        }
+      }
+      // The two fields a HOST is derived from. Checked here for the same reason
+      // the username/password keys above are, and the comment there is the whole
+      // argument: these values come from the profile, a prompt-injected agent can
+      // author them, and this is the point where the operator is still present.
+      //
+      // The type says `Record<string, string>`, and the type is not a check — a
+      // profile arrives as model JSON or as a file. The derivation refuses a
+      // non-string later and that refusal is the real boundary; what this adds is
+      // that a structurally broken profile never persists to fail far from
+      // whoever could fix it.
+      if (o.preset_id !== undefined && !/^[a-z][a-z0-9-]{0,63}$/.test(o.preset_id)) {
+        return `Invalid auth.oauth.preset_id "${o.preset_id}": must be a lowercase provider id, letters/digits/hyphens, starting with a letter.`;
+      }
+      const presetParams: unknown = o.preset_params;
+      if (presetParams !== undefined) {
+        if (typeof presetParams !== 'object' || presetParams === null || Array.isArray(presetParams)) {
+          return 'Invalid auth.oauth.preset_params: must be an object of name/value pairs, e.g. {"shop": "acme"}.';
+        }
+        for (const [name, value] of Object.entries(presetParams)) {
+          if (typeof value !== 'string') {
+            return `Invalid auth.oauth.preset_params.${name}: must be text. These values are substituted into the provider's address, so only a plain string can be one.`;
+          }
+          // The third condition, and the only one that is not about shape. Tool
+          // input passes through `resolveSecretRefs` before this handler runs, so
+          // a parameter written as a vault reference normally arrives here already
+          // holding the VALUE — which would make a credential a DNS label in an
+          // address the engine hands a browser. What still arrives as a literal
+          // reference is the infra-secret case, which that resolver deliberately
+          // leaves unsubstituted; refusing it is what this line can still do, and
+          // it says the thing the model needs to learn: this field is not a place
+          // for a secret at all.
+          if (new RegExp(SECRET_REF_PATTERN.source).test(value)) {
+            return `Invalid auth.oauth.preset_params.${name}: a vault reference cannot be a provider parameter. This value becomes part of the address the user's browser is sent to — pass the plain value (a shop name, a region), never a credential.`;
+          }
         }
       }
     }
@@ -1291,9 +1329,24 @@ Next steps before calling create:
       // offered. That refusal's advice ("save it again and accept") would be
       // unfollowable, which is the exact shape the comment below remembers from
       // the `*.openai.azure.com` incident.
+      // And when it CANNOT be derived, that is said rather than skipped. The
+      // first version dropped the host silently on any derivation failure, which
+      // made the completeness of a security disclosure depend on whether an
+      // unrelated parameter happened to validate — with no trace in either
+      // direction. Refusing the save instead was the other candidate and is
+      // worse: a provider retired from the register would make every profile
+      // naming it unsaveable, including the update that would remove the field.
+      let presetNote: string | undefined;
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id) {
-        const derived = derivePresetEndpoints(profile.auth.oauth.preset_id, profile.auth.oauth.preset_params);
-        if (!('kind' in derived)) egressUrls.push(derived.authorizeUrl, derived.tokenUrl);
+        const presetId = profile.auth.oauth.preset_id;
+        const derived = derivePresetEndpoints(presetId, profile.auth.oauth.preset_params);
+        if (!('kind' in derived)) {
+          egressUrls.push(derived.authorizeUrl, derived.tokenUrl);
+        } else if (derived.kind === 'unknown-preset') {
+          presetNote = `No authorization address could be derived: "${presetId}" is not a provider this engine has built in, so there is nothing here to disclose or accept. api_setup connect will refuse until it names one.`;
+        } else {
+          presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+        }
       }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
       // http.ts asks the same function, and the two MUST agree. While this asked the
@@ -1312,7 +1365,9 @@ Next steps before calling create:
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
         // EVERY non-vetted egress host so the single accept is informed.
-        const disclosure = nonVetted.map((u) => describeDisclosure(u)).join('\n\n');
+        const disclosure = [nonVetted.map((u) => describeDisclosure(u)).join('\n\n'), presetNote]
+          .filter((part): part is string => part !== undefined && part !== '')
+          .join('\n\n');
         if (!agent.promptUser) {
           return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
         }
@@ -1419,6 +1474,11 @@ Next steps before calling create:
       if (grantDiscarded) {
         parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
       }
+      // Said here as well, because the disclosure above only runs when some host
+      // was non-vetted. A profile whose base_url is vetted saves with no prompt
+      // at all, and that is the case where the missing authorize host would
+      // otherwise leave no trace anywhere.
+      if (presetNote) parts.push(presetNote);
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
     }
@@ -1445,6 +1505,32 @@ Next steps before calling create:
       if (!origin) {
         return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
+      // Parsed, not merely found. The provider host below is parsed, compared for
+      // identity and checked for userinfo; the host the user is sent to FIRST had
+      // a presence test and one stripped trailing slash. It is operator input
+      // rather than model input, which is why the answer is a refusal and not a
+      // repair — a link a person is told to click is the wrong place to guess
+      // what a malformed address meant.
+      //
+      // None of these refusals echo the value. A misconfigured ORIGIN can hold
+      // anything somebody pasted, including a credential, and this string goes
+      // into the model's context.
+      let base: URL;
+      try {
+        base = new URL(origin);
+      } catch {
+        return 'Error: ORIGIN is not a valid address, so no link can be built from it. Set it to this engine\'s full public address including the scheme, e.g. https://lynox.example.com.';
+      }
+      const originHost = base.hostname.replace(/^\[|\]$/g, '');
+      if (base.protocol !== 'https:' && !(base.protocol === 'http:' && (originHost === 'localhost' || isPrivateIP(originHost)))) {
+        return 'Error: ORIGIN must be an https address. The provider sends the authorization back to it, and plain http exposes that in transit; http is accepted only for an address inside the operator\'s own network.';
+      }
+      if (base.username !== '' || base.password !== '') {
+        return 'Error: ORIGIN carries a username or password in the address. Remove it — this address is shown to the user and handed to the provider.';
+      }
+      if (base.search !== '' || base.hash !== '') {
+        return 'Error: ORIGIN carries a query or a fragment. Set it to the bare public address of this engine — scheme, host, port, and a path prefix only if it is served under one.';
+      }
       // Derived here only to answer BEFORE sending the user anywhere; the route
       // derives again at use, and that derivation is the boundary.
       const endpoints = derivePresetEndpoints(profile.auth.oauth?.preset_id ?? '', profile.auth.oauth?.preset_params);
@@ -1455,6 +1541,16 @@ Next steps before calling create:
           return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
         }
         return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
+      }
+      // The same question the start route asks, from the same function — so a
+      // link is not handed out that the route will then refuse. While only the
+      // route asked it, the model was told to show a link and the user arrived
+      // at a 403, which is the dead end this feature keeps re-learning.
+      const redirect = checkRedirectTarget(endpoints, profile.custom_endpoint_ack);
+      if (redirect) {
+        return redirect.kind === 'inside-network'
+          ? `Error: profile "${id}" would send the user to ${endpoints.host}, which is inside this engine's own network. That is not the provider, and there is no acceptance that would make it one — the profile has to name a built-in provider.`
+          : `Error: nobody has accepted ${endpoints.host} for profile "${id}" yet, and this link would be refused. Save the profile again with api_setup update and let the user accept the provider when asked, then connect.`;
       }
       const clientIdKey = profile.auth.oauth?.client_id_key;
       const clientSecretKey = profile.auth.oauth?.client_secret_key;
@@ -1469,7 +1565,10 @@ Next steps before calling create:
         }
         return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
       }
-      const link = `${origin.replace(/\/$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      // Built from the parsed object, never by string surgery on the raw value.
+      // The path prefix is kept deliberately: an engine served under one needs
+      // it, and `origin` alone would silently produce a link to nothing.
+      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
       const grant = profile.oauth_grant;
       // Three replies, one link. What differs is what the user is walking into,
       // and saying it here is cheaper than a surprise on the provider's page.

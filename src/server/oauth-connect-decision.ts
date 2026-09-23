@@ -19,10 +19,11 @@
  */
 import type { ApiProfile } from '../core/api-store.js';
 import { derivePresetEndpoints, presetIds, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
-import { isVettedEgressHost, isPrivateLanEndpoint, isEndpointAcked } from '../core/llm/endpoint-allowlist.js';
+import { checkRedirectTarget } from '../core/oauth-redirect-guard.js';
 
 /** Every way the start route refuses before anything is minted. */
 export type ConnectRefusalKind =
+  | 'no-session'
   | 'no-fetch-metadata'
   | 'cross-site'
   | 'not-a-document'
@@ -31,6 +32,7 @@ export type ConnectRefusalKind =
   | 'no-preset'
   | 'bad-preset-param'
   | 'no-egress-ack'
+  | 'inside-network'
   | 'no-http-secret';
 
 export interface ConnectRefusal {
@@ -41,6 +43,16 @@ export interface ConnectRefusal {
 }
 
 export interface ConnectFacts {
+  /**
+   * Whether the request carried a valid session of THIS instance.
+   *
+   * Fetch metadata answers how the request was made, never by whom —
+   * `Sec-Fetch-Site: none` is an address-bar open, which anyone can perform. So
+   * identity is a fact this function takes, and it is the first thing refused:
+   * everything after it discloses something (that a profile exists, which
+   * providers are built in, which host one derives).
+   */
+  readonly authenticated: boolean;
   /** `Sec-Fetch-Site`, absent when the client sent none. */
   readonly fetchSite: string | undefined;
   /** `Sec-Fetch-Dest`. */
@@ -77,6 +89,13 @@ export function decideConnect(
   // reaching around the module.
   register: PresetRegister = OAUTH_PRESETS,
 ): ConnectRefusal | ConnectTarget {
+  if (!facts.authenticated) {
+    return {
+      kind: 'no-session',
+      status: 401,
+      message: 'Sign in to this instance first, then open the link again.',
+    };
+  }
   if (facts.fetchSite === undefined || facts.fetchDest === undefined) {
     return {
       kind: 'no-fetch-metadata',
@@ -134,41 +153,13 @@ export function decideConnect(
     };
   }
 
-  // Nearly the question `api_setup` asks before it sends a token anywhere — asked
-  // about the DERIVED host, not a stored one — with one half deliberately cut.
-  //
-  // `isVettedEgressHost` vouches for `localhost`, `127.0.0.1` and `.local` names
-  // as well, because for OUTBOUND traffic a host inside the operator's own
-  // network carries no third-party exposure. Sending a USER'S BROWSER somewhere
-  // is a different question with a different answer: a consent screen on a
-  // machine in the operator's LAN is one the user cannot judge, and it is not
-  // the provider they think they are authorizing. So the private half is
-  // excluded here and the public vetting kept.
-  // ⚠ `isPrivateLanEndpoint` alone does not answer this: `localhost`, `127.0.0.1`
-  // and `0.0.0.0` are in the VETTED list, not in the private-LAN patterns (which
-  // carry the RFC1918 blocks plus `.local`, `.lan`, `.intranet`). Reading the two
-  // as a partition let loopback through, and a test written for the LAN case is
-  // what caught it. Loopback is named here rather than assumed to be covered.
-  const loopback = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
-  let redirectHost: string;
-  try {
-    redirectHost = new URL(endpoints.authorizeUrl).hostname;
-  } catch {
-    redirectHost = '';
-  }
-  const insideThisNetwork = redirectHost === '' || loopback.has(redirectHost) || isPrivateLanEndpoint(endpoints.authorizeUrl);
-  // An ack cannot buy this one. Accepting a sub-processor is a statement about
-  // where DATA goes; it is not a statement that the person in front of the
-  // browser can judge a consent screen served from inside the operator's own
-  // network, which is what a redirect there would ask of them.
-  const mayRedirect = !insideThisNetwork
-    && (isVettedEgressHost(endpoints.authorizeUrl) || isEndpointAcked(profile.custom_endpoint_ack, endpoints.authorizeUrl));
-  if (!mayRedirect) {
-    return {
-      kind: 'no-egress-ack',
-      status: 403,
-      message: `Nobody has accepted sending data to ${endpoints.host} for this profile yet. Save the profile again and accept the provider when asked.`,
-    };
+  // The one question `api_setup connect` also has to ask, so it is asked in one
+  // place for both. Its two refusals are members of the union above, which is
+  // what makes this assignment a weld: a third refusal added over there fails to
+  // compile here until it is a kind the route can answer with.
+  const redirect = checkRedirectTarget(endpoints, profile.custom_endpoint_ack);
+  if (redirect) {
+    return { kind: redirect.kind, status: 403, message: redirect.message };
   }
 
   if (!facts.httpSecretSet) {

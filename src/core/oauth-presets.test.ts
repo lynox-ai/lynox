@@ -36,7 +36,18 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // nobody has vouched for a provider. If this ever fails, someone added a
     // preset — that is a decision, and it belongs in the register of decisions,
     // not in a passing test.
-    expect(presetIds()).toEqual([]);
+    //
+    // It is also the alarm for work that was deliberately left out of the first
+    // wave, which is why the obligation is in the assertion message rather than
+    // here: a comment is read by whoever is already in this file, and the one
+    // who needs it is whoever makes this test red.
+    expect(
+      presetIds(),
+      'A provider was added to the register, so the redirect flow becomes reachable. '
+      + 'Before that ships: `revokedGrantMessage` (src/core/oauth-refresh-failure.ts) still sends the model down the '
+      + 'paste-a-token path after a revocation and says nothing about connecting again, which is unreachable today '
+      + 'only because this list is empty. That wording was left to the follow-up wave on purpose; this is its alarm.',
+    ).toEqual([]);
   });
 
   it('hands out no map, so no cast can add a provider at runtime', () => {

@@ -39,6 +39,7 @@ function profile(over: Partial<ApiProfile> = {}): ApiProfile {
 }
 
 const good: ConnectFacts = {
+  authenticated: true,
   fetchSite: 'same-origin',
   fetchDest: 'document',
   profile: profile(),
@@ -53,6 +54,8 @@ const good: ConnectFacts = {
  * a complete table nobody runs passes the compiler and checks nothing.
  */
 const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
+  'no-session': { ...good, authenticated: false },
+  'inside-network': { ...good, profile: profile({ custom_endpoint_ack: undefined }) },
   'no-fetch-metadata': { ...good, fetchSite: undefined, fetchDest: undefined },
   'cross-site': { ...good, fetchSite: 'cross-site' },
   'not-a-document': { ...good, fetchDest: 'empty' },
@@ -71,8 +74,17 @@ const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
 };
 
 describe('the start route decides everything before it mints anything', () => {
+  // One row needs a provider the shipped register cannot express; the seam is a
+  // parameter, so the table carries the exception rather than a mock.
+  const REGISTER_FOR: Partial<Record<ConnectRefusalKind, typeof REGISTER>> = {
+    'inside-network': presetRegisterOf([{
+      id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: '169.254.169.254' },
+      authorizePath: '/authorize', tokenPath: '/token', params: [],
+    }]),
+  };
+
   it.each(Object.entries(BEFORE_MINT))('refuses %s, and names no authorize URL', (kind, facts) => {
-    const decision = decide(facts as ConnectFacts);
+    const decision = decide(facts as ConnectFacts, REGISTER_FOR[kind as ConnectRefusalKind] ?? REGISTER);
 
     expect(isRefusal(decision)).toBe(true);
     if (!isRefusal(decision)) return;
@@ -86,9 +98,9 @@ describe('the start route decides everything before it mints anything', () => {
 
   it('covers every refusal the type allows, and runs each one', () => {
     // The pairing that makes the table worth having: the compiler keeps it
-    // complete, this keeps it used. Nine today; a tenth kind fails to compile
+    // complete, this keeps it used. Eleven today; a twelfth kind fails to compile
     // above and fails this count here.
-    expect(Object.keys(BEFORE_MINT)).toHaveLength(9);
+    expect(Object.keys(BEFORE_MINT)).toHaveLength(11);
   });
 
   it('lets a click from this instance through, with the derived target', () => {
@@ -153,7 +165,75 @@ describe('the start route decides everything before it mints anything', () => {
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, lan);
 
-    expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
+    expect(isRefusal(decision) && decision.kind).toBe('inside-network');
+    // And the advice says what is actually possible — pinned as the SENTENCE,
+    // not as a word. The first version of this line forbade the word `accept`
+    // and failed against the very wording it was written to require: the
+    // message uses it to say that nobody CAN accept this on your behalf. What
+    // must be absent is the INSTRUCTION the neighbouring refusal gives, because
+    // a private host never reaches the prompt that would stamp an acceptance,
+    // so following it changes nothing.
+    expect(isRefusal(decision) && decision.message).not.toMatch(/save the profile again/i);
+    expect(isRefusal(decision) && decision.message).toContain('name a provider this engine knows');
+  });
+
+  it.each([
+    ['the rest of 127/8', '127.0.0.2'],
+    ['the metadata address', '169.254.169.254'],
+    ['carrier-grade NAT', '100.64.0.1'],
+    // The bracketed, NORMALISED spelling, and it has to be that one: measured
+    // here rather than assumed, `new URL('https://::ffff:127.0.0.1/')` throws
+    // and `https://[::ffff:127.0.0.1]/` comes back with hostname
+    // `[::ffff:7f00:1]`. Both are refused — one commit earlier than this check,
+    // by the host-identity rule in `derivePresetEndpoints` — which is why the
+    // fixture below carries the only spelling that actually REACHES the
+    // inside-network branch. The sibling case pins the other two.
+    ['IPv4-mapped loopback', '[::ffff:7f00:1]'],
+  ])('refuses a redirect to %s, which a five-string set missed', (_label, host) => {
+    // The first version of this rule listed five literal hosts and leaned on the
+    // private-LAN patterns for everything else. Those cover RFC1918 in dotted
+    // quad and three suffixes — not these four.
+    const inside = presetRegisterOf([{
+      id: 'example-shop', label: 'inside', host: { kind: 'constant', host },
+      authorizePath: '/authorize', tokenPath: '/token', params: [],
+    }]);
+    const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
+
+    expect(isRefusal(decision) && decision.kind).toBe('inside-network');
+  });
+
+  it.each([
+    ['unbracketed, which no URL parser accepts as a host', '::ffff:127.0.0.1'],
+    ['bracketed but not normalised, which the parser rewrites', '[::ffff:127.0.0.1]'],
+  ])('refuses %s before the network question is even asked', (_label, host) => {
+    // The same address in two spellings that never reach `isPrivateIP`, and the
+    // refusal they DO get is the honest one to assert. `derivePresetEndpoints`
+    // requires the derived host to survive a round trip through the URL parser
+    // unchanged, and neither spelling does: the first throws, the second comes
+    // back as `[::ffff:7f00:1]`. Writing `inside-network` here would have been a
+    // test that passes for a reason it does not state — the defence is the host
+    // identity rule, one layer earlier, and if that rule is ever relaxed this
+    // case goes red instead of quietly moving to another branch.
+    const inside = presetRegisterOf([{
+      id: 'example-shop', label: 'inside', host: { kind: 'constant', host },
+      authorizePath: '/authorize', tokenPath: '/token', params: [],
+    }]);
+    const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
+
+    expect(isRefusal(decision) && decision.kind).toBe('bad-preset-param');
+  });
+
+  it('refuses an unauthenticated open before it says whether the profile exists', () => {
+    // The ordering that decides what an anonymous caller learns. Fetch metadata
+    // cannot answer WHO — `none` is an address-bar open — so identity comes
+    // first, and a request without a session gets the same answer whether or not
+    // the id names anything here.
+    const known = decide({ ...good, authenticated: false });
+    const unknown = decide({ ...good, authenticated: false, profile: undefined });
+
+    expect(isRefusal(known) && known.kind).toBe('no-session');
+    expect(isRefusal(unknown) && unknown.kind).toBe('no-session');
+    expect(isRefusal(known) && isRefusal(unknown) && known.message === unknown.message).toBe(true);
   });
 
   it('checks the secret last, so a wrong link never reports a server fault', () => {
