@@ -65,7 +65,7 @@ interface Internals {
 }
 
 const CHIPS = [
-  { label: 'Budget senden', task: 'Sende das überarbeitete Budget an Markus Oehrli.' },
+  { label: 'Budget senden', task: 'Sende das überarbeitete Budget an Ada Lovelace.' },
   { label: 'SKUs bereinigen', task: 'Setze die SKU-Barcode-Bereinigung für Project Lumen fort.' },
 ];
 const USAGE = { input_tokens: 700, output_tokens: 150, cache_creation_input_tokens: null, cache_read_input_tokens: null };

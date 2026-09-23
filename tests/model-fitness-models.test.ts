@@ -118,15 +118,15 @@ describe('the coverage index and the cases do not drift apart', () => {
 
 describe('the entity-extraction assertion cannot be satisfied by nothing', () => {
   it('counts a wanted name only when a NAMED entity matches it', () => {
-    expect(countMatched(['markus oehrli', 'brunnmatt'], ['markus oehrli', 'brunnmatt ag'])).toBe(2);
-    expect(countMatched(['markus oehrli', 'brunnmatt'], ['brunnmatt ag'])).toBe(1);
+    expect(countMatched(['ada lovelace', 'acme'], ['ada lovelace', 'acme ag'])).toBe(2);
+    expect(countMatched(['ada lovelace', 'acme'], ['acme ag'])).toBe(1);
   });
 
   it('scores an entity with a missing name as nothing, not as everything', () => {
     // The shipped defect: `want.includes('')` is true for every wanted name, so
     // one entity with no `name` field passed the whole case.
-    expect(countMatched(['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'], [''])).toBe(0);
-    expect(countMatched(['markus oehrli'], ['', 'markus oehrli'])).toBe(1);
+    expect(countMatched(['ada lovelace', 'acme', 'beispielware', 'zürich'], [''])).toBe(0);
+    expect(countMatched(['ada lovelace'], ['', 'ada lovelace'])).toBe(1);
   });
 
   it('keeps the property the token filter\'s threshold rests on', () => {
@@ -147,14 +147,14 @@ describe('the entity-extraction assertion cannot be satisfied by nothing', () =>
     // complete: the empty string, then any fragment, then padding — and a single blob
     // naming all four, which no amount of per-name matching catches. Each form gets
     // its own line so a future narrowing cannot quietly drop one.
-    const want = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
+    const want = ['ada lovelace', 'acme', 'beispielware', 'zürich'];
     expect(countMatched(want, ['a', 'b', 'c', 'x']), 'one-character noise').toBe(0);
-    expect(countMatched(want, ['kus', 'unn']), 'fragments').toBe(0);
-    expect(countMatched(want, ['xmarkusx', 'xbrunnmattx', 'xtalfeldx', 'xzürichx']), 'padding').toBe(0);
-    expect(countMatched(want, ['markus brunnmatt talfeld zürich']), 'one entity for all four').toBe(1);
+    expect(countMatched(want, ['lace', 'cme']), 'fragments of the new keys').toBe(0);
+    expect(countMatched(want, ['xlovelacex', 'xacmex', 'xbeispielwarex', 'xzürichx']), 'padding').toBe(0);
+    expect(countMatched(want, ['ada lovelace acme beispielware zürich']), 'one entity for all four').toBe(1);
     // …while the legitimate forms still count: the whole name, a longer form of it,
     // and the distinctive token on its own.
-    expect(countMatched(want, ['markus oehrli', 'brunnmatt ag', 'talfeld', 'zürich'])).toBe(4);
-    expect(countMatched(['markus oehrli'], ['oehrli'])).toBe(1);
+    expect(countMatched(want, ['ada lovelace', 'acme ag', 'beispielware', 'zürich'])).toBe(4);
+    expect(countMatched(['ada lovelace'], ['lovelace'])).toBe(1);
   });
 });
