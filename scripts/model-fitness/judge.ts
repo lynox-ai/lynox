@@ -13,9 +13,12 @@
  * claim is checkable from a run rather than from this comment.
  *
  * SCOPE: "candidates" means `models.ts` `ALL_CANDIDATES`, the roster this judge
- * actually scores — verified: no Kimi in it. The sibling instruments in this
- * directory carry their own rosters (`replay.ts` and `artefact.ts` both list a
- * Kimi) and do not import this judge, so seeing one there is not a violation.
+ * actually scores. The sibling instruments in this directory carry their own
+ * rosters (`replay.ts` and `artefact.ts` both list a Kimi) and do not import this
+ * judge, so seeing one there is not a violation. The id-level half of the
+ * invariant is asserted in `tests/model-fitness-models.test.ts`; the family-level
+ * half — "no candidate from Kimi's family" — is still prose, because a model id
+ * does not carry its family.
  *
  * Bias mitigations: ABSOLUTE rubric scoring (score each answer 1-5 against a
  * fixed rubric) — NOT pairwise A-vs-B — which sidesteps POSITION bias entirely.
@@ -25,7 +28,7 @@
  * signal for the subjective quality axis — the hard cases' objective state
  * assertions remain the primary, bias-free discriminator.
  */
-const JUDGE_MODEL = 'accounts/fireworks/models/kimi-k2p6';
+export const JUDGE_MODEL = 'accounts/fireworks/models/kimi-k2p6';
 const JUDGE_BASE = 'https://api.fireworks.ai/inference/v1';
 
 /** True when an independent judge can run (FIREWORKS_API_KEY present). */
@@ -86,6 +89,11 @@ export async function judgeQuality(opts: { task: string; answer: string; rubric:
     const data = (await res.json()) as OpenAIChatResponse;
     text = data.choices?.[0]?.message?.content ?? '';
   } catch (e) {
+    // Two independent producers of the tag, deliberately: the explicit throw above
+    // sits INSIDE this try, so even if it were changed back to a plain Error this
+    // wrapper would still tag it. Neither is dead code — removing either one alone
+    // is unobservable, removing both loses the tag and the runner starts re-running
+    // paid cases on the judge's rate limit. Measured, not assumed.
     throw e instanceof JudgeError ? e : new JudgeError(`judge call failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   // Take the LAST score-like match — Kimi reasons first, concludes last.

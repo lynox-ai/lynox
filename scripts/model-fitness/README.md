@@ -12,7 +12,7 @@ picking the wrong rung is the one mistake that has actually cost us a wrong deci
 
 | Rung | Instrument | Cost | What it may decide |
 |---|---|---|---|
-| 1 | **Public leaderboards** — recorded per candidate as a one-line `prefilter` reason in `models.ts` (today BFCL and τ-bench, plus plain known facts) | free | **candidacy only.** Scores are inflated by contamination/scaffolding and swing by harness. |
+| 1 | **Evidence that costs no new spend** — a one-line `prefilter` reason per candidate in `models.ts`. Today those reasons cite BFCL, τ-bench, LMArena, this repo's own earlier set-bench results, and plain known facts. | free | **candidacy only.** Public scores are inflated by contamination/scaffolding and swing by harness. |
 | 2 | **Synthetic probe** — `run.ts` over `capabilities.ts` + `scenarios.ts` | cents | **a SCREEN.** Refutes a candidate (a model that fails here is out) and finds instrument bugs. It may **not** confirm one: no fit decision is citable from it alone. |
 | 3 | **Faithful replay** — `replay.ts` over a captured raw body | a few cheap turns | **the VERDICT.** It sends the exact request production sent. |
 
@@ -192,8 +192,10 @@ against the harness until proven otherwise.
 
 ## Where this sits among the repo's benches
 
-Three directories measure models, and which one to reach for was written down in two
-places and nowhere for the third:
+Three directories compare MODELS against each other, and which one to reach for was
+written down in two places and nowhere for the third. (Other directories under
+`scripts/` evaluate parts of the system rather than picking a model — `kg-bench`,
+`kg-eval`, `agent-efficiency` — and are out of scope here.)
 
 | Directory | The question it answers | Status |
 |---|---|---|

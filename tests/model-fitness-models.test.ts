@@ -16,6 +16,7 @@ import {
   ALL_CANDIDATES, collisionsIn, contextWindowOf, costOf, isEstimatedPrice, overrideCollisions,
 } from '../scripts/model-fitness/models.js';
 import { CAPABILITIES, countMatched, TIER_JOBS } from '../scripts/model-fitness/capabilities.js';
+import { JUDGE_MODEL } from '../scripts/model-fitness/judge.js';
 import { SCENARIOS } from '../scripts/model-fitness/scenarios.js';
 
 describe('OVERRIDES is a fallback, not a second source of truth', () => {
@@ -61,9 +62,19 @@ describe('OVERRIDES is a fallback, not a second source of truth', () => {
     // The case that pins the second conjunct: an id in NEITHER table has no price,
     // so there is no estimate to mark.
     expect(isEstimatedPrice('no-such-model-anywhere'), 'in neither table').toBe(false);
-    for (const c of ALL_CANDIDATES) {
-      expect(isEstimatedPrice(c.id), `${c.id}`).toBe(MODEL_CAPABILITIES[c.id]?.pricing === undefined);
-    }
+    // Deliberately NOT a sweep over ALL_CANDIDATES comparing the helper to its own
+    // first conjunct: that restates the implementation, and it would also contradict
+    // the line above for a candidate in neither table. The separate "resolves every
+    // candidate" test is what catches one of those appearing.
+  });
+});
+
+describe('the judge is not one of the things it judges', () => {
+  it('the judge model is not in the candidate roster', () => {
+    // The id-level half of "judge not in candidate families". The family-level half
+    // stays prose — an id does not carry its family — and the prose has drifted here
+    // twice already, so this pins what can be pinned.
+    expect(ALL_CANDIDATES.map((c) => c.id)).not.toContain(JUDGE_MODEL);
   });
 });
 
@@ -118,13 +129,19 @@ describe('the entity-extraction assertion cannot be satisfied by nothing', () =>
     expect(countMatched(['markus oehrli'], ['', 'markus oehrli'])).toBe(1);
   });
 
-  it('is not satisfied by fragments either', () => {
-    // Dropping empty names was not enough: the reverse direction used to be
-    // `want.includes(found)`, so four one-character entities scored a clean 4/4.
+  it('is not satisfied by fragments, padding, or one entity covering everything', () => {
+    // Three generations of this defect, each found after the previous fix was called
+    // complete: the empty string, then any fragment, then padding — and a single blob
+    // naming all four, which no amount of per-name matching catches. Each form gets
+    // its own line so a future narrowing cannot quietly drop one.
     const want = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
-    expect(countMatched(want, ['a', 'b', 'c', 'x'])).toBe(0);
-    expect(countMatched(want, ['kus', 'unn'])).toBe(0);
-    // …while the legitimate short form still counts: a whole token of the name.
+    expect(countMatched(want, ['a', 'b', 'c', 'x']), 'one-character noise').toBe(0);
+    expect(countMatched(want, ['kus', 'unn']), 'fragments').toBe(0);
+    expect(countMatched(want, ['xmarkusx', 'xbrunnmattx', 'xtalfeldx', 'xzürichx']), 'padding').toBe(0);
+    expect(countMatched(want, ['markus brunnmatt talfeld zürich']), 'one entity for all four').toBe(1);
+    // …while the legitimate forms still count: the whole name, a longer form of it,
+    // and the distinctive token on its own.
+    expect(countMatched(want, ['markus oehrli', 'brunnmatt ag', 'talfeld', 'zürich'])).toBe(4);
     expect(countMatched(['markus oehrli'], ['oehrli'])).toBe(1);
   });
 });

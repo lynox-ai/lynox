@@ -8,7 +8,8 @@
  * harness reporting a verdict it had not measured.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { judgeAvailable, judgeQuality } from '../scripts/model-fitness/judge.js';
+import { JudgeError, judgeAvailable, judgeQuality } from '../scripts/model-fitness/judge.js';
+import { isRetryableRunError } from '../scripts/model-fitness/grid.js';
 
 const ARGS = { task: 't', answer: 'a', rubric: 'r' };
 const originalFetch = globalThis.fetch;
@@ -31,10 +32,23 @@ describe('judgeQuality', () => {
     return expect(judgeQuality(ARGS)).resolves.toBeNull();
   });
 
-  it('THROWS when a configured judge answers with an error status', async () => {
+  it('THROWS a JudgeError when a configured judge answers with an error status', async () => {
     process.env['FIREWORKS_API_KEY'] = 'k';
     globalThis.fetch = vi.fn(async () => ({ ok: false, status: 429, json: async () => ({}) }) as unknown as Response);
     await expect(judgeQuality(ARGS)).rejects.toThrow(/429/);
+    await expect(judgeQuality(ARGS)).rejects.toBeInstanceOf(JudgeError);
+  });
+
+  it('the error it throws is one the runner will NOT retry — the two halves joined', async () => {
+    // Each half was covered and the JOIN was not: judge.ts could go back to a plain
+    // Error and every other assertion here stayed green, while the defect it fixes —
+    // re-running the whole case, re-calling the PAID candidate model up to four
+    // times for the judge's rate limit — came back in full.
+    process.env['FIREWORKS_API_KEY'] = 'k';
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 429, json: async () => ({}) }) as unknown as Response);
+    const thrown: unknown = await judgeQuality(ARGS).then(() => null, (e: unknown) => e);
+    expect(thrown).toBeInstanceOf(Error);
+    expect(isRetryableRunError(thrown), 'a judge failure must not re-run the candidate').toBe(false);
   });
 
   it('THROWS when a configured judge is unreachable', async () => {

@@ -119,21 +119,41 @@ const PNG = redBluePngBase64();
 /**
  * How many WANTED entity names the model actually produced.
  *
- * A found name counts when it CONTAINS the wanted name's first token ("Brunnmatt
- * AG" for "brunnmatt") or IS one of its tokens ("oehrli" for "markus oehrli").
- * Both directions are needed, but the second one used to be `w.includes(f)`, which
- * accepts any fragment: an entity named `''` matched every wanted name, and even
- * after empty names were dropped, `['a','b','c','x']` still scored a clean 4/4.
- * Whole tokens instead of substrings is what makes the assertion unsatisfiable by
- * noise.
+ * Three ways this assertion has been satisfiable by nothing, each found only after
+ * the previous fix was called complete:
+ *
+ *  1. `want.includes(found)` accepted the empty string, so one entity with a missing
+ *     `name` matched every wanted name — a clean 4/4 from a single blank.
+ *  2. Dropping blanks left the same rule accepting any FRAGMENT, so `['a','b','c','x']`
+ *     still scored 4/4.
+ *  3. Substring matching in the other direction accepted PADDING (`xmarkusx`), and
+ *     nothing stopped ONE entity from satisfying every wanted name at once — a model
+ *     that answers with a sentence instead of entities scored full marks.
+ *
+ * So the rule is now: compare WHOLE TOKENS, key on the wanted name's last token (the
+ * distinctive one — `oehrli`, not `markus`), and assign each found entity to AT MOST
+ * ONE wanted name. The assignment is what kills (3): a single blob can cover one
+ * wanted name, never four. Greedy is fine at this size.
+ *
+ * What it still allows, stated rather than claimed away: a model that emits four
+ * separate entities each containing one correct distinctive token scores 4, even if
+ * every one of them also carries noise around it. That is the right call — the case
+ * measures whether the entities were FOUND, not whether they were formatted well.
  */
 export function countMatched(want: readonly string[], found: readonly string[]): number {
-  return want.filter((w) => {
-    const tokens = w.split(' ').filter((t) => t.length > 0);
-    const head = tokens[0];
-    if (head === undefined) return false;
-    return found.some((f) => f.length > 0 && (f.includes(head) || tokens.includes(f)));
-  }).length;
+  const tokensOf = (s: string): string[] =>
+    s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length > 0);
+  const foundTokens = found.map(tokensOf);
+  const taken = new Set<number>();
+  let hits = 0;
+  for (const w of want) {
+    const wt = tokensOf(w);
+    const key = wt[wt.length - 1];
+    if (key === undefined) continue;
+    const i = foundTokens.findIndex((ft, idx) => !taken.has(idx) && ft.includes(key));
+    if (i >= 0) { taken.add(i); hits += 1; }
+  }
+  return hits;
 }
 
 export const CAPABILITIES: readonly Capability[] = [
@@ -146,6 +166,9 @@ export const CAPABILITIES: readonly Capability[] = [
     job: 'kg-entity-extraction',
     detail: 'A business sentence with 4 known entities → a forced extract call must surface all 4 (people/company/product). Weaker models drop or mangle entities.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
+      // Fixture names are invented and the domains are RFC-reserved (`.example`,
+      // `.invalid`). An earlier version of this case bound invented budget approvals
+      // to a real insurer's name and its live domain, in a public repository.
       // Ground truth: Markus Oehrli (person), Brunnmatt AG (company/project), Talfeld
       // (product), Zürich (place). All four should appear in the extraction.
       let found: string[] = [];
