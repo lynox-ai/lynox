@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { checkRedirectTarget } from './oauth-redirect-guard.js';
+import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 
 /**
  * One branch of this guard is unreachable from either of its two callers, and
@@ -50,6 +51,19 @@ describe('a target the URL parser refuses is treated as inside the network', () 
     // The acceptance names the host exactly, which is what makes this a test of
     // the network rule rather than of the consent rule.
     expect(decision?.kind).toBe('inside-network');
+  });
+
+  it('refuses an acceptance whose own flag says it was not given', () => {
+    // `accepted` is typed as the literal `true`, so this shape cannot be
+    // written by hand — but the ack is stored, rides a migration and is read
+    // back from disk, where a type promises nothing. Nothing covered the check
+    // until a mutation removed it and the whole suite stayed green.
+    const decision = checkRedirectTarget(
+      { host: 'shops.example.com', authorizeUrl: 'https://shops.example.com/authorize', tokenUrl: 'https://shops.example.com/token' },
+      { accepted: false, hosts: [], redirect_hosts: ['shops.example.com'], accepted_at: '2026-09-22T00:00:00.000Z' } as unknown as CustomEndpointAck,
+    );
+
+    expect(decision?.kind).toBe('no-egress-ack');
   });
 
   it('lets an ordinary public host through, so the dot is what decides', () => {

@@ -186,6 +186,11 @@ describe('the preset fields are checked at the door, not at the derivation', () 
     // leaves alone, and an unresolvable name. Those are what this can refuse,
     // and the refusal teaches the rule for all of them.
     ['a vault reference as a parameter', { preset_id: 'example-shop', preset_params: { shop: 'secret:LYNOX_ADMIN_TOKEN' } }, 'auth.oauth.preset_params.shop'],
+    // This row is load-bearing beyond its own assertion: the grammar is the ONLY
+    // thing refusing a vault reference here — a separate reference check was
+    // written and deleted after a mutation showed it could never fire, because
+    // a reference needs a colon and an uppercase letter and the grammar allows
+    // neither. Loosen the grammar and this goes red, which is the point.
     ['a vault reference as the provider id', { preset_id: 'secret:LYNOX_ADMIN_TOKEN' }, 'auth.oauth.preset_id'],
   ])('refuses %s', async (_label, oauth, field) => {
     const result = await createWith(oauth);

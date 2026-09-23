@@ -199,11 +199,17 @@ function validateProfile(profile: ApiProfile): string | null {
         // other call is substituted here with no prompt, and a refusal that
         // quotes what arrived would put the resolved value into the model's
         // context. It is a provider id; naming the field is enough to fix it.
-        if (new RegExp(SECRET_REF_PATTERN.source).test(o.preset_id)) {
-          return 'Invalid auth.oauth.preset_id: a vault reference cannot name a provider. This field selects a built-in provider by name — pass the id itself, never a credential.';
-        }
+        // One check, and it does both jobs. A vault reference has to contain
+        // `secret:` followed by an uppercase letter, and this grammar permits
+        // neither a colon nor an uppercase letter — so every string that could
+        // carry one is already refused here. A separate reference check was
+        // written first and then deleted: a mutation showed it could never
+        // fire, and a branch that cannot fire reads as a guard while guarding
+        // nothing. The test that hands this field a vault reference stays, so
+        // that loosening the grammar turns red rather than quietly reopening
+        // the hole.
         if (!/^[a-z][a-z0-9-]{0,63}$/.test(o.preset_id)) {
-          return 'Invalid auth.oauth.preset_id: must be a lowercase provider id — letters, digits and hyphens, starting with a letter. Use api_setup connect to see which providers this engine knows.';
+          return 'Invalid auth.oauth.preset_id: must be a lowercase provider id — letters, digits and hyphens, starting with a letter. A vault reference is not one. Use api_setup connect to see which providers this engine knows.';
         }
       }
       const presetParams: unknown = o.preset_params;
