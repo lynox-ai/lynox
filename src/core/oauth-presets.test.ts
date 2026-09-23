@@ -5,6 +5,7 @@ import {
   presetIds,
   presetRegisterOf,
   type OAuthPreset,
+  PRESET_ID_PATTERN,
 } from './oauth-presets.js';
 
 // Two presets that exercise both host rules. They live here, not in the
@@ -71,12 +72,15 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
   });
 
   it('exports no way to register a preset at runtime', async () => {
-    // Every export is a type, the frozen register, a pure derivation, or the
-    // test-seam builder. A future `registerPreset(...)` would show up here and
-    // has to be argued for, not slipped in.
+    // Every export is a type, the frozen register, a pure derivation, the
+    // test-seam builder, or a frozen pattern. A future `registerPreset(...)`
+    // would show up here and has to be argued for, not slipped in — and this
+    // test did its job when `PRESET_ID_PATTERN` was added: the argument for it
+    // is that the id grammar had TWO definitions, one in the validator and a
+    // copy in a test claiming to bind them.
     const module = await import('./oauth-presets.js');
     expect(Object.keys(module).sort()).toEqual(
-      ['OAUTH_PRESETS', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf'].sort(),
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf'].sort(),
     );
   });
 
@@ -216,15 +220,28 @@ describe('derivation happens at use, from the register alone', () => {
   });
 
   it('holds every shipped preset id to the grammar the tool validates', () => {
-    // Nothing bound the two together. A preset shipped as `azure_ad` would be
-    // derivable here and unsaveable there — and because the validator also runs
-    // over a STORED profile on the refine path, every later edit of a profile
-    // naming it would fail too. Vacuously green while the register is empty,
-    // red the day it matters, which is the same trick the emptiness alarm uses.
+    // The pattern is IMPORTED, not repeated. A copy here would be a second
+    // definition wearing the word "binding": tightening the validator to
+    // `/^[a-z][a-z0-9]{0,63}$/` and shipping `example-shop` left the first
+    // version of this test green while every profile naming that provider
+    // became unsaveable — and because the validator also runs over a STORED
+    // profile on the refine path, every later edit of one would fail too.
+    // Vacuous while the register is empty, red the day it matters, which is
+    // the same trick the emptiness alarm above uses.
     for (const id of presetIds()) {
       expect(id, `preset id "${id}" is not one api_setup would accept in a profile`)
-        .toMatch(/^[a-z][a-z0-9-]{0,63}$/);
+        .toMatch(PRESET_ID_PATTERN);
     }
+  });
+
+  it('keeps the grammar narrow enough to refuse a vault reference', () => {
+    // The second job the pattern does without saying so in its name, and the
+    // reason a separate reference check was deleted as unreachable: a reference
+    // needs `secret:` followed by an uppercase letter, and this class admits
+    // neither. If someone widens it to allow, say, a dot for `shopify.admin`,
+    // this is what notices before the hole reopens.
+    expect(PRESET_ID_PATTERN.test('secret:LYNOX_ADMIN_TOKEN')).toBe(false);
+    expect(PRESET_ID_PATTERN.test('example-shop')).toBe(true);
   });
 
   it('refuses a path that would join the authority instead of the path', () => {

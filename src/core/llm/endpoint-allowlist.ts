@@ -324,8 +324,8 @@ export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string)
  * Deliberately NOT `isEndpointAcked` with a different list passed in, and
  * deliberately not a parameter on it: the two questions are asked by different
  * code for different reasons, and a shared function with a flag is how they
- * drift back together. Same fail-closed rules — no ack, no list, wrong host or
- * an unparseable URL all answer false.
+ * drift back together. Same fail-closed rules — no ack, no list, a list that is
+ * not one, a wrong host or an unparseable URL all answer false.
  */
 export function isRedirectAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
   return ackCovers(ack, url, (a) => a.redirect_hosts ?? []);
@@ -343,7 +343,18 @@ function ackCovers(
   } catch {
     return false;
   }
-  return pick(ack).includes(host);
+  // `Array.isArray`, not `?? []`. A profile enters the store as
+  // `JSON.parse(…) as ApiProfile` with no schema behind it — from the apis
+  // directory, from engine.db, from a hand-edited migration — so the literal
+  // type here promises nothing about what is actually in the field. The two
+  // ways it goes wrong point in opposite directions and both are bad: a STRING
+  // makes this a SUBSTRING test, so an ack naming `shop.example.com` would
+  // answer yes for `p.example.com`; a number has no `.includes` at all and the
+  // TypeError leaves the caller with neither an allow nor a refusal. The same
+  // package already guards exactly this shape for the same reason
+  // (`api-store.ts`, `getAcceptedEgressHosts`).
+  const list: unknown = pick(ack);
+  return Array.isArray(list) && list.includes(host);
 }
 
 /**

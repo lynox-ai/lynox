@@ -66,6 +66,42 @@ describe('a target the URL parser refuses is treated as inside the network', () 
     expect(decision?.kind).toBe('no-egress-ack');
   });
 
+  it.each([
+    ['one root dot', 'https://localhost./authorize'],
+    ['two of them', 'https://localhost../authorize'],
+    ['an on-premise name with two', 'https://shop.local../authorize'],
+  ])('reads a host with %s as the host it actually is', (_label, authorizeUrl) => {
+    // The first version stripped ONE dot, which turned `localhost..` into
+    // `localhost.` — precisely the spelling the strip exists to remove. A
+    // measurement, not a guess: the URL parser hands `localhost..` back
+    // unchanged, so nothing downstream normalises it either.
+    const decision = checkRedirectTarget(
+      { host: 'provider.example.com', authorizeUrl, tokenUrl: authorizeUrl },
+      { accepted: true, hosts: [], redirect_hosts: ['localhost.', 'localhost..', 'shop.local..'], accepted_at: '2026-09-22T00:00:00.000Z' },
+    );
+
+    expect(decision?.kind).toBe('inside-network');
+  });
+
+  it.each([
+    ['a string where a list belongs', 'shop.example.com'],
+    ['a number', 7],
+    ['an object', { 0: 'shop.example.com' }],
+  ])('refuses when redirect_hosts is %s', (_label, redirectHosts) => {
+    // A stored ack is JSON, not a type: profiles are read back as
+    // `JSON.parse(…) as ApiProfile` with nothing checking the shape. The string
+    // case is the dangerous one and it fails OPEN without this — `includes` on
+    // a string is a SUBSTRING test, so an ack naming `shop.example.com` answers
+    // yes for `p.example.com`. The number case threw a TypeError out of the
+    // guard, which is neither an allow nor a refusal.
+    const decision = checkRedirectTarget(
+      { host: 'p.example.com', authorizeUrl: 'https://p.example.com/authorize', tokenUrl: 'https://p.example.com/token' },
+      { accepted: true, hosts: [], redirect_hosts: redirectHosts, accepted_at: '2026-09-22T00:00:00.000Z' } as unknown as CustomEndpointAck,
+    );
+
+    expect(decision?.kind).toBe('no-egress-ack');
+  });
+
   it('lets an ordinary public host through, so the dot is what decides', () => {
     const decision = checkRedirectTarget(
       { host: 'shops.example.com', authorizeUrl: 'https://shops.example.com/authorize', tokenUrl: 'https://shops.example.com/token' },

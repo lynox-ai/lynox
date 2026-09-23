@@ -54,7 +54,9 @@ export function checkRedirectTarget(
   // refuses that spelling too; this line is what makes the exported function
   // right for a caller that did not derive, which its argument type cannot
   // promise.
-  const rootedHost = redirectHost.replace(/\.$/, '');
+  // `/\.+$/`, not `/\.$/`: one strip turns `localhost..` into `localhost.`,
+  // which is exactly the spelling this line exists to remove.
+  const rootedHost = redirectHost.replace(/\.+$/, '');
   const bareHost = rootedHost.replace(/^\[|\]$/g, '');
   if (redirectHost === ''
     || bareHost === 'localhost'

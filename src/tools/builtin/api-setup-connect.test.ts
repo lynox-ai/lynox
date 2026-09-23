@@ -314,9 +314,9 @@ describe('the save asks about being sent somewhere, not only about data', () => 
   // relationship. It never mentions being handed to a site to type a password.
   // A consent whose text does not describe the act is not a consent for that
   // act, so the act now has a sentence and a list of its own.
-  const saveVetted = async (prompt: (q: unknown) => Promise<string>, store = new ApiStore()): Promise<{ store: ApiStore; reply: string }> => {
+  const saveVetted = async (prompt: (q: unknown) => Promise<string>, store = new ApiStore(), withPrompt = true): Promise<{ store: ApiStore; reply: string }> => {
     const agent = agentWith(store);
-    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
+    if (withPrompt) (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = prompt;
     const reply = await apiSetupTool.handler({ action: 'create', profile: {
       ...shopProfile(),
       // Vetted base_url AND a vetted authorize host: the data question has
@@ -343,6 +343,12 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     // And it says who the user signs in to, because that is the part a person
     // gets wrong: they are not signing in to this engine.
     expect(question).toContain('not to lynox');
+    // And it must not assert the OTHER act. With every host vetted the egress
+    // half has nothing to disclose, and its sentence followed by an empty list
+    // would tell a human that data goes somewhere it does not — the same defect
+    // as the one this whole round is about, pointing the other way.
+    expect(question).not.toContain('outside lynox');
+    expect(question).not.toContain('managed access_token');
   });
 
   it('stamps the two acceptances on separate lists', async () => {
@@ -353,6 +359,33 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     // Nothing non-vetted here, so the data list stays empty — one act accepted,
     // not two. A single list would have recorded a consent nobody gave.
     expect(ack?.hosts).toEqual([]);
+  });
+
+  it('stores the profile without the acceptance when nobody can be asked', async () => {
+    // The half that has nothing to leak at save time. Sharing one answer with
+    // the egress half made a background run unable to create ANY preset OAuth
+    // profile — a refusal nobody asked for. The profile is stored; what it does
+    // not get is an acceptance nobody gave.
+    const store = new ApiStore();
+    const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
+
+    expect(reply).toContain('Created');
+    expect(reply).toContain('WITHOUT the acceptance');
+    expect(store.get('shop-api')?.custom_endpoint_ack).toBeUndefined();
+  });
+
+  it('still refuses the SAVE when a credential would leave and nobody can be asked', async () => {
+    // The other half keeps failing closed at save time, because a stored
+    // profile with a non-vetted host is one a later request attaches a
+    // credential to.
+    const agent = agentWith(new ApiStore());
+    const reply = await apiSetupTool.handler({ action: 'create', profile: {
+      ...shopProfile(), custom_endpoint_ack: undefined,
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent) as string;
+
+    expect(reply).toContain('Blocked');
+    expect(reply).toContain('non-vetted sub-processor');
   });
 
   it('does not save the profile when the user declines being sent there', async () => {
@@ -547,6 +580,23 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
+  it('A2b · says a broken provider is the engine\'s fault, and does not crash saying it', async () => {
+    // This arm is the only thing between a preset written wrongly and an
+    // uncaught TypeError: the refusal below it reads `endpoints.param.describe`,
+    // and a preset defect carries no `param`. Deleting the arm made `connect`
+    // throw rather than answer — and the whole suite stayed green, because
+    // nothing drove `connect` with a broken preset.
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: 'broken-path', preset_params: {} } } });
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toContain('defined wrongly in this engine');
+    expect(result).not.toContain('preset_params.');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
   it('A9b · will not read a data-egress acceptance as agreement to be sent somewhere', async () => {
     // A real acceptance, covering exactly this host, given by a human — for the
     // other act. The engine may send data there; nobody said the user agreed to
@@ -616,6 +666,18 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     store.register(shopProfile());
 
     expect(await connect(agentWith(store))).toContain('http://nas.local:3000/api/oauth/connect/shop-api');
+  });
+
+  it('reads an on-premise name with a root dot as the same address', async () => {
+    // The strip on the ORIGIN host had no test: removing it moved
+    // `http://nas.local.` from accepted to refused and nothing went red. Numeric
+    // forms never needed it — the parser normalises `127.0.0.1.` away — so the
+    // line only ever mattered for NAMES.
+    process.env['ORIGIN'] = 'http://nas.local.:3000';
+    const store = new ApiStore();
+    store.register(shopProfile());
+
+    expect(await connect(agentWith(store))).toContain('/api/oauth/connect/shop-api');
   });
 
   it('accepts plain http for an address inside the operator network', async () => {

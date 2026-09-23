@@ -20,7 +20,7 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { derivePresetEndpoints, presetIds } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -208,7 +208,7 @@ function validateProfile(profile: ApiProfile): string | null {
         // nothing. The test that hands this field a vault reference stays, so
         // that loosening the grammar turns red rather than quietly reopening
         // the hole.
-        if (!/^[a-z][a-z0-9-]{0,63}$/.test(o.preset_id)) {
+        if (!PRESET_ID_PATTERN.test(o.preset_id)) {
           return 'Invalid auth.oauth.preset_id: must be a lowercase provider id — letters, digits and hyphens, starting with a letter. A vault reference is not one. Use api_setup connect to see which providers this engine knows.';
         }
       }
@@ -1357,6 +1357,9 @@ Next steps before calling create:
       // naming it unsaveable, including the update that would remove the field.
       let presetNote: string | undefined;
       const redirectUrls: string[] = [];
+      // Set only where a human actually answered. An acceptance nobody gave is
+      // the one thing this record must never contain.
+      let redirectAccepted = false;
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id) {
         const presetId = profile.auth.oauth.preset_id;
         const derived = derivePresetEndpoints(presetId, profile.auth.oauth.preset_params);
@@ -1436,14 +1439,27 @@ Next steps before calling create:
         ].filter((part): part is string => part !== undefined && part !== '');
         const disclosure = disclosureParts.join('\n\n');
         if (!agent.promptUser) {
-          return `Blocked: profile "${profile.id}" needs an explicit human acceptance before it can be saved, and no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
-        }
-        const answer = await agent.promptUser(
-          pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
-          ['Allow', 'Deny', '\x00'],
-        );
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: profile "${profile.id}" not saved — user declined.`;
+          // Two halves, two answers, because they fail in opposite directions.
+          // The egress half has to refuse the SAVE: a stored profile with a
+          // non-vetted host is one a later request attaches a credential to, so
+          // saving it without an acceptance is the leak. The redirect half has
+          // nothing to leak at save time — it only decides whether a link may be
+          // handed out later — so the profile is stored WITHOUT the acceptance
+          // and `connect` refuses until somebody is there to be asked. Sharing
+          // one answer made a background run unable to create any preset OAuth
+          // profile at all, which is a new refusal nobody asked for.
+          if (nonVetted.length > 0) {
+            return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
+          }
+        } else {
+          const answer = await agent.promptUser(
+            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            ['Allow', 'Deny', '\x00'],
+          );
+          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+            return `Blocked: profile "${profile.id}" not saved — user declined.`;
+          }
+          redirectAccepted = redirectUrls.length > 0;
         }
       }
 
@@ -1455,8 +1471,10 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonVetted.length > 0 || redirectUrls.length > 0) {
-        // Reachable only after the human accepted above (else returned).
+      if (nonVetted.length > 0 || redirectAccepted) {
+        // Reachable only after the human accepted above (else returned, or —
+        // for the redirect half in autonomous mode — fell through with
+        // `redirectAccepted` still false, which is what keeps the record honest).
         const hostsOf = (urls: readonly string[]): string[] => Array.from(new Set(
           urls
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
@@ -1467,7 +1485,7 @@ Next steps before calling create:
         // meaning something wider; `redirect_hosts` is fed from the derived
         // authorize URL alone, so an acceptance earned by a `base_url` cannot
         // authorize a redirect even when the two hostnames coincide.
-        const redirectHosts = hostsOf(redirectUrls);
+        const redirectHosts = redirectAccepted ? hostsOf(redirectUrls) : [];
         profile.custom_endpoint_ack = {
           accepted: true,
           hosts: hostsOf(nonVetted),
@@ -1553,6 +1571,9 @@ Next steps before calling create:
       // at all, and that is the case where the missing authorize host would
       // otherwise leave no trace anywhere.
       if (presetNote) parts.push(presetNote);
+      if (redirectUrls.length > 0 && !redirectAccepted) {
+        parts.push('Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
+      }
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
     }
@@ -1602,10 +1623,10 @@ Next steps before calling create:
       // repo's own predicate, two imports away, calls private. A feature with
       // two definitions of one phrase has the ending the redirect guard's own
       // docstring describes.
-      const originHost = base.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '');
+      const originHost = base.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
       const originIsInsideNetwork = originHost === 'localhost'
         || isPrivateIP(originHost)
-        || isPrivateLanEndpoint(`https://${base.hostname.replace(/\.$/, '')}/`);
+        || isPrivateLanEndpoint(`https://${base.hostname.replace(/\.+$/, '')}/`);
       if (base.protocol !== 'https:' && !(base.protocol === 'http:' && originIsInsideNetwork)) {
         return 'Error: ORIGIN must be an https address. The provider sends the authorization back to it, and plain http exposes that in transit; http is accepted only for an address inside the operator\'s own network.';
       }

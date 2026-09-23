@@ -231,6 +231,22 @@ export function derivePresetEndpoints(
   };
 }
 
+/**
+ * What a profile may write in `auth.oauth.preset_id`, as ONE definition.
+ *
+ * It lives here rather than beside the validator that enforces it, because two
+ * places need to agree and a second copy is not an agreement: a test asserting
+ * that every shipped id matches its own copy of this pattern stays green while
+ * the validator tightens underneath it — and then every profile naming that
+ * provider becomes unsaveable, which is the failure the test was written for.
+ *
+ * It also does a second job that is easy to lose: it refuses a vault reference
+ * without mentioning one. A reference needs `secret:` followed by an uppercase
+ * letter, and this class admits neither a colon nor an uppercase letter, so
+ * loosening it reopens that hole silently. Two tests hold the line.
+ */
+export const PRESET_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+
 /** The ids a profile may name, for a message that lists what exists. */
 export function presetIds(register: PresetRegister = OAUTH_PRESETS): string[] {
   return register.ids();
