@@ -67,7 +67,16 @@ function shopProfile(over: Partial<ApiProfile> = {}): ApiProfile {
   };
 }
 
-function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLIENT_ID: 'id', SHOP_CLIENT_SECRET: 'secret' }): never {
+// Sentinels, not 'id' and 'secret': an assertion that the reply carries no
+// secret cannot tell the VALUE `'secret'` from the word `secret` in
+// `SHOP_CLIENT_SECRET`, and `'id'` is a substring of half the English language.
+// Spelled out rather than random-looking, because the first pair read as a
+// credential to the secret scanner — a fixture that has to look fake to a guard
+// and stay distinct to an assertion is both here.
+const CLIENT_ID_VALUE = 'not-a-real-client-id-only-a-fixture';
+const CLIENT_SECRET_VALUE = 'not-a-real-client-secret-only-a-fixture';
+
+function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE }): never {
   return {
     sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
     secretStore: {
@@ -112,14 +121,17 @@ describe('the action list and the enum say the same thing', () => {
 });
 
 describe('api_setup connect — one answer per shape that can reach it', () => {
-  it('A1 · says the web interface is needed when the engine runs without one', async () => {
+  it('A1 · says the engine has no public address, which is what it can actually tell', async () => {
+    // Not "no web interface": ORIGIN is required on every tier and the installer
+    // writes it, so its presence says nothing about a running server and its
+    // absence says only that there is no address to return to.
     delete process.env['ORIGIN'];
     const store = new ApiStore();
     store.register(shopProfile());
 
     const result = await connect(agentWith(store));
 
-    expect(result).toContain('connecting needs the web interface');
+    expect(result).toContain('no public address configured');
     expect(result).not.toContain('https://tenant.lynox.example');
   });
 
@@ -165,7 +177,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     const store = new ApiStore();
     store.register(shopProfile());
 
-    const result = await connect(agentWith(store, { SHOP_CLIENT_ID: 'id' }));
+    const result = await connect(agentWith(store, { SHOP_CLIENT_ID: CLIENT_ID_VALUE }));
 
     expect(result).toContain('ask_secret');
     expect(result).toContain('SHOP_CLIENT_SECRET');
@@ -181,6 +193,35 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).toContain('already connected');
     expect(result).toContain('replaces the stored token');
     expect(result).toContain('https://tenant.lynox.example/api/oauth/connect/shop-api');
+  });
+
+  it('A6b · says nothing about a replacement for a state no callback produced', async () => {
+    // The `origin === 'callback'` half of that branch was a free mutation
+    // survivor: every fixture that carried `state: 'connected'` carried the
+    // origin too, so dropping the check changed nothing. A record can hold a
+    // state without a callback ever having run — a hand-configured profile whose
+    // exchange succeeded — and that profile has no stored authorization a second
+    // one would replace.
+    const store = new ApiStore();
+    store.register(shopProfile({ oauth_grant: { state: 'connected' } }));
+
+    const result = await connect(agentWith(store));
+
+    expect(result).not.toContain('already connected');
+    expect(result).toContain('https://tenant.lynox.example/api/oauth/connect/shop-api');
+  });
+
+  it('A6c · treats a dead refresh as a first connect, not as a replacement', async () => {
+    // The third state nothing pinned. `refresh-dead` means the stored grant no
+    // longer works, so there is nothing to warn about replacing — but saying so
+    // out loud is what makes it a decision rather than a fall-through.
+    const store = new ApiStore();
+    store.register(shopProfile({ oauth_grant: { origin: 'callback', state: 'refresh-dead' } }));
+
+    const result = await connect(agentWith(store));
+
+    expect(result).not.toContain('already connected');
+    expect(result).toContain('It opens acme.shops.example.com');
   });
 
   it('A7 · says the old access is gone when the provider ended it', async () => {
@@ -229,6 +270,7 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
 
     expect(link).toBe('https://tenant.lynox.example/api/oauth/connect/shop-api');
     expect(link).not.toContain('?');
-    expect(result).not.toContain('secret');
+    expect(result).not.toContain(CLIENT_SECRET_VALUE);
+    expect(result).not.toContain(CLIENT_ID_VALUE);
   });
 });

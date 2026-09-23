@@ -129,6 +129,20 @@ describe('the start route decides everything before it mints anything', () => {
     expect(isRefusal(decision) && decision.kind).toBe('no-egress-ack');
   });
 
+  it('answers a cross-site open the same way whether or not the profile exists', () => {
+    // The ordering that matters for what a refusal TELLS a caller. Fetch metadata
+    // is judged before the store is consulted, so someone who opens the link from
+    // another site learns that their open was wrong — not whether this instance
+    // carries that profile. Only one of the nine orderings was pinned before; this
+    // is the one where getting it backwards leaks something.
+    const known = decideConnect({ ...good, fetchSite: 'cross-site' });
+    const unknown = decideConnect({ ...good, fetchSite: 'cross-site', profile: undefined });
+
+    expect(isRefusal(known) && known.kind).toBe('cross-site');
+    expect(isRefusal(unknown) && unknown.kind).toBe('cross-site');
+    expect(isRefusal(known) && isRefusal(unknown) && known.message).toBe(isRefusal(unknown) ? unknown.message : '');
+  });
+
   it('checks the secret last, so a wrong link never reports a server fault', () => {
     // Order matters for what the user sees: a cross-site open on an engine
     // without the secret is the user's cross-site open, not a 500.

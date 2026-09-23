@@ -167,6 +167,50 @@ describe('derivation happens at use, from the register alone', () => {
       .toMatchObject({ kind: 'bad-param' });
   });
 
+  it('does not let a parameter value splice the template back into the host', () => {
+    // `String.replace` reads `$&`, `$'` and `` $` `` in a replacement STRING as
+    // instructions. A permissive preset plus such a value would have assembled a
+    // host nobody wrote; a function replacement is not scanned at all.
+    const permissive = presetRegisterOf([{
+      ...TEMPLATED,
+      params: [{ name: 'shop', pattern: /[a-z$'`&]+/, describe: 'the shop name' }],
+    }]);
+    const out = derivePresetEndpoints('example-shop', { shop: "a$'b" }, permissive);
+    expect(out).toMatchObject({ host: "a$'b.shops.example.com" });
+  });
+
+  it('reports the host of the URL it hands out, whatever the path looks like', () => {
+    // A review asked for a refusal here, on the theory that a path like
+    // `//evil.example` re-points the URL while the host string stays innocent.
+    // Measured instead of argued: ten such shapes (`//host`, `/@host`, `\\host`,
+    // `/:80@host`, a tab, a fragment) and NONE moves the host — once the origin
+    // is written as `https://<hostname>`, the parser has already committed the
+    // authority. So there is nothing to refuse; what the code does is read `host`
+    // off the assembled URL, which makes the two identical by construction rather
+    // than by argument. This test pins that, and records the measurement.
+    const odd = presetRegisterOf([{ ...CONSTANT, authorizePath: '//evil.example/authorize' }]);
+    const out = derivePresetEndpoints('example-constant', undefined, odd);
+
+    expect(out).toMatchObject({ host: 'auth.example.com' });
+    if ('authorizeUrl' in out) {
+      expect(new URL(out.authorizeUrl).hostname).toBe(out.host);
+    }
+  });
+
+  it('keeps a pattern that only means what it means under its own flags', () => {
+    // Re-anchoring used to drop the flags, so a `u`-mode source was re-compiled
+    // as a different pattern — quietly, because most sources mean the same thing
+    // either way.
+    const unicode = presetRegisterOf([{
+      ...TEMPLATED,
+      params: [{ name: 'shop', pattern: /\p{Ll}+/u, describe: 'the shop name' }],
+    }]);
+    expect(derivePresetEndpoints('example-shop', { shop: 'acme' }, unicode))
+      .toMatchObject({ host: 'acme.shops.example.com' });
+    expect(derivePresetEndpoints('example-shop', { shop: 'ACME' }, unicode))
+      .toMatchObject({ kind: 'bad-param' });
+  });
+
   it('takes nothing from the profile but the parameters the preset names', () => {
     // A profile carrying its own host, token_url or authorize_url changes
     // nothing: the derivation never looks at them.

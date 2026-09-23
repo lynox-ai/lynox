@@ -310,7 +310,7 @@ export interface OAuthGrantRecord {
   /**
    * What the last exchange left behind.
    *
-   * `revoked` — the provider rejected the stored refresh token (W0).
+   * `revoked` — the provider rejected the stored refresh token.
    * `connected` — an exchange succeeded and left a refresh token.
    * `no-refresh` — an exchange succeeded and left none, so there is nothing to
    *   refresh with; neither state is the normal case until a real provider has

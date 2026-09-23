@@ -304,12 +304,6 @@ describe('ApiStore — grant record projections', () => {
     expect(cs.get('crm-api')?.status).toBe('active');
   });
 
-  // The `typeof k === 'string'` guard inside `collectVaultKeys` cannot be killed on
-  // its own: `parseVaultKeys` filters the same way when the column is read back, so
-  // a non-string that slips into the write is invisible to every reader. The two
-  // together are one guarantee; this test pins the pair. Keep the write-side guard —
-  // the column is what a later purge trusts — and do not read the raw column here to
-  // make it fail on its own.
   it.each(['connected', 'no-refresh', 'refresh-dead'] as const)('does not project %s as revoked', (state) => {
     const cs = makeCs();
     const store = new ApiStore();
@@ -321,6 +315,12 @@ describe('ApiStore — grant record projections', () => {
     expect(cs.get('crm-api')?.status).toBe('active');
   });
 
+  // The `typeof k === 'string'` guard inside `collectVaultKeys` cannot be killed on
+  // its own: `parseVaultKeys` filters the same way when the column is read back, so
+  // a non-string that slips into the write is invisible to every reader. The two
+  // together are one guarantee; this test pins the pair. Keep the write-side guard —
+  // the column is what a later purge trusts — and do not read the raw column here to
+  // make it fail on its own.
   it('lists only string entries of vault_keys in the trail', () => {
     const cs = makeCs();
     const store = new ApiStore();

@@ -6,9 +6,11 @@
  * verifier exist costs no stored state, no cookie and no nonce, while the same
  * refusal after them leaves litter behind that a later request has to clean up
  * or trip over. Keeping the decision in one pure function is what makes that
- * order testable — a test can enumerate the refusals and assert that each one
- * leaves nothing, which a handler with the checks sprinkled through it cannot
- * offer.
+ * order testable: the function returns a refusal or a target and touches nothing
+ * else, so a test can enumerate the refusals and see that none of them carries a
+ * target to mint against — which a handler with its checks sprinkled through it
+ * cannot offer. What no test here asserts is that the FUNCTION is pure; that is
+ * read off the code, and it is why the code stays this small.
  *
  * The union below is the enumeration. A new refusal means a new member, and a
  * new member breaks the test's fixture table until it has a case — which is
@@ -17,7 +19,7 @@
  */
 import type { ApiProfile } from '../core/api-store.js';
 import { derivePresetEndpoints, presetIds } from '../core/oauth-presets.js';
-import { isVettedEgressHost, isEndpointAcked } from '../core/llm/endpoint-allowlist.js';
+import { isVettedEgressHost, isPrivateLanEndpoint, isEndpointAcked } from '../core/llm/endpoint-allowlist.js';
 
 /** Every way the start route refuses before anything is minted. */
 export type ConnectRefusalKind =
@@ -58,7 +60,8 @@ export interface ConnectTarget {
 /**
  * The refusal, or `null` when the route may proceed to mint.
  *
- * Measured, not assumed (see the plan's §11): a click on a chat link arrives as
+ * Measured in a browser rather than read off the specification: a click on a
+ * chat link arrives as
  * `same-origin`/`document` even though the link carries `rel="noreferrer"`, an
  * address-bar or messenger open arrives as `none`, a foreign page arrives as
  * `cross-site` — and stays `cross-site` through a redirect on our own origin.
@@ -124,10 +127,19 @@ export function decideConnect(facts: ConnectFacts): ConnectRefusal | ConnectTarg
     };
   }
 
-  // The same question `api_setup` asks before it sends a token anywhere: is
-  // this host one the engine vouches for, or one the operator accepted for
-  // this profile? Asked about the DERIVED host, not a stored one.
-  if (!isVettedEgressHost(endpoints.authorizeUrl) && !isEndpointAcked(profile.custom_endpoint_ack, endpoints.authorizeUrl)) {
+  // Nearly the question `api_setup` asks before it sends a token anywhere — asked
+  // about the DERIVED host, not a stored one — with one half deliberately cut.
+  //
+  // `isVettedEgressHost` vouches for `localhost`, `127.0.0.1` and `.local` names
+  // as well, because for OUTBOUND traffic a host inside the operator's own
+  // network carries no third-party exposure. Sending a USER'S BROWSER somewhere
+  // is a different question with a different answer: a consent screen on a
+  // machine in the operator's LAN is one the user cannot judge, and it is not
+  // the provider they think they are authorizing. So the private half is
+  // excluded here and the public vetting kept.
+  const mayRedirect = (isVettedEgressHost(endpoints.authorizeUrl) && !isPrivateLanEndpoint(endpoints.authorizeUrl))
+    || isEndpointAcked(profile.custom_endpoint_ack, endpoints.authorizeUrl);
+  if (!mayRedirect) {
     return {
       kind: 'no-egress-ack',
       status: 403,

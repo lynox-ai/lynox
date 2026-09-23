@@ -1093,6 +1093,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
     },
   },
   detailedGuidance:
+    'connect: pass `id`. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
     'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
@@ -1284,6 +1285,16 @@ Next steps before calling create:
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
+      // A preset profile authorizes at a host nobody typed into it — the register
+      // derives it — so without this the disclosure would name `base_url` and the
+      // connect route would then ask for an acceptance of a host the save never
+      // offered. That refusal's advice ("save it again and accept") would be
+      // unfollowable, which is the exact shape the comment below remembers from
+      // the `*.openai.azure.com` incident.
+      if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id) {
+        const derived = derivePresetEndpoints(profile.auth.oauth.preset_id, profile.auth.oauth.preset_params);
+        if (!('kind' in derived)) egressUrls.push(derived.authorizeUrl, derived.tokenUrl);
+      }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
       // http.ts asks the same function, and the two MUST agree. While this asked the
       // broader one, an `*.openai.azure.com` profile saved with no prompt and no ack,
@@ -1425,9 +1436,14 @@ Next steps before calling create:
       // The link is built from the server's own origin, never assembled by the
       // model: a link the model writes is a link the model chooses. Without an
       // HTTP server there is nothing to send the user to.
+      // ORIGIN is the engine's public address, not a sign that the server is up:
+      // the env registry makes it required on every tier and the installer writes
+      // it unconditionally. So its ABSENCE is what this can answer — that there is
+      // no address to bring the user back to. Whether the route answers is the
+      // route's own business, and W1b gives it a check of its own.
       const origin = process.env['ORIGIN'];
       if (!origin) {
-        return 'Error: connecting needs the web interface. This engine runs without an HTTP server, so there is no page for the user to return to. Start it with --http-api, or set the credentials by hand with ask_secret and use action=fetch_token.';
+        return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
       }
       // Derived here only to answer BEFORE sending the user anywhere; the route
       // derives again at use, and that derivation is the boundary.
@@ -1442,10 +1458,16 @@ Next steps before calling create:
       }
       const clientIdKey = profile.auth.oauth?.client_id_key;
       const clientSecretKey = profile.auth.oauth?.client_secret_key;
-      const missing = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
-      if (!clientIdKey || !clientSecretKey || missing.length > 0) {
-        const names = [clientIdKey ?? 'the client id key', clientSecretKey ?? 'the client secret key'];
-        return `Error: profile "${id}" cannot authorize yet — the provider's client credentials are not in the vault. Call ask_secret for ${names.join(' and ')}, then connect.`;
+      // Only what is missing, because a reply that names a filled slot sends the
+      // model to collect a value the user already gave — and the user then has to
+      // decide which half of the sentence is about them.
+      const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
+      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
+      if (unnamed.length > 0 || unfilled.length > 0) {
+        if (unnamed.length > 0) {
+          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
+        }
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
       }
       const link = `${origin.replace(/\/$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
       const grant = profile.oauth_grant;
