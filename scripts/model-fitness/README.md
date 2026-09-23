@@ -2,8 +2,7 @@
 
 Instruments that answer **"is this model fit for lynox, and for which tier?"** — not
 generic benchmark rank. Fitness is scored on the capability-critical points lynox's OWN
-tools and prompt discipline depend on. (`DEF-…` references throughout are internal tracking
-ids; they are not resolvable from this repository.)
+tools and prompt discipline depend on.
 
 This directory holds **several instruments of different strength**. Read the ladder first;
 picking the wrong rung is the one mistake that has actually cost us a wrong decision.
@@ -67,8 +66,8 @@ concern's) triggering case × a deterministic assertion, tagged with its `job`:
   `schema-fidelity` ✓, `vision` ✓, `durable-memory` recall discipline ✓,
   `injection-resistance` ✓, `terminal-under-load` ✓, `grounding-discipline` ✓.
 
-`TIER_JOBS` is the coverage index — ✓ = a case exists, ○ = an open gap
-(`DEF-model-fitness-job-coverage-gaps`). The ✓ is a hand-typed `covers` pointing at a case
+`TIER_JOBS` is the coverage index — ✓ = a case exists, ○ = a job no case covers yet.
+The ✓ is a hand-typed `covers` pointing at a case
 id, so a new case joins the index only when you set it. Two mechanical checks keep it from
 lying in either direction (`tests/model-fitness-models.test.ts`): a `covers` may not name a
 case that does not exist, and a job with a case may not still be marked ○. What stays
@@ -173,7 +172,7 @@ approve, or the tool is blocked and state never mutates. Wire both into any new 
 
 **One substrate, three consumers** — model-fitness (here), release-regression, and the
 release skills (`/staging-walk --release`, `/release-harden`). Only the first is wired today;
-the other two are `DEF-model-fitness-scenario-release-gate`.
+the other two are not wired to anything yet.
 
 **Cost/reliability:** each scenario is a full tool-loop plus sim-user turns, so it is
 on-demand, not every pass. The tier-fitness read is strict (`passes === runs`) — one flake
@@ -195,7 +194,7 @@ prohibition, not a claim that every id is dated.
 
 ## Where the run findings live — deliberately not here
 
-Measured results are recorded in the `DEF-model-compat-harness` register row, not in this
+Measured results are recorded where they are maintained, not in this
 file. A dated table in a standing README goes stale in days, and this one did: its
 `language-fidelity` finding was an artifact of that case's **own German system prompt**
 biasing every model German. The case was fixed the same week — `capabilities.ts` now uses an
@@ -234,8 +233,7 @@ whichever one is open in the editor.
 | `dk-capture-repro.mjs`, `dk-capture-crossprovider.mjs` | Durable-knowledge capture A/B against a REAL engine, swept cross-provider. | 3, single behaviour |
 | `probe-freshness.mjs` | The shared trap for all of the above: a fact already active on the target engine turns a capture probe into a dedup probe. | — |
 
-`types.ts` is **meant** to be the shared type home for this directory
-(`DEF-model-fitness-shared-lib`). It is not yet: `replay.ts` and `artefact.ts` each declare
+`types.ts` is **meant** to be the shared type home for this directory. It is not yet: `replay.ts` and `artefact.ts` each declare
 their own `Candidate`, and a provider base URL is spelled out in six files in this directory.
 Import from `types.ts` in anything new; de-duplicating what is already here is that row's
 job, not a claim this file gets to make in the present tense.
