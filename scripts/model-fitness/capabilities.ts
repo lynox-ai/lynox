@@ -126,7 +126,7 @@ const PNG = redBluePngBase64();
  *     `name` matched every wanted name — a clean 4/4 from a single blank.
  *  2. Dropping blanks left the same rule accepting any FRAGMENT, so `['a','b','c','x']`
  *     still scored 4/4.
- *  3. Substring matching in the other direction accepted PADDING (`xmarkusx`), and
+ *  3. Substring matching in the other direction accepted PADDING (`xmaxx`), and
  *     nothing stopped ONE entity from satisfying every wanted name at once — a model
  *     that answers with a sentence instead of entities scored full marks.
  *
@@ -138,15 +138,15 @@ const PNG = redBluePngBase64();
  * so a single blob and four correct entities were indistinguishable.
  *
  * So the rule is now: compare WHOLE TOKENS, key on the wanted name's last token (the
- * distinctive one — `oehrli`, not `markus`), and assign each found entity to AT MOST
+ * distinctive one — `lovelace`, not `ada`), and assign each found entity to AT MOST
  * ONE wanted name. The repair is structural, not stricter: the assignment is what kills
  * (3), because a single blob can now cover one wanted name and never four. Greedy is
  * fine at this size.
  *
- * What it still allows, stated rather than claimed away: a model that emits four
- * separate entities each containing one correct distinctive token scores 4, even if
- * every one of them also carries noise around it. That is the right call — the case
- * measures whether the entities were FOUND, not whether they were formatted well.
+ * The boundary, stated rather than claimed away: EXTRA TOKENS are tolerated — "Acme AG
+ * Zürich" still matches `acme`, because the case measures whether the entity was FOUND,
+ * not whether it was formatted well. Characters glued onto the token are NOT: `xacmex`
+ * is a different token and matches nothing. Token membership, not substring search.
  */
 /**
  * The entity names the extraction case expects, as a named constant so its one
@@ -160,7 +160,7 @@ const PNG = redBluePngBase64();
  * asserts it: the test fails on the PR that adds the short entry, rather than the
  * reasoning failing silently long after anyone remembers it.
  */
-export const EXTRACTION_GROUND_TRUTH: readonly string[] = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
+export const EXTRACTION_GROUND_TRUTH: readonly string[] = ['ada lovelace', 'acme', 'beispielware', 'zürich'];
 
 export function countMatched(want: readonly string[], found: readonly string[]): number {
   const tokensOf = (s: string): string[] =>
@@ -188,17 +188,26 @@ export const CAPABILITIES: readonly Capability[] = [
     job: 'kg-entity-extraction',
     detail: 'A business sentence with 4 known entities → a forced extract call must surface all 4 (people/company/product). Weaker models drop or mangle entities.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
-      // Fixture names are invented and the domains are RFC-reserved (`.example`,
-      // `.invalid`). An earlier version of this case bound invented budget approvals
-      // to a generated company name that may correspond to a real firm, in a public
-      // repository. Two things were corrected about that description afterwards,
-      // because it had become a factual claim about a third party that nobody
-      // checked: whether such a firm exists was never looked up, and the domain was
-      // not independent evidence — it was the name plus `.ch`, so a chance hit on
-      // the name produces the domain hit automatically. The fix stands regardless:
-      // an invented business transaction under a name that could exist reads the
-      // same to whoever holds it.
-      // Ground truth: Markus Oehrli (person), Brunnmatt AG (company/project), Talfeld
+      // Fixture identities, and the standard they are held to, because this case
+      // has been wrong about it twice.
+      //
+      // WHY IT MATTERS: an earlier version bound an invented budget approval to a
+      // generated Swiss company name in a public repository. Two things were then
+      // said about that which nobody had checked — that such a firm exists, and
+      // that its domain was independent evidence. The domain was the name plus
+      // `.ch`, derived from it, so a chance hit on the name produced the domain hit
+      // automatically; one string, reported as two findings.
+      //
+      // THE STANDARD: "sounds invented" is a feeling, not a test. Either the name is
+      // UNMISTAKABLY fictional — `Ada Lovelace`, a historical figure nobody reads as
+      // a customer — or it is verified free: `Beispielware` returns NXDOMAIN on .ch,
+      // .com and .io. `Acme` is the archetypal placeholder and is the convention
+      // already used elsewhere in these files. Addresses use RFC-reserved spaces
+      // (`.example`, `.invalid`), which never resolve at all.
+      //
+      // A fixture needs the FORM — capitalisation, a German connector, a domain
+      // suffix, token length — never the IDENTITY.
+      // Ground truth: Ada Lovelace (person), Acme AG (company/project), Beispielware
       // (product), Zürich (place). All four should appear in the extraction.
       let found: string[] = [];
       const extract = recordingTool(
@@ -209,7 +218,7 @@ export const CAPABILITIES: readonly Capability[] = [
           found = e.map((x) => String(x.name ?? '').toLowerCase());
         }, 'Extracted.');
       const agent = make({ name: 'fit-extract', systemPrompt: 'You extract named entities. Call extract_entities exactly once with every entity you find.', tools: [extract], maxIterations: 2 });
-      await agent.send('Erfasse die Entitäten: "Markus Oehrli von der Brunnmatt AG hat unser Talfeld-Setup in Zürich abgenommen."');
+      await agent.send('Erfasse die Entitäten: "Ada Lovelace von der Acme AG hat unser Beispielware-Setup in Zürich abgenommen."');
       const want = EXTRACTION_GROUND_TRUTH;
       const hit = countMatched(want, found);
       return { pass: hit === want.length, note: `found ${hit}/4 [${found.join(', ').slice(0, 50)}]` };
@@ -228,7 +237,7 @@ export const CAPABILITIES: readonly Capability[] = [
           input_schema: { type: 'object', properties: { bucket: { type: 'string', enum: ['requires_user', 'fyi', 'spam', 'newsletter'] } }, required: ['bucket'] } },
         (input) => { bucket = String((input as { bucket?: unknown }).bucket ?? ''); }, 'Classified.');
       const agent = make({ name: 'fit-classify', systemPrompt: 'You triage inbox mail. Call classify_mail with the correct bucket.', tools: [classify], maxIterations: 2 });
-      await agent.send('Klassifiziere diese Mail:\nVon: markus@brunnmatt.example\nBetreff: Dringend: Freigabe Budget bis Freitag\n\nHallo, bitte gib mir bis Freitag deine schriftliche Freigabe zum revidierten Budget von CHF 45\'500, sonst verschiebt sich der Projektstart.');
+      await agent.send('Klassifiziere diese Mail:\nVon: ada@acme.example\nBetreff: Dringend: Freigabe Budget bis Freitag\n\nHallo, bitte gib mir bis Freitag deine schriftliche Freigabe zum revidierten Budget von CHF 45\'500, sonst verschiebt sich der Projektstart.');
       return { pass: bucket === 'requires_user', note: `bucket=${bucket || 'none'}` };
     },
   },
@@ -240,7 +249,7 @@ export const CAPABILITIES: readonly Capability[] = [
     detail: 'Summarize a short transcript carrying 3 concrete facts (customer, amount, deadline/task); all 3 must survive. A lossy compaction silently degrades every long thread.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       const transcript = [
-        'User: Der neue Kunde ist Markus Oehrli von der Brunnmatt AG.',
+        'User: Der neue Kunde ist Ada Lovelace von der Acme AG.',
         'Assistant: Notiert. Worum geht es?',
         'User: Er hat das revidierte Budget von CHF 45\'500 mündlich zugesagt.',
         'Assistant: Gut. Nächste Schritte?',
@@ -257,7 +266,7 @@ export const CAPABILITIES: readonly Capability[] = [
       // Bilingual: a faithful compaction may keep German OR render it in English
       // (some models summarize in English) — the FACT survives either way, so the
       // deadline/task matcher accepts both (Freitag/Friday, Angebot/offer/proposal).
-      const facts: Array<[string, RegExp]> = [['customer', /brunnmatt|oehrli|markus/i], ['amount', /45\D{0,2}500/], ['deadline/task', /freitag|friday|angebot|offer|proposal|senden|\bsend|frist|deadline/i]];
+      const facts: Array<[string, RegExp]> = [['customer', /acme|lovelace|ada/i], ['amount', /45\D{0,2}500/], ['deadline/task', /freitag|friday|angebot|offer|proposal|senden|\bsend|frist|deadline/i]];
       const kept = facts.filter(([, re]) => re.test(l));
       return { pass: kept.length === 3, note: `kept ${kept.length}/3${kept.length < 3 ? ` missing[${facts.filter(([, re]) => !re.test(l)).map(([n]) => n).join(',')}]` : ''}` };
     },
@@ -296,7 +305,7 @@ export const CAPABILITIES: readonly Capability[] = [
       // German (fb_measure_pixel — fix the setup before trusting the finding).
       const agent = make({
         name: 'fit-lang',
-        systemPrompt: 'You are lynox, a business assistant. Always reply in the language of the user\'s latest message.\n\n[Recalled memory]\nDer Kunde Markus Oehrli bevorzugt kurze, direkte Antworten. Das Projektbudget ist eng kalkuliert.',
+        systemPrompt: 'You are lynox, a business assistant. Always reply in the language of the user\'s latest message.\n\n[Recalled memory]\nDer Kunde Ada Lovelace bevorzugt kurze, direkte Antworten. Das Projektbudget ist eng kalkuliert.',
         tools: [], maxIterations: 1,
       });
       const out = await agent.send('In one sentence, what is a good reason to automate recurring business tasks?');
@@ -380,7 +389,7 @@ export const CAPABILITIES: readonly Capability[] = [
       let args: { title?: unknown; priority?: unknown } | null = null;
       const tool = recordingTool({ name: 'task_create', description: 'Create a task.', input_schema: { type: 'object', properties: { title: { type: 'string' }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] } }, required: ['title', 'priority'] } }, (input) => { args = input as { title?: unknown; priority?: unknown }; }, 'Created.');
       const agent = make({ name: 'fit-json', tools: [tool], maxIterations: 2 });
-      await agent.send('Erstelle eine dringende Aufgabe: Angebot an Markus senden.');
+      await agent.send('Erstelle eine dringende Aufgabe: Angebot an Ada senden.');
       const a = args as { title?: unknown; priority?: unknown } | null;
       const valid = a !== null && typeof a.title === 'string' && typeof a.priority === 'string'
         && ['low', 'medium', 'high', 'urgent'].includes(a.priority);

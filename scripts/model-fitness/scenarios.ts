@@ -119,7 +119,7 @@ export const SCENARIOS: readonly Capability[] = [
     id: 'scenario:mail-reply-signoff',
     point: 'Multi-turn: draft a mail reply via a SIMULATED user (clarify → draft the right content)',
     tiers: ['balanced'],
-    detail: 'State assert: a reply to Markus is composed that names the CHF 45,500 amount AND asks for written sign-off.',
+    detail: 'State assert: a reply to Ada is composed that names the CHF 45,500 amount AND asks for written sign-off.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       const state: State = { sent: [] as Array<Record<string, unknown>> };
       const reply = stateTool({ name: 'mail_reply', description: 'Reply to a mail (to, body). Confirm content with the user first.', input_schema: { type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } }, required: ['to', 'body'] } },
@@ -136,11 +136,11 @@ export const SCENARIOS: readonly Capability[] = [
         // Room for a chatty model: content Q + tone Q + confirm-send Q + the
         // mail_reply permission round + the send itself, without starving the turn.
         maxIterations: 8,
-        promptUser: simulatedUser('You are the operator. Goal: a friendly reply to Markus that CONFIRMS the revised budget of CHF 45,500 and ASKS for written sign-off by Friday. If asked what to write, state exactly those two facts (the amount CHF 45,500 and the request for written sign-off).'),
+        promptUser: simulatedUser('You are the operator. Goal: a friendly reply to Ada that CONFIRMS the revised budget of CHF 45,500 and ASKS for written sign-off by Friday. If asked what to write, state exactly those two facts (the amount CHF 45,500 and the request for written sign-off).'),
       });
-      await agent.send('Antworte bitte auf Markus\' Mail zum Projekt-Budget (markus@brunnmatt.example).');
+      await agent.send('Antworte bitte auf Adas Mail zum Projekt-Budget (ada@acme.example).');
       const sent = state['sent'] as Array<Record<string, unknown>>;
-      const ok = sent.some((m) => /markus/i.test(str(m['to'])) && /45.?500/.test(str(m['body'])) && /freigabe|sign|unterschrift|schriftlich/i.test(lower(m['body'])));
+      const ok = sent.some((m) => /ada/i.test(str(m['to'])) && /45.?500/.test(str(m['body'])) && /freigabe|sign|unterschrift|schriftlich/i.test(lower(m['body'])));
       return { pass: ok, note: sent.length ? `drafted to=${str(sent[0]!['to']).slice(0, 20)} match=${ok}` : 'no reply drafted' };
     },
   },
@@ -231,17 +231,17 @@ export const SCENARIOS: readonly Capability[] = [
     id: 'scenario:replanning',
     point: 'DEEP ceiling — re-planning: the first tool path is BLOCKED; must adapt, not stall',
     tiers: ['deep'],
-    detail: 'A SELF-CONTAINED send (content + an unambiguous recipient given) whose only obstacle is that mail_send needs an email, not a name → the model must contact_lookup + retry. Pass = the mail reaches markus@brunnmatt.example. (The task is fully specified on purpose: an under-specified task would reward reckless guessing and penalize a careful model that asks — that confound is removed.)',
+    detail: 'A SELF-CONTAINED send (content + an unambiguous recipient given) whose only obstacle is that mail_send needs an email, not a name → the model must contact_lookup + retry. Pass = the mail reaches ada@acme.example. (The task is fully specified on purpose: an under-specified task would reward reckless guessing and penalize a careful model that asks — that confound is removed.)',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       const state: State = { sent: [] as Array<Record<string, unknown>> };
       const mail = stateTool({ name: 'mail_send', description: 'Send a mail (to = a valid email address, body).', input_schema: { type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } }, required: ['to', 'body'] } },
         (input, s) => { const to = str((input as { to?: string }).to); if (!/@/.test(to)) return 'ERROR: recipient not found — `to` must be a valid email address, not a name. Look up the contact to get their email, then retry.'; (s['sent'] as Array<Record<string, unknown>>).push(input as Record<string, unknown>); return 'Sent.'; });
       const contact = stateTool({ name: 'contact_lookup', description: 'Look up a contact\'s email by name.', input_schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
-        (input) => { const n = str((input as { name?: string }).name); return /markus|oehrli/i.test(n) ? JSON.stringify({ name: n, email: 'markus@brunnmatt.example' }) : 'no match'; });
+        (input) => { const n = str((input as { name?: string }).name); return /ada|lovelace/i.test(n) ? JSON.stringify({ name: n, email: 'ada@acme.example' }) : 'no match'; });
       const agent = make({ name: 'sc-replan', systemPrompt: 'You are lynox. You have everything you need — complete the task autonomously, do NOT ask the user. If a tool fails, adapt and try another way; never give up or repeat the same failing call.', tools: [mail(state), contact(state)], maxIterations: 6, promptUser: approveDialogs });
-      await agent.send('Sende diese fertige Q3-Zusammenfassung per E-Mail an den Kontakt Markus Oehrli: "Umsatz Q3: CHF 36\'000, Zielerreichung 92%, keine offenen Risiken."');
+      await agent.send('Sende diese fertige Q3-Zusammenfassung per E-Mail an den Kontakt Ada Lovelace: "Umsatz Q3: CHF 36\'000, Zielerreichung 92%, keine offenen Risiken."');
       const sent = state['sent'] as Array<Record<string, unknown>>;
-      const pass = sent.some((m) => /markus@brunnmatt\.example/i.test(str(m['to'])));
+      const pass = sent.some((m) => /ada@acme\.example/i.test(str(m['to'])));
       return { pass, note: sent.length ? `sent to=${str(sent[0]!['to'])}` : 'never sent (stalled/asked instead of looking up)' };
     },
   },
