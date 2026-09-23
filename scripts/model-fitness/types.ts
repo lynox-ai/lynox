@@ -23,7 +23,10 @@ export type Tier = 'fast' | 'balanced' | 'deep';
 
 /** A candidate model to score, with the PROVENANCE for why it's a candidate
  *  (the free pre-filter). `provider: 'openai'` = an OpenAI-compatible endpoint
- *  (Mistral). Always a dated snapshot — never a `-latest` tag (rate limits). */
+ *  (Mistral). Never a `-latest` tag — it resolves to whatever the provider ships
+ *  today and carries the shallow rate limits. Prefer a dated snapshot where the
+ *  provider offers one; several ids in the roster have no dated form to pin, so
+ *  the rule is the prohibition, not a claim that every id is dated. */
 export interface Candidate {
   readonly id: string;
   readonly label: string;

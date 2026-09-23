@@ -21,10 +21,11 @@ matters — a handful of hand-picked tool schemas, a written-by-hand system prom
 ephemeral tail. Tool CHOICE is exactly what that reduced surface cannot show (`prompt-ab.ts`
 states the same blindness for the prompt axis). It has happened once already: a candidate the
 synthetic probe rated fit for the balanced slot fell **below the floor** when the same
-comparison ran on a real captured request, and the slot was changed because of it. That
-measurement is recorded in the project's own tracker, not in this repo, so take the
-structural argument as the reason and the episode only as the illustration. The screen was
-not wrong to exist — it was read as a verdict, and that is what this ladder prevents.
+comparison ran on a real captured request, and the slot moved because of it. That episode is
+recorded in this repository, not only in the argument — `src/types/models.ts`
+(`MISTRAL_MODEL_MAP`) and `src/core/tier-presets.ts` both carry it, the second explicitly as
+evidence it no longer accepts. The screen was not wrong to exist; it was read as a verdict,
+and that is what this ladder prevents.
 
 So: screen with rung 2 to spend rung 3's budget well; decide on rung 3.
 
@@ -41,9 +42,9 @@ candidates whose provider key is present are run; `--scenarios` swaps the cheap 
 the multi-step set. `FIREWORKS_API_KEY` enables the judge (below); without it the
 judge-scored cases soft-pass.
 
-**Cost:** ~(#capabilities × #candidates × repeats) SHORT calls — the default is a few cents.
-`--provider` chunks a run, because Mistral 429-backoffs and judge latency compound over a
-full fleet.
+**Cost:** the run prints its own arithmetic at startup. It counts CASE RUNS, and a case is a
+tool loop, so the API calls are a multiple of it. `--provider` chunks a run, because Mistral
+429-backoffs and judge latency compound over a full roster.
 
 ## What it measures — the TIER→JOBS spine (`capabilities.ts`)
 
@@ -83,7 +84,9 @@ compaction all run over the full thread. The harness applies a hard floor
 **`MIN_CONTEXT_WINDOW` (200k, rafael 2026-07-19)**, read first from lynox's OWN registry
 (`MODEL_CAPABILITIES[id].contextWindow`) and only otherwise from `OVERRIDES` — so for a model
 the engine does not ship yet, a hand-typed row is what clears or fails this gate. It is
-checked before any behaviour: a sub-floor model is refused regardless. Free, deterministic, and the one gate that needs no rung-3
+checked before any behaviour is *judged* — but not before it is *run*: a sub-floor candidate
+still executes every case and only then fails the gate. Only the per-job `minContext` below
+actually skips work. Free, deterministic, and the one gate that needs no rung-3
 confirmation.
 
 Context and price are **never re-declared here**. `models.ts` `OVERRIDES` is a fallback for
@@ -139,15 +142,24 @@ silently into FIT for the whole roster.
 
 ## The multi-step golden set (`scenarios.ts`)
 
-The τ-bench triad adapted to lynox, run with `--scenarios`. Each scenario is:
+The τ-bench triad adapted to lynox, run with `--scenarios`. Twelve scenarios today, and the
+triad is the design rather than a description of all twelve — counted, because the sentence
+that used to stand here claimed all three parts for every one of them:
 
-1. a realistic multi-step task (not a single call);
-2. a **simulated user** — a cheap fixed model answering the agent's `ask_user` clarifications
-   from a persona + goal, so the information the task needs lives in the *user's head*, not
-   in the prompt (the model must ASK for it);
-3. a **state-based assertion** — the scenario's tools mutate a shared `state`; the assert
-   checks the END STATE (deal advanced? task created? mail drafted with the right amount and
-   sign-off?), never the words.
+1. **a realistic multi-step task** (not a single call) — all twelve;
+2. **a simulated user** — a cheap fixed model answering the agent's `ask_user` clarifications
+   from a persona and goal, so the information the task needs lives in the *user's head* and
+   the model must ASK for it. **One** scenario wires this (`mail-reply-signoff`); the rest
+   pass a callback that only approves permission dialogs, because their task is
+   self-contained by design;
+3. **a state-based assertion** — the scenario's tools mutate a shared `state` and the assert
+   checks the END STATE (deal advanced? task created? mail drafted with the right amount?),
+   not the words. **Nine** of twelve assert on state alone. Two more assert on state *and* on
+   the answer text (`data-import-answer` wants three rows AND the right month;
+   `research-multihop` wants two fetches AND the right figure in the reply). One —
+   `balanced:conversation-quality` — has no state at all and rests entirely on the judge's
+   score. That last one is where the assertion is weakest, so it is named here rather than
+   averaged into a claim about all twelve.
 
 The set deliberately includes NEGATIVE cases — `refund-policy-gate` requires the model to
 look up a policy, **refuse** an out-of-policy refund, and leave a destructive distractor tool
@@ -176,7 +188,10 @@ cannot do baseline tool-use. `FLEET` = what lynox tier-routes today; add a `COMP
 its reason) to evaluate qualifying a new model. A deliberately weak comparator is worth its
 cost — it is what tells you the suite discriminates at all.
 
-**Dated snapshots only — never a `-latest` tag** (rate limits, `fb_mistral_stable_tag`).
+**Never a `-latest` tag** — it resolves to whatever the provider ships today and carries the
+shallow rate limits. A dated snapshot is preferred where the provider offers one;
+nine of the fifteen ids in the roster carry no date today, so the rule is the `-latest`
+prohibition, not a claim that every id is dated.
 
 ## Where the run findings live — deliberately not here
 

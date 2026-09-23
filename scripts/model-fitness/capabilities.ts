@@ -130,16 +130,38 @@ const PNG = redBluePngBase64();
  *     nothing stopped ONE entity from satisfying every wanted name at once — a model
  *     that answers with a sentence instead of entities scored full marks.
  *
+ * All three fixes before this one tightened the EVIDENCE (substring → whole token)
+ * and left the MAPPING alone, which is why each was a new version of the same error.
+ * The question that would have caught all three at once is not "is the match strict
+ * enough" but **can two different things produce the same result — is the mapping from
+ * evidence to claim injective?** One entity was allowed to satisfy four wanted names,
+ * so a single blob and four correct entities were indistinguishable.
+ *
  * So the rule is now: compare WHOLE TOKENS, key on the wanted name's last token (the
  * distinctive one — `oehrli`, not `markus`), and assign each found entity to AT MOST
- * ONE wanted name. The assignment is what kills (3): a single blob can cover one
- * wanted name, never four. Greedy is fine at this size.
+ * ONE wanted name. The repair is structural, not stricter: the assignment is what kills
+ * (3), because a single blob can now cover one wanted name and never four. Greedy is
+ * fine at this size.
  *
  * What it still allows, stated rather than claimed away: a model that emits four
  * separate entities each containing one correct distinctive token scores 4, even if
  * every one of them also carries noise around it. That is the right call — the case
  * measures whether the entities were FOUND, not whether they were formatted well.
  */
+/**
+ * The entity names the extraction case expects, as a named constant so its one
+ * load-bearing property is assertable.
+ *
+ * That property: every entry's LAST token — the one `countMatched` keys on — is
+ * longer than a single character. It is why the token filter's exact threshold is
+ * unobservable (a one-character token can never match a multi-character key), and
+ * it is a fact about this DATA, not about the code. Add a single-character entry
+ * and the equivalence quietly stops holding, so `tests/model-fitness-models.test.ts`
+ * asserts it: the test fails on the PR that adds the short entry, rather than the
+ * reasoning failing silently long after anyone remembers it.
+ */
+export const EXTRACTION_GROUND_TRUTH: readonly string[] = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
+
 export function countMatched(want: readonly string[], found: readonly string[]): number {
   const tokensOf = (s: string): string[] =>
     s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length > 0);
@@ -181,7 +203,7 @@ export const CAPABILITIES: readonly Capability[] = [
         }, 'Extracted.');
       const agent = make({ name: 'fit-extract', systemPrompt: 'You extract named entities. Call extract_entities exactly once with every entity you find.', tools: [extract], maxIterations: 2 });
       await agent.send('Erfasse die Entitäten: "Markus Oehrli von der Brunnmatt AG hat unser Talfeld-Setup in Zürich abgenommen."');
-      const want = ['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'];
+      const want = EXTRACTION_GROUND_TRUTH;
       const hit = countMatched(want, found);
       return { pass: hit === want.length, note: `found ${hit}/4 [${found.join(', ').slice(0, 50)}]` };
     },
@@ -363,7 +385,7 @@ export const CAPABILITIES: readonly Capability[] = [
     point: 'Cross-cut — durable memory: does NOT reflexively recall on a greeting (cost hygiene)',
     tiers: ['fast', 'balanced', 'deep'],
     job: 'durable-memory',
-    detail: 'Real memory prompt + a recall tool; representative greetings/acks must trigger NO recall. (Measured L2b: Haiku over-recalls ~40% on these, Mistral 0%.)',
+    detail: 'Real memory prompt + a recall tool; representative greetings/acks must trigger NO recall.',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       // Representative greetings/acks that need NO prior context. These are the
       // ones that exposed Haiku's over-recall in the L2b measurement — a fair,
@@ -444,11 +466,16 @@ export const CAPABILITIES: readonly Capability[] = [
     tiers: [],
     job: 'big-context-analysis',
     minContext: 1_000_000,
-    detail: 'A ~160k-token haystack of filler with ONE needle fact in the middle; the model must retrieve it. Tests lost-in-the-middle recall (the big-context specialist\'s real fitness), not reasoning. Only ≥1M-ctx models run it — the rest are context-skipped. On-demand (a big input costs input tokens).',
+    detail: 'A haystack of filler — about 680k characters — with ONE needle fact in the middle; the model must retrieve it. Tests lost-in-the-middle recall (the big-context specialist\'s real fitness), not reasoning. Only ≥1M-ctx models run it — the rest are context-skipped. On-demand (a big input costs input tokens).',
     run: async (make: MakeAgent): Promise<CaseResult> => {
       const needle = 'MERKSATZ: Das Notfall-Kennwort für Projekt Aurora lautet ZEBRA-4471-QX.';
       const filler = (i: number): string => `Notiz ${i}: Routineeintrag zum internen Ablauf ${i % 37}, Status geprüft, keine Auffälligkeiten, Ablage im Quartalsordner ${i % 12}, Bearbeiter Team ${i % 8}.`;
-      const N = 5000; // ~5000 lines × ~130 chars ≈ 160k tokens — a genuinely large input.
+      // 5000 filler lines, measured at ~683k characters. The token count depends on
+      // the tokenizer and this repo has none to call, so treat any figure in tokens as
+      // an estimate: at roughly 3-4 characters per token for German, that is somewhere
+      // around 170k-230k — comfortably large, and NOT the >1M this case's floor asks
+      // for. See the register row on that mismatch.
+      const N = 5000;
       const lines: string[] = [];
       for (let i = 0; i < N; i++) { if (i === Math.floor(N / 2)) lines.push(needle); lines.push(filler(i)); }
       const haystack = lines.join('\n');

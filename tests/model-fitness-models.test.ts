@@ -15,7 +15,7 @@ import { MODEL_CAPABILITIES } from '../src/types/models.js';
 import {
   ALL_CANDIDATES, collisionsIn, contextWindowOf, costOf, isEstimatedPrice, overrideCollisions,
 } from '../scripts/model-fitness/models.js';
-import { CAPABILITIES, countMatched, TIER_JOBS } from '../scripts/model-fitness/capabilities.js';
+import { CAPABILITIES, countMatched, EXTRACTION_GROUND_TRUTH, TIER_JOBS } from '../scripts/model-fitness/capabilities.js';
 import { JUDGE_MODEL } from '../scripts/model-fitness/judge.js';
 import { SCENARIOS } from '../scripts/model-fitness/scenarios.js';
 
@@ -127,6 +127,19 @@ describe('the entity-extraction assertion cannot be satisfied by nothing', () =>
     // one entity with no `name` field passed the whole case.
     expect(countMatched(['markus oehrli', 'brunnmatt', 'talfeld', 'zürich'], [''])).toBe(0);
     expect(countMatched(['markus oehrli'], ['', 'markus oehrli'])).toBe(1);
+  });
+
+  it('keeps the property the token filter\'s threshold rests on', () => {
+    // `countMatched` keys on each wanted name's LAST token. That a one-character
+    // token can never match such a key is why the filter's exact threshold is
+    // unobservable — a fact about this data, not about the code. This is the alarm
+    // for that: add a single-character entry and this fails here, on the PR that
+    // adds it, instead of the reasoning failing silently.
+    for (const w of EXTRACTION_GROUND_TRUTH) {
+      const last = w.split(' ').filter((t) => t.length > 0).at(-1);
+      expect(last, `"${w}" has no token`).toBeDefined();
+      expect(last!.length, `"${w}" keys on a single character`).toBeGreaterThan(1);
+    }
   });
 
   it('is not satisfied by fragments, padding, or one entity covering everything', () => {
