@@ -326,11 +326,36 @@ export const SCENARIOS: readonly Capability[] = [
         'reviews/beta': 'Beta — durchschnittliche Kundenbewertung 4.7 von 5 (289 Rezensionen).',
         'reviews/gamma': 'Gamma — durchschnittliche Kundenbewertung 3.9 von 5 (150 Rezensionen).',
       };
-      const search = stateTool({ name: 'web_search', description: 'Search the web; returns result titles + urls.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+      // NAMED `web_research`, and the name is load-bearing twice over.
+      //
+      // (1) The engine appends Anthropic's own server-side search tool — itself
+      // named `web_search` — to a request when all three hold: the provider is
+      // Anthropic-DIRECT, no registered tool is called `web_research`, and tools
+      // are not suppressed (the compaction path). Naming this mock `web_search`
+      // therefore sent two tools of one name, and the API refused the request
+      // outright ("tools: Tool names must be unique"). The scenario errored at
+      // iteration 0 on every Anthropic-direct candidate, and since an error
+      // disqualifies a candidate from the tier grid, it marked those models unfit
+      // for balanced AND deep for a reason unrelated to the model.
+      //
+      // (2) A merely NEUTRAL name would fix the 400 and leave the engine's REAL
+      // search tool in the list beside this mock. That cannot forge a pass — the
+      // assertion also counts fixture fetches, and only the mock increments them —
+      // but it lets the model spend its iterations on a live search and then fail
+      // the fetch count, which is a false FAIL and a real API call per run.
+      // `web_research` is the name the engine's own guard looks for, so it removes
+      // the duplicate and the live tool in one move.
+      //
+      // The cost of that choice, stated rather than discovered later: `web_research`
+      // is in `Agent.EXTERNAL_CONTENT_TOOLS`, so this turn is now marked as having
+      // ingested untrusted content. For a scenario that stands in for reading web
+      // pages that is the honest marking, but it is a behaviour change, not just a
+      // rename.
+      const search = stateTool({ name: 'web_research', description: 'Search the web; returns result titles + urls.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
         () => JSON.stringify([{ title: 'Alpha – Reviews', url: 'reviews/alpha' }, { title: 'Beta – Reviews', url: 'reviews/beta' }, { title: 'Gamma – Reviews', url: 'reviews/gamma' }]));
       const fetchTool = stateTool({ name: 'web_fetch', description: 'Fetch + read a web page by its url (from the search results).', input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
         (input, s) => { const u = str((input as { url?: string }).url); if (pages[u]) { (s['fetched'] as string[]).push(u); return pages[u]; } return 'not found — use a url from the search results.'; });
-      const agent = make({ name: 'sc-research', systemPrompt: 'You are lynox, a research assistant. Use web_search + web_fetch to answer from the ACTUAL page content; never invent ratings or figures.', tools: [search(state), fetchTool(state)], maxIterations: 8 });
+      const agent = make({ name: 'sc-research', systemPrompt: 'You are lynox, a research assistant. Use web_research + web_fetch to answer from the ACTUAL page content; never invent ratings or figures.', tools: [search(state), fetchTool(state)], maxIterations: 8 });
       const answer = await agent.send('Recherchiere: welches der drei Produkte Alpha, Beta oder Gamma hat die beste Kundenbewertung? Nenne das Produkt und die genaue Bewertung.');
       const fetched = state['fetched'] as string[];
       const pass = /beta/i.test(answer) && /4[.,]7/.test(answer) && fetched.length >= 2;
