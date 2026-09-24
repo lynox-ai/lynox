@@ -579,6 +579,41 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(result).toMatch(/requires a live chat session/);
   });
 
+  it('answers an interactive UNCONFIRMED workflow with the MODE, not the consent gate', async () => {
+    // Pins the ORDER, which the test above does not: it leaves `autonomy`
+    // undefined, so the consent gate cannot fire there and the two blocks could
+    // be swapped without it noticing. Here both conditions hold at once —
+    // autonomous caller, interactive workflow, no confirmedAt — and only the
+    // order decides which sentence comes back.
+    //
+    // It has to be the mode one. "Schedule it (the consent step confirms it)" is
+    // a route an interactive workflow does not have: `POST /api/tasks` refuses a
+    // non-autonomous workflow and the library hides its Schedule button. The
+    // consent sentence is only true for a reader who can take it, and the mode
+    // check in front of it is what guarantees that.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = 'interactive-unconfirmed';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'asks',
+      goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+      // confirmedAt deliberately absent — both gates would fire, order decides.
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toMatch(/requires a live chat session/);
+    expect(result).not.toMatch(/first-run confirmation/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
   it('returns error when pipeline already executed', async () => {
     const agent = makePipelineAgent();
     const pipelineId = seedStoredPipeline();

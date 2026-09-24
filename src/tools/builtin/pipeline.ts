@@ -741,7 +741,14 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   }
 
   // Consent gate for UNATTENDED execution — the same first-run-confirm the cron
-  // gate (worker-loop.ts:574) and the library /run route enforce. run_workflow is
+  // gate (`WorkerLoop.executePipeline`) and the library /run route enforce.
+  // LOAD-BEARING ORDER: the interactive check above runs FIRST, so this message
+  // is only ever read by an autonomous workflow — which is what makes "schedule
+  // it" a route its reader can actually take (`POST /api/tasks` refuses a
+  // non-autonomous workflow, and the library hides its Schedule button). Move
+  // this above that check and the sentence starts naming a step half its readers
+  // cannot find; the /run route in http-api.ts has no such check in front of it
+  // and branches on `mode` instead. run_workflow is
   // reachable from an AUTONOMOUS worker session (the run_agent trigger builds a
   // session with the full tool registry), so without this an autonomous caller
   // could run an UNCONFIRMED imported workflow — attacker-authored steps — with no

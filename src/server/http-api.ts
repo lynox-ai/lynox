@@ -5751,7 +5751,7 @@ export class LynoxHTTPApi {
           runParams = rawParams as Record<string, unknown>;
         }
       }
-      // Consent gate — mirror the worker-loop cron gate (worker-loop.ts:574).
+      // Consent gate — mirror the cron gate in `WorkerLoop.executePipeline`.
       // This Run path executes the workflow headless with autonomy:'autonomous'
       // (no per-action approval prompt), so it must not run a workflow whose steps
       // the user has never seen. NO workflow is confirmed at save any more — the
@@ -5765,10 +5765,22 @@ export class LynoxHTTPApi {
       const { getPipeline } = await import('../tools/builtin/pipeline.js');
       const plannedForRun = getPipeline(params['id']!, history);
       if (plannedForRun && !plannedForRun.confirmedAt) {
+        // The remedy depends on the MODE, because only an autonomous workflow can
+        // take the route the autonomous branch names: `POST /api/tasks` refuses a
+        // non-autonomous one ("is interactive and cannot be scheduled") and the
+        // library renders its Schedule button under `mode === 'autonomous'`. The
+        // two sibling gates carrying this same sentence — `executePipeline` in
+        // pipeline.ts and `WorkerLoop.executePipeline` — each sit BEHIND a mode
+        // check, so an interactive workflow never reaches them and their single
+        // sentence is true. This gate has no mode check in front of it, which is
+        // why the branch belongs here and not there. `getPipeline` labels every
+        // legacy row via `inferPipelineMode`, so `mode` is set whenever it is read.
         errorResponse(
           res,
           403,
-          'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
+          plannedForRun.mode === 'interactive'
+            ? 'This workflow uses ask_user / ask_secret, so it cannot run unattended — an unattended run has no one to answer it. Run it from a chat instead; scheduling is not offered for an interactive workflow.'
+            : 'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
         );
         return;
       }

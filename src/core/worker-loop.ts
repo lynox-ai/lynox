@@ -989,7 +989,11 @@ export class WorkerLoop {
     }
 
     // Slice B2 — first-run-confirm gate (S2, PRD §4.4): a workflow must have been
-    // confirmed by a human before it runs unattended. The B2 scheduling surface
+    // confirmed by a human before it runs unattended.
+    // LOAD-BEARING ORDER: the 'autonomous'-only check above throws first, so the
+    // message below is only ever read for an autonomous workflow — the one kind
+    // that can actually be scheduled. Keep it in that order, or "schedule it from
+    // the workflow library" becomes advice its reader cannot follow. The B2 scheduling surface
     // stamps `confirmedAt` as part of the consent action, so any workflow
     // scheduled through the product has it; enforce here too so a hand-edited /
     // synced task can't put an un-consented workflow on a cron. (No back-compat
