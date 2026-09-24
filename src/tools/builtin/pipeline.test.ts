@@ -537,6 +537,23 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     expect(result).not.toContain('first-run confirmation');
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
+
+  it('RUNS an interactive workflow from a chat — the case the prompter conjunct exists for', async () => {
+    // The guard above the consent gate reads `mode === 'interactive' &&
+    // !parentPromptUser`. The second conjunct is what keeps an interactive
+    // workflow runnable where somebody can answer it, and NOTHING covered that:
+    // every fixture in this file lacked `promptUser`, so dropping the conjunct
+    // left the whole suite green while breaking the one path it protects.
+    const { agent } = makeBillableAgent();
+    (agent as unknown as Record<string, unknown>)['promptUser'] = vi.fn();
+    const pipelineId = seedStoredPipeline([{ id: 'q', task: 'ask_user which option' }]);
+    const stored = getPipeline(pipelineId);
+    if (stored) stored.mode = 'interactive';
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).not.toMatch(/requires a live chat session/);
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('run_workflow — stored workflow (workflow_id)', () => {
@@ -647,7 +664,12 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
       mode: 'interactive',
     });
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
-    expect(result).toMatch(/ask_user \/ ask_secret/);
+    // Assert on the phrase that is UNIQUE to this message. The first version
+    // matched /ask_user \/ ask_secret/, which the interactive guard's own message
+    // also contains — so it passed whether this gate answered or that one did,
+    // and a mutant dropping the `&& !parentPromptUser` conjunct survived it.
+    expect(result).toMatch(/no unattended run to confirm/);
+    expect(result).not.toMatch(/requires a live chat session/);
     expect(result).not.toMatch(/Schedule it/);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
