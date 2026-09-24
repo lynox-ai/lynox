@@ -8,6 +8,7 @@ import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
@@ -5630,6 +5631,25 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('the note\'s claim about redaction is coupled to the code, not asserted once', () => {
+        // "the only two that define redactInputForAudit" is a claim about the
+        // whole tree. It is true today and nothing held it there: a third
+        // definer — a plugin tool's field is deliberately preserved by
+        // session-plugin-tool-gate — would make the note false with every test
+        // green. This is the same coupling the 2000 gets from its constant.
+        const root = fileURLToPath(new URL('..', import.meta.url));
+        const hits = execSync(
+          `grep -rn --include=*.ts "redactInputForAudit:" ${root} | grep -v "\\.test\\.ts"`,
+          { encoding: 'utf-8' },
+        ).trim().split('\n');
+        // Positive control on the same search: it finds things, so a count of
+        // two is a count and not an empty result wearing the right number.
+        expect(hits.length, `found: ${hits.join(' | ')}`).toBeGreaterThan(0);
+        const definers = hits.filter((l) => /\/(mail-send|mail-reply)\.ts:/.test(l));
+        expect(definers).toHaveLength(2);
+        expect(hits).toHaveLength(2);
+      });
+
       it('carries the note VERBATIM', async () => {
         // Pinned whole rather than by substring. A review rewrote this note into
         // its own negation — "nothing is merged", "NOT under runs[].tool_calls
@@ -5641,8 +5661,9 @@ describe('LynoxHTTPApi', () => {
           const res = await jsonFetch('/api/threads/t1/debug-export');
           const body = await res.json() as { messages_projection: { note: string } };
           expect(body.messages_projection.note).toBe(
-            'messages[] is a rendered projection, so it CAN be shorter than stored_rows — on a thread with no tool '
-            + 'calls the two are equal. It is shorter for SEVERAL reasons, not one: a tool-result carrier is merged '
+            'messages[] is a rendered projection, so it CAN be shorter than stored_rows rather than always being '
+            + 'shorter — read the two numbers instead of assuming a gap. It is shorter for SEVERAL reasons, not '
+            + 'one: a tool-result carrier is merged '
             + 'into the tool call it answers; hint-only and tool-guidance-only user rows are dropped, as are '
             + 'thinking-only assistant rows and assistant rows whose blocks are ALL text and all empty (a turn '
             + 'carrying an image or a server-tool block is kept). Separately, a tool_result whose tool_use was never '
@@ -5650,7 +5671,9 @@ describe('LynoxHTTPApi', () => {
             + 'missing count. A tool call\'s OUTPUT lives at messages[].toolCalls[].result — NOT in '
             + 'runs[].tool_calls, whose output column is an error ledger (empty on success) and whose input is '
             + 'secret-masked and capped at 2000 characters (redacted only for the mail tools, which are the only '
-            + 'two that define redactInputForAudit). If truncated_at_limit is true the read dropped the NEWEST '
+            + 'two that define redactInputForAudit). Where the two counts above disagree with thread.message_count, '
+            + 'stored_rows is the authoritative one: it is a COUNT(*), while message_count is a denormalised column '
+            + 'written by callers. If truncated_at_limit is true the read dropped the NEWEST '
             + 'rows (ORDER BY seq ASC), while runs[] is not capped.',
           );
           // The 2000 above is written out, while the source interpolates
