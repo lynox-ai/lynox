@@ -5970,6 +5970,41 @@ describe('LynoxHTTPApi', () => {
       expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
     });
 
+    it('POST /api/workflows/:id/run tells an INTERACTIVE workflow the one route it has', async () => {
+      // The remedy is mode-dependent, and only one branch of it was ever written.
+      // An interactive workflow cannot be scheduled — `POST /api/tasks` refuses a
+      // non-autonomous one and the library renders Schedule under
+      // `mode === 'autonomous'` — so "schedule it" named a step its reader cannot
+      // find. The two sibling gates carrying the same sentence get away with one
+      // branch because a mode check runs before them; this route has none.
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-int', name: 'Interactive', template: true, mode: 'interactive',
+        steps: [{ id: 's1', task: 'ask the user' }],
+      });
+      const res = await jsonFetch('/api/workflows/wf-int/run', { method: 'POST' });
+      expect(res.status).toBe(403);
+      const body = JSON.parse(await res.text()) as { error: string };
+      expect(body.error).toContain('chat');
+      expect(body.error).not.toContain('schedule it');
+      expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('POST /api/workflows/:id/run still names scheduling for an AUTONOMOUS one', async () => {
+      // The positive half of the pair above, on the same machinery. Without it a
+      // message that dropped "schedule it" for EVERY workflow would satisfy the
+      // interactive test while quietly removing the only route an autonomous
+      // workflow has — a negative assertion needs a "it does, though" beside it.
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-auto', name: 'Autonomous', template: true, mode: 'autonomous',
+        steps: [{ id: 's1', task: 'fetch' }],
+      });
+      const res = await jsonFetch('/api/workflows/wf-auto/run', { method: 'POST' });
+      expect(res.status).toBe(403);
+      const body = JSON.parse(await res.text()) as { error: string };
+      expect(body.error).toContain('schedule it');
+      expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+    });
+
     it('PATCH /api/workflows/:id renames a saved workflow and evicts the cache', async () => {
       mockHistoryRenamePlannedPipeline.mockReturnValue(true);
       const res = await jsonFetch('/api/workflows/wf-1', {

@@ -741,7 +741,19 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   }
 
   // Consent gate for UNATTENDED execution — the same first-run-confirm the cron
-  // gate (worker-loop.ts:574) and the library /run route enforce. run_workflow is
+  // gate (`WorkerLoop.executePipeline`) and the library /run route enforce.
+  //
+  // The check above does NOT keep interactive workflows out of this one, and an
+  // earlier version of this comment claimed it did. It is a conjunction —
+  // `mode === 'interactive' && !parentPromptUser` — so it only fires when there
+  // is no prompter. An autonomous WORKER session has one: `WorkerLoop` assigns
+  // `session.promptUser` (routed through the prompt store, so a human can answer
+  // later from the UI), the Session setter forwards it to `agent.promptUser`, and
+  // `run_workflow` builds `parentPrompt` from exactly that. So a `run_agent`
+  // trigger calling `run_workflow` on an interactive workflow lands HERE, with
+  // `autonomy === 'autonomous'`. That is why the message branches on mode rather
+  // than relying on an ordering: a guard of the form `a && b` never establishes
+  // `a` for whatever comes after it. run_workflow is
   // reachable from an AUTONOMOUS worker session (the run_agent trigger builds a
   // session with the full tool registry), so without this an autonomous caller
   // could run an UNCONFIRMED imported workflow — attacker-authored steps — with no
@@ -750,7 +762,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // stays open, matching how run_workflow was always the safe way to trial an
   // imported workflow.
   if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
-    return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
+    return planned.mode === 'interactive'
+      ? `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`
+      : `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;

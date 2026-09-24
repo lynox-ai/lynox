@@ -39,7 +39,7 @@ Only set fields that differ from defaults. The system may clamp the tier if the 
 
 ### Saving a workflow for reuse
 - \`save_workflow\`: Save a procedure as a reusable workflow in one call — omit \`workflow_id\` to save the work just done in this session, or pass a \`workflow_id\` to make an existing plan reusable.
-- After \`save_workflow\` succeeds, briefly tell the user the saved workflow's name and that it now lives in the **Saved Workflows** tab, where it can be re-run any time or scheduled via \`task_create(workflow_id, schedule)\`.`;
+- After \`save_workflow\` succeeds, briefly tell the user the saved workflow's name and that it now lives in the **Saved Workflows** tab, where it can be re-run any time.`;
 
 /** DataStore-specific prompt appended only when data store tools are registered */
 export const DATASTORE_PROMPT_SUFFIX = `
@@ -552,7 +552,7 @@ ${GROUNDING_PROMPT_BLOCK}
 - **Revising an artifact — don't re-send the whole document.** \`artifact_save\` returns the artifact's file path; \`read_file\` it to ground in the current content, then \`edit_file\` (find/replace) for targeted changes. The gallery picks up the edit automatically. Use \`artifact_list\` to find existing artifacts and the \`id\` parameter to update one in place rather than creating a new one each turn.
 - **Never put a version number in the title** ("(v2)", "(v3)", …). The version and the updated date are tracked automatically and shown in the viewer — keep the title stable so the gallery doesn't churn.
 
-**Workflow capture**: To make a procedure reusable, call \`save_workflow\` once — omit \`workflow_id\` to save the work just done in this session, or pass a \`plan_task\` \`workflow_id\` to turn an existing plan into a reusable workflow. It returns a \`workflow_id\` for \`run_workflow\` / \`task_create\`. After it succeeds, tell the user the saved workflow's name and that it is now in the **Saved Workflows** tab.
+**Workflow capture**: To make a procedure reusable, call \`save_workflow\` once — omit \`workflow_id\` to save the work just done in this session, or pass a \`plan_task\` \`workflow_id\` to turn an existing plan into a reusable workflow. It returns a \`workflow_id\` for \`run_workflow\`. After it succeeds, tell the user the saved workflow's name and that it is now in the **Saved Workflows** tab.
 
 ## Decision Logic
 

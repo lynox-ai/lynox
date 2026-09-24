@@ -305,10 +305,12 @@ function measureStaticPrefixTokens(): number {
 // tool description and no prompt, so the model learned it by HITTING it. A live
 // bulk on 2026-08-18 asked for 130 records, got exactly 100, and stopped at id
 // 101 — correctly reported, but it had no way to have batched differently,
-// because it could not know the ceiling existed. The escape it now names is
-// real: a saved workflow fired per batch gets fresh counters (proved by two
-// headless runs of 60 requests each, 120 total, none blocked), and `params` is
-// what makes one workflow serve many batches.
+// because it could not know the ceiling existed.
+//   The escape it named alongside — a saved workflow fired per batch, with
+// `params` re-targeting each firing — was removed on 2026-09-22 and the entry
+// below records what that cost. The CAP half of this bump stands; the escape
+// half stopped being true when a saved workflow stopped confirming itself, and
+// a route that ends in a refusal is worse to name than to leave unnamed.
 //
 // The alternative was leaving the model to discover a hard wall mid-job on a
 // customer's 2000-record import. 125 tokens a turn is the cheaper failure.
@@ -398,7 +400,26 @@ function measureStaticPrefixTokens(): number {
 // spelled out "to authorize a provider" and "show it to them". Naming the
 // provider is redundant inside a tool that is entirely about one API profile,
 // and the second clause repeated the verb. Same rule, eight tokens less.
-const STATIC_PREFIX_BUDGET = 23948;
+// 2026-09-24: −109 (23948 → 23839, measured) — FIVE strings deleted, not rewritten, all of
+// them advertising a route that now ends at a consent step the model cannot grant
+// (`save_workflow` no longer stamps the workflow as confirmed). Two in this prompt
+// ("scheduled via `task_create(workflow_id, schedule)`", "a `workflow_id` for
+// `run_workflow` / `task_create`") and three in tool definitions, which count toward this
+// measurement too: `task_create`'s `params` description (firing one workflow per batch),
+// `http_request`'s batch advice, and `save_workflow`'s "you can pass to run_workflow or
+// task_create". Naming a DIFFERENT route would be a decision about who may consent, so
+// they are gone rather than replaced. 380 characters in total.
+// The same deletion measured −108 against the pre-`connect` prefix (23913) and −109
+// against this one, and the reason is arithmetic rather than linguistic: this measure is
+// `Math.ceil(length / 3.5)` (`estimateTokens`), and 380 / 3.5 = 108.57, so which side of
+// the ceiling the two endpoints fall on depends on the base length. THE DIFFERENCE OF TWO
+// ROUNDED NUMBERS IS NOT THE ROUNDING OF THEIR DIFFERENCE. Rebasing this entry past
+// another one is therefore a RE-MEASUREMENT, never an arithmetic — 23948 − 108 would have
+// written 23840 here, and nothing in the guard can detect a budget that is one too high.
+// (An earlier version of this note blamed a tokenizer merging across text boundaries.
+// There is no tokenizer here; that was a mechanism fitted to the gap, and a refuter
+// caught it by reading `estimateTokens`. The conclusion survived, the reason did not.)
+const STATIC_PREFIX_BUDGET = 23839;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

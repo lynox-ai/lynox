@@ -937,10 +937,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only
     // discovers by hitting it. Before this line it learned about the ceiling at
-    // request 101 — mid-bulk, with no way to have batched differently. The escape
-    // is named in the same breath, because "you will be stopped" without "here is
-    // how to not be" only teaches the model to give up.
-    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing). For more, save a workflow and fire it per batch via task_create(workflow_id, params) — each firing gets a fresh budget.`,
+    // request 101 — mid-bulk, with no way to have batched differently.
+    //   The escape used to be named in the same breath — save a workflow and fire
+    // it per batch — and that sentence was REMOVED, not replaced: a workflow the
+    // model saves is no longer allowed to run unattended on its own say-so, so the
+    // route it described now stops at a consent step this text cannot grant. A
+    // wrong instruction is worse than none; naming a new one is a decision about
+    // who may give that consent, and that decision is not this file's to make.
+    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing).`,
     input_schema: {
       type: 'object' as const,
       properties: {

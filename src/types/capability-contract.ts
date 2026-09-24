@@ -57,9 +57,11 @@ export interface ParamConstraint {
  * which the grant alone cannot express.
  *
  *  - `authorship`: derived automatically at save time from a workflow the user
- *    built in their own session. The engine treats authorship as authorisation
- *    (`process.ts` stamps `confirmedAt` on the same grounds). Defensible for an
- *    instance someone builds for themselves; NOT the same as a review.
+ *    built in their own session. Note what the engine no longer does: saving used
+ *    to stamp `confirmedAt` on these same grounds, and that stopped, because the
+ *    tool doing the saving is called by the model. Authorship-as-authorisation is
+ *    defensible for an instance someone builds for themselves; it is NOT a review,
+ *    and it is no longer how a workflow becomes runnable unattended.
  *  - `reviewed`: a human was shown what the grant permits and accepted it. No
  *    product path produces this yet; the field exists so the difference is
  *    visible rather than implied, and so the day it appears nothing has to be

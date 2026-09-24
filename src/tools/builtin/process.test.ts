@@ -113,17 +113,24 @@ describe('save_workflow — session source', () => {
     expect(mockHistory.insertPlannedPipeline).toHaveBeenCalledTimes(1);
   });
 
-  it('first-run-confirms the saved workflow (self-built = authorised)', async () => {
-    // The provenance seam behind the library Run gate + the worker-loop cron gate:
-    // the user authored these steps in their own session, so the saved workflow is
-    // confirmed for unattended execution at save time. An IMPORTED workflow lands
-    // UNCONFIRMED on purpose (its steps are attacker-authorable) — asserted in
-    // import-workflow.test.ts. Without this stamp the Run gate would refuse a
-    // user's own saved workflow.
+  it('does NOT confirm the saved workflow — a tool call is not a person', async () => {
+    // This assertion used to read the other way, with the reason "self-built =
+    // authorised": the steps came out of the user's own session, so the save was
+    // treated as their consent. The caller is the MODEL — `save_workflow` is a
+    // tool — so that stamp was a permission the model wrote for itself, and
+    // `confirmedAt` is what the worker-loop cron gate and the library Run gate
+    // read before running a workflow with nobody watching.
+    //
+    // Consent now comes from where a person acts: scheduling the workflow stamps
+    // it. The cost is stated rather than hidden — a freshly saved workflow is
+    // refused by the library Run gate until it has been scheduled once, and the
+    // refusal names both ways out (schedule it, or run it from a chat where each
+    // action asks). That refusal is the true state: nobody has agreed yet.
     const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
     await saveWorkflowTool.handler({ name: 'Test' }, agent);
     const pipeline = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
-    expect(pipeline?.confirmedAt).toBeTruthy();
+    expect(pipeline).toBeDefined();
+    expect(pipeline?.confirmedAt).toBeUndefined();
   });
 
   it('resolves input_from by step order even when order != array index', async () => {
@@ -279,6 +286,54 @@ describe('save_workflow — workflow_id source', () => {
     _resetPipelineStore();
     mockHistory = makeMockRunHistory();
     captureProcessMock.mockReset();
+  });
+
+  it('does NOT confirm the promoted copy either — the same tool, the same caller', async () => {
+    // The session path has the same assertion one block up, and for a while only
+    // that one existed: putting the save-time stamp back HERE passed the whole
+    // suite. Both writers are the same function reached two ways, so both need
+    // the same guard — a model promoting a plan it wrote is not a person agreeing
+    // to let it run unattended.
+    storePipeline('plan-789', makePlan());
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Saved Ad Report', workflow_id: 'plan-789' }, agent);
+
+    const { workflow_id: savedId } = JSON.parse(result) as { workflow_id: string };
+    const stored = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+    expect(stored).toBeDefined();
+    expect(stored?.confirmedAt).toBeUndefined();
+    // …and the copy in the live store agrees, so this is not an artefact of the
+    // mock: the object the rest of the engine reads is unconfirmed too. The
+    // existence check is not decoration — `getPipeline` of a wrong id also yields
+    // `undefined`, so without it "never stored at all" reads as "stored
+    // unconfirmed" and the assertion passes for the wrong reason.
+    expect(getPipeline(savedId)).toBeDefined();
+    expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
+  });
+
+  it('drops a stamp the SOURCE carries, instead of spreading it into the copy', async () => {
+    // The two tests above both start from a plan that has no `confirmedAt`, so
+    // they pass whether the copy clears the field or merely fails to add one.
+    // This is the difference: the source carries a stamp, and the copy must not.
+    //
+    // No product path puts a stamp on a plan_task row today, which is exactly why
+    // this needs saying — without the explicit clear the copy's unconfirmed-ness
+    // is a property of what the CALLER happens to contain, and a later change to
+    // the source revokes it silently, at the one seam that decides whether a
+    // workflow may run with nobody watching.
+    storePipeline('plan-stamped', { ...makePlan(), id: 'plan-stamped', confirmedAt: '2026-01-01T00:00:00.000Z' });
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Promoted From Stamped', workflow_id: 'plan-stamped' }, agent);
+
+    const { workflow_id: savedId } = JSON.parse(result) as { workflow_id: string };
+    const stored = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+    expect(stored).toBeDefined();
+    expect(stored?.confirmedAt).toBeUndefined();
+    expect(getPipeline(savedId)).toBeDefined();
+    expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
+    // Control: the source still has its stamp, so the assertions above are about
+    // the copy and not about a fixture that never carried one.
+    expect(getPipeline('plan-stamped')?.confirmedAt).toBe('2026-01-01T00:00:00.000Z');
   });
 
   it('promotes a non-template plan into a reusable workflow copy', async () => {

@@ -1323,6 +1323,13 @@ describe('WorkerLoop', () => {
   // sync from another instance) must be rejected at the boundary so it
   // can't hang waiting for a non-existent live session.
   it('executePipeline refuses an interactive PlannedPipeline', async () => {
+    // Doubles as the ORDER guard, and that is load-bearing: the fixture below
+    // carries NO `confirmedAt`, so both guards in executePipeline are armed and
+    // only their order decides the outcome. The mode guard throws; the consent
+    // guard disables the task and returns. Measured by neutering the mode guard
+    // — this assertion then reads "promise resolved undefined instead of
+    // rejecting". Adding `confirmedAt` to the fixture would silently disarm the
+    // consent guard and cost the order half of this test without turning it red.
     vi.useRealTimers();
     const task = makeTask({
       id: 'pipe-interactive',

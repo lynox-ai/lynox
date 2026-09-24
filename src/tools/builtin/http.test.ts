@@ -3414,12 +3414,21 @@ describe('http_request tool description — the session cap is stated, not disco
     expect(description).toMatch(/shared with sub-agents/i);
   });
 
-  it('names the escape in the same breath as the limit', () => {
-    // A stated limit without a stated way around it teaches the model to give up
-    // rather than to batch. The escape is a saved workflow fired per batch —
-    // each firing gets fresh counters (runner.ts `parentSessionCounters ?? {…}`).
-    expect(description).toMatch(/task_create/);
-    expect(description).toMatch(/fresh budget/i);
+  it('names no way around the limit that the engine would refuse', () => {
+    // This assertion used to be the opposite, and its reason was good: a stated
+    // limit with no stated way around it teaches the model to give up rather than
+    // to batch. The way it named — save a workflow, fire it per batch through
+    // `task_create` — stopped being true when a saved workflow stopped confirming
+    // itself: that route now meets a consent step, and a tool description cannot
+    // give consent. So the sentence was removed rather than rewritten, and this
+    // pins the removal: an instruction that ends in a refusal is worse than none,
+    // and naming a different one is a decision about who may consent.
+    // Not a two-word blocklist over the tool's own prose: any wording that sends the
+    // model to a saved workflow lands in the same refusal, so the whole subject is
+    // out until someone decides who may consent. The cap itself is asserted by its
+    // own test two blocks up, and `shared with sub-agents` by the one between.
+    expect(description).not.toMatch(/workflow/i);
+    expect(description).not.toMatch(/task_create|fresh budget/i);
   });
 });
 

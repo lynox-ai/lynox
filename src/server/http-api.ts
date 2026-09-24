@@ -5751,22 +5751,43 @@ export class LynoxHTTPApi {
           runParams = rawParams as Record<string, unknown>;
         }
       }
-      // Consent gate — mirror the worker-loop cron gate (worker-loop.ts:574).
+      // Consent gate — mirror the cron gate in `WorkerLoop.executePipeline`.
       // This Run path executes the workflow headless with autonomy:'autonomous'
       // (no per-action approval prompt), so it must not run a workflow whose steps
-      // the user has never seen. A self-built workflow is first-run-confirmed at
-      // save (process.ts); an IMPORTED workflow lands unconfirmed on purpose, its
-      // steps being attacker-authorable. Refuse an unconfirmed workflow here
+      // the user has never seen. NO workflow is confirmed at save any more — the
+      // tool that saves one is called by the model, so a stamp there was a
+      // permission it wrote itself; consent is stamped where a person schedules
+      // the workflow, and an imported one lands unconfirmed as it always did,
+      // its steps being attacker-authorable. Refuse an unconfirmed workflow here
       // rather than headless-running arbitrary imported bash. (Resolve via
       // getPipeline so a prefix id + the post-confirm cache eviction are handled;
       // a not-found id falls through to runGuardedSavedWorkflow's 404.)
       const { getPipeline } = await import('../tools/builtin/pipeline.js');
       const plannedForRun = getPipeline(params['id']!, history);
       if (plannedForRun && !plannedForRun.confirmedAt) {
+        // The remedy depends on the MODE, because only an autonomous workflow can
+        // reach the PRODUCT route the autonomous branch names: this same file's
+        // `POST /api/tasks` refuses a non-autonomous workflow, and the library
+        // renders its Schedule button under `mode === 'autonomous'`. (The agent
+        // tool `task_create` puts any id on a cron without checking either — it
+        // fails at fire time instead — so the honest claim is "cannot be
+        // scheduled through the surface a person uses", not "cannot be
+        // scheduled".) `executePipeline` in pipeline.ts branches the same way and
+        // for the same reason; `WorkerLoop.executePipeline` does not need to,
+        // because its mode check is a standalone `!== 'autonomous'` throw.
+        // On `mode` being present: every producer sets it and the SQLite read
+        // backfills it (`backfillPlannedPipelineDefaults`), but `getPipeline`'s
+        // direct and prefix hits return the stored object untouched — so this is
+        // a convention held up by the writers, not a property of the read. The
+        // branch is written `=== 'interactive'` so that a writer who forgets lands
+        // in the autonomous branch, i.e. on the old text rather than on a wrong
+        // new one.
         errorResponse(
           res,
           403,
-          'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
+          plannedForRun.mode === 'interactive'
+            ? 'This workflow uses ask_user / ask_secret, so it cannot run unattended — an unattended run has no one to answer it. Run it from a chat instead; scheduling is not offered for an interactive workflow.'
+            : 'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
         );
         return;
       }
