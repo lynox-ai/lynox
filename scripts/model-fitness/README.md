@@ -206,21 +206,25 @@ against the harness until proven otherwise.
 
 ## Where this sits among the repo's benches
 
-Three directories compare MODELS against each other, and which one to reach for was
-written down in two places and nowhere for the third. (Other directories under
-`scripts/` evaluate parts of the system rather than picking a model — `kg-bench`,
-`kg-eval`, `agent-efficiency` — and are out of scope here.)
+Two directories compare MODELS against each other, and which one to reach for was written
+down in one of them and nowhere in the other. (Other directories under `scripts/` evaluate
+parts of the system rather than picking a model — `kg-bench`, `kg-eval`,
+`agent-efficiency` — and are out of scope here.)
 
-| Directory | The question it answers | Status |
-|---|---|---|
-| `scripts/set-bench/` | Cross-provider, tool-using benchmark — the suite behind the published bench page, and where `CONTRIBUTING.md` sends a contributor adding a scenario. | canonical |
-| `scripts/model-fitness/` (here) | Is a model FIT for lynox's own jobs, and for which tier — measured on lynox's own tools and prompt discipline, not on a generic task set. | canonical for fit |
-| `scripts/bench-models/` + `scripts/bench-models.ts` | The Claude-only effort/thinking Pareto sweep. Kept deliberately for that one question; its own README says so. | legacy, scoped |
+| Directory | The question it answers |
+|---|---|
+| `scripts/set-bench/` | Cross-provider, tool-using benchmark — the suite behind the published bench page, and where `CONTRIBUTING.md` sends a contributor adding a scenario. |
+| `scripts/model-fitness/` (here) | Is a model FIT for lynox's own jobs, and for which tier — measured on lynox's own tools and prompt discipline, not on a generic task set. |
 
-They are complementary and none of them is dead: a *rank* (set-bench), a *fit verdict*
-(here) and a *single-provider Pareto sweep* (bench-models) are three different questions.
-The failure mode this table exists against is not duplication — it is reaching for
-whichever one is open in the editor.
+They answer different questions — a *rank* against a *fit verdict* — and the failure mode
+this table exists against is not duplication but reaching for whichever one is open in the
+editor.
+
+A third, `scripts/bench-models/`, was retired in 2026-09. <!-- drift-guard:allow: the path is named precisely because it no longer exists; a reader who remembers the directory needs to know it was removed rather than moved --> It ran a Claude-only
+effort/thinking Pareto sweep and had been labelled legacy since June, which is the state
+this table was written to end: a directory kept alive by a label rather than by a question
+somebody still asks. Nothing here inherited its scope — a single-provider sweep is simply
+not a question being asked any more. Its history is in the log.
 
 ## The other instruments in this directory
 
