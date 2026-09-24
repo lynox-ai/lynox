@@ -362,4 +362,18 @@ describe('capStopNote', () => {
     expect(note?.code).toBe('turn_limit');
     expect(note?.detail).toBeUndefined();
   });
+
+  it('caps the detail, because the banner is the only thing holding it back', () => {
+    // `buildDisplayNoteContent` passes `detail` through untouched, so the only
+    // place a length limit can live is here. A turn stopped mid-flight can hold
+    // a dozen pending calls with long names; unbounded, that renders as a wall
+    // of tool names where a one-line note was promised.
+    const many = Array.from({ length: 40 }, (_, i) => `a_very_long_tool_name_number_${i}`);
+    const detail = capStopNote(stop('iteration_cap', many), { isInternalRun: false })?.detail;
+    expect(detail, 'unbounded detail reached the banner').toBeDefined();
+    expect((detail as string).length).toBeLessThanOrEqual(300);
+    // The cap must TRUNCATE, not empty it — a guard that returns '' would also
+    // satisfy the length bound while destroying the information.
+    expect(detail).toMatch(/^still calling: a_very_long_tool_name_number_0, /);
+  });
 });

@@ -7,6 +7,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import type { ThreadStore } from './thread-store.js';
 import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
 import { getErrorMessage } from './utils.js';
+import type { SendStopCause } from './agent.js';
 
 export interface EagerPersistInput {
   /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
@@ -181,7 +182,7 @@ export function persistCompactionMarker(
 
 /** What `Agent.getLastStop()` reports, narrowed to what the note decision needs. */
 export interface CapStopLike {
-  readonly cause: string;
+  readonly cause: SendStopCause;
   readonly pendingTools: readonly string[];
   readonly pendingToolCount: number;
 }
@@ -217,9 +218,12 @@ export function capStopNote(
       : null;
   if (code === null) return null;
   // The tool NAMES come from `safeToolNames` upstream (charset-gated), so the
-  // detail carries no model-authored text into the banner.
+  // detail carries no model-authored text into the banner. It still goes
+  // through `sanitizeNoteDetail`, for the LENGTH: a turn stopped mid-flight can
+  // hold a dozen pending calls, and `buildDisplayNoteContent` passes `detail`
+  // straight through — the 300-char cap lives here or nowhere.
   const detail = stop.pendingTools.length > 0
-    ? `still calling: ${stop.pendingTools.join(', ')}`
+    ? sanitizeNoteDetail(`still calling: ${stop.pendingTools.join(', ')}`)
     : undefined;
   return { code, detail };
 }

@@ -1200,8 +1200,11 @@ export class Session {
           // (persistFailedTurnDisplay). display_only matters twice: it renders
           // as a banner, and it never re-enters API context — so the model is
           // not taught to narrate its own caps back at the user.
-          // Stamped AFTER setMessageUsage so the run's cost footer lands on the
-          // last real message rather than on this banner.
+          // Order against setMessageUsage is NOT load-bearing, and an earlier
+          // revision of this comment claimed it was: that UPDATE selects
+          // `display_only = 0` (thread-store.ts), so it cannot land on a banner
+          // whichever way round the two run. What the banner does need is the
+          // message_count bump, because appendDisplayNotes does not do it.
           const capNote = capStopNote(agent.getLastStop(), { isInternalRun: agent.isInternalRun });
           if (capNote !== null) {
             const { code, detail } = capNote;

@@ -15,6 +15,20 @@ import { fileURLToPath } from 'node:url';
  * Source-level because neither i18n nor ChatView can be imported in vitest (the
  * root config has no svelte plugin), and because the two files must AGREE —
  * a behavioural test of either alone cannot see the disagreement.
+ *
+ * WHY WHOLE LINES. The first revision of this file checked existence and a
+ * minimum length, and a review then walked four separate regressions past it:
+ * a key commented OUT (`indexOf` finds it inside the comment just as well), a
+ * title commented out, the `isInfoNote` list trimmed back, and a DUPLICATE key
+ * added later in the table — which wins at runtime while a `.find()` reads the
+ * first. None of those change a length. These are four short sentences that
+ * change about once a year, so they are compared whole, the instrument used for
+ * a small rarely-edited artefact elsewhere (`trigger-consent-i18n.test.ts`).
+ *
+ * What that buys: editing any of these means editing this file. That is the
+ * point, and it is also the entire cost. What it does not buy is a check that
+ * the German and the English say the same thing — that is a reading, and no
+ * assertion below claims to make it.
  */
 const read = (rel: string): string =>
   readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf-8');
@@ -26,31 +40,69 @@ const CHAT_VIEW = read('./ChatView.svelte');
  *  side of the wire, and deriving them from core would test core against itself. */
 const CAP_NOTE_CODES = ['turn_limit', 'cost_budget'] as const;
 
+/**
+ * The one LIVE line that opens with `key`, as written.
+ *
+ * Anchored at the start of the trimmed line, so a commented-out row is not a
+ * match — that is the whole difference from `indexOf`, and it is what let the
+ * commented-out key through. Exactly one match is required, so a second
+ * definition further down is a failure rather than a silent winner.
+ */
+function liveLine(source: string, key: string): string {
+  const hits = source.split('\n').filter((l) => l.trim().startsWith(`'${key}':`));
+  expect(hits.length, `expected exactly one live '${key}' line, found ${hits.length}`).toBe(1);
+  return (hits[0] as string).trim();
+}
+
 describe('cap-stop banners are renderable', () => {
   it('read both files, not a prefix of either', () => {
     expect(I18N.length).toBeGreaterThan(100_000);
     expect(CHAT_VIEW).toContain('isInfoNote');
   });
 
-  for (const code of CAP_NOTE_CODES) {
-    it(`${code} has a title in both languages`, () => {
-      const line = I18N.split('\n').find((l) => l.includes(`'chat.note.${code}.title'`)) ?? '';
-      expect(line, `missing chat.note.${code}.title`).not.toBe('');
-      expect(line).toMatch(/de:\s*'[^']{5,}'/);
-      expect(line).toMatch(/en:\s*'[^']{5,}'/);
-    });
+  it('every cap-note string is exactly the one that was reviewed', () => {
+    const pinned: Record<string, string> = {
+      'chat.note.turn_limit.title':
+        "'chat.note.turn_limit.title': { de: 'Rundenlimit erreicht', en: 'Turn limit reached' },",
+      'chat.note.turn_limit':
+        "'chat.note.turn_limit': { de: 'Der Agent rief noch Werkzeuge auf, als diese Runde ihr Limit erreichte — eine fertige Antwort gibt es deshalb nicht. Lass ihn in kleineren Schritten vorgehen oder grenze die Aufgabe enger ein.', en: 'The agent was still calling tools when this turn hit its limit, so there is no finished answer. Let it work in smaller steps, or narrow the task.' },",
+      'chat.note.cost_budget.title':
+        "'chat.note.cost_budget.title': { de: 'Kostenbudget erreicht', en: 'Cost budget reached' },",
+      'chat.note.cost_budget':
+        "'chat.note.cost_budget': { de: 'Diese Runde hat ihr Kostenbudget aufgebraucht, während der Agent noch Werkzeuge aufrief — eine fertige Antwort gibt es deshalb nicht. Das Budget pro Runde ist fest vorgegeben; lass ihn in kleineren Schritten vorgehen oder grenze die Aufgabe enger ein.', en: 'This turn used up its cost budget while the agent was still calling tools, so there is no finished answer. The per-turn budget is fixed; let it work in smaller steps, or narrow the task.' },",
+    };
+    for (const [key, expected] of Object.entries(pinned)) {
+      expect(liveLine(I18N, key), `${key} is not the reviewed sentence`).toBe(expected);
+    }
+  });
 
-    it(`${code} has a body in both languages that says what to do`, () => {
-      const line = I18N.split('\n').find((l) => l.includes(`'chat.note.${code}':`)) ?? '';
-      expect(line, `missing chat.note.${code}`).not.toBe('');
-      expect(line).toMatch(/de:\s*'[^']{60,}'/);
-      expect(line).toMatch(/en:\s*'[^']{60,}'/);
-    });
+  it('neither banner sends the reader to a control that governs nothing', () => {
+    // The first revision said "raise the budget in settings". No settings field
+    // feeds `costGuard`: managed takes the ceiling from a clamped CP env and
+    // WorkspaceLimitsView renders every spend input `disabled` for managed;
+    // the other sources are constants (worker-loop's $15, the orchestrator's
+    // $10/$2). `getHardLimits()` is read for DISPLAY only. So the advice was
+    // wrong for every possible reader, and a length check cannot see that.
+    const bodies = CAP_NOTE_CODES.map((c) => liveLine(I18N, `chat.note.${c}`));
+    for (const body of bodies) {
+      expect(body).not.toMatch(/Einstellungen|settings/i);
+    }
+    // Positive control on the same search: the advice these lines DO give is
+    // found by the identical machinery, so the two nulls above are absences,
+    // not a broken matcher.
+    expect(bodies.every((b) => /kleineren Schritten/.test(b) && /smaller steps/.test(b))).toBe(true);
+  });
 
-    it(`${code} renders as an info note rather than falling through`, () => {
-      // ChatView's `isInfoNote` list decides the banner's shape. A code missing
-      // from it renders in the error styling — a cap is not a fault.
-      expect(CHAT_VIEW).toMatch(new RegExp(`isInfoNote[^\\n]*'${code}'`));
-    });
-  }
+  it('both codes render as info notes rather than falling through', () => {
+    // ChatView's `isInfoNote` list decides the banner's shape: a code missing
+    // from it renders in the error styling, and a cap is not a fault. Pinned
+    // WHOLE — a review trimmed the list back to its first four codes and every
+    // substring assertion on the survivors still matched, because each one only
+    // ever asked about its own code.
+    const hits = CHAT_VIEW.split('\n').filter((l) => l.trim().startsWith('{@const isInfoNote'));
+    expect(hits.length, `expected exactly one live isInfoNote line, found ${hits.length}`).toBe(1);
+    expect((hits[0] as string).trim()).toBe(
+      "{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop' || msg.note.code === 'turn_limit' || msg.note.code === 'cost_budget'}",
+    );
+  });
 });
