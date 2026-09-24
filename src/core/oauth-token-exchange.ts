@@ -46,15 +46,80 @@
 import { fetchWithValidatedRedirects, readBodyLimited } from '../tools/builtin/http.js';
 import { resolveGuardedAckHosts } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
+import { isVettedEgressHost, isEndpointAcked } from './llm/endpoint-allowlist.js';
+import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 
 /** 15 s per leg; the wall timer sits one second beyond it. */
 export const TOKEN_EXCHANGE_TIMEOUT_MS = 15_000;
 /** A token response is small JSON; this is the ceiling a hostile one is read to. */
 export const TOKEN_BODY_MAX_BYTES = 64 * 1024;
 
+declare const vetted: unique symbol;
+
+/**
+ * A token endpoint that has passed the egress vetting.
+ *
+ * The brand is a module-private `unique symbol`, so this interface cannot be
+ * written by hand anywhere else — `vetTokenEndpoint` is the only way to obtain
+ * one. That is deliberate and it is the second attempt at this guarantee: the
+ * first version took a plain `string` and said in prose that the caller was
+ * expected to have vetted it. A refuter then measured what that was worth.
+ *
+ * `resolveGuardedAckHosts` returns `undefined` unless `networkPolicy` is
+ * `guarded`, and `assertHostPolicy` breaks out on `undefined`/`allow-all`
+ * before it reaches the `full-control` branch — and the ToolContext default IS
+ * `undefined`. So on a default engine the policy check this module passes
+ * `toolContext` to does **no host vetting at all**. `api_setup` was safe only
+ * because it runs its own Wave-5d gate first, and that gate stayed in the tool.
+ * A caller without one — the OAuth callback route this module exists for —
+ * would have POSTed a client secret to an unvetted host.
+ *
+ * A precondition in a comment is a rule; a type nobody can satisfy without the
+ * check is a mechanism.
+ */
+export interface VettedTokenEndpoint {
+  readonly url: string;
+  readonly [vetted]: true;
+}
+
+/** Why a token endpoint was refused, in a form the caller can phrase. */
+export interface TokenEndpointRefused {
+  /** The hostname, or the raw value when it does not parse. Never the full URL. */
+  readonly host: string;
+}
+
+/**
+ * The Wave-5d gate, fail-closed: a non-vetted host is refused unless the
+ * profile carries a persisted acceptance covering that exact host.
+ *
+ * The caller phrases the refusal, because only it knows whose endpoint this is
+ * — `api_setup` names the profile, a route names the connection. What this
+ * returns is the host and nothing else: the raw value can hold anything
+ * somebody pasted, including a credential, and a refusal string reaches a
+ * model's context or a browser page.
+ */
+export function vetTokenEndpoint(
+  url: string,
+  ack: CustomEndpointAck | undefined,
+): VettedTokenEndpoint | TokenEndpointRefused {
+  if (isVettedEgressHost(url) || isEndpointAcked(ack, url)) {
+    return { url } as VettedTokenEndpoint;
+  }
+  let host = url;
+  try { host = new URL(url).hostname; } catch { /* keep the raw value */ }
+  return { host };
+}
+
+/** `true` when `vetTokenEndpoint` refused. */
+export function isTokenEndpointRefused(
+  v: VettedTokenEndpoint | TokenEndpointRefused,
+): v is TokenEndpointRefused {
+  return 'host' in v;
+}
+
 export interface TokenExchangeRequest {
-  /** The provider's token endpoint. Passed through to the egress guard as-is. */
-  readonly tokenUrl: string;
+  /** The provider's token endpoint, already past {@link vetTokenEndpoint}. */
+  readonly endpoint: VettedTokenEndpoint;
   /** Every form field. The caller owns the flow, so the caller owns this map. */
   readonly params: Readonly<Record<string, string>>;
   /** `form` is what the OAuth specification says; `json` is what some providers want. */
@@ -70,12 +135,12 @@ export type TokenExchangeResult =
 /**
  * POST the parameters and hand back what came out.
  *
- * `toolContext` carries the egress controls — `network_policy` and the HTTPS
- * rule — and is not optional in spirit even though the type allows `undefined`:
- * without it the client secret in the body would be POSTed to whatever URL the
- * caller supplied, regardless of the tenant's policy. That is the
- * credential-exfiltration channel this whole path is shaped around, which is
- * why the surface is declared `full-control`.
+ * `toolContext` carries the tenant's `network_policy` and the HTTPS rule. It is
+ * the SECOND line, not the first: on a default engine `networkPolicy` is
+ * `undefined` and `assertHostPolicy` breaks out before its `full-control`
+ * branch, so the policy adds nothing there. The first line is the endpoint
+ * type — `vetTokenEndpoint` ran, fail-closed, or this function could not have
+ * been called.
  */
 export async function exchangeToken(
   req: TokenExchangeRequest,
@@ -106,7 +171,7 @@ export async function exchangeToken(
 
   try {
     const { response } = await Promise.race([
-      fetchWithValidatedRedirects(req.tokenUrl, {
+      fetchWithValidatedRedirects(req.endpoint.url, {
         method: 'POST',
         headers,
         body,
@@ -125,7 +190,7 @@ export async function exchangeToken(
   } catch (err) {
     return {
       ok: false,
-      message: `token exchange to ${req.tokenUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
+      message: `token exchange to ${req.endpoint.url} failed: ${err instanceof Error ? err.message : String(err)}.`,
     };
   } finally {
     clearTimeout(timer);

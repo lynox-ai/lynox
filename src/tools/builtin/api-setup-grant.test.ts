@@ -13,6 +13,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { apiSetupTool } from './api-setup.js';
+import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
@@ -1154,9 +1155,14 @@ describe('fetch_token — the wall-clock ceiling on a dripping body', () => {
       );
 
       const pending = fetchToken(agent);
-      // Past the wall timer (DOCS_FETCH_TIMEOUT_MS + 1000), not merely past the
-      // abort timer — the point is the second ceiling.
-      await vi.advanceTimersByTimeAsync(17_000);
+      // Past the WALL timer, not merely past the abort timer — the second
+      // ceiling is the point. Derived from the constant rather than written as
+      // 17_000: this is the only test that depends on that value, and a
+      // hard-coded number means grepping the live constant does not lead here.
+      // (It said `DOCS_FETCH_TIMEOUT_MS` for one commit, which stopped being the
+      // constant on this path the moment the exchange moved — a comment that
+      // went stale inside its own pull request.)
+      await vi.advanceTimersByTimeAsync(TOKEN_EXCHANGE_TIMEOUT_MS + 1_500);
       const result = await pending;
 
       expect(result).toContain('timed out');

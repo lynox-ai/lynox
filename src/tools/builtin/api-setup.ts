@@ -23,11 +23,11 @@ import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, to
 import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
-import { exchangeToken } from '../../core/oauth-token-exchange.js';
+import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { describeDisclosure, isEndpointAcked, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
+import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
 import { isInfraSecret, isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -1765,9 +1765,11 @@ Next steps before calling create:
       // re-verify here fail-closed: a non-vetted token_url is refused unless
       // the profile carries a persisted acceptance covering that exact host.
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
-      if (!isVettedEgressHost(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
-        let host = oauth.token_url;
-        try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
+      // The same check the module requires, from the module — so the route that
+      // will call `exchangeToken` cannot skip what this path never could.
+      const vetting = vetTokenEndpoint(oauth.token_url, profile.custom_endpoint_ack);
+      if (isTokenEndpointRefused(vetting)) {
+        const host = vetting.host;
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';
@@ -1921,7 +1923,7 @@ Next steps before calling create:
       // response: a refused egress never reached the provider to be charged for,
       // and `fetch_token` must not be a freebie bypass of the per-session cap.
       const exchanged = await exchangeToken(
-        { tokenUrl: oauth.token_url, params, bodyFormat },
+        { endpoint: vetting, params, bodyFormat },
         agent.toolContext,
         () => { agent.sessionCounters.httpRequests++; },
       );
