@@ -308,6 +308,34 @@ INTERNAL_REF="\\[\\[${REF_SLUG_BODY}\\]\\]"
 # i.e. a dollar CHARACTER, and the pattern silently stops anchoring. Tried it while
 # tidying the quoting; the split-line test caught it, which is the point of having it.
 REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
+# Fifth class — the SAME internal cross-reference, in the bare form without the
+# brackets: `// (DEF-0073)`, `describe('… (DEF-0083)')`. Same defect as the linked
+# form at lower severity — an opaque id a reader of THIS repo cannot resolve — and
+# it was deliberately left ungated in core#1092 because 68 live hits would have
+# painted the guard permanently red.
+#
+# It can start now because the backlog is gone, measured on `origin/main` before
+# this pattern existed: `git grep -cIE` over `src/**/*.ts` → 0 files, with 727 .ts
+# files in the path as the positive control that the query reached something. Over
+# the WHOLE tracked tree there are 4 hits, all in `tests/gate-record.test.ts`, and
+# all of them fabricated ids (`DEF-a-row`) that are INPUT to the `closes:` parser
+# rather than references. Those four carry the inline pragma rather than a path
+# carve-out, deliberately: a scope drawn around a DIRECTORY is blind to the next
+# file outside it, while the pragma states the reason at the one place it is true.
+#
+# The prefix is assembled the way `_org` above is, so this file carries no literal
+# instance of what it forbids. That is style rather than necessity — SELF_EXCLUDE
+# already skips this file — but it keeps a grep for the marker honest, and the same
+# reasoning is why the test file assembles every marker at runtime.
+#
+# Limits, stated rather than implied. The body class is `[0-9a-z-]`, so an id with
+# an uppercase letter or an underscore does not match; none exist in the register's
+# id vocabulary today, which is kebab-case and lowercase by the id guard's own rule.
+# And like both reference classes above, this one honours the pragma — without an
+# escape a legitimate line would hard-block a commit, and the only way past would be
+# a hook bypass, which is worse than what is guarded.
+_bare_ref_prefix='DE'"F-"
+BARE_REF="${_bare_ref_prefix}[0-9a-z][0-9a-z-]*"
 
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
@@ -775,6 +803,28 @@ fi
 # hides its producer's exit status from `set -e` — see scripts/lib/guard-file-list.sh
 # for the full reasoning and for why the assertion is on the STATUS, not on the
 # count. The two scans below then read from a plain file, which cannot swallow one.
+
+# ── Positive control, on every invocation ─────────────────────────────────────
+#
+# A guard with zero hits on a clean tree is indistinguishable from a guard whose
+# pattern stopped matching, and this script's final line used to say `clean ✓` with
+# neither a sample size nor a probe. Both halves of that are fixed here: each class
+# below must match a worked example, and the closing message names how many files it
+# actually read. A pattern that no longer matches its own example is a broken
+# instrument, so the script REFUSES (exit 2) rather than reporting a clean tree.
+_probe() {
+  printf '%s\n' "$2" | grep -qEi -- "$1" && return 0
+  echo "❌ public-repo-guard: pattern '$3' no longer matches its own example — refusing"
+  echo "   to report on a tree it cannot inspect. Fix the pattern, then re-run."
+  exit 2
+}
+_probes_ok=0
+_probe "$BARE_REF"     "${_bare_ref_prefix}probe-row-not-real"        'bare cross-reference' && _probes_ok=$((_probes_ok + 1))
+_probe "$INTERNAL_REF" "$(printf '%s' '[[')probe-slug$(printf '%s' ']]')" 'linked cross-reference' && _probes_ok=$((_probes_ok + 1))
+_probe "$REF_OPENER"   "$(printf '%s' '[[')probe-slug"                'split-line opener' && _probes_ok=$((_probes_ok + 1))
+_probe "$SOFT"         'engine'"."'lynox'"."'cloud'                   'dual-use hostname' && _probes_ok=$((_probes_ok + 1))
+_probe "$HARD"         'root'"@"'control'                             'HARD leak marker' && _probes_ok=$((_probes_ok + 1))
+
 FILE_LIST="$(mktemp)"
 trap 'rm -f "$FILE_LIST"' EXIT
 if $mode_staged; then
@@ -936,6 +986,18 @@ while IFS= read -r -d '' f; do
     echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE -- "$REF_OPENER" "./$f" 2>/dev/null || true)
+  # The bare form of the same id. Reported separately so the message can name the
+  # remedy that differs: a linked ref is removed, a bare id is usually replaced by
+  # the reason it stood for.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"$PRAGMA"*) continue ;;
+    esac
+    echo "❌ internal register id in $f, bare form (say what it stands for instead):"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIE -- "$BARE_REF" "./$f" 2>/dev/null || true)
 
   # SOFT — exempt if the line carries the pragma. Whole-file allow already
   # returned above, so it needs no second check here.
@@ -964,4 +1026,4 @@ if [ "$violations" -gt 0 ]; then
   exit 1
 fi
 
-echo "public-repo-guard: clean ✓"
+echo "public-repo-guard: clean ✓ ($(tr -cd '\0' < "$FILE_LIST" | wc -c | tr -d ' ') file(s) scanned, ${_probes_ok} pattern class(es) probed)"

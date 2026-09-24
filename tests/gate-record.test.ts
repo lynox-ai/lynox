@@ -419,8 +419,8 @@ describe('gate-record — `closes:`, required with `none` allowed', () => {
   it('accepts one id and a list, in either separator this register uses', () => {
     // Invented ids; none names a real row.
     for (const value of ['DEF-' + 'example-single-id',
-                         'DEF-a-row, DEF-b-row',
-                         'DEF-a-row · DEF-b-row']) {
+                         'DEF-a-row, DEF-b-row', // public-repo-guard:allow: fabricated ids, parser INPUT not a reference
+                         'DEF-a-row · DEF-b-row']) { // public-repo-guard:allow: fabricated ids, parser INPUT not a reference
       const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
       expect(v.ok, `rejected ${value}`).toBe(true);
     }
@@ -492,7 +492,7 @@ describe('gate-record — a line nothing reads is a line that lost something', (
     // The failure this whole PR exists to prevent, reproduced INSIDE the fix: a
     // second id on a continuation line parsed as nothing, and the guard against
     // a datum going missing let a datum go missing. Green tick, id gone.
-    const body = record().replace('closes: none', 'closes: DEF-a-row,\n  DEF-b-row');
+    const body = record().replace('closes: none', 'closes: DEF-a-row,\n  DEF-b-row'); // public-repo-guard:allow: fabricated ids, parser INPUT not a reference
     const v = evaluate({ body, head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
     expect(v.errors?.join(' ')).toContain('nothing reads it');
@@ -501,7 +501,7 @@ describe('gate-record — a line nothing reads is a line that lost something', (
   it('⭐ refuses a repeated field rather than letting the last one win', () => {
     // A leftover `closes: none` under a real answer silently overwrote it. Same
     // reasoning this file already applies to two BLOCKS, one level down.
-    const body = record().replace('closes: none', 'closes: DEF-a-row\ncloses: none');
+    const body = record().replace('closes: none', 'closes: DEF-a-row\ncloses: none'); // public-repo-guard:allow: fabricated ids, parser INPUT not a reference
     const v = evaluate({ body, head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
     expect(v.errors?.join(' ')).toContain('repeats');
