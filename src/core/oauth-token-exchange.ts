@@ -59,11 +59,20 @@ declare const vetted: unique symbol;
 /**
  * A token endpoint that has passed the egress vetting.
  *
- * The brand is a module-private `unique symbol`, so this interface cannot be
- * written by hand anywhere else — `vetTokenEndpoint` is the only way to obtain
- * one. That is deliberate and it is the second attempt at this guarantee: the
- * first version took a plain `string` and said in prose that the caller was
- * expected to have vetted it. A refuter then measured what that was worth.
+ * ⚠ **The brand stops the ACCIDENTAL construction, not the deliberate one, and
+ * the comment here claimed otherwise for one commit.** A plain literal is
+ * refused (`TS2741: Property '[vetted]' is missing`), which is what makes it
+ * worth having. But a `unique symbol` brand has no runtime property, so the
+ * value this module returns is an ordinary `{ url, ack }` — and
+ * `{ ...legitimate, url: 'https://elsewhere/' }` keeps the branded TYPE while
+ * changing the address. Measured: it compiles under this repo's `strict`
+ * config and passes straight into {@link exchangeToken}.
+ *
+ * **So the brand is a reading aid and {@link exchangeToken}'s own re-check is
+ * the mechanism.** The check is idempotent and costs two string comparisons;
+ * paying it at the point of use makes the guarantee independent of how the
+ * object came to be, which is the only form of it that survives a spread, a
+ * cast, or a future caller nobody has written yet.
  *
  * `resolveGuardedAckHosts` returns `undefined` unless `networkPolicy` is
  * `guarded`, and `assertHostPolicy` breaks out on `undefined`/`allow-all`
@@ -79,6 +88,12 @@ declare const vetted: unique symbol;
  */
 export interface VettedTokenEndpoint {
   readonly url: string;
+  /**
+   * The acceptance the vetting was decided against, carried so the check can be
+   * REPEATED at use. Without it the re-check could only ask the baseline, and an
+   * endpoint a profile legitimately accepted would be refused at the last step.
+   */
+  readonly ack: CustomEndpointAck | undefined;
   readonly [vetted]: true;
 }
 
@@ -103,7 +118,7 @@ export function vetTokenEndpoint(
   ack: CustomEndpointAck | undefined,
 ): VettedTokenEndpoint | TokenEndpointRefused {
   if (isVettedEgressHost(url) || isEndpointAcked(ack, url)) {
-    return { url } as VettedTokenEndpoint;
+    return { url, ack } as VettedTokenEndpoint;
   }
   let host = url;
   try { host = new URL(url).hostname; } catch { /* keep the raw value */ }
@@ -147,6 +162,19 @@ export async function exchangeToken(
   toolContext: ToolContext | undefined,
   onRequestSent?: () => void,
 ): Promise<TokenExchangeResult> {
+  // Re-vetted HERE, not trusted from the type. See {@link VettedTokenEndpoint}:
+  // the brand survives a spread that rewrites `url`, so the only check that
+  // actually holds is the one taken against the value about to be fetched.
+  // Cheap and idempotent — the price of a guarantee that does not depend on
+  // how its argument was built.
+  const stillVetted = vetTokenEndpoint(req.endpoint.url, req.endpoint.ack);
+  if (isTokenEndpointRefused(stillVetted)) {
+    return {
+      ok: false,
+      message: `token exchange refused: ${stillVetted.host} is not a vetted endpoint for this profile.`,
+    };
+  }
+
   const headers: Record<string, string> = { 'Accept': 'application/json' };
   let body: string;
   if (req.bodyFormat === 'json') {

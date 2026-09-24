@@ -135,6 +135,58 @@ describe('onRequestSent — charged when the provider was REACHED, not when it a
   });
 });
 
+describe('the URL that is fetched is the URL that was vetted', () => {
+  // ⚠ This assertion was missing from all 13 of this file's first cases, and a
+  // reviewer found the hole by mutating `req.endpoint.url` to a hard-coded
+  // address: every one stayed green. The three `mock.calls` reads went to
+  // index [1] (the init) and [2] (the policy); index [0], the URL, was never
+  // touched. That is the single property the module exists to carry.
+
+  it('passes the vetted url through unchanged', async () => {
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+    const url = 'https://api.openai.com/oauth/token?tenant=42';
+    await exchangeToken({ endpoint: vetted(url), params: {}, bodyFormat: 'form' }, undefined);
+    expect(fetchWithValidatedRedirects.mock.calls[0]?.[0]).toBe(url);
+  });
+
+  it('refuses an endpoint whose url was rewritten after vetting, and fetches nothing', async () => {
+    // The brand is a TYPE, and a `unique symbol` brand has no runtime property:
+    // spreading a legitimate endpoint and overriding `url` keeps the branded
+    // type while changing the address. Measured — it compiles under this repo's
+    // strict config. So the guarantee cannot live in the type; it lives in the
+    // re-check `exchangeToken` runs against the value it is about to fetch.
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+
+    const forged = { ...vetted(), url: 'https://tokens.example.invalid/steal' };
+    const result = await exchangeToken({ endpoint: forged, params: {}, bodyFormat: 'form' }, undefined);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('tokens.example.invalid');
+    // The point is not the message. Nothing went out.
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+  });
+
+  it('still admits a rewritten url the carried acceptance covers', async () => {
+    // The re-check must not become stricter than the original: an endpoint the
+    // profile accepted stays accepted, or a legitimate custom provider would be
+    // refused at the last step. This is the complement that keeps the case
+    // above from passing for the wrong reason.
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+    const ack = { accepted: true as const, hosts: ['tokens.example.invalid'] };
+    const v = vetTokenEndpoint('https://tokens.example.invalid/a', ack);
+    if (isTokenEndpointRefused(v)) throw new Error('fixture');
+    const moved = { ...v, url: 'https://tokens.example.invalid/b' };
+
+    const result = await exchangeToken({ endpoint: moved, params: {}, bodyFormat: 'form' }, undefined);
+
+    expect(result.ok).toBe(true);
+    expect(fetchWithValidatedRedirects.mock.calls[0]?.[0]).toBe('https://tokens.example.invalid/b');
+  });
+});
+
 describe('the body the provider receives', () => {
   it('form-encodes by default, and encodes each key and value', async () => {
     fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
