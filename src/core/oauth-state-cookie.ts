@@ -16,8 +16,8 @@
  * follow, and the second is the reason this module exists:
  *
  *  1. The dispatch gains a second exact branch instead of a pattern.
- *  2. `DEF-oauth-api-setup` owes an obligation — *authenticate before the
- *     profile id is resolved*, because the lookup alone discloses whether the
+ *  2. The OAuth clause this belongs to owes an obligation — *authenticate
+ *     before the profile id is resolved*, because the lookup alone discloses whether the
  *     id exists on this instance. That is an ORDERING, and orderings do not
  *     survive refactors. Here the id is not in the request at all: it arrives
  *     inside a payload whose HMAC is checked before anything touches the
