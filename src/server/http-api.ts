@@ -7206,11 +7206,18 @@ export class LynoxHTTPApi {
     // session; the CALLBACK half is not, and that asymmetry is why the profile
     // id travels in a signed cookie rather than in either path.
     //
-    // ⚠ `decideConnect` is called with ONE argument. Its second parameter is a
-    // test seam whose default is the frozen register, and passing anything here
-    // — a register derived from the request, or even a copy — would let the
-    // CALLER choose which host the user is sent to. That is precisely the
-    // boundary the register exists to be.
+    // ⚠ `decideConnect` is called with ONE argument, and the reason is that one
+    // is ENOUGH — not that two would fail to compile. Its second parameter is a
+    // test seam whose default is the frozen register, so omitting it is what
+    // makes the shipped register the only one this route can reach, and the
+    // register is the boundary deciding which host a user may be sent to.
+    //
+    // The two ways to pass a second argument are not equally bad, and saying so
+    // is the point: a register built from the REQUEST hands that decision to
+    // the caller, which is the boundary gone. A COPY of the frozen one behaves
+    // identically today — it is wrong because it is a second definition of the
+    // same set, and a second definition drifts from the first without a compile
+    // error to say so. Neither belongs here; only the first is an exploit.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', async (req, res, params) => {
       const id = params['id'] ?? '';
       const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
