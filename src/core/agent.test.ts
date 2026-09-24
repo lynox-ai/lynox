@@ -995,6 +995,9 @@ describe('Agent', () => {
       expect(handler).toHaveBeenCalledTimes(1); // turn 1 ran; turn 2's call was dropped
       expect(result).toContain('turn limit was reached');
       expect(result).toContain('loop_tool');
+      // The other side of the branch: a TURN stop keeps the turns advice, so the
+      // fix above cannot have been made by deleting the sentence outright.
+      expect(result).toContain('The task needs more turns or a narrower scope.');
       expect(agent.getLastStop()?.cause).toBe('iteration_cap');
       expect(agent.getLastStop()?.pendingTools).toEqual(['loop_tool']);
     });
@@ -1010,6 +1013,13 @@ describe('Agent', () => {
       expect(result).toContain('cost budget was reached');
       expect(result).not.toContain('turn limit');
       expect(agent.getLastStop()?.cause).toBe('budget_cap');
+      // The REMEDY has to branch too, not just the noun. This line used to end
+      // "The task needs more turns or a narrower scope." for both causes, and
+      // more turns is the one lever a cost stop does not have: no setting feeds
+      // this budget for any reader. It is also the FIRST surface the user sees —
+      // the thread banner only arrives on a re-read.
+      expect(result).toContain('The per-turn cost budget is fixed');
+      expect(result).not.toContain('needs more turns');
     });
 
     it('a clean end_turn reports cause end_turn, no pending tools, and the bare text', async () => {

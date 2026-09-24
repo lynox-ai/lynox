@@ -219,9 +219,12 @@ export function capStopNote(
   if (code === null) return null;
   // The tool NAMES come from `safeToolNames` upstream (charset-gated), so the
   // detail carries no model-authored text into the banner. It still goes
-  // through `sanitizeNoteDetail`, for the LENGTH: a turn stopped mid-flight can
-  // hold a dozen pending calls, and `buildDisplayNoteContent` passes `detail`
-  // straight through — the 300-char cap lives here or nowhere.
+  // through `sanitizeNoteDetail`, for the LENGTH — and the honest figure is
+  // bounded, not unbounded: `MAX_REPORTED_TOOL_NAMES` is 8 and the charset gate
+  // allows 64 chars each, so the worst case is 541 characters. Ordinary builtin
+  // names never reach 300; eight MCP-length names (`mcp__…__create_event`) do.
+  // `buildDisplayNoteContent` passes `detail` straight through, so the cap lives
+  // here or nowhere.
   const detail = stop.pendingTools.length > 0
     ? sanitizeNoteDetail(`still calling: ${stop.pendingTools.join(', ')}`)
     : undefined;

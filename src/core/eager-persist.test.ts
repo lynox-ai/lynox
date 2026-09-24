@@ -368,12 +368,21 @@ describe('capStopNote', () => {
     // place a length limit can live is here. A turn stopped mid-flight can hold
     // a dozen pending calls with long names; unbounded, that renders as a wall
     // of tool names where a one-line note was promised.
-    const many = Array.from({ length: 40 }, (_, i) => `a_very_long_tool_name_number_${i}`);
+    // EIGHT names, not forty: `safeToolNames` caps at MAX_REPORTED_TOOL_NAMES = 8,
+    // so forty is a shape the producer cannot emit and proving the cap on it
+    // proves it nowhere real. Eight MCP-length names is the case that actually
+    // crosses 300 characters in production.
+    const many = Array.from({ length: 8 }, (_, i) => `mcp__claude_ai_Google_Calendar__create_event_${i}`);
     const detail = capStopNote(stop('iteration_cap', many), { isInternalRun: false })?.detail;
     expect(detail, 'unbounded detail reached the banner').toBeDefined();
     expect((detail as string).length).toBeLessThanOrEqual(300);
     // The cap must TRUNCATE, not empty it — a guard that returns '' would also
     // satisfy the length bound while destroying the information.
-    expect(detail).toMatch(/^still calling: a_very_long_tool_name_number_0, /);
+    expect(detail).toMatch(/^still calling: mcp__claude_ai_Google_Calendar__create_event_0, /);
+    // And the bound is real rather than incidental: eight names of the maximum
+    // 64 characters the charset gate allows come to 541, so the cap is reached
+    // by a legal input and not only by an invented one.
+    const worst = Array.from({ length: 8 }, (_, i) => `n${String(i)}`.padEnd(64, 'x'));
+    expect(`still calling: ${worst.join(', ')}`.length).toBe(541);
   });
 });

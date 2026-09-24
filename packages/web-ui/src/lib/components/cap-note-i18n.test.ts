@@ -45,11 +45,22 @@ const CAP_NOTE_CODES = ['turn_limit', 'cost_budget'] as const;
  *
  * Anchored at the start of the trimmed line, so a commented-out row is not a
  * match — that is the whole difference from `indexOf`, and it is what let the
- * commented-out key through. Exactly one match is required, so a second
- * definition further down is a failure rather than a silent winner.
+ * commented-out key through.
+ *
+ * EITHER quote style counts. An earlier revision of this helper matched only
+ * `'key':`, and its docblock claimed a duplicate-key guard it did not have: a
+ * second definition written `"chat.note.cost_budget":` left this file green
+ * while `t()` returned the duplicate at runtime. The claim is now true for the
+ * form a person actually writes.
+ *
+ * What it still cannot see, stated rather than implied: a COMPUTED key
+ * (`['chat.note.' + 'cost_budget']: …`). No line-based reader can, and
+ * `svelte-check` does not flag it either — that one is unguarded, and saying so
+ * is worth more than a sentence that sounds like it is covered.
  */
 function liveLine(source: string, key: string): string {
-  const hits = source.split('\n').filter((l) => l.trim().startsWith(`'${key}':`));
+  const opener = new RegExp(`^['"]${key.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')}['"]\\s*:`);
+  const hits = source.split('\n').filter((l) => opener.test(l.trim()));
   expect(hits.length, `expected exactly one live '${key}' line, found ${hits.length}`).toBe(1);
   return (hits[0] as string).trim();
 }
@@ -78,10 +89,12 @@ describe('cap-stop banners are renderable', () => {
 
   it('neither banner sends the reader to a control that governs nothing', () => {
     // The first revision said "raise the budget in settings". No settings field
-    // feeds `costGuard`: managed takes the ceiling from a clamped CP env and
-    // WorkspaceLimitsView renders every spend input `disabled` for managed;
-    // the other sources are constants (worker-loop's $15, the orchestrator's
-    // $10/$2). `getHardLimits()` is read for DISPLAY only. So the advice was
+    // feeds `costGuard`: managed takes the ceiling from a clamped CP env while
+    // WorkspaceLimitsView renders every spend input `disabled` for managed, and
+    // the only other producer of this banner is the worker loop's $15 constant.
+    // (The orchestrator's $10/$2 build Agents rather than Sessions, so they
+    // never reach this path at all — they are not a third reader, they are no
+    // reader.) `getHardLimits()` is read for DISPLAY only. So the advice was
     // wrong for every possible reader, and a length check cannot see that.
     const bodies = CAP_NOTE_CODES.map((c) => liveLine(I18N, `chat.note.${c}`));
     for (const body of bodies) {
