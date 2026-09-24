@@ -365,28 +365,56 @@ export interface RepeatCallSkip {
  * Run-scoped: one instance per agent run, reset alongside the loop tool counter.
  */
 export class RepeatCallGuard {
-  private key: string | null = null;
-  private lastResult = '';
-  /** Consecutive skips already served for the latched key. Reset with the streak. */
+  /**
+   * Bounded history of executed (call → result) pairs, oldest first.
+   *
+   * It is a WINDOW, not a single key, and that is the whole point. The previous
+   * version kept only the last key and counted CONSECUTIVE identical calls, so
+   * any alternation reset the streak. Measured on rafael's prod thread
+   * 2026-09-24: the model issued `data_store_query` against two collections in
+   * strict alternation — `ABABABABAB…`, 40 calls, byte-identical arguments,
+   * identical results, twice in a row never — and the guard never counted past
+   * one. The run ended on the iteration cap instead, 20 turns and 20 duplicate
+   * assistant messages later. A two-cycle walked straight through a guard built
+   * for the one-cycle it was born from (a model re-issuing a single
+   * `api_setup view` ~25 times, 2026-08-14).
+   */
+  private history: Array<{ key: string; result: string }> = [];
+  /** Consecutive skips already served for the latched cycle. Reset with it. */
   private skipCount = 0;
   /** Latched once the model has IGNORED `BREAK_AFTER_ESCALATIONS` escalated
    *  results — read (and kept) by the agent loop to end the run hard. Carries
    *  the `tool\x00input` key so the break error can name the call. */
   private breakKey: string | null = null;
-  private identicalCount = 0;
+  /** The keys of the currently latched cycle, in call order, or null. */
+  private cycleKeys: string[] | null = null;
 
   /**
-   * After this many consecutive identical (call → result) pairs, the next
-   * identical call is skipped. Conservative: a normal retry after a transient
-   * hiccup yields a DIFFERENT result and thus resets the streak, so it is never
-   * caught — only a genuinely stuck, output-unchanging loop is.
+   * How many times a cycle must repeat before the next call in it is skipped.
+   *
+   * Conservative, and the reason is unchanged from the single-key version: a
+   * normal retry after a transient hiccup yields a DIFFERENT result, which
+   * breaks the periodicity and clears the latch, so it is never caught — only a
+   * genuinely stuck, output-unchanging loop is.
    */
   static readonly REPEAT_LIMIT = 3;
 
   /**
-   * After this many consecutive ESCALATED skips for the same latched key — i.e.
-   * the model received the "do NOT call this again" result this many times and
-   * re-issued the identical call anyway — the agent loop ends the run hard
+   * The longest cycle this guard can see. Four covers the shapes that occur:
+   * one tool retried (k=1, the original case), a two-collection alternation
+   * (k=2, the 2026-09-24 case), and a short read-read-write rhythm.
+   *
+   * It is deliberately not larger. The window it forces is
+   * `REPEAT_LIMIT * MAX_CYCLE_LENGTH` entries, and a long "cycle" is
+   * increasingly hard to tell from a legitimate repeating workflow — the cost
+   * of guessing wrong is refusing a call the model needed.
+   */
+  static readonly MAX_CYCLE_LENGTH = 4;
+
+  /**
+   * After this many consecutive ESCALATED skips for the same latched cycle —
+   * i.e. the model received the "do NOT call this again" result this many times
+   * and re-issued the cycle anyway — the agent loop ends the run hard
    * (ToolLoopBreakError). The escalated result alone was measured NOT to stop
    * weaker models: the 2026-08-14 prod loop (thread 861f3e4b, GLM) re-issued the
    * identical `api_setup view` ~25 times, reading the escalation every time.
@@ -396,27 +424,82 @@ export class RepeatCallGuard {
 
   private static readonly EXCERPT_MAX = 300;
 
+  /** The window that can still carry a detectable cycle. */
+  private static readonly HISTORY_MAX =
+    RepeatCallGuard.REPEAT_LIMIT * RepeatCallGuard.MAX_CYCLE_LENGTH;
+
   /**
-   * Call BEFORE executing a tool. Returns a skip directive when this exact call
-   * has already produced this exact result REPEAT_LIMIT times in a row;
-   * otherwise null (execute normally). The streak itself stays untouched on
-   * skip (no record() runs), so the guard stays latched until a different call
-   * resets it — every further identical repeat is skipped too. The SKIP,
-   * however, is state: it counts toward the hard break (skipCount/breakKey), so
-   * an ignored escalation eventually ends the run rather than repeating forever.
+   * The SHORTEST cycle the tail of `history` consists of, or null.
+   *
+   * "Consists of" is strict: the last `k * REPEAT_LIMIT` entries must be exactly
+   * `k`-periodic in BOTH key and result. That is what separates a loop from
+   * legitimate repetition — a model that re-reads the same config between three
+   * different pieces of real work has other calls in the window, so the tail is
+   * not periodic and nothing latches. Only a tail that is nothing but the cycle
+   * does.
+   *
+   * Shortest wins so `AAA` is reported as a one-cycle rather than as a
+   * three-cycle of identical entries; the escalated message then names one call
+   * instead of three copies of it.
+   */
+  private detectCycle(): string[] | null {
+    for (let k = 1; k <= RepeatCallGuard.MAX_CYCLE_LENGTH; k++) {
+      const span = k * RepeatCallGuard.REPEAT_LIMIT;
+      if (this.history.length < span) break;
+      const tail = this.history.slice(this.history.length - span);
+      let periodic = true;
+      for (let i = k; i < tail.length && periodic; i++) {
+        const a = tail[i]!;
+        const b = tail[i - k]!;
+        if (a.key !== b.key || a.result !== b.result) periodic = false;
+      }
+      if (periodic) return tail.slice(0, k).map((e) => e.key);
+    }
+    return null;
+  }
+
+  /** The most recent recorded result for `key`, for the escalation excerpt. */
+  private lastResultFor(key: string): string {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const e = this.history[i]!;
+      if (e.key === key) return e.result;
+    }
+    return '';
+  }
+
+  /**
+   * Call BEFORE executing a tool. Returns a skip directive when this call is
+   * part of a cycle the last `REPEAT_LIMIT` rounds consisted of; otherwise null
+   * (execute normally). The history is NOT touched on skip (no `record` runs),
+   * so the latch holds until a call outside the cycle breaks the periodicity.
+   * The SKIP, however, is state: it counts toward the hard break
+   * (skipCount/breakKey), so an ignored escalation eventually ends the run
+   * rather than repeating forever.
    */
   check(key: string): RepeatCallSkip | null {
-    if (key !== this.key || this.identicalCount < RepeatCallGuard.REPEAT_LIMIT) return null;
-    const excerpt = this.lastResult.length > RepeatCallGuard.EXCERPT_MAX
-      ? this.lastResult.slice(0, RepeatCallGuard.EXCERPT_MAX) + '…'
-      : this.lastResult;
+    if (!this.cycleKeys || !this.cycleKeys.includes(key)) return null;
+    const last = this.lastResultFor(key);
+    const excerpt = last.length > RepeatCallGuard.EXCERPT_MAX
+      ? last.slice(0, RepeatCallGuard.EXCERPT_MAX) + '…'
+      : last;
     this.skipCount++;
     if (this.skipCount >= RepeatCallGuard.BREAK_AFTER_ESCALATIONS) this.breakKey = key;
+    const cycleLength = this.cycleKeys.length;
+    // The COUNT is read off the window rather than printed as the constant, so
+    // the sentence stays true if the threshold is ever retuned. It does NOT keep
+    // rising while the latch holds — a skip runs no `record`, so the window
+    // freezes at the moment of latching — and a first version of this comment
+    // claimed it did.
+    const made = this.history.filter((e) => e.key === key).length;
+    const rounds = Math.floor(this.history.length / cycleLength);
+    const preamble = cycleLength === 1
+      ? `This exact call was already made ${String(made)} times in a row and returned the same result each time:`
+      : `This call is part of a ${String(cycleLength)}-call sequence that has now repeated ` +
+        `${String(rounds)} times with identical results each round. Its last result was:`;
     return {
       consecutiveSkips: this.skipCount,
       escalatedResult:
-        `This exact call was already made ${String(this.identicalCount)} times in a row and returned the same result each time:\n\n` +
-        `${excerpt}\n\n` +
+        `${preamble}\n\n${excerpt}\n\n` +
         `Repeating it will not change the outcome. Do NOT call it again with the same input — take a different ` +
         `approach (a different action such as "list", different arguments, or ask the user).`,
     };
@@ -424,20 +507,33 @@ export class RepeatCallGuard {
 
   /**
    * Call AFTER executing a tool, with the result content the agent actually saw.
-   * Grows the streak when the same key yields the same result; otherwise starts
-   * a fresh streak of 1. Any progress (different call or different result)
-   * clears the escalation counters and unlatches a pending break.
+   * Appends to the window and re-derives the latch. Any progress — a call that
+   * breaks the periodicity, or the same call returning something new — leaves no
+   * cycle, which clears the escalation counters and unlatches a pending break.
    */
   record(key: string, result: string): void {
-    if (key === this.key && result === this.lastResult) {
-      this.identicalCount++;
-    } else {
-      this.key = key;
-      this.lastResult = result;
-      this.identicalCount = 1;
+    this.history.push({ key, result });
+    if (this.history.length > RepeatCallGuard.HISTORY_MAX) {
+      this.history.splice(0, this.history.length - RepeatCallGuard.HISTORY_MAX);
+    }
+    const cycle = this.detectCycle();
+    if (!cycle) {
+      this.cycleKeys = null;
+      this.skipCount = 0;
+      this.breakKey = null;
+      return;
+    }
+    const same = this.cycleKeys !== null
+      && this.cycleKeys.length === cycle.length
+      && this.cycleKeys.every((k, i) => k === cycle[i]);
+    if (!same) {
+      // A DIFFERENT cycle is still a fresh observation, not a continued
+      // escalation: the model has changed what it is doing, even if it is still
+      // stuck. Start its escalation count at zero.
       this.skipCount = 0;
       this.breakKey = null;
     }
+    this.cycleKeys = cycle;
   }
 
   /**
@@ -453,10 +549,9 @@ export class RepeatCallGuard {
 
   /** Clear all state — call at the start of each agent run. */
   reset(): void {
-    this.key = null;
-    this.lastResult = '';
-    this.identicalCount = 0;
+    this.history = [];
     this.skipCount = 0;
     this.breakKey = null;
+    this.cycleKeys = null;
   }
 }

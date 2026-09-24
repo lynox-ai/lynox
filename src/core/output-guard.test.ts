@@ -240,6 +240,215 @@ describe('ToolCallTracker', () => {
 describe('RepeatCallGuard', () => {
   const K = RepeatCallGuard.REPEAT_LIMIT;
 
+  /**
+   * The 2026-09-24 prod incident, as tests.
+   *
+   * The guard kept ONE key and counted consecutive identical calls, so a model
+   * alternating between two calls reset the streak on every step and never
+   * counted past one. Measured on rafael's thread: `data_store_query` against
+   * two collections in strict alternation — `ABABABABAB…`, 40 calls,
+   * byte-identical arguments, identical results — walked straight through and
+   * ended on the iteration cap, 20 turns and 20 duplicate assistant messages
+   * later. Every test in this block fails against that version.
+   */
+  describe('cycles, not just consecutive repeats', () => {
+    const A = 'data_store_query {"collection":"kw","limit":20}';
+    const B = 'data_store_query {"collection":"comp","limit":10}';
+    const rA = '20 rows of keyword research';
+    const rB = '10 rows of local-pack competitors';
+
+    /** Run `rounds` full rounds of the cycle, asserting none of them is skipped. */
+    const runCycle = (guard: RepeatCallGuard, pairs: Array<[string, string]>, rounds: number): void => {
+      for (let r = 0; r < rounds; r++) {
+        for (const [key, result] of pairs) {
+          expect(guard.check(key), `round ${String(r)} key ${key}`).toBeNull();
+          guard.record(key, result);
+        }
+      }
+    };
+
+    it('skips the two-cycle that defeated the single-key streak', () => {
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      const skip = guard.check(A);
+      expect(skip).not.toBeNull();
+      expect(skip!.escalatedResult).toContain('2-call sequence');
+      expect(skip!.escalatedResult).toContain('keyword research');
+    });
+
+    it('skips EITHER call of the latched cycle, not just the one that tripped it', () => {
+      // The model alternates; whichever half it re-issues first must be caught,
+      // or it simply continues on the other one.
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      expect(guard.check(B)).not.toBeNull();
+    });
+
+    it('does not latch one round early', () => {
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K - 1);
+      expect(guard.check(A)).toBeNull();
+      expect(guard.check(B)).toBeNull();
+    });
+
+    it('catches a three-cycle too', () => {
+      const guard = new RepeatCallGuard();
+      const C = 'web_research {"q":"x"}';
+      runCycle(guard, [[A, rA], [B, rB], [C, 'nothing new']], K);
+      expect(guard.check(C)).not.toBeNull();
+    });
+
+    it('ignores a cycle longer than it can see — the documented boundary', () => {
+      // MAX_CYCLE_LENGTH is a deliberate ceiling: past it, a "cycle" is hard to
+      // tell from a legitimate repeating workflow, and refusing a call the model
+      // needed is the more expensive mistake.
+      //
+      // The length is a LITERAL. A first version built it from
+      // MAX_CYCLE_LENGTH + 1, so raising the constant grew the test's own input
+      // in lock-step and the assertion held for any value — the control drew its
+      // set from the subject. The precondition below fails loudly instead.
+      const TOO_LONG = 5;
+      expect(RepeatCallGuard.MAX_CYCLE_LENGTH).toBeLessThan(TOO_LONG);
+      const guard = new RepeatCallGuard();
+      const pairs: Array<[string, string]> = [];
+      for (let i = 0; i < TOO_LONG; i++) {
+        pairs.push([`tool_${String(i)} {}`, `result ${String(i)}`]);
+      }
+      runCycle(guard, pairs, K);
+      expect(guard.check(pairs[0]![0])).toBeNull();
+    });
+
+    // THE COUNTER-DIRECTION. Widening "same call three times" into "same call
+    // three times anywhere in the window" would catch this, and it is ordinary
+    // work: re-reading one source between three different pieces of progress.
+    it('never latches when real work happens between the repeats', () => {
+      const guard = new RepeatCallGuard();
+      const reread = 'read_file {"path":"config.json"}';
+      const config = '{"setting":true}';
+      for (let i = 0; i < K + 3; i++) {
+        expect(guard.check(reread)).toBeNull();
+        guard.record(reread, config);                       // same call, same result
+        const work = `edit_file {"path":"step${String(i)}.ts"}`;
+        expect(guard.check(work)).toBeNull();
+        guard.record(work, `wrote step ${String(i)}`);       // …but progress between
+      }
+      expect(guard.check(reread)).toBeNull();
+    });
+
+    it('never latches when one leg of the cycle keeps returning something new', () => {
+      const guard = new RepeatCallGuard();
+      for (let r = 0; r < K + 2; r++) {
+        expect(guard.check(A)).toBeNull();
+        guard.record(A, rA);
+        expect(guard.check(B)).toBeNull();
+        guard.record(B, `page ${String(r)}`);  // B advances — this is pagination
+      }
+      expect(guard.check(A)).toBeNull();
+    });
+
+    it('unlatches as soon as the model does something else', () => {
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      expect(guard.check(A)).not.toBeNull();       // latched
+      guard.record('artifact_save {"id":"plan"}', 'saved');  // progress
+      expect(guard.check(A)).toBeNull();           // and released
+      expect(guard.breakLatched()).toBeNull();
+    });
+
+    it('breaks the run hard after the escalation is ignored twice', () => {
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      expect(guard.check(A)!.consecutiveSkips).toBe(1);
+      expect(guard.breakLatched()).toBeNull();
+      expect(guard.check(B)!.consecutiveSkips).toBe(RepeatCallGuard.BREAK_AFTER_ESCALATIONS);
+      expect(guard.breakLatched()).toBe(B);
+    });
+
+    it('starts the escalation count over when the model switches to a DIFFERENT cycle', () => {
+      // Still stuck, but stuck on something else — it has not ignored a warning
+      // about THIS cycle yet, and counting it as if it had would break the run
+      // one escalation early.
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      expect(guard.check(A)!.consecutiveSkips).toBe(1);
+      const C = 'task_list {}';
+      const D = 'memory_recall {"q":"plan"}';
+      runCycle(guard, [[C, 'no tasks'], [D, 'nothing']], K);
+      expect(guard.check(C)!.consecutiveSkips).toBe(1);
+      expect(guard.breakLatched()).toBeNull();
+    });
+
+    it('reports a single repeated call as one call, not as a cycle of copies', () => {
+      // Shortest-cycle-wins: `AAA` must read as "this exact call", or the
+      // sentence the model is supposed to act on describes the wrong thing.
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA]], K);
+      expect(guard.check(A)!.escalatedResult).toContain('This exact call');
+      expect(guard.check(A)!.escalatedResult).not.toContain('sequence');
+    });
+
+    it('reads the count off the window instead of printing the constant', () => {
+      // The two agree today (a skip runs no `record`, so the window freezes at
+      // the latch), which is exactly why this is worth pinning: the sentence
+      // must stay true if REPEAT_LIMIT is ever retuned, and a hardcoded number
+      // would silently start lying.
+      const guard = new RepeatCallGuard();
+      for (let i = 0; i < K; i++) guard.record(A, rA);
+      const msg = guard.check(A)!.escalatedResult;
+      expect(msg).toContain(`already made ${String(K)} times`);
+    });
+
+    it('reset() clears a latched cycle', () => {
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      expect(guard.check(A)).not.toBeNull();
+      guard.reset();
+      expect(guard.check(A)).toBeNull();
+      expect(guard.breakLatched()).toBeNull();
+    });
+
+    it('reset() drops the window too, so the next run cannot inherit a cycle', () => {
+      // Clearing only the latch leaves the history behind, and `check` reads the
+      // latch — so the leak is invisible HERE and lands on the NEXT run, which
+      // would latch after one round instead of three on calls the fresh run has
+      // barely made. `reset()` runs at run entry, which is exactly the seam.
+      const guard = new RepeatCallGuard();
+      runCycle(guard, [[A, rA], [B, rB]], K);
+      guard.reset();
+      runCycle(guard, [[A, rA], [B, rB]], K - 1);  // one round short of latching
+      expect(guard.check(A)).toBeNull();
+    });
+
+    it('a cycle that collapses into a shorter one starts a fresh escalation', () => {
+      // Found by fuzzing, not by reasoning: `B A A` three times latches the
+      // three-cycle, and one further `A` makes the last three `A A A`, so the
+      // shorter cycle wins and the latch switches WITHOUT passing through "no
+      // cycle". That is the only way the cycle-changed branch is reached — 2
+      // occurrences in 274'981 transitions — and dropping it silently charges
+      // the new cycle for the old one's ignored warning, breaking the run an
+      // escalation early.
+      const guard = new RepeatCallGuard();
+      for (let r = 0; r < K; r++) {
+        guard.record(B, rB);
+        guard.record(A, rA);
+        guard.record(A, rA);
+      }
+      expect(guard.check(B)!.consecutiveSkips).toBe(1);
+      guard.record(A, rA);                       // …and the three-cycle collapses
+      expect(guard.check(A)!.consecutiveSkips).toBe(1);
+      expect(guard.breakLatched()).toBeNull();
+    });
+
+    it('keeps its window bounded over a long run', () => {
+      // The window must not grow with the run: it is consulted on every tool
+      // call, and an unbounded one turns a long session into a slow one.
+      const guard = new RepeatCallGuard();
+      for (let i = 0; i < 500; i++) guard.record(`tool_${String(i)} {}`, `r${String(i)}`);
+      const size = (guard as unknown as { history: unknown[] }).history.length;
+      expect(size).toBeLessThanOrEqual(RepeatCallGuard.REPEAT_LIMIT * RepeatCallGuard.MAX_CYCLE_LENGTH);
+    });
+  });
+
   // AC-1: K identical (call → same result) pairs → the (K+1)th is skipped, with
   // the last result echoed and a "do not repeat" hint. Mirrors the api_setup
   // loop (a soft failure returned as an ORDINARY, non-is_error string).
