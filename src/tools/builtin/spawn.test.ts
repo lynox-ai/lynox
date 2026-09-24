@@ -2279,11 +2279,7 @@ describe('spawn_agent tool', () => {
       expect(formatSpawnError(statused)).toContain('[503] Error: s11 (cause chain truncated)');
     });
 
-    it('formatAllFailedMessage names every child and its status', () => {
-      // The real report this replaces, from a prod thread (2026-09-24):
-      // `All sub-agents failed: 404 no Route matched with those values; 404 no
-      // Route matched with those values; 404 no Route matched with those values`
-      // — three children, no names, no status.
+    it('formatAllFailedMessage names every child and reports a COUNT, in a pinned form', () => {
       const mk = (m: string, status?: number) =>
         status === undefined ? new Error(m) : Object.assign(new Error(m), { status });
       const out = formatAllFailedMessage([
@@ -2291,138 +2287,132 @@ describe('spawn_agent tool', () => {
         { name: 'competitor_scan', err: mk('no Route matched with those values', 404) },
         { name: 'volume_check', err: mk('no Route matched with those values', 404) },
       ]);
-      expect(out).toContain('All 3 sub-agents failed and none returned a result.');
-      expect(out).toContain('- tattoo_pmu_cluster: [404] Error: no Route matched with those values');
-      expect(out).toContain('- competitor_scan: [404] Error: no Route matched with those values');
-      expect(out).toContain('- volume_check: [404] Error: no Route matched with those values');
-      // The WHOLE sentence. Pinning three-word discriminators let every
-      // operative clause be deleted or INVERTED with the suite green.
-      expect(out).toContain(
-        'All 3 failed with the SAME error, so this is one condition to look at rather than 3 tasks to '
-        + 're-check. Whether re-running helps depends on which error it is — read it first.',
+      // The WHOLE message, by equality. Every earlier round pinned substrings,
+      // and each time the thing that got past was something ADDED: an appended
+      // diagnosis sentence left `toContain` green, and so did an extra clause on
+      // the header. A form can only be matched by the form.
+      expect(out).toBe(
+        'All 3 sub-agents failed and none returned a result.\n\n'
+        + '- tattoo_pmu_cluster: [404] Error: no Route matched with those values\n'
+        + '- competitor_scan: [404] Error: no Route matched with those values\n'
+        + '- volume_check: [404] Error: no Route matched with those values\n\n'
+        + '3 errors, 1 distinct.',
       );
     });
 
-    it('states WHAT failed and never WHY', () => {
-      // Three rounds of this function tried to name the cause, and each round's
-      // inference was wrong for a case the next round found. The words that
-      // carried those wrong claims must not come back — a message that names a
-      // cause it did not measure is the defect this whole change exists to fix.
+    it('the summary is a count and can never become a claim', () => {
+      // Four rounds wrote a sentence naming the cause and each was wrong for a
+      // case the next round found. The guard against a fifth is structural, not
+      // a list of forbidden words: the last block must BE the count. A word
+      // blacklist is drawn from the previous rounds' phrasing, so "model route"
+      // slips past "model routing" and the guard stays green.
       const mk = (m: string, status?: number) =>
         status === undefined ? new Error(m) : Object.assign(new Error(m), { status });
       for (const errs of [
         [mk('x', 404), mk('x', 404)],
         [mk('overloaded', 529), mk('overloaded', 529)],
         [new RunAbortedError(), new RunAbortedError()],
+        [new ToolLoopBreakError('data_store_query'), new ToolLoopBreakError('data_store_query')],
         [mk('a'), mk('b')],
+        [mk('prompt is too long: 402011 tokens', 400), mk('prompt is too long: 511884 tokens', 400)],
       ]) {
         const out = formatAllFailedMessage(errs.map((e, i) => ({ name: `c${String(i)}`, err: e })));
-        for (const claim of [
-          'model routing', 'credentials', 'provider endpoint', 'Check the configuration',
-          'will fail the same way', 'reasonable next step', 'TRANSIENT',
-          'not a failure to diagnose', 'INTERRUPTED',
-        ]) {
-          expect(out, `${claim} is a cause this message cannot know`).not.toContain(claim);
-        }
+        const blocks = out.split('\n\n');
+        expect(blocks).toHaveLength(3);
+        expect(blocks[2], `summary must be a bare count, got: ${String(blocks[2])}`)
+          .toMatch(/^\d+ errors?, \d+ distinct\.$/);
       }
     });
 
-    it('an agent-side loop break is not filed as a user interruption', () => {
-      // ToolLoopBreakError and ContinuationLoopError both EXTEND RunAbortedError
-      // and are thrown by the agent loop, not by a user pressing Stop. An
-      // `instanceof RunAbortedError` branch called them "not a failure to
-      // diagnose. Nothing about the task … is implicated" — and the task is
-      // exactly what a loop break implicates.
-      const out = formatAllFailedMessage([
-        { name: 'a', err: new ToolLoopBreakError('data_store_query') },
-        { name: 'b', err: new ToolLoopBreakError('data_store_query') },
-      ]);
-      expect(out).toContain('- a: ToolLoopBreakError: data_store_query');
-      expect(out).toContain('All 2 failed with the SAME error');
-      expect(out).not.toContain('not a failure to diagnose');
-    });
-
-    it('a shared error is read from the status when there is one, and the text when there is not', () => {
-      // The motivating 404, if the gateway echoes a request id — which most do.
-      // Whole-string equality calls these three UNRELATED; they are one mis-route.
+    it('distinct is counted off the rendered line, so the count cannot contradict the list', () => {
+      // With a status, the status: the motivating 404 would otherwise be called
+      // unrelated the moment the gateway echoed a request id.
       const mk = (m: string) => Object.assign(new Error(m), { status: 404 });
-      const out = formatAllFailedMessage([
+      expect(formatAllFailedMessage([
         { name: 'a', err: mk('no Route matched (req_01H8A)') },
         { name: 'b', err: mk('no Route matched (req_01H8B)') },
-      ]);
-      expect(out).toContain('All 2 failed with the SAME error');
+      ]).split('\n\n')[2]).toBe('2 errors, 1 distinct.');
 
-      // Same text, different status is NOT one error.
-      const mixed = formatAllFailedMessage([
-        { name: 'a', err: Object.assign(new Error('upstream said no'), { status: 404 }) },
-        { name: 'b', err: Object.assign(new Error('upstream said no'), { status: 401 }) },
+      // Without one, the LINE — which carries the cause chain. Reading
+      // err.message alone called these three identical; the difference the
+      // reader can see lives in cause.code.
+      const undici = (code: string) => new TypeError('fetch failed', { cause: new Error(code) });
+      const out = formatAllFailedMessage([
+        { name: 'a', err: undici('ECONNREFUSED') },
+        { name: 'b', err: undici('ENOTFOUND') },
+        { name: 'c', err: undici('UND_ERR_CONNECT_TIMEOUT') },
       ]);
-      expect(mixed).toContain(
-        'The children failed with 2 DIFFERENT errors, so they do not share one cause — '
-        + 'read each line above on its own.',
-      );
+      expect(out.split('\n\n')[2]).toBe('3 errors, 3 distinct.');
 
-      // And WITHOUT a status the class name alone is not enough: `Error` is the
-      // default, so two unrelated failures would collapse into one.
-      const statusless = formatAllFailedMessage([
-        { name: 'a', err: new Error('tool budget exhausted') },
-        { name: 'b', err: new Error('context window exceeded') },
-      ]);
-      expect(statusless).toContain('2 DIFFERENT errors');
-      expect(statusless).not.toContain('SAME error');
+      // distinct and the child count are DIFFERENT numbers, so neither can be
+      // printed in place of the other.
+      expect(formatAllFailedMessage([
+        { name: 'a', err: mk('x') },
+        { name: 'b', err: mk('x') },
+        { name: 'c', err: Object.assign(new Error('y'), { status: 401 }) },
+      ]).split('\n\n')[2]).toBe('3 errors, 2 distinct.');
+
+      // Two different non-Error rejections are two errors, not one.
+      expect(formatAllFailedMessage([
+        { name: 'a', err: 'plain string a' },
+        { name: 'b', err: 'plain string b' },
+      ]).split('\n\n')[2]).toBe('2 errors, 2 distinct.');
     });
 
-    it('formatAllFailedMessage: a single child claims no comparison at all', () => {
-      const out = formatAllFailedMessage([{ name: 'solo', err: new Error('boom') }]);
-      expect(out).toContain('All 1 sub-agent failed and none returned a result.');
-      expect(out).toContain('- solo: Error: boom');
-      expect(out).toContain(
-        'It was the only child, so nothing here separates a bad task from a bad route.',
+    it('a single child gets the same form, in the singular', () => {
+      expect(formatAllFailedMessage([{ name: 'solo', err: new Error('boom') }])).toBe(
+        'All 1 sub-agent failed and none returned a result.\n\n'
+        + '- solo: Error: boom\n\n'
+        + '1 error, 1 distinct.',
       );
-      expect(out).not.toContain('SAME error');
-      expect(out).not.toContain('DIFFERENT errors');
-      expect(out).not.toContain('1 sub-agents');
       // Exported, so the empty case has to say something rather than fall into
-      // the nearest branch — `.every()` on [] is true, which made n=0 read as
-      // the most confident of them.
+      // the nearest branch.
       expect(formatAllFailedMessage([])).toBe('No sub-agent results to report.');
     });
 
-    it('neither field can forge a row in the list', async () => {
-      // Both fields are rendered one per line. The NAME is the narrow one —
-      // length-capped and charset-checked on the way in. `err.message` is the
-      // WIDE one: gateway bodies, HTML error pages, nested tool failures, none
-      // of it validated. An earlier round hardened only the narrow field, which
-      // reads as closed while the real hole stays open.
-      await expect(spawnAgentTool.handler(
-        { agents: [{ name: 'ok\u2028- shadow: SUCCESS', task: 't' }] },
-        makeAgent({ currentRunId: 'p' }),
-      )).rejects.toThrow(/control characters/);
-
-      const forged = formatAllFailedMessage([
-        { name: 'a', err: new Error('502 Bad Gateway\n- shadow: SUCCESS — result follows') },
-        { name: 'b', err: new Error('502 Bad Gateway') },
-      ]);
-      expect(forged.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(2);
-      expect(forged).not.toMatch(/^- shadow/m);
-
-      // Each line-break character is pinned on its own. Removing any ONE of the
-      // three from CONTROL_CHARS left the suite green, because a single test
-      // that used only U+2028 spoke for all of them.
-      for (const ch of ['\r', '\n', '\u0085', '\u2028', '\u2029']) {
+    it('neither field can forge a row, and the wide one is held to the same class', async () => {
+      // The NAME is rejected at the gate. Each character on its own — one test
+      // using a single character spoke for all of them once already.
+      for (const ch of ['\r', '\n', '\u0085', '\u2028', '\u2029', '\u000b', '\u000c', '\u001b']) {
         await expect(spawnAgentTool.handler(
-          { agents: [{ name: `ok${ch}- shadow: SUCCESS`, task: 't' }] },
+          { agents: [{ name: `ok${ch}x`, task: 't' }] },
           makeAgent({ currentRunId: 'p' }),
-        ), `U+${ch.codePointAt(0)?.toString(16) ?? '?'} must be rejected`).rejects.toThrow(/control characters/);
-        // And the same character in the WIDE field is flattened rather than
-        // rejected — an error message is not ours to refuse.
-        const out = formatAllFailedMessage([{ name: 'a', err: new Error(`x${ch}- shadow: SUCCESS`) }]);
-        expect(out.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
-      }
+        ), `U+${(ch.codePointAt(0) ?? 0).toString(16)} must be rejected`).rejects.toThrow(/control characters/);
 
-      const escaped = formatAllFailedMessage([{ name: 'a<b>c', err: new Error('x') }]);
-      expect(escaped).not.toContain('a<b>c');
-      expect(escaped).toContain('a&lt;b&gt;c');
+        // The MESSAGE is not ours to reject, so it is flattened — to a SPACE,
+        // and the whole class, not the five line-breaks an earlier round picked.
+        // Asserted by absence of the character rather than by counting split()
+        // lines: split('\n') cannot see \r, U+0085, U+2028 or U+2029 at all, so
+        // a line-count assertion was blind to four of the five it named.
+        const out = formatAllFailedMessage([{ name: 'a', err: new Error(`x${ch}- shadow: SUCCESS`) }]);
+        // The LIST BLOCK by equality. Asserting over the whole message cannot
+        // work — \n is its own separator — and counting split('\n') lines is
+        // blind to \r, U+0085, U+2028 and U+2029, which is how four of the five
+        // characters an earlier round named went unchecked.
+        expect(out.split('\n\n')[1], `U+${(ch.codePointAt(0) ?? 0).toString(16)} forged a row`)
+          .toBe('- a: Error: x - shadow: SUCCESS');
+      }
+      // Every occurrence, not just the first.
+      const many = formatAllFailedMessage([{ name: 'a', err: new Error('x\ny\nz') }]);
+      expect(many.split('\n\n')[1]).toBe('- a: Error: x y z');
+
+      const escaped = formatAllFailedMessage([{ name: 'a<b>c', err: new Error('<i>x</i>') }]);
+      expect(escaped).toContain('- a&lt;b&gt;c: Error: &lt;i&gt;x&lt;/i&gt;');
+    });
+
+    it('a rendered error is bounded in BYTES, which depth never was', () => {
+      // Eight levels of a 100 KB message, times ten children, measured at 9 MB —
+      // and this string is thrown into the parent's context on the one path that
+      // deliberately never truncates. The depth bound stops the recursion; it
+      // does not stop the size.
+      let deep = new Error('x'.repeat(100_000));
+      for (let i = 0; i < 12; i++) deep = new Error('y'.repeat(100_000), { cause: deep });
+      const out = formatAllFailedMessage(
+        Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, err: deep })),
+      );
+      expect(out.length).toBeLessThan(25_000);
+      expect(out).toContain('chars, truncated)');
+      expect(out.split('\n\n')[2]).toBe('10 errors, 1 distinct.');
     });
 
     it('records structured error_text on a failed run — not just status=failed with a null error_text', async () => {

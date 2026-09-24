@@ -333,8 +333,14 @@ function validateSpawnInput(input: SpawnAgentInput): void {
 /** How deep a `cause` chain is rendered before it is cut. Foreign data. */
 const MAX_CAUSE_DEPTH = 8;
 
-/** Line breaks that would let a rendered field forge a row in a one-per-line list. */
-const LINE_BREAKS = /[\r\n\u0085\u2028\u2029]/g;
+/** Per-child ceiling on the rendered error. Bytes, because depth does not bound them. */
+const MAX_RENDERED_ERROR_CHARS = 2_000;
+
+/** Everything the name gate rejects, flattened wherever a field is rendered on
+ *  its own line. Deliberately the SAME class as `CONTROL_CHARS`: a subset would
+ *  hold the wide, unvalidated field to a looser rule than the narrow, already
+ *  validated one. */
+const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
 
 export function formatSpawnError(err: unknown, depth = 0): string {
   if (!(err instanceof Error)) return String(err);
@@ -379,58 +385,63 @@ export function formatSpawnError(err: unknown, depth = 0): string {
  * matched with those values; 404 no Route matched with those values` and named
  * neither the children nor the status (dogfood 2026-09-24).
  *
- * The one-vs-many split is the whole point of the text, not decoration. Children
- * that all died the SAME way did not each fail at their task — something they
- * share failed, and the only useful next step is to look at the routing. Children
- * that died DIFFERENTLY have to be read one by one. A single sentence covering
- * both would have to be vague enough to be useless for either.
+ * It reports and does not explain, and that took four rounds to accept. Each
+ * round wrote a sentence naming the cause; each was wrong for a case the next
+ * round found; and each fix was a better SENTENCE rather than a different kind
+ * of statement. The summary is now a count, and the reader draws the conclusion
+ * from the lines above it.
  */
 export function formatAllFailedMessage(failures: readonly { name: string; err: unknown }[]): string {
   if (failures.length === 0) return 'No sub-agent results to report.';
 
-  // BOTH fields are flattened, and the wide one is the point. An earlier round
-  // escaped the NAME — which `validateSpawnInput` already length-caps and
-  // charset-checks — and left `err.message` raw, which is provider text: a
-  // gateway body, an HTML error page, a nested tool failure, none of it
-  // validated. In a one-per-line list a break in either field invents a row,
-  // and a forged row can claim a child SUCCEEDED inside a message whose whole
-  // job is to report that none did. Hardening the narrow field and leaving the
-  // wide one is worse than doing neither, because it reads as closed.
-  const flat = (v: string): string => v.replace(LINE_BREAKS, ' ');
-  const formatted = failures.map((f) => flat(formatSpawnError(f.err)));
-  const lines = failures.map((f, i) => `- ${flat(escapeXml(f.name))}: ${formatted[i] as string}`);
+  // BOTH fields get the SAME treatment, and the wide one is the reason. The
+  // NAME is narrow — `validateSpawnInput` length-caps it and rejects the whole
+  // control range. `err.message` is wide: gateway bodies, HTML pages, nested
+  // failures, none of it validated. In a one-per-line list anything that ends a
+  // line in either field invents a row, and a forged row can claim a child
+  // SUCCEEDED inside a message whose whole job is to report that none did.
+  // Giving one field two guards and the other none is worse than giving neither
+  // any, because it reads as closed.
+  //
+  // The flattened set is the same class the name gate REJECTS, not a subset: an
+  // earlier round flattened five characters while the gate rejected thirty-five,
+  // so vertical tab, form feed and ESC reached the output untouched.
+  const clean = (v: string): string => escapeXml(v).replace(UNSAFE_IN_LINE, ' ');
+  // Per-error byte cap. The depth bound on the cause chain terminates it; it
+  // does not bound it — eight levels of a 100 KB message, times ten children,
+  // measured at 9 MB, and this string is thrown into the parent's context on
+  // the one path that deliberately never truncates. Depth was the wrong axis:
+  // the cost is bytes.
+  const cap = (v: string): string =>
+    v.length <= MAX_RENDERED_ERROR_CHARS ? v : `${v.slice(0, MAX_RENDERED_ERROR_CHARS)}… (${String(v.length)} chars, truncated)`;
+  const formatted = failures.map((f) => cap(clean(formatSpawnError(f.err))));
+  const lines = failures.map((f, i) => `- ${clean(f.name)}: ${formatted[i] as string}`);
 
-  // The strongest discriminator available, per error. A numeric status is the
-  // coarse-but-correct one: the motivating gateway 404 would be called
-  // UNRELATED the moment the gateway echoed a request id. Without a status
-  // there is nothing coarser than the text, and falling back to the class name
-  // alone was measurably worse — `Error` is the default, so two unrelated
-  // failures both became "one shared cause".
-  const classOf = (err: unknown): string => {
-    if (!(err instanceof Error)) return `raw:${String(err)}`;
-    const status = (err as { status?: unknown }).status;
-    return typeof status === 'number' ? `status:${String(status)}` : `name:${err.name}|msg:${err.message}`;
+  // Counted off the RENDERED line, not off a field beside it. A status is used
+  // when there is one — the motivating gateway 404 would otherwise be called
+  // unrelated the moment the gateway echoed a request id. Without a status the
+  // discriminator is the line the reader actually sees, so the count and the
+  // list cannot disagree: reading `err.message` alone called three undici
+  // failures identical (the difference lives in `cause.code`, which the line
+  // shows and the message does not).
+  const classOf = (err: unknown, rendered: string): string => {
+    const status = err instanceof Error ? (err as { status?: unknown }).status : undefined;
+    return typeof status === 'number' ? `status:${String(status)}` : `line:${rendered}`;
   };
-  const distinct = new Set(failures.map((f) => classOf(f.err))).size;
+  const distinct = new Set(failures.map((f, i) => classOf(f.err, formatted[i] as string))).size;
 
-  // WHAT, not WHY. Three rounds of this function tried to name the cause — a
-  // shared misconfiguration, an interruption, a transient upstream — and each
-  // round's inference was wrong for a case the next round found: a user abort
-  // and an agent-side loop break are the same class to `instanceof`, a 429 is
-  // the one status where re-running IS right, and two status-less errors are
-  // not one cause. The data does not determine the cause, so the sentence
-  // cannot either. It now reports what was measured and hands the judgement to
-  // the reader, who has the errors in front of them.
-  const summary = failures.length === 1
-    ? `It was the only child, so nothing here separates a bad task from a bad route.`
-    : distinct === 1
-      ? `All ${String(failures.length)} failed with the SAME error, so this is one condition to look at rather than ` +
-        `${String(failures.length)} tasks to re-check. Whether re-running helps depends on which error it is — read it first.`
-      : `The children failed with ${String(distinct)} DIFFERENT errors, so they do not share one cause — ` +
-        `read each line above on its own.`;
+  // A COUNT, not a sentence. Four rounds wrote a sentence naming the cause and
+  // every one was wrong for a case the next round found — most recently "one
+  // condition to look at rather than N tasks to re-check", which is exactly
+  // backwards for N oversized tasks that all return the same 400, and "they do
+  // not share one cause", which is wrong when one abort hits an idle child and
+  // a mid-flight one differently. Each fix was a better sentence rather than a
+  // different kind of statement. The data does not determine the cause; the
+  // reader has the lines above and draws it. A number cannot overclaim.
+  const errs = failures.length === 1 ? '1 error' : `${String(failures.length)} errors`;
   const count = failures.length === 1 ? '1 sub-agent' : `${String(failures.length)} sub-agents`;
   return `All ${count} failed and none returned a result.\n\n` +
-    `${lines.join('\n')}\n\n${summary}`;
+    `${lines.join('\n')}\n\n${errs}, ${String(distinct)} distinct.`;
 }
 
 /**
