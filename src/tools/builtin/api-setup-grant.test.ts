@@ -1118,3 +1118,52 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek(ACCESS)).toBe('at-1');
   });
 });
+
+describe('fetch_token — the wall-clock ceiling on a dripping body', () => {
+  // ── Why this test is added BEFORE the exchange moves ──────────────────
+  //
+  // `oauth-token-exchange.ts` extracts this exchange out of the tool so the
+  // OAuth callback route can reach it too. The proof that the extraction is
+  // faithful is "the existing fetch_token tests stay green" — and that proof
+  // is only as wide as those tests.
+  //
+  // Measured before writing this: `timed out` occurred **0 times** across the
+  // whole fetch_token suite. So the one property the extraction could silently
+  // drop — the wall-clock guard that an AbortController alone does not give —
+  // was the one the proof could not see. Characterised here against the
+  // CURRENT code, green before the move, so the move has something to be
+  // measured against.
+  //
+  // The hazard the guard exists for, from the code's own comment: an
+  // `AbortController.signal` aborts `fetch()` but NOT `response.body.getReader()`
+  // once headers have arrived. A token endpoint that answers 200 and then drips
+  // bytes would hold the read open indefinitely.
+
+  it('rejects a response whose body never completes, instead of waiting forever', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const agent = makeAgent(store, vaultWithRefresh());
+
+      // Headers arrive; the body never does. `cancel` is a no-op on purpose:
+      // a body that honoured cancellation would not exercise the guard.
+      const neverEnds = new ReadableStream<Uint8Array>({ start() { /* nothing, ever */ } });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(neverEnds, { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+
+      const pending = fetchToken(agent);
+      // Past the wall timer (DOCS_FETCH_TIMEOUT_MS + 1000), not merely past the
+      // abort timer — the point is the second ceiling.
+      await vi.advanceTimersByTimeAsync(17_000);
+      const result = await pending;
+
+      expect(result).toContain('timed out');
+      // And the grant is untouched: a timeout is not a revocation.
+      expect(store.get('crm-api')?.oauth_grant?.state).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
