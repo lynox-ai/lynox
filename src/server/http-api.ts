@@ -15,6 +15,9 @@ import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
+import { signProfileOAuthState, PROFILE_OAUTH_STATE_TTL_SEC } from '../core/oauth-state-cookie.js';
+import { createPkcePair } from '../core/oauth-pkce.js';
+import { decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -942,6 +945,80 @@ async function parseBodyWithRaw(req: IncomingMessage, maxBytes: number): Promise
   });
 }
 
+/**
+ * One header value, or `undefined`.
+ *
+ * Node gives `string | string[] | undefined`: an array when the client sent the
+ * header twice. For `Sec-Fetch-*` a repeat is not something to merge — the two
+ * values may disagree, and picking one would be inventing an answer. Treated as
+ * absent, which the decision function refuses on (`no-fetch-metadata`) rather
+ * than guessing what the browser meant.
+ */
+function singleHeader(v: string | string[] | undefined): string | undefined {
+  return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * HTML-escape.
+ *
+ * ⚠ Three inline copies of this expression already live in the Google callback
+ * (`/api/google/callback`). They are deliberately NOT folded into this one
+ * here: that route is not this change's subject, and rewriting a rendering path
+ * while adding an unauthenticated one puts two unrelated risks in a single
+ * diff. What this does is avoid adding a FOURTH copy — the duplication is named
+ * so the next person who touches that route unifies four rather than finding
+ * five.
+ */
+function escapeHtml(v: string): string {
+  return v.replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c
+  ));
+}
+
+/**
+ * The one page both halves of the profile OAuth flow render.
+ *
+ * Plain HTML, no inline script: the engine API sends
+ * `Content-Security-Policy: default-src 'none'`, so a script would not run and
+ * a page that depends on one is a blank screen for the user.
+ *
+ * `no-store` because these pages are reached with a code or an error in the
+ * query string, and a cached one would replay it from history.
+ */
+function sendOAuthHtml(res: ServerResponse, status: number, message: string): void {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization</title></head>`
+    + `<body><p>${escapeHtml(message)}</p><p>You can close this tab.</p></body></html>`,
+  );
+}
+
+/**
+ * The redirect URI both halves must agree on, character for character.
+ *
+ * Built from `ORIGIN` at each use rather than stored, and built in ONE place
+ * because the provider compares it as a string: the value sent with the
+ * authorization request and the value sent with the exchange must be identical
+ * or the exchange is refused. Two construction sites is how they drift.
+ *
+ * The trailing-slash strip mirrors the tool's `connect` action, which builds
+ * the link the user clicks — an engine served under a path prefix needs the
+ * prefix, and `new URL(...).origin` alone would drop it.
+ */
+function profileOAuthRedirectUri(): string {
+  const origin = process.env['ORIGIN'] ?? '';
+  try {
+    const base = new URL(origin);
+    return `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/callback`;
+  } catch {
+    // `decideConnect` does not ask about ORIGIN, and the tool refuses a
+    // malformed one before handing out a link. An empty string here cannot be
+    // mistaken for a valid redirect_uri by any provider, which is the failure
+    // mode to prefer over a half-built one.
+    return '';
+  }
+}
+
 function parseDynamicRoute(scope: AuthScope, method: string, path: string, handler: RouteHandler): DynamicRoute {
   const paramNames: string[] = [];
   const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
@@ -1460,6 +1537,51 @@ export class LynoxHTTPApi {
 
   private _clearOAuthStateCookie(): string {
     return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+  }
+
+  // ── API-profile OAuth state cookie ────────────────────────────────────
+  //
+  // A SECOND cookie, not a reuse of the Google one above, and the difference
+  // is deliberate at three levels. Its NAME differs, so a jar never holds two
+  // entries that read alike. Its `Path` differs, so it is only ever sent to
+  // the one route that consumes it. And its signing PURPOSE differs, which is
+  // the only one of the three a later edit cannot quietly collapse —
+  // `oauth-state-cookie.ts` derives a different key, so a Google state cookie
+  // cannot verify as a profile one whatever happens to the first two.
+  //
+  // It also carries more: the profile id and the PKCE verifier travel INSIDE
+  // the signature. That is what lets the callback path stay constant, which is
+  // what keeps the dispatch carve-out an exact comparison instead of a prefix.
+
+  private static readonly PROFILE_OAUTH_COOKIE = 'lynox_profile_oauth_state';
+  private static readonly PROFILE_OAUTH_CALLBACK_PATH = '/api/oauth/callback';
+
+  private static _buildProfileOAuthSetCookie(signed: string): string {
+    // SameSite=Lax for the same reason as the Google cookie: the provider's
+    // redirect is a top-level cross-site GET, which Lax preserves and Strict
+    // drops. Max-Age mirrors the TTL the signature enforces, so an expired
+    // cookie is usually gone before it is offered — the signature check is
+    // what makes that a guarantee rather than a convenience.
+    return `${LynoxHTTPApi.PROFILE_OAUTH_COOKIE}=${encodeURIComponent(signed)}`
+      + `; Path=${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}; HttpOnly; Secure; SameSite=Lax`
+      + `; Max-Age=${String(PROFILE_OAUTH_STATE_TTL_SEC)}`;
+  }
+
+  private static _clearProfileOAuthCookie(): string {
+    return `${LynoxHTTPApi.PROFILE_OAUTH_COOKIE}=; Path=${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`
+      + '; HttpOnly; Secure; SameSite=Lax; Max-Age=0';
+  }
+
+  /** The raw cookie value, or `null`. Verification is the caller's, not this reader's. */
+  private static _readProfileOAuthCookie(req: IncomingMessage): string | null {
+    const header = req.headers['cookie'];
+    if (!header) return null;
+    // Anchored on a boundary so `x_lynox_profile_oauth_state=` cannot match.
+    const m = header.match(
+      new RegExp(`(?:^|;\\s*)${LynoxHTTPApi.PROFILE_OAUTH_COOKIE}=([^;]+)`),
+    );
+    if (!m?.[1]) return null;
+    try { return decodeURIComponent(m[1]); } catch { return null; }
   }
 
   /**
@@ -7077,6 +7199,98 @@ export class LynoxHTTPApi {
         errorResponse(res, 500, msg);
       }
     });
+
+    // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
+    //
+    // The START half. Authenticated, because it is a click from the user's own
+    // session; the CALLBACK half is not, and that asymmetry is why the profile
+    // id travels in a signed cookie rather than in either path.
+    //
+    // ⚠ `decideConnect` is called with ONE argument. Its second parameter is a
+    // test seam whose default is the frozen register, and passing anything here
+    // — a register derived from the request, or even a copy — would let the
+    // CALLER choose which host the user is sent to. That is precisely the
+    // boundary the register exists to be.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', async (req, res, params) => {
+      const id = params['id'] ?? '';
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
+
+      // Resolved here and not earlier. The obligation on this route is that
+      // authentication happens BEFORE the profile id is resolved, because the
+      // lookup alone discloses whether the id exists on this instance. It is
+      // met by the route's `user` scope: the dispatch answers 401 for an
+      // unauthenticated request before any handler runs. Two consequences are
+      // worth writing down rather than trusting:
+      //   - on an instance with NO `LYNOX_HTTP_SECRET` there is no dispatch
+      //     auth at all — and `decideConnect` refuses such an instance on its
+      //     own ground (`no-http-secret`), because the state cookie cannot be
+      //     signed without it. The two refusals cover each other's gap.
+      //   - `authenticated` is passed as a fact rather than assumed inside
+      //     `decideConnect`, because the same function answers for the tool,
+      //     where there is no dispatch to have done it.
+      const profile = engine.getApiStore()?.get(id);
+
+      const decision = decideConnect({
+        authenticated: true,
+        fetchSite: singleHeader(req.headers['sec-fetch-site']),
+        fetchDest: singleHeader(req.headers['sec-fetch-dest']),
+        profile,
+        httpSecretSet: httpSecret !== '',
+      });
+
+      if (isRefusal(decision)) {
+        // The refusal text is the decision's own. It is written to be read by a
+        // person standing in a browser, and none of the eleven kinds echoes a
+        // value back — a profile id or a host in an error page is a disclosure
+        // to whoever is looking at that screen.
+        sendOAuthHtml(res, decision.status, decision.message);
+        return;
+      }
+
+      const { verifier, challenge, method } = createPkcePair();
+      const state = randomUUID();
+      const signed = signProfileOAuthState(
+        { state, profileId: id, verifier },
+        httpSecret,
+        Math.floor(Date.now() / 1000),
+      );
+      if (!signed) {
+        // Unreachable by construction: `decideConnect` has already established
+        // the secret and the profile, and the id it saw is the id signed here.
+        // Refused rather than asserted, because "unreachable" is a claim about
+        // today's callers and this is the one place where a wrong one would
+        // mint a cookie that verifies as a DIFFERENT profile.
+        sendOAuthHtml(res, 500, 'This engine could not start the authorization. Nothing was sent to the provider.');
+        return;
+      }
+
+      const clientIdKey = profile?.auth?.oauth?.client_id_key ?? '';
+      const clientId = clientIdKey ? engine.getSecretStore()?.resolve(clientIdKey) : null;
+      if (!clientId) {
+        // `decideConnect` does not ask this: it decides whether the user may be
+        // SENT somewhere, and the vault's contents are not part of that. The
+        // tool's `connect` action checks it before handing out the link, so
+        // reaching here means the slot was emptied between the link and the
+        // click.
+        sendOAuthHtml(res, 409, 'The client id for this profile is no longer in the vault. Set it again, then ask for a new link.');
+        return;
+      }
+
+      const authorize = new URL(decision.authorizeUrl);
+      // `set`, not `append`: a preset's authorize path may legitimately carry
+      // its own query, and a second `state` would let the provider echo back
+      // whichever it preferred.
+      authorize.searchParams.set('response_type', 'code');
+      authorize.searchParams.set('client_id', clientId);
+      authorize.searchParams.set('redirect_uri', profileOAuthRedirectUri());
+      authorize.searchParams.set('state', state);
+      authorize.searchParams.set('code_challenge', challenge);
+      authorize.searchParams.set('code_challenge_method', method);
+
+      LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._buildProfileOAuthSetCookie(signed));
+      res.writeHead(302, { Location: authorize.toString(), 'Cache-Control': 'no-store' });
+      res.end();
+    }));
 
     // ── Knowledge Graph ──────────────────────────────────────────
 
