@@ -39,6 +39,15 @@ let mockRecordedToolCalls = 0;
 /** Why each constructed child says its `send()` ended (null = clean end_turn). */
 let mockLastStop: import('../../core/agent.js').SendStop | null = null;
 
+const { MockRunAbortedError } = vi.hoisted(() => ({
+  MockRunAbortedError: class RunAbortedError extends Error {
+    constructor(message = 'Run interrupted before completion') {
+      super(message);
+      this.name = 'RunAbortedError';
+    }
+  },
+}));
+
 vi.mock('../../core/agent.js', () => ({
   Agent: vi.fn().mockImplementation(function (this: MockedAgentShape, config: {
     spawnDepth?: number | undefined;
@@ -76,10 +85,14 @@ vi.mock('../../core/agent.js', () => ({
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
   // instanceof throws a TypeError (RHS undefined) and skips the updateRun.
-  RunAbortedError: class RunAbortedError extends Error {
-    constructor(message = 'Run interrupted before completion') {
-      super(message);
-      this.name = 'RunAbortedError';
+  RunAbortedError: MockRunAbortedError,
+  // Mirrors the real inheritance (agent.ts:258) — this subclass is thrown by the
+  // AGENT LOOP, not by a user abort, and a test that gave it a separate base
+  // could not see the `instanceof RunAbortedError` branch mistake it exists for.
+  ToolLoopBreakError: class ToolLoopBreakError extends MockRunAbortedError {
+    constructor(key: string) {
+      super(key);
+      this.name = 'ToolLoopBreakError';
     }
   },
 }));
@@ -116,7 +129,8 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
+import { RunAbortedError, ToolLoopBreakError } from '../../core/agent.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, formatAllFailedMessage, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
 import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
@@ -469,7 +483,17 @@ describe('spawn_agent tool', () => {
         },
         agent,
       ),
-    ).rejects.toThrow(/All sub-agents failed/);
+    ).rejects.toThrow(/All 2 sub-agents failed and none returned a result/);
+    // Through the real handler, not just the formatter: both children are named
+    // and the shared-cause reading is the one the parent gets. Asserted here
+    // because a unit test of `formatAllFailedMessage` cannot show that the throw
+    // uses it — the previous message was built inline at the throw site.
+    await expect(
+      spawnAgentTool.handler(
+        { agents: [{ name: 'fail1', task: 'Think' }, { name: 'fail2', task: 'Think too' }] },
+        makeAgent({ currentRunId: 'parent-allfail-2' }),
+      ),
+    ).rejects.toThrow(/- fail1: Error: all fail\n- fail2: Error: all fail/);
   });
 
   // === H-002 regression evidence ===
@@ -2201,6 +2225,196 @@ describe('spawn_agent tool', () => {
       expect(formatSpawnError(Object.assign(new Error('x'), { status: 'weird' }))).toBe('Error: x');
     });
 
+    it('formatSpawnError: a cause is formatted, not interpolated', () => {
+      // `${err.cause}` renders an Error as "Error: msg" and drops the status —
+      // the one field that separates a mis-route from a bad task. The cause goes
+      // through the same formatter, so it keeps its own `[status]`.
+      const inner = Object.assign(new Error('no Route matched'), { status: 404 });
+      expect(formatSpawnError(new Error('spawn failed', { cause: inner })))
+        .toBe('Error: spawn failed (cause: [404] Error: no Route matched)');
+      expect(formatSpawnError(new Error('wrapped', { cause: 'a plain string' })))
+        .toBe('Error: wrapped (cause: a plain string)');
+      // No cause must leave the old rendering byte-identical.
+      expect(formatSpawnError(new Error('bare'))).toBe('Error: bare');
+      // `cause: null` is not the same as absent, and must not print "null".
+      expect(formatSpawnError(new Error('nulled', { cause: null }))).toBe('Error: nulled');
+    });
+
+    it('formatSpawnError is total: a cause cycle cannot throw', () => {
+      // This function also runs on the PARTIAL-failure path, where a throw
+      // discards the results of children that SUCCEEDED — the same failure
+      // direction this whole change exists to remove, one level down. Before
+      // the bound, a cyclic cause raised RangeError and the parent got
+      // "Maximum call stack size exceeded" instead of a diagnosis.
+      const a = new Error('A');
+      const b = new Error('B');
+      (a as { cause?: unknown }).cause = b;
+      (b as { cause?: unknown }).cause = a;
+      expect(() => formatSpawnError(a)).not.toThrow();
+      expect(formatSpawnError(a)).toContain('cause chain truncated');
+
+      const self = new Error('S');
+      (self as { cause?: unknown }).cause = self;
+      expect(() => formatSpawnError(self)).not.toThrow();
+
+      // A long LINEAR chain is bounded too, and the bound is visible rather
+      // than silent — a reader must not mistake a cut chain for a short one.
+      let deep = new Error('leaf');
+      for (let i = 0; i < 5_000; i++) deep = new Error(`w${String(i)}`, { cause: deep });
+      expect(() => formatSpawnError(deep)).not.toThrow();
+      expect(formatSpawnError(deep)).toContain('cause chain truncated');
+      expect(formatSpawnError(deep).length).toBeLessThan(2_000);
+
+      // The DEPTH is pinned, not just its existence: 8 → 2 and 8 → 64 both left
+      // the suite green, so the number was decoration. Eight levels render,
+      // the ninth is the cut.
+      let chain = new Error('leaf');
+      for (let i = 0; i < 20; i++) chain = new Error(`w${String(i)}`, { cause: chain });
+      expect(formatSpawnError(chain).split('(cause: ').length - 1).toBe(8);
+
+      // And the cut keeps the status — losing it would drop the one field this
+      // change exists to keep in front of the reader.
+      let statused = Object.assign(new Error('deep-leaf'), { status: 500 });
+      for (let i = 0; i < 20; i++) statused = Object.assign(new Error(`s${String(i)}`, { cause: statused }), { status: 503 });
+      expect(formatSpawnError(statused)).toContain('[503] Error: s11 (cause chain truncated)');
+    });
+
+    it('formatAllFailedMessage names every child and reports a COUNT, in a pinned form', () => {
+      const mk = (m: string, status?: number) =>
+        status === undefined ? new Error(m) : Object.assign(new Error(m), { status });
+      const out = formatAllFailedMessage([
+        { name: 'tattoo_pmu_cluster', err: mk('no Route matched with those values', 404) },
+        { name: 'competitor_scan', err: mk('no Route matched with those values', 404) },
+        { name: 'volume_check', err: mk('no Route matched with those values', 404) },
+      ]);
+      // The WHOLE message, by equality. Every earlier round pinned substrings,
+      // and each time the thing that got past was something ADDED: an appended
+      // diagnosis sentence left `toContain` green, and so did an extra clause on
+      // the header. A form can only be matched by the form.
+      expect(out).toBe(
+        'All 3 sub-agents failed and none returned a result.\n\n'
+        + '- tattoo_pmu_cluster: [404] Error: no Route matched with those values\n'
+        + '- competitor_scan: [404] Error: no Route matched with those values\n'
+        + '- volume_check: [404] Error: no Route matched with those values\n\n'
+        + '3 errors, 1 distinct.',
+      );
+    });
+
+    it('the summary is a count and can never become a claim', () => {
+      // Four rounds wrote a sentence naming the cause and each was wrong for a
+      // case the next round found. The guard against a fifth is structural, not
+      // a list of forbidden words: the last block must BE the count. A word
+      // blacklist is drawn from the previous rounds' phrasing, so "model route"
+      // slips past "model routing" and the guard stays green.
+      const mk = (m: string, status?: number) =>
+        status === undefined ? new Error(m) : Object.assign(new Error(m), { status });
+      for (const errs of [
+        [mk('x', 404), mk('x', 404)],
+        [mk('overloaded', 529), mk('overloaded', 529)],
+        [new RunAbortedError(), new RunAbortedError()],
+        [new ToolLoopBreakError('data_store_query'), new ToolLoopBreakError('data_store_query')],
+        [mk('a'), mk('b')],
+        [mk('prompt is too long: 402011 tokens', 400), mk('prompt is too long: 511884 tokens', 400)],
+      ]) {
+        const out = formatAllFailedMessage(errs.map((e, i) => ({ name: `c${String(i)}`, err: e })));
+        const blocks = out.split('\n\n');
+        expect(blocks).toHaveLength(3);
+        expect(blocks[2], `summary must be a bare count, got: ${String(blocks[2])}`)
+          .toMatch(/^\d+ errors?, \d+ distinct\.$/);
+      }
+    });
+
+    it('distinct is counted off the rendered line, so the count cannot contradict the list', () => {
+      // With a status, the status: the motivating 404 would otherwise be called
+      // unrelated the moment the gateway echoed a request id.
+      const mk = (m: string) => Object.assign(new Error(m), { status: 404 });
+      expect(formatAllFailedMessage([
+        { name: 'a', err: mk('no Route matched (req_01H8A)') },
+        { name: 'b', err: mk('no Route matched (req_01H8B)') },
+      ]).split('\n\n')[2]).toBe('2 errors, 1 distinct.');
+
+      // Without one, the LINE — which carries the cause chain. Reading
+      // err.message alone called these three identical; the difference the
+      // reader can see lives in cause.code.
+      const undici = (code: string) => new TypeError('fetch failed', { cause: new Error(code) });
+      const out = formatAllFailedMessage([
+        { name: 'a', err: undici('ECONNREFUSED') },
+        { name: 'b', err: undici('ENOTFOUND') },
+        { name: 'c', err: undici('UND_ERR_CONNECT_TIMEOUT') },
+      ]);
+      expect(out.split('\n\n')[2]).toBe('3 errors, 3 distinct.');
+
+      // distinct and the child count are DIFFERENT numbers, so neither can be
+      // printed in place of the other.
+      expect(formatAllFailedMessage([
+        { name: 'a', err: mk('x') },
+        { name: 'b', err: mk('x') },
+        { name: 'c', err: Object.assign(new Error('y'), { status: 401 }) },
+      ]).split('\n\n')[2]).toBe('3 errors, 2 distinct.');
+
+      // Two different non-Error rejections are two errors, not one.
+      expect(formatAllFailedMessage([
+        { name: 'a', err: 'plain string a' },
+        { name: 'b', err: 'plain string b' },
+      ]).split('\n\n')[2]).toBe('2 errors, 2 distinct.');
+    });
+
+    it('a single child gets the same form, in the singular', () => {
+      expect(formatAllFailedMessage([{ name: 'solo', err: new Error('boom') }])).toBe(
+        'All 1 sub-agent failed and none returned a result.\n\n'
+        + '- solo: Error: boom\n\n'
+        + '1 error, 1 distinct.',
+      );
+      // Exported, so the empty case has to say something rather than fall into
+      // the nearest branch.
+      expect(formatAllFailedMessage([])).toBe('No sub-agent results to report.');
+    });
+
+    it('neither field can forge a row, and the wide one is held to the same class', async () => {
+      // The NAME is rejected at the gate. Each character on its own — one test
+      // using a single character spoke for all of them once already.
+      for (const ch of ['\r', '\n', '\u0085', '\u2028', '\u2029', '\u000b', '\u000c', '\u001b']) {
+        await expect(spawnAgentTool.handler(
+          { agents: [{ name: `ok${ch}x`, task: 't' }] },
+          makeAgent({ currentRunId: 'p' }),
+        ), `U+${(ch.codePointAt(0) ?? 0).toString(16)} must be rejected`).rejects.toThrow(/control characters/);
+
+        // The MESSAGE is not ours to reject, so it is flattened — to a SPACE,
+        // and the whole class, not the five line-breaks an earlier round picked.
+        // Asserted by absence of the character rather than by counting split()
+        // lines: split('\n') cannot see \r, U+0085, U+2028 or U+2029 at all, so
+        // a line-count assertion was blind to four of the five it named.
+        const out = formatAllFailedMessage([{ name: 'a', err: new Error(`x${ch}- shadow: SUCCESS`) }]);
+        // The LIST BLOCK by equality. Asserting over the whole message cannot
+        // work — \n is its own separator — and counting split('\n') lines is
+        // blind to \r, U+0085, U+2028 and U+2029, which is how four of the five
+        // characters an earlier round named went unchecked.
+        expect(out.split('\n\n')[1], `U+${(ch.codePointAt(0) ?? 0).toString(16)} forged a row`)
+          .toBe('- a: Error: x - shadow: SUCCESS');
+      }
+      // Every occurrence, not just the first.
+      const many = formatAllFailedMessage([{ name: 'a', err: new Error('x\ny\nz') }]);
+      expect(many.split('\n\n')[1]).toBe('- a: Error: x y z');
+
+      const escaped = formatAllFailedMessage([{ name: 'a<b>c', err: new Error('<i>x</i>') }]);
+      expect(escaped).toContain('- a&lt;b&gt;c: Error: &lt;i&gt;x&lt;/i&gt;');
+    });
+
+    it('a rendered error is bounded in BYTES, which depth never was', () => {
+      // Eight levels of a 100 KB message, times ten children, measured at 9 MB —
+      // and this string is thrown into the parent's context on the one path that
+      // deliberately never truncates. The depth bound stops the recursion; it
+      // does not stop the size.
+      let deep = new Error('x'.repeat(100_000));
+      for (let i = 0; i < 12; i++) deep = new Error('y'.repeat(100_000), { cause: deep });
+      const out = formatAllFailedMessage(
+        Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, err: deep })),
+      );
+      expect(out.length).toBeLessThan(25_000);
+      expect(out).toContain('chars, truncated)');
+      expect(out.split('\n\n')[2]).toBe('10 errors, 1 distinct.');
+    });
+
     it('records structured error_text on a failed run — not just status=failed with a null error_text', async () => {
       const insertRun = vi.fn().mockReturnValue('run-fail-1');
       const updateRun = vi.fn();
@@ -2213,7 +2427,7 @@ describe('spawn_agent tool', () => {
       const agent = makeAgent({ currentRunId: 'parent-fail', toolContext: parentToolContext });
       await expect(
         spawnAgentTool.handler({ agents: [{ name: 'collector', task: 'fetch' }] }, agent),
-      ).rejects.toThrow(/All sub-agents failed/);
+      ).rejects.toThrow(/- collector: \[404\] Error: no Route matched with those values/);
 
       const failUpdate = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'failed');
       expect(failUpdate).toBeDefined();

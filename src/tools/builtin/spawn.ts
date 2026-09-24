@@ -274,7 +274,12 @@ export function resolveSpawnChildProviderConfig(input: {
 // Control characters (incl. CR/LF) that could be used to spoof log lines or
 // break terminal rendering when `name` is echoed in error messages, channel
 // events, or the `## ${name}` markdown header.
-const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+// U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are line
+// breaks that `[\x00-\x1f\x7f]` does not cover. They matter here for the same
+// reason CR/LF do: a name is echoed one-per-line in the all-failed message, so a
+// name carrying a line break forges an extra row — and a forged row can claim a
+// child SUCCEEDED inside a message whose whole job is to report that none did.
+const CONTROL_CHARS = /[\x00-\x1f\x7f\u0085\u2028\u2029]/;
 
 function validateSpawnInput(input: SpawnAgentInput): void {
   if (!Array.isArray(input.agents) || input.agents.length === 0) {
@@ -325,11 +330,118 @@ function validateSpawnInput(input: SpawnAgentInput): void {
  * makes a silent sub-agent failure undiagnosable after the fact (the exact gap
  * that hid the v2.1.1 hybrid 404s until the DB was read by hand).
  */
-export function formatSpawnError(err: unknown): string {
+/** How deep a `cause` chain is rendered before it is cut. Foreign data. */
+const MAX_CAUSE_DEPTH = 8;
+
+/** Per-child ceiling on the rendered error. Bytes, because depth does not bound them. */
+const MAX_RENDERED_ERROR_CHARS = 2_000;
+
+/** Everything the name gate rejects, flattened wherever a field is rendered on
+ *  its own line. Deliberately the SAME class as `CONTROL_CHARS`: a subset would
+ *  hold the wide, unvalidated field to a looser rule than the narrow, already
+ *  validated one. */
+const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
+
+export function formatSpawnError(err: unknown, depth = 0): string {
   if (!(err instanceof Error)) return String(err);
-  const status = (err as { status?: unknown }).status;
-  const statusPrefix = typeof status === 'number' ? `[${status}] ` : '';
-  return `${statusPrefix}${err.name}: ${err.message}`;
+  // A cause chain is foreign data — an SDK may hand back a cycle, and this
+  // function also runs on the PARTIAL-failure path, where a throw would discard
+  // the results of children that SUCCEEDED. That is the failure direction this
+  // file exists to remove, one level down.
+  //
+  // ONE bound, not two. A seen-set sat beside this depth stop and no test could
+  // tell them apart — deleting the seen-set left the suite green, because after
+  // eight levels the depth stop cuts a cycle anyway. Two guards where one
+  // suffices is a guard nobody is checking: it survives every mutation and
+  // reads as defence.
+  const cutStatus = (err as { status?: unknown }).status;
+  const cutPrefix = typeof cutStatus === 'number' ? `[${cutStatus}] ` : '';
+  if (depth >= MAX_CAUSE_DEPTH) {
+    // The prefix survives the cut. Dropping it loses the status — the one field
+    // this whole change exists to keep in front of the reader.
+    return `${cutPrefix}${err.name}: ${err.message} (cause chain truncated)`;
+  }
+  const statusPrefix = cutPrefix;
+  // The cause is formatted by THIS function too, not string-interpolated by the
+  // caller: `${err.cause}` on an Error renders as "Error: msg" and drops the
+  // status, which is the one field that separates a mis-route from a bad task.
+  const { cause } = err;
+  const causeSuffix = cause === undefined || cause === null
+    ? ''
+    : ` (cause: ${cause instanceof Error ? formatSpawnError(cause, depth + 1) : String(cause)})`;
+  return `${statusPrefix}${err.name}: ${err.message}${causeSuffix}`;
+}
+
+/**
+ * The message for the case where EVERY child died, which is the case the parent
+ * is least able to act on and was until now told the least about.
+ *
+ * The partial-failure path already renders each child as `## name — FAILED` with
+ * `formatSpawnError`, and the comment at that call says why: the HTTP status is
+ * what makes a provider mis-route read as a config failure rather than a vague
+ * one. When all of them failed, that rendering was built and then thrown away —
+ * the throw joined bare `err.message`s, so a real fan-out reported
+ * `All sub-agents failed: 404 no Route matched with those values; 404 no Route
+ * matched with those values; 404 no Route matched with those values` and named
+ * neither the children nor the status (dogfood 2026-09-24).
+ *
+ * It reports and does not explain, and that took four rounds to accept. Each
+ * round wrote a sentence naming the cause; each was wrong for a case the next
+ * round found; and each fix was a better SENTENCE rather than a different kind
+ * of statement. The summary is now a count, and the reader draws the conclusion
+ * from the lines above it.
+ */
+export function formatAllFailedMessage(failures: readonly { name: string; err: unknown }[]): string {
+  if (failures.length === 0) return 'No sub-agent results to report.';
+
+  // BOTH fields get the SAME treatment, and the wide one is the reason. The
+  // NAME is narrow — `validateSpawnInput` length-caps it and rejects the whole
+  // control range. `err.message` is wide: gateway bodies, HTML pages, nested
+  // failures, none of it validated. In a one-per-line list anything that ends a
+  // line in either field invents a row, and a forged row can claim a child
+  // SUCCEEDED inside a message whose whole job is to report that none did.
+  // Giving one field two guards and the other none is worse than giving neither
+  // any, because it reads as closed.
+  //
+  // The flattened set is the same class the name gate REJECTS, not a subset: an
+  // earlier round flattened five characters while the gate rejected thirty-five,
+  // so vertical tab, form feed and ESC reached the output untouched.
+  const clean = (v: string): string => escapeXml(v).replace(UNSAFE_IN_LINE, ' ');
+  // Per-error byte cap. The depth bound on the cause chain terminates it; it
+  // does not bound it — eight levels of a 100 KB message, times ten children,
+  // measured at 9 MB, and this string is thrown into the parent's context on
+  // the one path that deliberately never truncates. Depth was the wrong axis:
+  // the cost is bytes.
+  const cap = (v: string): string =>
+    v.length <= MAX_RENDERED_ERROR_CHARS ? v : `${v.slice(0, MAX_RENDERED_ERROR_CHARS)}… (${String(v.length)} chars, truncated)`;
+  const formatted = failures.map((f) => cap(clean(formatSpawnError(f.err))));
+  const lines = failures.map((f, i) => `- ${clean(f.name)}: ${formatted[i] as string}`);
+
+  // Counted off the RENDERED line, not off a field beside it. A status is used
+  // when there is one — the motivating gateway 404 would otherwise be called
+  // unrelated the moment the gateway echoed a request id. Without a status the
+  // discriminator is the line the reader actually sees, so the count and the
+  // list cannot disagree: reading `err.message` alone called three undici
+  // failures identical (the difference lives in `cause.code`, which the line
+  // shows and the message does not).
+  const classOf = (err: unknown, rendered: string): string => {
+    const status = err instanceof Error ? (err as { status?: unknown }).status : undefined;
+    return typeof status === 'number' ? `status:${String(status)}` : `line:${rendered}`;
+  };
+  const distinct = new Set(failures.map((f, i) => classOf(f.err, formatted[i] as string))).size;
+
+  // A COUNT, not a sentence. Four rounds wrote a sentence naming the cause and
+  // every one was wrong for a case the next round found — most recently "one
+  // condition to look at rather than N tasks to re-check", which is exactly
+  // backwards for N oversized tasks that all return the same 400, and "they do
+  // not share one cause", which is wrong when one abort hits an idle child and
+  // a mid-flight one differently. Each fix was a better sentence rather than a
+  // different kind of statement. The data does not determine the cause; the
+  // reader has the lines above and draws it. A number cannot overclaim.
+  const errs = failures.length === 1 ? '1 error' : `${String(failures.length)} errors`;
+  const count = failures.length === 1 ? '1 sub-agent' : `${String(failures.length)} sub-agents`;
+  return `All ${count} failed and none returned a result.\n\n` +
+    `${lines.join('\n')}\n\n${errs}, ${String(distinct)} distinct.`;
 }
 
 /**
@@ -1206,6 +1318,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     const sections: string[] = [];
     const errors: Error[] = [];
+    // Paired with `errors` so the all-failed message can name WHICH child died
+    // of what. `errors` alone cannot: it holds only the ones that failed, so its
+    // index does not line up with `specs`.
+    const failures: { name: string; err: Error }[] = [];
     const childRunIds: Array<string | undefined> = [];
 
     for (let i = 0; i < results.length; i++) {
@@ -1356,6 +1472,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           ? outcome.reason
           : new Error(String(outcome.reason));
         errors.push(err);
+        failures.push({ name: spec.name, err });
         // Mark the section as a FAILURE unambiguously so the parent can't mistake
         // a dead sub-agent for one that returned nothing useful — a silent
         // sub-agent failure is more dangerous than a loud one. `formatSpawnError`
@@ -1382,8 +1499,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     });
 
     if (errors.length === specs.length) {
-      const details = errors.map(e => `${e.message}${e.cause ? ` (cause: ${e.cause})` : ''}`).join('; ');
-      throw new AggregateError(errors, `All sub-agents failed: ${details}`);
+      throw new AggregateError(errors, formatAllFailedMessage(failures));
     }
 
     return sections.join('\n\n---\n\n');
