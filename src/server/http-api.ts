@@ -3934,8 +3934,16 @@ export class LynoxHTTPApi {
       // truth (incl. what the merged chat bubble hides), so it must NOT collapse
       // a turn's assistant iterations the way the UI /messages endpoint does.
       const MESSAGE_ROW_LIMIT = 50000;
-      const messageRows = threadStore.getMessages(id, { fromSeq: 0, limit: MESSAGE_ROW_LIMIT });
-      const messages = projectMessages(messageRows, { mergeTurns: false });
+      // Counted with COUNT(*), not as `.length` of the array we just read: the
+      // array's length is capped by the very limit it would be used to detect,
+      // so it can only ever agree with itself. Two independent sources, and the
+      // read's array stays a temporary rather than being held alive across the
+      // whole bundle build.
+      const storedRowCount = threadStore.getMessageCount(id);
+      const messages = projectMessages(
+        threadStore.getMessages(id, { fromSeq: 0, limit: MESSAGE_ROW_LIMIT }),
+        { mergeTurns: false },
+      );
 
       const history = engine.getRunHistory();
       // Extended debug capture (step-3 at-a-glance view): a flat per-turn table across
@@ -4159,9 +4167,9 @@ export class LynoxHTTPApi {
         // input/output those carriers hold is under `runs[].tool_calls`.
         messages_projection: {
           rendered: messages.length,
-          stored_rows: messageRows.length,
-          truncated_at_limit: messageRows.length >= MESSAGE_ROW_LIMIT,
-          note: 'messages[] is a rendered projection: tool-result carrier rows are merged into the tool call they answer instead of appearing as their own entry, so it is shorter than stored_rows. Raw tool input/output is under runs[].tool_calls.',
+          stored_rows: storedRowCount,
+          truncated_at_limit: storedRowCount > MESSAGE_ROW_LIMIT,
+          note: 'messages[] is a rendered projection and is shorter than stored_rows for SEVERAL reasons, not one: a tool-result carrier is merged into the tool call it answers; a tool_result whose tool_use was not rendered is dropped outright; so are hint-only and tool-guidance-only user rows, and thinking-only or empty assistant rows. A tool call\'s OUTPUT lives at messages[].toolCalls[].result — NOT in runs[].tool_calls, whose output column is an error ledger (empty on success) and whose input is redacted and capped at 2000 characters. If truncated_at_limit is true the read dropped the NEWEST rows (ORDER BY seq ASC), while runs[] is not capped.',
         },
         messages,
         runs,

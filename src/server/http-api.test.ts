@@ -5109,7 +5109,7 @@ describe('LynoxHTTPApi', () => {
     }
 
     it('GET /api/threads/:id/debug-export 404s an unknown thread', async () => {
-      await swapEngine({ getThreadStore: () => ({ getThread: () => null, getMessages: () => [] }) }, async () => {
+      await swapEngine({ getThreadStore: () => ({ getThread: () => null, getMessages: () => [], getMessageCount: () => 0 }) }, async () => {
         const res = await jsonFetch('/api/threads/nope/debug-export');
         expect(res.status).toBe(404);
       });
@@ -5127,7 +5127,7 @@ describe('LynoxHTTPApi', () => {
       await swapEngine({
         // KEY also in the thread title → proves the whole-bundle scrub covers
         // fields BEYOND runs (thread + messages), not just the runs array.
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `T ${KEY}` }), getMessages: () => [] }),
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `T ${KEY}` }), getMessages: () => [], getMessageCount: () => 0 }),
         getRunHistory: () => runHistory,
       }, async () => {
         const res = await jsonFetch('/api/threads/t1/debug-export');
@@ -5159,7 +5159,7 @@ describe('LynoxHTTPApi', () => {
         }),
       };
       await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [], getMessageCount: () => 0 }),
         getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
         getKnowledgeLayer: () => kg,
       }, async () => {
@@ -5189,7 +5189,7 @@ describe('LynoxHTTPApi', () => {
      */
     function dkEngine(store: unknown): Record<string, () => unknown> {
       return {
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [], getMessageCount: () => 0 }),
         getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
         getKnowledgeLayer: () => ({
           stats: async () => ({ memoryCount: 1, entityCount: 0, relationCount: 0, communityCount: 0 }),
@@ -5506,7 +5506,7 @@ describe('LynoxHTTPApi', () => {
         ],
       };
       await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [], getMessageCount: () => 0 }),
         getRunHistory: () => runHistory,
       }, async () => {
         const res = await jsonFetch('/api/threads/t1/debug-export');
@@ -5549,35 +5549,99 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('states BOTH counts, so a shorter messages[] does not read as lost rows', async () => {
+    describe('messages_projection', () => {
       // The projection merges a tool-result carrier INTO the tool call it
-      // answers, so `messages` is legitimately shorter than the stored rows.
-      // Unlabelled, that gap reads as data loss: a 2026-09-24 loop
-      // investigation counted 133 entries against a stored 213 and spent a
-      // detour on the persistence layer before the seq gaps gave it away.
+      // answers and drops several other row kinds outright, so `messages` is
+      // legitimately shorter than what is stored. Unlabelled, that gap reads as
+      // data loss: a 2026-09-24 loop investigation counted 133 entries against
+      // a stored 213 and spent a detour on the persistence layer.
       const rows = [
         { seq: 1, role: 'user', content_json: JSON.stringify('do it'), created_at: 'now' },
         { seq: 2, role: 'assistant', content_json: JSON.stringify([{ type: 'tool_use', id: 'tu1', name: 'data_store_query', input: {} }]), created_at: 'now' },
-        // The carrier — merged into tu1 above, never its own entry.
         { seq: 3, role: 'user', content_json: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu1', content: '20 rows' }]), created_at: 'now' },
+        // A SECOND assistant turn. With mergeTurns it would collapse into the
+        // first; the export must not collapse a turn's iterations, which is the
+        // whole reason the reporter could see twenty of them.
+        { seq: 4, role: 'assistant', content_json: JSON.stringify([{ type: 'text', text: 'second turn' }]), created_at: 'now' },
       ];
-      await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => rows }),
-        getRunHistory: () => null,
-      }, async () => {
-        const res = await jsonFetch('/api/threads/t1/debug-export');
-        const body = await res.json() as {
-          messages: unknown[];
-          messages_projection: { rendered: number; stored_rows: number; truncated_at_limit: boolean; note: string };
+
+      /** Records what the handler asked the store for — the extracted call is
+       *  part of the diff, and a mock that ignores `opts` cannot see it change. */
+      const storeSpy = (count: number) => {
+        const seen: Array<Record<string, unknown>> = [];
+        return {
+          seen,
+          store: {
+            getThread: () => ({ id: 't1', title: 'T' }),
+            getMessages: (_id: string, opts?: Record<string, unknown>) => { seen.push(opts ?? {}); return rows; },
+            getMessageCount: () => count,
+          },
         };
-        const p = body.messages_projection;
-        expect(p.stored_rows).toBe(rows.length);
-        expect(p.rendered).toBe(body.messages.length);
-        // The whole point: the two differ, and the artefact says so itself.
-        expect(p.rendered).toBeLessThan(p.stored_rows);
-        expect(p.truncated_at_limit).toBe(false);
-        expect(p.note).toMatch(/merged into the tool call/i);
-        expect(p.note).toMatch(/runs\[\]\.tool_calls/);
+      };
+
+      it('reads the whole thread from the first row, under an explicit cap', () => {
+        const spy = storeSpy(rows.length);
+        return swapEngine({ getThreadStore: () => spy.store, getRunHistory: () => null }, async () => {
+          await jsonFetch('/api/threads/t1/debug-export');
+          expect(spy.seen).toHaveLength(1);
+          expect(spy.seen[0]).toEqual({ fromSeq: 0, limit: 50000 });
+        });
+      });
+
+      it('does not collapse a turn\'s assistant iterations', async () => {
+        const spy = storeSpy(rows.length);
+        await swapEngine({ getThreadStore: () => spy.store, getRunHistory: () => null }, async () => {
+          const res = await jsonFetch('/api/threads/t1/debug-export');
+          const body = await res.json() as { messages: Array<{ role: string }> };
+          expect(body.messages.filter((m) => m.role === 'assistant')).toHaveLength(2);
+        });
+      });
+
+      it('counts stored rows from the store, not from the array it just read', async () => {
+        // The array's length is capped by the very limit it would be used to
+        // detect, so it can only ever agree with itself. COUNT(*) is the second,
+        // independent source — here it deliberately disagrees with rows.length.
+        const spy = storeSpy(9_999);
+        await swapEngine({ getThreadStore: () => spy.store, getRunHistory: () => null }, async () => {
+          const res = await jsonFetch('/api/threads/t1/debug-export');
+          const body = await res.json() as { messages: unknown[]; messages_projection: { rendered: number; stored_rows: number } };
+          expect(body.messages_projection.stored_rows).toBe(9_999);
+          expect(body.messages_projection.rendered).toBe(body.messages.length);
+          expect(body.messages_projection.rendered).toBeLessThan(9_999);
+        });
+      });
+
+      it('flags truncation only when the store holds more than the cap', async () => {
+        for (const [count, expected] of [[49_999, false], [50_000, false], [50_001, true]] as Array<[number, boolean]>) {
+          const spy = storeSpy(count);
+          await swapEngine({ getThreadStore: () => spy.store, getRunHistory: () => null }, async () => {
+            const res = await jsonFetch('/api/threads/t1/debug-export');
+            const body = await res.json() as { messages_projection: { truncated_at_limit: boolean } };
+            expect(body.messages_projection.truncated_at_limit, `count ${String(count)}`).toBe(expected);
+          });
+        }
+      });
+
+      it('carries the note VERBATIM', async () => {
+        // Pinned whole rather than by substring. A review rewrote this note into
+        // its own negation — "nothing is merged", "NOT under runs[].tool_calls
+        // and exists nowhere" — and every substring assertion still matched. A
+        // sentence that tells a debugger where to look is either right or it
+        // sends them away from the data; there is no partial credit.
+        const spy = storeSpy(rows.length);
+        await swapEngine({ getThreadStore: () => spy.store, getRunHistory: () => null }, async () => {
+          const res = await jsonFetch('/api/threads/t1/debug-export');
+          const body = await res.json() as { messages_projection: { note: string } };
+          expect(body.messages_projection.note).toBe(
+            'messages[] is a rendered projection and is shorter than stored_rows for SEVERAL reasons, not one: '
+            + 'a tool-result carrier is merged into the tool call it answers; a tool_result whose tool_use was not '
+            + 'rendered is dropped outright; so are hint-only and tool-guidance-only user rows, and thinking-only '
+            + 'or empty assistant rows. A tool call\'s OUTPUT lives at messages[].toolCalls[].result — NOT in '
+            + 'runs[].tool_calls, whose output column is an error ledger (empty on success) and whose input is '
+            + 'redacted and capped at 2000 characters. If truncated_at_limit is true the read dropped the NEWEST '
+            + 'rows (ORDER BY seq ASC), while runs[] is not capped.',
+          );
+        });
       });
     });
 
@@ -5594,7 +5658,7 @@ describe('LynoxHTTPApi', () => {
         getWireSnapshotsForRun: () => [],
       };
       await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [], getMessageCount: () => 0 }),
         getRunHistory: () => runHistory,
       }, async () => {
         const res = await jsonFetch('/api/threads/t1/debug-export');
@@ -5622,7 +5686,7 @@ describe('LynoxHTTPApi', () => {
         getWireSnapshotsForRun: () => [],
       };
       await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [], getMessageCount: () => 0 }),
         getRunHistory: () => runHistory,
       }, async () => {
         const res = await jsonFetch('/api/threads/t1/debug-export');
