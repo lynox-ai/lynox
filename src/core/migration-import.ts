@@ -260,10 +260,23 @@ export class MigrationImporter {
       // complete is worse than a migration that refuses to start, and the message has to name
       // the type, because otherwise the operator cannot tell "too old" from "corrupt".
       if (!KNOWN_CHUNK_TYPES.has(chunk.type)) {
+        // The type is echoed because the operator cannot act without it — and it is BOUNDED
+        // and QUOTED at the source, not one function away. `errorResponse` does mask and cap
+        // at 600 chars on the way out, but a throw site that relies on its caller for that is
+        // safe only for as long as every caller keeps doing it; two sibling errors in this
+        // file already lean on the same single mitigation. `JSON.stringify` also escapes
+        // control characters, so a crafted type cannot forge a line wherever this text lands.
+        //
+        // The wording states what the code KNOWS. An earlier draft said the export "was
+        // written by a newer lynox" — which a corrupt or hostile manifest produces just as
+        // well, so the sentence asserted a cause the check cannot establish. Naming both and
+        // ranking them is the difference between a diagnosis and a guess.
         throw new Error(
-          `Unknown chunk type "${chunk.type}" in the manifest — this export was written by a `
-          + `newer lynox than this instance. Upgrade this instance before restoring; a restore `
-          + `now would silently leave out everything it cannot place.`,
+          `Unknown chunk type ${JSON.stringify(String(chunk.type).slice(0, 64))} in the `
+          + `manifest. Most likely this export was written by a newer lynox than this `
+          + `instance — upgrade this instance before restoring. Otherwise the manifest is `
+          + `corrupt. Either way, restoring now would silently leave out everything this `
+          + `build cannot place.`,
         );
       }
 

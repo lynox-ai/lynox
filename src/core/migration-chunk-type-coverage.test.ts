@@ -66,13 +66,41 @@ describe('a manifest naming a type this build does not know is refused', () => {
       let msg = '';
       try { importer.setManifest(manifestWith(['memory', 'time_machine'])); } catch (e) { msg = String(e); }
       expect(msg).toContain('time_machine');
+      // The message must name BOTH causes, because the check cannot tell them apart: a corrupt
+      // or hostile manifest produces the same unknown type as an export from a newer build. An
+      // earlier draft asserted the newer-build cause as fact, which is a guess in the voice of
+      // a diagnosis.
       expect(msg).toMatch(/newer lynox/);
+      expect(msg, 'the message must not present one of two causes as the cause').toMatch(/corrupt/);
       // The orchestrator's condition, and it is the whole point: the refusal must be
       // DISTINGUISHABLE from a completed import, not merely a different exit path. A run that
       // aborts while looking finished is the defect this file exists for, with the sign flipped.
       expect(importer.isComplete()).toBe(false);
       expect(() => importer.restore()).toThrow();
       expect(readdirSync(dir), 'a refused manifest must not have written anything').toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('bounds and quotes the echoed type AT THE SOURCE, not one function away', () => {
+    // `errorResponse` masks and caps at 600 chars, but that is the HTTP caller's doing. A
+    // throw site that depends on its caller is safe only while every caller keeps doing it,
+    // and this message is thrown from a library method that any embedder can call.
+    const dir = mkdtempSync(join(tmpdir(), 'mig-long-'));
+    try {
+      const importer = armed(dir);
+      // The control characters come FIRST, deliberately. With them at the end, `.slice(0, 64)`
+      // removed them on its own and the two assertions below passed without `JSON.stringify`
+      // doing anything — a mutation that deleted the quoting survived. The fixture has to put
+      // the hostile part where the code under test is the only thing that can neutralise it.
+      const hostile = `\n\u001b[2Jforged-log-line${'A'.repeat(5000)}`;
+      let msg = '';
+      try { importer.setManifest(manifestWith([hostile])); } catch (e) { msg = e instanceof Error ? e.message : ''; }
+      expect(msg.length, 'the echoed type is not bounded at the throw site').toBeLessThan(400);
+      expect(msg, 'a raw newline survived into the message').not.toContain('\n');
+      expect(msg, 'a raw escape survived into the message').not.toContain('\u001b');
+      // …and the control: a bounded prefix of the hostile input IS still shown, or the
+      // operator learns nothing.
+      expect(msg).toContain('AAAA');
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
