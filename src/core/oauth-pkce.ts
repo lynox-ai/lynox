@@ -12,8 +12,15 @@
  * browser this engine does not control. The state cookie binds the callback to
  * the browser that started the flow; PKCE binds the code to the same start.
  * A code lifted out of a redirect — a shared machine, a referrer, a proxy log —
- * cannot be exchanged without the verifier, which never leaves this engine's
- * signed cookie.
+ * cannot be exchanged without the verifier.
+ *
+ * ⚠ **The verifier never travels the FRONT channel, which is not the same as
+ * never being sent.** An earlier version of this comment said it "never leaves
+ * this engine's signed cookie", and that is contradicted by the exchange one
+ * import away: RFC 7636 §4.5 requires `code_verifier` in the token request, and
+ * this flow sends it there. What the browser carries is only the SHA-256. The
+ * distinction is the whole mechanism — a channel the attacker can read carries
+ * the hash, and a channel they cannot carries the pre-image.
  *
  * ⚠ **Not measured against a real provider, because there is none yet.** The
  * preset register ships empty, so no authorize URL exists to send these
@@ -32,9 +39,13 @@ import { createHash, randomBytes } from 'node:crypto';
 const VERIFIER_BYTES = 64; // base64url of 64 bytes → 86 chars, inside the range
 
 export interface PkcePair {
-  /** Kept by this engine, in the signed state cookie. Never sent to the provider. */
+  /**
+   * Kept in the signed state cookie across the redirect, then sent to the
+   * provider's TOKEN endpoint — the back channel — where RFC 7636 §4.5
+   * requires it. It never travels through the browser.
+   */
   readonly verifier: string;
-  /** Sent to the provider on the authorize URL. */
+  /** The only half the browser carries: it goes on the authorize URL. */
   readonly challenge: string;
   /** Always `S256`; `plain` is offered by the RFC and is not offered here. */
   readonly method: 'S256';

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { signProfileOAuthState } from '../core/oauth-state-cookie.js';
+import { profileOAuthCookieAttributes, authorizationCodeParams } from './http-api.js';
 
 /**
  * The callback is the one route in this file's subject that an unauthenticated
@@ -70,7 +71,11 @@ describe('what a stranger gets', () => {
   it.each([
     ['no cookie at all', `?code=c&state=${STATE}`, undefined],
     ['a cookie that is not ours', `?code=c&state=${STATE}`, `${COOKIE}=not-a-signed-value`],
-    ['a cookie with a tampered payload', `?code=c&state=${STATE}`, `${COOKIE}=${STATE}.bexio.${VERIFIER}.1700000000.dead`],
+    ['a cookie with a tampered signature', `?code=c&state=${STATE}`,
+      // Stamped NOW on purpose. With a stale timestamp the TTL refuses it before
+      // the signature is ever computed, and the case silently stops being about
+      // the signature at all — which is what it said on the label for one revision.
+      `${COOKIE}=${STATE}.bexio.${VERIFIER}.${String(Math.floor(Date.now() / 1000))}.dead`],
     ['no code', `?state=${STATE}`, mintCookie()],
     ['no state', '?code=c', mintCookie()],
     ['a state that does not match the cookie', '?code=c&state=3f2504e0-4f89-11d3-9a0c-0305e82c3302', mintCookie()],
@@ -125,6 +130,78 @@ describe('the shape of the page itself', () => {
   });
 });
 
+describe('the inputs that made this route answer 500', () => {
+  it('refuses a state whose UTF-8 length differs from its JS length, with 400 and not 500', async () => {
+    // `String.length` counts UTF-16 code units, `Buffer.from` produces UTF-8
+    // bytes. A 36-character state carrying one non-ASCII character passed a
+    // string-length pre-check and then made `timingSafeEqual` throw, so the
+    // route answered 500 with a JSON body and an UNCLEARED cookie — instead of
+    // the uniform 400 every other malformed arrival gets.
+    const sneaky = `${'a'.repeat(35)}\u00e9`;
+    expect(sneaky).toHaveLength(36);
+    expect(Buffer.from(sneaky)).toHaveLength(37);
+
+    const res = await callback(`?code=c&state=${encodeURIComponent(sneaky)}`, mintCookie());
+    expect(res.status).toBe(400);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(res.headers.get('set-cookie') ?? '').toContain('Max-Age=0');
+  });
+
+  it('clears the cookie when the provider says the user declined', async () => {
+    // A declining user is a FINISHED round-trip, not an interrupted one. This
+    // path returned before any clear for one revision, so the next top-level
+    // navigation could retry a flow the person had just refused.
+    const res = await callback('?error=access_denied', mintCookie());
+    expect(res.status).toBe(400);
+    expect(res.headers.get('set-cookie') ?? '').toContain('Max-Age=0');
+  });
+});
+
+describe('the attributes that ARE the mechanism', () => {
+  it('carries Lax, HttpOnly, Secure and the callback path', () => {
+    // `SameSite=Lax` is the whole bound the design names for the redirect hop,
+    // and a probe flipped it to `None` with the entire suite staying green.
+    const attrs = profileOAuthCookieAttributes();
+    expect(attrs).toContain('SameSite=Lax');
+    expect(attrs).toContain('HttpOnly');
+    expect(attrs).toContain('Secure');
+    expect(attrs).toContain('Path=/api/oauth/callback');
+    // Not Strict: Strict drops the cookie on the provider's top-level
+    // cross-site redirect, which is the one navigation this flow depends on.
+    expect(attrs).not.toContain('SameSite=Strict');
+  });
+
+  it('is the same string the route actually sends', async () => {
+    // Pinning a copy and shipping another is how an asserted attribute becomes
+    // decoration. Read back off a live response.
+    const res = await callback('?code=c&state=wrong', mintCookie());
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    for (const part of profileOAuthCookieAttributes().split('; ')) {
+      expect(setCookie).toContain(part);
+    }
+  });
+});
+
+describe('the exchange carries the PKCE pre-image', () => {
+  it('sends code_verifier, which is what binds the code to the start', () => {
+    // Deleting this field from the call site left the whole suite green,
+    // because the exchange sits behind a profile this harness cannot build.
+    const params = authorizationCodeParams({
+      code: 'c', redirectUri: 'https://e/api/oauth/callback',
+      clientId: 'id', clientSecret: 'sec', verifier: 'v'.repeat(43),
+    });
+    expect(params['code_verifier']).toBe('v'.repeat(43));
+    expect(params['grant_type']).toBe('authorization_code');
+    // The challenge belongs on the authorize URL and nowhere near here.
+    expect(Object.keys(params)).not.toContain('code_challenge');
+  });
+});
+
+// ⚠ LAST in this file on purpose. It spends the whole per-IP window, and every
+// case after it then measures 429 instead of what it meant to measure — which
+// is exactly what happened when it sat in the middle: three later cases failed
+// and neither the route nor they were wrong. A test that consumes a SHARED
+// budget changes what every later test is about.
 describe('the route is charged against the client window', () => {
   it('answers 429 once the window is spent', async () => {
     // This route answers before the dispatch's shared charge point, so it

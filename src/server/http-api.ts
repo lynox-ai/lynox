@@ -1014,6 +1014,52 @@ function sendOAuthHtml(res: ServerResponse, status: number, message: string): vo
  * the link the user clicks — an engine served under a path prefix needs the
  * prefix, and `new URL(...).origin` alone would drop it.
  */
+/**
+ * The form fields an authorization-code exchange carries.
+ *
+ * A function rather than an object literal at the call site, because a mutation
+ * probe deleted `code_verifier` from that literal and the whole suite stayed
+ * green: the exchange happens behind a provisioned profile the harness cannot
+ * build, so nothing downstream could see the loss. PKCE is the mechanism the
+ * route's own table names for `code`, and a mechanism nothing asserts is a
+ * sentence.
+ */
+/**
+ * The attributes both the set and the clear carry, written ONCE.
+ *
+ * ⚠ A mutation probe found all three unpinned: `SameSite=Lax` is the entire
+ * mechanism the callback's own table names for the redirect hop, and flipping
+ * it to `None` — or dropping `HttpOnly` — left the whole suite green. An
+ * attribute nothing asserts is a comment with a semicolon in it.
+ *
+ * `Lax` and not `Strict`: the provider's redirect is a top-level cross-site
+ * GET, which Lax preserves and Strict drops. That IS the bound on the redirect
+ * hop, rather than a `Referer` check.
+ *
+ * The class reads this through one private field, so there is one definition
+ * and not a copy that a test pins while the code uses the other.
+ */
+export function profileOAuthCookieAttributes(): string {
+  return 'Path=/api/oauth/callback; HttpOnly; Secure; SameSite=Lax';
+}
+
+export function authorizationCodeParams(args: {
+  readonly code: string;
+  readonly redirectUri: string;
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly verifier: string;
+}): Record<string, string> {
+  return {
+    grant_type: 'authorization_code',
+    code: args.code,
+    redirect_uri: args.redirectUri,
+    client_id: args.clientId,
+    client_secret: args.clientSecret,
+    code_verifier: args.verifier,
+  };
+}
+
 function profileOAuthRedirectUri(): string {
   const origin = process.env['ORIGIN'] ?? '';
   try {
@@ -1597,6 +1643,21 @@ export class LynoxHTTPApi {
   private static readonly PROFILE_OAUTH_COOKIE = 'lynox_profile_oauth_state';
   private static readonly PROFILE_OAUTH_CALLBACK_PATH = '/api/oauth/callback';
 
+  /**
+   * The attributes both the set and the clear carry, written once.
+   *
+   * ⚠ Exported through {@link profileOAuthCookieAttributes} because a mutation
+   * probe found all three unpinned: `SameSite=Lax` is the ENTIRE mechanism the
+   * design names for the redirect hop, and flipping it to `None` — or dropping
+   * `HttpOnly` — left the whole suite green. An attribute nothing asserts is a
+   * comment with a semicolon in it.
+   *
+   * `SameSite=Lax` and not `Strict`: the provider's redirect is a top-level
+   * cross-site GET, which Lax preserves and Strict drops. That is the bound,
+   * not a `Referer` check.
+   */
+  private static readonly PROFILE_OAUTH_COOKIE_ATTRS = profileOAuthCookieAttributes();
+
   private static _buildProfileOAuthSetCookie(signed: string): string {
     // SameSite=Lax for the same reason as the Google cookie: the provider's
     // redirect is a top-level cross-site GET, which Lax preserves and Strict
@@ -1604,13 +1665,12 @@ export class LynoxHTTPApi {
     // cookie is usually gone before it is offered — the signature check is
     // what makes that a guarantee rather than a convenience.
     return `${LynoxHTTPApi.PROFILE_OAUTH_COOKIE}=${encodeURIComponent(signed)}`
-      + `; Path=${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}; HttpOnly; Secure; SameSite=Lax`
+      + `; ${LynoxHTTPApi.PROFILE_OAUTH_COOKIE_ATTRS}`
       + `; Max-Age=${String(PROFILE_OAUTH_STATE_TTL_SEC)}`;
   }
 
   private static _clearProfileOAuthCookie(): string {
-    return `${LynoxHTTPApi.PROFILE_OAUTH_COOKIE}=; Path=${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`
-      + '; HttpOnly; Secure; SameSite=Lax; Max-Age=0';
+    return `${LynoxHTTPApi.PROFILE_OAUTH_COOKIE}=; ${LynoxHTTPApi.PROFILE_OAUTH_COOKIE_ATTRS}; Max-Age=0`;
   }
 
   /** The raw cookie value, or `null`. Verification is the caller's, not this reader's. */
@@ -7356,16 +7416,23 @@ export class LynoxHTTPApi {
     //   redirect hop — `SameSite=Lax` on the cookie: it travels on a top-level
     //                  navigation and not on a cross-site subresource or a
     //                  POST. That is the property, not a `Referer` check.
-    //   `code`       — NO mechanism here. It is single-use at the PROVIDER,
-    //                  which is the provider's guarantee and not this engine's.
-    //                  A replay therefore costs one refused exchange, and the
-    //                  window it can happen in is the cookie's TTL.
+    //   `code`       — two, and neither is single-use enforcement. PKCE binds it
+    //                  to the start that minted the verifier, so a code lifted
+    //                  out of the redirect cannot be spent without it. Being
+    //                  single-use is the PROVIDER's guarantee, not this
+    //                  engine's, so a replay costs one refused exchange inside
+    //                  the cookie's TTL. ⚠ An earlier version of this line said
+    //                  "NO mechanism here" while the module two imports away
+    //                  explained that PKCE is exactly that — the table
+    //                  contradicted its own diff.
     this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res) => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const providerError = url.searchParams.get('error');
       if (providerError !== null) {
-        // The provider's own word, escaped but not echoed as-is into anything
-        // that parses: a user who declined is the ordinary case here.
+        // Cleared here too. A declining user is a FINISHED round-trip, not an
+        // interrupted one — leaving the cookie would let the next top-level
+        // navigation to this path retry a flow the person just refused.
+        LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
         sendOAuthHtml(res, 400, 'The provider did not complete the authorization.');
         return;
       }
@@ -7382,10 +7449,18 @@ export class LynoxHTTPApi {
       // deliberately one TEXT for all of them: which of the five failed is
       // information about this engine's state, and the person who reaches this
       // page without a valid cookie is not the person who started the flow.
-      const statesMatch = signed !== null
-        && queryState !== null
-        && queryState.length === signed.state.length
-        && timingSafeEqual(Buffer.from(queryState), Buffer.from(signed.state));
+      // Both sides converted FIRST, then compared by byte length. `String.length`
+      // counts UTF-16 code units and `Buffer.from` produces UTF-8 bytes, so a
+      // 36-character state carrying one non-ASCII character passes a
+      // string-length pre-check and then makes `timingSafeEqual` throw — which
+      // left this route answering 500 with an uncleared cookie instead of the
+      // uniform 400. Measured, and the two lengths are the whole bug.
+      const queryBuf = queryState === null ? null : Buffer.from(queryState);
+      const stateBuf = signed === null ? null : Buffer.from(signed.state);
+      const statesMatch = queryBuf !== null
+        && stateBuf !== null
+        && queryBuf.length === stateBuf.length
+        && timingSafeEqual(queryBuf, stateBuf);
       if (!signed || !code || !statesMatch) {
         LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
         sendOAuthHtml(res, 400, 'This authorization link is no longer valid. Ask for a new one and try again.');
@@ -7426,14 +7501,13 @@ export class LynoxHTTPApi {
 
       const exchanged = await exchangeToken({
         endpoint: vetting,
-        params: {
-          grant_type: 'authorization_code',
+        params: authorizationCodeParams({
           code,
-          redirect_uri: profileOAuthRedirectUri(),
-          client_id: clientId,
-          client_secret: clientSecret,
-          code_verifier: signed.verifier,
-        },
+          redirectUri: profileOAuthRedirectUri(),
+          clientId,
+          clientSecret,
+          verifier: signed.verifier,
+        }),
         bodyFormat: oauth.body_format ?? 'form',
       }, engine.getToolContext());
 
