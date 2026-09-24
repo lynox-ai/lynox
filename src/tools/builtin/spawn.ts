@@ -355,7 +355,6 @@ export function formatSpawnError(err: unknown, depth = 0): string {
     // this whole change exists to keep in front of the reader.
     return `${cutPrefix}${err.name}: ${err.message} (cause chain truncated)`;
   }
-  const status = cutStatus;
   const statusPrefix = cutPrefix;
   // The cause is formatted by THIS function too, not string-interpolated by the
   // caller: `${err.cause}` on an Error renders as "Error: msg" and drops the
