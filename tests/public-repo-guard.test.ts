@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, chmodSync, readdirSync, readFileSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1368,5 +1368,97 @@ describe('public-repo-guard — private names in files (check-files)', () => {
 
   it('is invoked by nothing under .github — printing paths is safe only locally', () => {
     expect(invokersUnder(join(REPO_ROOT, '.github'))).toEqual([]);
+  });
+});
+
+/**
+ * The BARE cross-reference id — the same class as the linked form, one bracket pair
+ * short. It could only start now: the backlog it was filed against (68 hits in 2026-07)
+ * is gone, and the pattern goes green on a tree nobody had to clean for it.
+ *
+ * Every marker is assembled, like the rest of this file, so the test itself carries no
+ * literal instance of what it forbids.
+ */
+describe('bare register ids', () => {
+  const BARE_ID = ['DEF', 'probe-row-not-real'].join('-');
+
+  it('catches the bare form in a source file', () => {
+    commitFile('src/leak.ts', `// deferred, see (${BARE_ID})\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('catches BOTH forms, so the fix does not move the gap one bracket deeper', () => {
+    commitFile('src/bare.ts', `// ${BARE_ID}\n`);
+    expect(runGuard(), 'bare form').not.toBe(0);
+    rmSync(join(dir, 'src/bare.ts'));
+    execFileSync('git', ['rm', '--cached', '-q', '--', 'src/bare.ts'], { cwd: dir, env: GIT_ENV });
+    commitFile('src/linked.ts', `// ${internalRef(BARE_ID)}\n`);
+    expect(runGuard(), 'linked form').not.toBe(0);
+  });
+
+  it('honours the inline pragma, because a fabricated id can be legitimate INPUT', () => {
+    // The live case this exists for: `tests/gate-record.test.ts` feeds invented ids to
+    // the `closes:` parser. Those are input, not references, and a path carve-out would
+    // be blind to the next file that does the same somewhere else.
+    commitFile('src/parser.test.ts', `const s = 'closes: ${BARE_ID}'; // ${PRAGMA}: parser input\n`);
+    expect(runGuard()).toBe(0);
+  });
+
+  it('does NOT catch an uppercase or underscored variant — a stated limit, not an oversight', () => {
+    // The register's ids are lowercase kebab by its own id guard's rule, so the body
+    // class is `[0-9a-z-]`. If that vocabulary ever widens, this test is the one that
+    // should fail first and say so.
+    commitFile('src/upper.ts', `// ${['DEF', 'Row_Mixed'].join('-')}\n`);
+    expect(runGuard()).toBe(0);
+  });
+});
+
+describe('the closing message is falsifiable', () => {
+  it('names how many files it read, and the number is not zero', () => {
+    // This assertion exists because the first version of the counter printed `0
+    // file(s) scanned` on a run that had just reported four hits: the file list is
+    // NUL-separated and `wc -l` therefore counts nothing. A sample size that can be
+    // silently zero is worse than none — it reads like "nothing to check".
+    commitFile('src/ok.ts', 'export const a = 1;\n');
+    const r = run([]);
+    expect(r.code).toBe(0);
+    const m = /clean ✓ \((\d+) file\(s\) scanned, (\d+) pattern class\(es\) probed\)/.exec(r.out);
+    expect(m, `no sample size in: ${r.out}`).not.toBeNull();
+    expect(Number(m![1]), 'sample size is zero on a tree with files').toBeGreaterThan(0);
+    expect(Number(m![2]), 'no pattern class was probed').toBeGreaterThan(4);
+  });
+  it('REFUSES with exit 2 when a pattern stops matching its own example', () => {
+    // A negative assertion ("a broken pattern cannot report clean") needs a positive on
+    // the same machinery, or it passes because nothing ever exercises it. So the script
+    // is copied, one pattern is sabotaged, and the copy is run: the refusal has to be
+    // observable, not argued.
+    // The copy has to bring the library with it: the guard sources
+    // `lib/guard-file-list.sh` relative to its OWN path, so a copy anywhere else dies
+    // at line 50 with "No such file" and exit 1 — which the first version of this test
+    // read as "the refusal did not fire". A sabotage test carries the subject's
+    // dependencies, or it measures the copy instead of the change.
+    const sabDir = join(dir, 'sab');
+    mkdirSync(join(sabDir, 'lib'), { recursive: true });
+    copyFileSync(join(dirname(SCRIPT), 'lib', 'guard-file-list.sh'), join(sabDir, 'lib', 'guard-file-list.sh'));
+    const sabotaged = join(sabDir, 'guard-sabotaged.sh');
+    const src = readFileSync(SCRIPT, 'utf8');
+    const line = /^BARE_REF=.*$/m.exec(src);
+    expect(line, 'the pattern this test sabotages is gone — update the test').not.toBeNull();
+    writeFileSync(sabotaged, src.replace(line![0], 'BARE_REF="zzqx-never-matches-anything"'));
+    let code = 0; let out = '';
+    try {
+      out = execFileSync('bash', [sabotaged], {
+        cwd: dir, encoding: 'utf8', stdio: 'pipe',
+        env: { ...process.env, HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } as NodeJS.ProcessEnv,
+      });
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      code = e.status ?? -1; out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    expect(code, 'a broken pattern must refuse, not report on a tree it cannot inspect').toBe(2);
+    expect(out).toContain('no longer matches its own example');
+    // …and the control that the unsabotaged script is clean on the same fixture, so the
+    // exit 2 above is attributable to the sabotage and not to the fixture.
+    expect(runGuard()).toBe(0);
   });
 });
