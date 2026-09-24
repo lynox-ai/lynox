@@ -144,6 +144,18 @@ const mockGoogleAuth = {
  * about re-testing the egress gate (which has its own suite).
  */
 const mockCpFetch = vi.fn();
+const mockDerivePresetEndpoints = vi.fn();
+vi.mock('../core/oauth-presets.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/oauth-presets.js')>()),
+  derivePresetEndpoints: (...a: unknown[]) => mockDerivePresetEndpoints(...a),
+}));
+
+const mockExchangeToken = vi.fn();
+vi.mock('../core/oauth-token-exchange.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/oauth-token-exchange.js')>()),
+  exchangeToken: (...a: unknown[]) => mockExchangeToken(...a),
+}));
+
 vi.mock('../core/connector-egress.js', async (importActual) => ({
   ...(await importActual<typeof import('../core/connector-egress.js')>()),
   cpFetch: (...args: unknown[]) => mockCpFetch(...args),
@@ -9385,3 +9397,93 @@ describe('mail custom-server defaults are the same on both routes', () => {
         expect(existsSync(join(tmpArea, 'uploads'))).toBe(false);
       });
     });
+
+describe('GET /api/oauth/callback — the half behind the cookie check', () => {
+  // ⚠ This region was called "not reachable by this harness" for one revision.
+  // It is reachable: the engine mock already swaps `getApiStore` and
+  // `getSecretStore`, `derivePresetEndpoints` carries a register seam, and the
+  // exchange is mockable like `connector-egress` above. What made it
+  // unreachable was the OTHER test file booting a real engine — a choice, not
+  // a property. Naming a limit as a property of the tooling is how a gap stops
+  // being looked at.
+
+  const PROFILE = 'crm-api';
+  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  const VERIFIER = 'v'.repeat(43);
+
+  async function arrange(): Promise<string> {
+    const { ApiStore } = await import('../core/api-store.js');
+    const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+    const store = new ApiStore();
+    store.register({
+      id: PROFILE, name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+      auth: {
+        type: 'oauth2',
+        vault_keys: ['CRM_CLIENT_ID'],
+        oauth: { client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' },
+      },
+    });
+    mockGetApiStore.mockReturnValue(store);
+    mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_CLIENT_ID' ? 'id-1' : 'sec-1'));
+    mockDerivePresetEndpoints.mockReturnValue({
+      authorizeUrl: 'https://api.openai.com/authorize',
+      tokenUrl: 'https://api.openai.com/token',
+      host: 'api.openai.com',
+    });
+    mockExchangeToken.mockResolvedValue({
+      ok: true, status: 200, responseOk: true,
+      text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
+    });
+    const signed = signProfileOAuthState(
+      { state: STATE, profileId: PROFILE, verifier: VERIFIER },
+      TEST_SECRET, Math.floor(Date.now() / 1000),
+    );
+    if (signed === null) throw new Error('fixture could not be signed');
+    return `lynox_profile_oauth_state=${encodeURIComponent(signed)}`;
+  }
+
+  afterEach(() => {
+    mockGetApiStore.mockReturnValue(null);
+    mockSecretResolve.mockReset();
+    mockSecretSet.mockReset();
+  });
+
+  it('stores both tokens on the ordinary path', async () => {
+    const cookie = await arrange();
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('Connected');
+    expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0]))
+      .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
+  });
+
+  it('answers the page, not the catch-all, when the SECOND write throws', async () => {
+    // The partial-write state: the access token is already persisted, the
+    // refresh token is not. That profile WORKS until the access token expires
+    // and then fails with no renewal path — a delayed, silent failure nobody
+    // traces back. Unguarded, the throw reached the dispatch's catch-all, which
+    // answers JSON while every other answer from this route is a page, and the
+    // user read "Internal server error" without learning to retry.
+    const cookie = await arrange();
+    let call = 0;
+    mockSecretSet.mockImplementation(() => {
+      call++;
+      if (call === 2) throw new Error('SQLITE_BUSY: database is locked');
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    const body = await res.text();
+    expect(body).toContain('incomplete');
+    // NOT the sentence the earlier branches use: something WAS stored.
+    expect(body).not.toContain('Nothing was stored');
+    // And the first write really did land, which is why the sentence differs.
+    expect(call).toBe(2);
+  });
+});
