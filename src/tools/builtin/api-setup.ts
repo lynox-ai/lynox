@@ -23,7 +23,7 @@ import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, to
 import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
-import { resolveGuardedAckHosts } from '../../core/tool-context.js';
+import { exchangeToken } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
@@ -39,9 +39,6 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
-// OAuth token responses are small JSON; cap the read so a malicious token_url
-// can't stream an unbounded body into memory during fetch_token.
-const TOKEN_BODY_MAX_BYTES = 64 * 1024;
 /**
  * Hard $ budget per extraction call. The helper's default model is now
  * Sonnet 4.6 (matches the engine-wide LLM default) — Haiku was the legacy
@@ -1909,68 +1906,28 @@ Next steps before calling create:
       if (oauth.scope) params['scope'] = oauth.scope;
       if (oauth.audience) params['audience'] = oauth.audience;
       if (presentedRefresh !== null) params['refresh_token'] = presentedRefresh;
-      const headers: Record<string, string> = { 'Accept': 'application/json' };
-      let body: string;
-      if (bodyFormat === 'json') {
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify(params);
-      } else {
-        headers['Content-Type'] = 'application/x-www-form-urlencoded';
-        body = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-      }
-      let response: Response;
-      let respText: string;
-      const ac = new AbortController();
-      const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
-      // Wall-clock guarantee: an AbortController.signal aborts fetch() but NOT
-      // response.body.getReader() once headers have arrived, so a malicious
-      // token_url that returns headers then drips the body (≤ TOKEN_BODY_MAX_BYTES,
-      // 1 byte/30s) would hang readBodyLimited indefinitely. Race BOTH the fetch
-      // and the body read against this (mirrors http_request's HARD_CAP).
-      let wallTimer: ReturnType<typeof setTimeout> | undefined;
-      const wallTimeout = new Promise<never>((_, reject) => {
-        wallTimer = setTimeout(() => {
-          ac.abort();
-          reject(new Error(`token exchange timed out after ${DOCS_FETCH_TIMEOUT_MS}ms`));
-        }, DOCS_FETCH_TIMEOUT_MS + 1000);
-      });
-      try {
-        // Pass agent.toolContext so the SAME egress controls the docs/http paths
-        // enforce apply here too: network_policy (deny-all / allow-list) + HTTPS
-        // enforcement. Without it the client_secret in `body` would POST to an
-        // arbitrary attacker-supplied token_url regardless of the tenant's
-        // network policy — a credential-exfil channel.
-        ({ response } = await Promise.race([
-          // fetch_token is a full-control credentialed egress (posts the
-          // client_secret to token_url) — gated under `guarded`. The token_url
-          // host is in this profile's own custom_endpoint_ack (base_url +
-          // token_url were both accepted at save), so the accepted-host union
-          // admits it; a token_url no profile accepted stays blocked.
-          fetchWithValidatedRedirects(oauth.token_url, {
-            method: 'POST',
-            headers,
-            body,
-            signal: ac.signal,
-          }, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(agent.toolContext) }, agent.toolContext),
-          wallTimeout,
-        ]));
-        // Charge the token exchange against the session HTTP budget so
-        // fetch_token is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
-        agent.sessionCounters.httpRequests++;
-        // Bounded read — a malicious token_url can't stream an unbounded body
-        // into memory (the response is small JSON; we only need the access_token).
-        const read = await Promise.race([
-          readBodyLimited(response, TOKEN_BODY_MAX_BYTES),
-          wallTimeout,
-        ]);
-        respText = read.text;
-      } catch (err) {
-        return `Error: token exchange to ${oauth.token_url} failed: ${err instanceof Error ? err.message : String(err)}.`;
-      } finally {
-        clearTimeout(timer);
-        clearTimeout(wallTimer);
-      }
-      if (!response.ok) {
+      // The POST itself lives in `core/oauth-token-exchange.ts` because the
+      // OAuth callback route needs the same hardened request — and only that.
+      // What a non-2xx MEANS stays here: everything below this call is about
+      // refresh tokens and the grant behind them, which the authorization-code
+      // caller has neither of.
+      //
+      // `agent.toolContext` carries the egress controls. Without it the
+      // client_secret in the body would POST to an arbitrary token_url whatever
+      // the tenant's network policy says, which is the exfiltration channel this
+      // path is shaped around.
+      //
+      // The session HTTP budget is charged through the callback, after the
+      // response: a refused egress never reached the provider to be charged for,
+      // and `fetch_token` must not be a freebie bypass of the per-session cap.
+      const exchanged = await exchangeToken(
+        { tokenUrl: oauth.token_url, params, bodyFormat },
+        agent.toolContext,
+        () => { agent.sessionCounters.httpRequests++; },
+      );
+      if (!exchanged.ok) return `Error: ${exchanged.message}`;
+      const respText = exchanged.text;
+      if (!exchanged.responseOk) {
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
         const snippet = respText.length > 500 ? respText.slice(0, 500) + '…[truncated]' : respText;
@@ -1981,7 +1938,7 @@ Next steps before calling create:
         // else changes nothing. Before this, all three read as "check your
         // credentials", and a revoked grant looked like a token that had merely
         // expired — the model was told to fetch again, forever.
-        let kind = classifyRefreshFailure(response.status, respText);
+        let kind = classifyRefreshFailure(exchanged.status, respText);
         // Only a refresh token is a grant the user gave and the provider can take
         // back. A client-credentials exchange answering `invalid_grant` refuses
         // the client itself, so it is read as a client problem.
@@ -2011,10 +1968,10 @@ Next steps before calling create:
         if (kind === 'grant-revoked') {
           const nowHeld = resolveOne(refreshKey);
           if (nowHeld === null) {
-            return `Token exchange failed with HTTP ${response.status}, but the refresh token it sent is no longer in the vault under "${refreshKey}", so this answer says nothing about the grant. Nothing was recorded. Check with api_setup list that api_profile "${input.id}" still exists before anything else. ${responseBody}`;
+            return `Token exchange failed with HTTP ${exchanged.status}, but the refresh token it sent is no longer in the vault under "${refreshKey}", so this answer says nothing about the grant. Nothing was recorded. Check with api_setup list that api_profile "${input.id}" still exists before anything else. ${responseBody}`;
           }
           if (nowHeld !== presentedRefresh) {
-            return `Token exchange failed with HTTP ${response.status}, but the refresh token under "${refreshKey}" was replaced while the request was out — by another exchange running at the same time, or by a token stored meanwhile — so this answer says nothing about the token stored now. Nothing was recorded. Retry the API request; if it is refused or answers 401, call fetch_token once. ${responseBody}`;
+            return `Token exchange failed with HTTP ${exchanged.status}, but the refresh token under "${refreshKey}" was replaced while the request was out — by another exchange running at the same time, or by a token stored meanwhile — so this answer says nothing about the token stored now. Nothing was recorded. Retry the API request; if it is refused or answers 401, call fetch_token once. ${responseBody}`;
           }
         }
         // A profile that names its own refresh slot reads from there, while every
@@ -2022,7 +1979,7 @@ Next steps before calling create:
         // just failed may simply be the one the last rotation replaced, so no
         // verdict can be recorded; the reply names the split instead.
         if (kind === 'grant-revoked' && refreshKey !== refreshTokenKey(input.id)) {
-          return `Token exchange failed with HTTP ${response.status}: the provider rejected the refresh token read from "${refreshKey}". This profile reads its refresh token from "${refreshKey}", but fetch_token stores a rotated one under "${refreshTokenKey(input.id)}", so the rejected token may just be an old one. Nothing was recorded. Remove auth.oauth.refresh_token_key from the profile with api_setup update, so both are the same slot, then call fetch_token again. ${responseBody}`;
+          return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected the refresh token read from "${refreshKey}". This profile reads its refresh token from "${refreshKey}", but fetch_token stores a rotated one under "${refreshTokenKey(input.id)}", so the rejected token may just be an old one. Nothing was recorded. Remove auth.oauth.refresh_token_key from the profile with api_setup update, so both are the same slot, then call fetch_token again. ${responseBody}`;
         }
         if (kind === 'grant-revoked' && presentedFp !== undefined) {
           persistGrant(apiStore, input.id, apisDir, (current) => ({
@@ -2034,19 +1991,19 @@ Next steps before calling create:
           return `${revokedGrantMessage(input.id, refreshKey, undefined)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {
-          return `Token exchange failed with HTTP ${response.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;
+          return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;
         }
-        return `Token exchange failed with HTTP ${response.status} — a temporary provider or network condition, or an answer the engine does not classify. Nothing was changed; retry later. ${responseBody}\n\n${notOurs}`;
+        return `Token exchange failed with HTTP ${exchanged.status} — a temporary provider or network condition, or an answer the engine does not classify. Nothing was changed; retry later. ${responseBody}\n\n${notOurs}`;
       }
       let parsed: { access_token?: string; expires_in?: number; refresh_token?: string; scope?: string; token_type?: string };
       try {
         parsed = JSON.parse(respText) as typeof parsed;
       } catch {
-        return `Token exchange returned HTTP ${response.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
+        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
       }
       const accessToken = parsed.access_token;
       if (!accessToken || typeof accessToken !== 'string') {
-        return `Token exchange returned HTTP ${response.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
+        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
       }
       // A refresh token counts as new only if it differs from the one this exchange
       // sent. A provider that does not rotate can answer with the very token it was
