@@ -329,7 +329,57 @@ export function formatSpawnError(err: unknown): string {
   if (!(err instanceof Error)) return String(err);
   const status = (err as { status?: unknown }).status;
   const statusPrefix = typeof status === 'number' ? `[${status}] ` : '';
-  return `${statusPrefix}${err.name}: ${err.message}`;
+  // The cause is formatted by THIS function too, not string-interpolated by the
+  // caller: `${err.cause}` on an Error renders as "Error: msg" and drops the
+  // status, which is the one field that separates a mis-route from a bad task.
+  const { cause } = err;
+  const causeSuffix = cause === undefined || cause === null
+    ? ''
+    : ` (cause: ${cause instanceof Error ? formatSpawnError(cause) : String(cause)})`;
+  return `${statusPrefix}${err.name}: ${err.message}${causeSuffix}`;
+}
+
+/**
+ * The message for the case where EVERY child died, which is the case the parent
+ * is least able to act on and was until now told the least about.
+ *
+ * The partial-failure path already renders each child as `## name — FAILED` with
+ * `formatSpawnError`, and the comment at that call says why: the HTTP status is
+ * what makes a provider mis-route read as a config failure rather than a vague
+ * one. When all of them failed, that rendering was built and then thrown away —
+ * the throw joined bare `err.message`s, so a real fan-out reported
+ * `All sub-agents failed: 404 no Route matched with those values; 404 no Route
+ * matched with those values; 404 no Route matched with those values` and named
+ * neither the children nor the status (dogfood 2026-09-24).
+ *
+ * The one-vs-many split is the whole point of the text, not decoration. Children
+ * that all died the SAME way did not each fail at their task — something they
+ * share failed, and the only useful next step is to look at the routing. Children
+ * that died DIFFERENTLY have to be read one by one. A single sentence covering
+ * both would have to be vague enough to be useless for either.
+ */
+export function formatAllFailedMessage(failures: readonly { name: string; err: unknown }[]): string {
+  // Formatted ONCE and reused for both the listing and the sameness test. Two
+  // separate `.map(formatSpawnError)` calls could drift, and the whole claim of
+  // the "same way" branch is that the reader is comparing the strings shown.
+  const formatted = failures.map((f) => formatSpawnError(f.err));
+  const lines = failures.map((f, i) => `- ${f.name}: ${formatted[i] as string}`);
+  // THREE shapes, not two. With a single child there is nothing to compare, and
+  // both comparative sentences are false for it — "every child failed the same
+  // way" and "the children failed differently" each assert a comparison that was
+  // never made. Writing one sentence for the n>1 cases and letting n=1 fall into
+  // the else is how the second one ships.
+  const diagnosis = failures.length < 2
+    ? `It was the only child, so nothing here separates a bad task from a bad route.`
+    : formatted.every((m) => m === formatted[0])
+      ? `Every child failed the SAME way, so this is not ${String(failures.length)} failed tasks — ` +
+        `it is one shared cause: model routing, credentials, or the provider endpoint. ` +
+        `Check the configuration before re-spawning; re-running the same fan-out will fail the same way.`
+      : `The children failed differently, so read each line above on its own — ` +
+        `a shared cause is not indicated.`;
+  const count = failures.length === 1 ? '1 sub-agent' : `${String(failures.length)} sub-agents`;
+  return `All ${count} failed and none returned a result.\n\n` +
+    `${lines.join('\n')}\n\n${diagnosis}`;
 }
 
 /**
@@ -1206,6 +1256,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     const sections: string[] = [];
     const errors: Error[] = [];
+    // Paired with `errors` so the all-failed message can name WHICH child died
+    // of what. `errors` alone cannot: it holds only the ones that failed, so its
+    // index does not line up with `specs`.
+    const failures: { name: string; err: Error }[] = [];
     const childRunIds: Array<string | undefined> = [];
 
     for (let i = 0; i < results.length; i++) {
@@ -1356,6 +1410,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           ? outcome.reason
           : new Error(String(outcome.reason));
         errors.push(err);
+        failures.push({ name: spec.name, err });
         // Mark the section as a FAILURE unambiguously so the parent can't mistake
         // a dead sub-agent for one that returned nothing useful — a silent
         // sub-agent failure is more dangerous than a loud one. `formatSpawnError`
@@ -1382,8 +1437,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     });
 
     if (errors.length === specs.length) {
-      const details = errors.map(e => `${e.message}${e.cause ? ` (cause: ${e.cause})` : ''}`).join('; ');
-      throw new AggregateError(errors, `All sub-agents failed: ${details}`);
+      throw new AggregateError(errors, formatAllFailedMessage(failures));
     }
 
     return sections.join('\n\n---\n\n');

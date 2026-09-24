@@ -116,7 +116,7 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, formatAllFailedMessage, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
 import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
@@ -469,7 +469,17 @@ describe('spawn_agent tool', () => {
         },
         agent,
       ),
-    ).rejects.toThrow(/All sub-agents failed/);
+    ).rejects.toThrow(/All 2 sub-agents failed and none returned a result/);
+    // Through the real handler, not just the formatter: both children are named
+    // and the shared-cause reading is the one the parent gets. Asserted here
+    // because a unit test of `formatAllFailedMessage` cannot show that the throw
+    // uses it — the previous message was built inline at the throw site.
+    await expect(
+      spawnAgentTool.handler(
+        { agents: [{ name: 'fail1', task: 'Think' }, { name: 'fail2', task: 'Think too' }] },
+        makeAgent({ currentRunId: 'parent-allfail-2' }),
+      ),
+    ).rejects.toThrow(/- fail1: Error: all fail\n- fail2: Error: all fail/);
   });
 
   // === H-002 regression evidence ===
@@ -2201,6 +2211,71 @@ describe('spawn_agent tool', () => {
       expect(formatSpawnError(Object.assign(new Error('x'), { status: 'weird' }))).toBe('Error: x');
     });
 
+    it('formatSpawnError: a cause is formatted, not interpolated', () => {
+      // `${err.cause}` renders an Error as "Error: msg" and drops the status —
+      // the one field that separates a mis-route from a bad task. The cause goes
+      // through the same formatter, so it keeps its own `[status]`.
+      const inner = Object.assign(new Error('no Route matched'), { status: 404 });
+      expect(formatSpawnError(new Error('spawn failed', { cause: inner })))
+        .toBe('Error: spawn failed (cause: [404] Error: no Route matched)');
+      expect(formatSpawnError(new Error('wrapped', { cause: 'a plain string' })))
+        .toBe('Error: wrapped (cause: a plain string)');
+      // No cause must leave the old rendering byte-identical.
+      expect(formatSpawnError(new Error('bare'))).toBe('Error: bare');
+      // `cause: null` is not the same as absent, and must not print "null".
+      expect(formatSpawnError(new Error('nulled', { cause: null }))).toBe('Error: nulled');
+    });
+
+    it('formatAllFailedMessage names every child and its status', () => {
+      // The real report this replaces, from a prod thread (2026-09-24):
+      // `All sub-agents failed: 404 no Route matched with those values; 404 no
+      // Route matched with those values; 404 no Route matched with those values`
+      // — three children, no names, no status, and no way to tell one shared
+      // cause from three unlucky tasks.
+      const mk = (m: string, status?: number) =>
+        status === undefined ? new Error(m) : Object.assign(new Error(m), { status });
+      const out = formatAllFailedMessage([
+        { name: 'tattoo_pmu_cluster', err: mk('no Route matched with those values', 404) },
+        { name: 'competitor_scan', err: mk('no Route matched with those values', 404) },
+        { name: 'volume_check', err: mk('no Route matched with those values', 404) },
+      ]);
+      expect(out).toContain('All 3 sub-agents failed and none returned a result.');
+      expect(out).toContain('- tattoo_pmu_cluster: [404] Error: no Route matched with those values');
+      expect(out).toContain('- competitor_scan: [404] Error: no Route matched with those values');
+      expect(out).toContain('- volume_check: [404] Error: no Route matched with those values');
+      expect(out).toContain('Every child failed the SAME way');
+      expect(out).toContain('one shared cause');
+      expect(out).not.toContain('failed differently');
+    });
+
+    it('formatAllFailedMessage: differing errors are NOT reported as one cause', () => {
+      // The inverse direction. A message that always blamed the configuration
+      // would read just as confidently here and send the reader to the one place
+      // the problem is not.
+      const out = formatAllFailedMessage([
+        { name: 'a', err: Object.assign(new Error('no Route matched'), { status: 404 }) },
+        { name: 'b', err: new Error('tool budget exhausted') },
+      ]);
+      expect(out).toContain('- a: [404] Error: no Route matched');
+      expect(out).toContain('- b: Error: tool budget exhausted');
+      expect(out).toContain('failed differently');
+      expect(out).not.toContain('SAME way');
+      expect(out).not.toContain('one shared cause');
+    });
+
+    it('formatAllFailedMessage: a single child claims no comparison at all', () => {
+      // Both comparative sentences are false for n=1. Letting it fall into the
+      // else branch is how "The children failed differently" ships for one child.
+      const out = formatAllFailedMessage([{ name: 'solo', err: new Error('boom') }]);
+      expect(out).toContain('All 1 sub-agent failed and none returned a result.');
+      expect(out).toContain('- solo: Error: boom');
+      expect(out).toContain('It was the only child');
+      expect(out).not.toContain('SAME way');
+      expect(out).not.toContain('failed differently');
+      // Singular grammar, so the count is not "1 sub-agents".
+      expect(out).not.toContain('1 sub-agents');
+    });
+
     it('records structured error_text on a failed run — not just status=failed with a null error_text', async () => {
       const insertRun = vi.fn().mockReturnValue('run-fail-1');
       const updateRun = vi.fn();
@@ -2213,7 +2288,7 @@ describe('spawn_agent tool', () => {
       const agent = makeAgent({ currentRunId: 'parent-fail', toolContext: parentToolContext });
       await expect(
         spawnAgentTool.handler({ agents: [{ name: 'collector', task: 'fetch' }] }, agent),
-      ).rejects.toThrow(/All sub-agents failed/);
+      ).rejects.toThrow(/- collector: \[404\] Error: no Route matched with those values/);
 
       const failUpdate = updateRun.mock.calls.find((c) => (c[1] as { status?: string }).status === 'failed');
       expect(failUpdate).toBeDefined();
