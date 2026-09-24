@@ -895,7 +895,17 @@ export class Agent implements IAgent {
     // `more` counts CALLS the name list does not show — duplicates of a listed
     // name, names the charset gate rejected, and names past the cap alike.
     const names = (pendingTools.length > 0 ? pendingTools.join(', ') : 'unnamed tool') + (more > 0 ? ` +${String(more)} more call${more === 1 ? '' : 's'}` : '');
-    const marker = `[Response stopped: the ${limit} was reached while the model was still calling tools (${names}) — no final answer was produced. The task needs more turns or a narrower scope.]`;
+    // The advice BRANCHES on the cause. "The task needs more turns" was said
+    // for both, and for a cost stop it names the one lever that does not exist:
+    // no setting feeds this budget for any reader (managed takes a clamped CP
+    // env with every spend input disabled; the worker loop's is a constant).
+    // The reload-path banner was corrected first and this line was not — and
+    // this is the surface the user sees FIRST, since the note only arrives when
+    // the thread is re-read.
+    const remedy = cause === 'iteration_cap'
+      ? 'The task needs more turns or a narrower scope.'
+      : 'The per-turn cost budget is fixed, so the task needs a narrower scope or smaller steps.';
+    const marker = `[Response stopped: the ${limit} was reached while the model was still calling tools (${names}) — no final answer was produced. ${remedy}]`;
     return text.trim().length > 0 ? `${text}\n\n${marker}` : marker;
   }
 
