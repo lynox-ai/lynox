@@ -1,0 +1,45 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t09-performance",
+  "title": "API latency investigation (EN, large http logs, N+1 root cause + caching decision)",
+  "targetTokens": 60000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Customers are complaining the dashboard got slow this week. Our SLO is p95 under 800ms on /api/threads and monitoring shows we are way over. Find out what happened and fix it." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t09_01", "name": "http_request", "input": { "method": "GET", "url": "https://metrics.internal.example/api/latency?route=/api/threads&window=14d&percentiles=50,95,99" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t09_01", "content": [ { "type": "text", "text": "Route /api/threads, 14-day percentiles by day: stable p95 ~410-460ms until 2026-08-03, then a step to p95 1840ms / p99 4100ms starting 2026-08-04 ~14:00 UTC. p50 only moved from 120ms to 190ms — the tail exploded, not the median. Deploy marker at 2026-08-04 13:41 UTC: release v5.2.0.\n\nRaw access log sample around the step:" }, { "type": "pad", "generator": "httplog", "lines": 950, "seed": 91 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "The step coincides exactly with the v5.2.0 deploy (2026-08-04 13:41 UTC): p95 jumped from ~440ms to 1840ms while p50 barely moved — classic per-item amplification for users with many items. v5.2.0 shipped the \"unread counts per thread\" feature. Checking the query log for amplification." }, { "type": "tool_use", "id": "tu_t09_02", "name": "run_sql", "input": { "db": "app", "query": "SELECT query_fingerprint, calls, mean_ms, calls_per_request FROM query_stats WHERE window='24h' ORDER BY calls DESC LIMIT 20" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t09_02", "content": [ { "type": "text", "text": "Top fingerprint: SELECT COUNT(*) FROM messages WHERE thread_id = ? AND read_at IS NULL — 4.1M calls/24h, mean 3.8ms, avg 74 calls per /api/threads request. Second: SELECT * FROM threads WHERE user_id = ? — 55k calls, 12ms. The count query did not exist before 2026-08-04.\n\nFull stats:" }, { "type": "pad", "generator": "sqlrows", "lines": 700, "seed": 92 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Confirmed N+1: getThreadList in v5.2.0 issues one unread-COUNT per thread — 74 per request on average, 3.8ms each ≈ 280ms serial DB time on the p50 user, and users with 300+ threads hit multi-second tails. The offender is src/api/threads/list.ts, the per-thread loop added in PR #471.\n\nFix options:\n(a) Batch the counts into ONE grouped query: SELECT thread_id, COUNT(*) FROM messages WHERE thread_id IN (…) AND read_at IS NULL GROUP BY thread_id. Cuts 74 round-trips to 1. Estimated p95 back under 600ms.\n(b) Additionally cache the unread map per user with a short TTL, invalidated on message-read events.\n\nI recommend shipping (a) immediately — it is a pure query restructure, no semantics change — and doing (b) only if the numbers still miss the SLO: cache invalidation on read-receipts has real edge cases (multi-device) and should not ride an incident fix." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Agreed, (a) now, (b) only if needed and then properly. Ship it behind our normal canary flow please." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t09_03", "name": "run_deploy", "input": { "target": "canary", "action": "deploy", "ref": "fix/threads-unread-batch" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t09_03", "content": [ { "type": "text", "text": "Canary deployed (PR #482, branch fix/threads-unread-batch, image sha256:c41d88). 10% traffic for 2h. Canary metrics: p95 388ms, p99 720ms, error rate 0.01% (baseline 0.02%). Query fingerprint count-per-request dropped from 74 to 1. No regression on write paths.\n\nCanary access log:" }, { "type": "pad", "generator": "httplog", "lines": 800, "seed": 93 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Canary numbers are decisive: p95 388ms (SLO 800ms, pre-incident baseline ~440ms — we are now FASTER than before the incident, because the old code had a milder per-thread pattern too), p99 720ms, errors at baseline, and the count query collapsed from 74 calls per request to 1. Promoting to 100% and closing out." }, { "type": "tool_use", "id": "tu_t09_04", "name": "run_deploy", "input": { "target": "prod", "action": "promote", "ref": "fix/threads-unread-batch" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t09_04", "content": [ { "type": "text", "text": "Promoted to 100% at 2026-08-07 09:12 UTC as v5.2.1. Post-promotion 6h: p95 holding 390-420ms across all pods." }, { "type": "pad", "generator": "httplog", "lines": 600, "seed": 94 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Done and stable. Wrap-up:\n- Root cause: PR #471 (v5.2.0) introduced a per-thread unread COUNT in getThreadList (src/api/threads/list.ts) — an N+1 with avg 74 queries per request; p95 went 440ms → 1840ms.\n- Fix: single grouped count query, shipped as PR #482 → v5.2.1, promoted 2026-08-07 09:12 UTC. p95 now 390-420ms, inside the 800ms SLO with margin.\n- Deliberately NOT done: the per-user unread cache (option b) — deferred unless numbers regress; multi-device invalidation needs its own design.\n- Open follow-ups: (1) add a query-amplification check to CI (fail a PR that raises calls-per-request on hot routes above a threshold — this exact class would have been caught); (2) a short incident note for the customer-facing status page; (3) watch the p95 dashboard for a week — alert threshold temporarily tightened to 600ms.\n- For the SLO report: incident window 2026-08-04 14:00 UTC to 2026-08-07 09:12 UTC." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Great work. Write the CI check as a proper ticket with the threshold proposal, and send me the status-page draft before it goes out." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Both underway: ticket PERF-233 created — \"CI guard: query calls-per-request budget on hot routes\", proposal: fail if a PR raises the per-request query count of any top-10 route by more than 3x, measured on the seeded test dataset. Status-page draft comes to you for approval before publication — nothing goes out without your sign-off. The tightened 600ms alert stays until 2026-08-14, then back to the standard SLO alerting." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "1840ms",
+      "v5.2.0",
+      "src/api/threads/list.ts",
+      "#471",
+      "#482",
+      "v5.2.1",
+      "388ms",
+      "PERF-233",
+      "2026-08-07 09:12"
+    ],
+    "rubric": [
+      "States the root cause: the v5.2.0 unread-counts feature (PR #471) added an N+1 per-thread COUNT in getThreadList (src/api/threads/list.ts), ~74 queries per request.",
+      "Preserves the impact numbers: p95 stepped from ~440ms to 1840ms starting 2026-08-04, tail-only (p50 barely moved).",
+      "Records the fix decision: batch into one grouped count query — and that the per-user cache (option b) was deliberately deferred with the multi-device invalidation reasoning.",
+      "Preserves the fix path: PR #482 / branch fix/threads-unread-batch, canaried at 10%, then promoted as v5.2.1 on 2026-08-07 09:12 UTC.",
+      "Preserves the outcome numbers: canary p95 388ms, post-promotion 390-420ms, inside the 800ms SLO.",
+      "Keeps the follow-up ticket PERF-233 (CI query-amplification guard) with its 3x threshold proposal.",
+      "Keeps the approval gate: the status-page draft goes to the user before publication.",
+      "Preserves the temporary monitoring state: alert threshold tightened to 600ms until 2026-08-14, and the incident window recorded for the SLO report."
+    ]
+  }
+}
