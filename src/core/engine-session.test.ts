@@ -541,6 +541,30 @@ describe('language reaches the model, not just the snapshot', () => {
     expect(summarizerPrompt).toContain('Summarize the conversation so far');
     expect(summarizerPrompt).toContain('<fact kind=');
     expect(summarizerPrompt).toContain('NOT engine markers');
+    // …and the clause this test is NAMED after, which it never actually checked.
+    // The sibling test above it does, so this was a misleading title rather than an
+    // open hole — but a title that promises a check nobody performs is the thing a
+    // future reader trusts. Concretely: the prompt has moved into its own module,
+    // and a version of that move written before this clause existed resolves
+    // cleanly over it while dropping it. The sibling would have caught that; these
+    // three assertions would not have.
+    expect(summarizerPrompt).toContain('in the language the CONVERSATION is in');
+    // The other direction of the focus suffix, on the same machinery: a plain
+    // compact() must not carry one. Asserting only that a focus ARRIVES leaves a
+    // builder that appends the clause unconditionally — "Give extra weight to:
+    // undefined." in every summary — passing.
+    expect(summarizerPrompt).not.toContain('Give extra weight');
+  });
+
+  it('passes an explicit /compact focus through to the summarizer', async () => {
+    // The focus suffix was the one part of the prompt nothing asserted: a builder
+    // that ignored its argument entirely passed every test in this file, including
+    // the two that call compact() WITH a focus — they never looked at the prompt.
+    const { session } = await createEngineAndSession();
+    mockSend.mockResolvedValueOnce('zusammenfassung');
+    await session.compact('die offene Rechnung');
+    const summarizerPrompt = mockSend.mock.calls.at(-1)?.[0] as string;
+    expect(summarizerPrompt).toContain('Give extra weight to: die offene Rechnung.');
   });
 });
 
