@@ -1,0 +1,44 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t02-quartalsabschluss",
+  "title": "Q2-Abschluss Buchhaltung (DE, CSV-Exporte, Rueckstellungs-Entscheid)",
+  "targetTokens": 22000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Ich muss den Q2-Abschluss fuer die Hartmann Digital GmbH vorbereiten. Zieh mir bitte die offenen Debitoren per 30.06. und gleich die Kreditoren dazu. Treuhand-Meeting ist am 14.08., bis dahin muss alles sauber sein." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Ich ziehe beide Listen aus der Buchhaltung, zuerst die Debitoren per Stichtag 30.06.2026." }, { "type": "tool_use", "id": "tu_t02_01", "name": "run_sql", "input": { "db": "erp", "query": "SELECT invoice_no, customer, amount, currency, due_date, status FROM receivables WHERE as_of = '2026-06-30' AND status != 'paid' ORDER BY due_date" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t02_01", "content": [ { "type": "text", "text": "42 offene Debitoren, Summe CHF 96'412.30. Groesste Einzelposition: INV-2026-0417, Kunde Bergwerk Studios AG, CHF 12'840.50, faellig 12.05.2026 — 49 Tage ueberfaellig. Zweitgroesste: INV-2026-0533, Kunde Lindenhof Apotheken, CHF 8'220.00, faellig 28.06.2026.\n\nVollstaendige Liste:" }, { "type": "pad", "generator": "sqlrows", "lines": 700, "seed": 21 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Debitoren stehen: 42 offene Posten, total CHF 96'412.30. Auffaellig ist INV-2026-0417 an Bergwerk Studios AG ueber CHF 12'840.50 — 49 Tage ueberfaellig und damit ein Kandidat fuer eine Einzelwertberichtigung. Jetzt die Kreditoren." }, { "type": "tool_use", "id": "tu_t02_02", "name": "run_sql", "input": { "db": "erp", "query": "SELECT bill_no, vendor, amount, currency, due_date FROM payables WHERE as_of = '2026-06-30' AND status = 'open' ORDER BY amount DESC" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t02_02", "content": [ { "type": "text", "text": "17 offene Kreditoren, Summe CHF 34'118.75. Keine ueberfaelligen Positionen. Groesster Posten: Hosting-Jahresrechnung cloudmetrics CHF 11'400.00, faellig 15.07.2026.\n\nVollstaendige Liste:" }, { "type": "pad", "generator": "sqlrows", "lines": 450, "seed": 22 } ] } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Zu Bergwerk Studios: die haben letzte Woche telefonisch einen Teilbetrag zugesagt, 50% bis Ende August, Rest offen. Wie gehen wir damit im Abschluss um? Und exportier mir bitte die Zahlungseingaenge Q2 als CSV fuer die Treuhaenderin." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Fuer den Abschluss schlage ich vor: Einzelwertberichtigung von 50% auf INV-2026-0417, also CHF 6'420.25 — die telefonische Teilzusage deckt die erste Haelfte, fuer den Rest gibt es keine belastbare Zusage. Das ist vorsichtig, aber vertretbar; die Treuhaenderin kann am 14.08. anders entscheiden. Ich vermerke die Zusage (50% bis 31.08.2026, telefonisch) im Debitorenkommentar.\n\nJetzt der Q2-Export der Zahlungseingaenge." }, { "type": "tool_use", "id": "tu_t02_03", "name": "run_sql", "input": { "db": "erp", "query": "COPY (SELECT * FROM payments WHERE value_date BETWEEN '2026-04-01' AND '2026-06-30') TO '/exports/hartmann-q2-payments.csv' CSV HEADER" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t02_03", "content": [ { "type": "text", "text": "Export geschrieben: /exports/hartmann-q2-payments.csv — 388 Zeilen, Summe CHF 201'339.90. Stichprobe:" }, { "type": "pad", "generator": "csv", "lines": 900, "seed": 23 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Export liegt unter /exports/hartmann-q2-payments.csv, 388 Zahlungseingaenge, Summe CHF 201'339.90. Ein Punkt noch: 3 Eingaenge im Juni haben keinen Rechnungsbezug (unmatched), zusammen CHF 2'150.00 — die muessen vor dem Treuhand-Meeting zugeordnet werden, sonst tauchen sie als durchlaufende Posten auf." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Die drei unmatched schau ich mir selber an, das sind vermutlich die Baraeinzahlungen vom Ladengeschaeft. Was ist mit den Rueckstellungen? Letztes Jahr hatten wir 15'000 fuer Gewaehrleistung drin, der Support-Aufwand ist aber gestiegen." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Ich habe die Support-Faelle Q2 gegen Vorjahr gezogen: 61 Gewaehrleistungsfaelle vs. 38 im Vorjahresquartal, durchschnittliche Fallkosten CHF 310 statt CHF 245. Hochgerechnet ergibt das einen Jahresbedarf von rund CHF 22'000. Meine Empfehlung: Rueckstellung Gewaehrleistung von CHF 15'000 auf CHF 22'000 erhoehen — Begruendung und Berechnung lege ich als Beilage 4 zum Abschlussdossier.\n\nOffene Punkte bis zum Treuhand-Meeting am 14.08.:\n1. Du: die 3 unmatched Zahlungseingaenge (CHF 2'150.00) zuordnen.\n2. Ich: Einzelwertberichtigung INV-2026-0417 buchen (CHF 6'420.25) sobald du das Okay gibst.\n3. Ich: Rueckstellung auf CHF 22'000 anpassen, ebenfalls nach deinem Okay.\n4. Beide: Beilagen-Dossier finalisieren, Ablage unter /dossiers/hartmann/2026-q2/." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Okay fuer beides, buch die Wertberichtigung und die Rueckstellung. Denk dran, die Treuhaenderin will die Unterlagen 3 Tage vorher, also bis 11.08." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Gebucht: Einzelwertberichtigung CHF 6'420.25 auf INV-2026-0417 (Beleg WB-2026-089) und Erhoehung der Gewaehrleistungsrueckstellung auf CHF 22'000 (Beleg RS-2026-014). Deadline fuer das komplette Dossier an die Treuhaenderin: 11.08.2026, drei Tage vor dem Meeting am 14.08. Naechster Schritt bei mir: Beilagen-Dossier unter /dossiers/hartmann/2026-q2/ zusammenstellen, sobald deine drei unmatched Eingaenge zugeordnet sind." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "INV-2026-0417",
+      "Bergwerk Studios",
+      "12'840.50",
+      "6'420.25",
+      "22'000",
+      "/exports/hartmann-q2-payments.csv",
+      "11.08",
+      "14.08",
+      "2'150.00"
+    ],
+    "rubric": [
+      "Records the decision to book a 50% specific value adjustment (CHF 6'420.25) on INV-2026-0417 and why (only half is covered by the phone commitment).",
+      "Records the decision to raise the warranty provision from CHF 15'000 to CHF 22'000 with the supporting case-count reasoning.",
+      "Preserves that the user explicitly approved both bookings and that they were executed (booking refs WB-2026-089 / RS-2026-014).",
+      "Preserves the Q2 payments export path /exports/hartmann-q2-payments.csv and its totals.",
+      "Keeps the user's open task: assign the 3 unmatched June payments (CHF 2'150.00).",
+      "Keeps the deadline chain: dossier to the fiduciary by 11.08, meeting on 14.08.",
+      "Preserves the context that Bergwerk Studios committed by phone to pay 50% by end of August.",
+      "Keeps the assistant's next step: assemble the dossier under /dossiers/hartmann/2026-q2/ once the unmatched payments are assigned."
+    ]
+  }
+}

@@ -1,0 +1,205 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t06-db-migration",
+  "title": "SQLite → Postgres migration planning (EN, schema dumps, cutover decision)",
+  "targetTokens": 25000,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "We need to migrate the booking platform off SQLite to Postgres — the file is at 11 GB and nightly locks are killing the morning batch. Plan the migration with me. Constraint: the platform can be down at most 2 hours, and only on a weekend night."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Let me inventory the current schema and row counts first — the copy strategy depends on which tables dominate."
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_t06_01",
+          "name": "run_sql",
+          "input": {
+            "db": "booking",
+            "query": "SELECT name FROM sqlite_master WHERE type='table'; SELECT 'bookings', COUNT(*) FROM bookings UNION ALL SELECT 'booking_events', COUNT(*) FROM booking_events UNION ALL SELECT 'customers', COUNT(*) FROM customers"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t06_01",
+          "content": [
+            {
+              "type": "text",
+              "text": "14 tables. Dominant: booking_events 48'200'113 rows (append-only audit trail, 9.1 GB), bookings 2'914'880 rows, customers 388'414 rows. The other 11 tables sum to under 200k rows. Primary keys are TEXT UUIDs everywhere except booking_events which uses INTEGER autoincrement.\n\nSchema dump:"
+            },
+            {
+              "type": "pad",
+              "generator": "sqlrows",
+              "lines": 850,
+              "seed": 61
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The shape is favorable: 95% of the data (booking_events, 48.2M rows) is append-only, which means we can copy it AHEAD of the cutover window and only sync the tail during downtime. Plan sketch:\n\n1. Pre-migration (during normal operation): bulk-copy booking_events up to a checkpointed max id into Postgres. Takes hours, does not matter.\n2. Cutover window: stop writes, copy the small tables plus the booking_events tail since the checkpoint, switch the connection string, smoke-test, reopen.\n3. Keys: KEEP the TEXT UUIDs as-is (Postgres uuid type where they parse, text where not) — converting to bigserial would ripple through every foreign key and the public API. booking_events keeps its integer sequence.\n\nEstimated cutover: small tables ~8 min, events tail (one day of writes ≈ 60k rows) ~2 min, smoke ~15 min. Well inside 2 hours."
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_t06_02",
+          "name": "run_sql",
+          "input": {
+            "db": "booking",
+            "query": "SELECT date(created_at) d, COUNT(*) FROM booking_events WHERE created_at > date('now','-14 day') GROUP BY d ORDER BY d"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t06_02",
+          "content": [
+            {
+              "type": "text",
+              "text": "Daily event volume last 14 days: min 41'112, max 68'904, mean 55'371. Saturday nights are the floor (41-46k the following day).\n\nDaily rows:"
+            },
+            {
+              "type": "pad",
+              "generator": "csv",
+              "lines": 700,
+              "seed": 62
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Sounds right. Which weekend? And write the migration as a repeatable script, not manual steps — if the smoke test fails I want to abort and retry a week later without archaeology."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Proposal: Saturday 2026-09-05, window 02:00-04:00 CEST — lowest event volume, and it avoids the month-end billing batch on the 30th/1st. The script lands at scripts/migrate/2026-09-sqlite-to-pg.ts with four idempotent phases:\n\n- phase precopy: checkpointed bulk copy of booking_events (rerunnable, resumes from last checkpoint in migration_state table)\n- phase cutover: write-freeze flag, tail copy, small tables, sequence alignment\n- phase verify: row-count parity per table, checksum sample of 10k random bookings, the 6 canonical smoke queries from the morning batch\n- phase abort: drops the write-freeze and leaves SQLite authoritative — Postgres side is wiped clean so a retry starts fresh\n\nEvery phase logs to migration_log with timestamps so a post-mortem needs no reconstruction. Rollback rule: if verify fails ANY check, we abort — no partial acceptance."
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_t06_03",
+          "name": "read_document",
+          "input": {
+            "path": "docs/runbooks/batch-morning.md"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t06_03",
+          "content": [
+            {
+              "type": "text",
+              "text": "Morning batch runbook: 6 jobs, first starts 05:30 CEST (invoice generation), depends on booking_events being writable. Job list and their canonical verification queries:"
+            },
+            {
+              "type": "pad",
+              "generator": "buildlog",
+              "lines": 550,
+              "seed": 63
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Good — the morning batch starts 05:30 CEST, so our 02:00-04:00 window leaves 90 minutes of slack before the first dependent job. I have included the batch's own 6 verification queries in the verify phase, so \"migration green\" means \"the batch will run\", not just \"rows arrived\".\n\nDecisions so far:\n1. Cutover Saturday 2026-09-05, 02:00-04:00 CEST.\n2. Keep TEXT UUID primary keys; booking_events keeps integer sequence.\n3. Pre-copy strategy for booking_events with checkpoint resume.\n4. Hard abort rule: any verify failure → abort phase, SQLite stays authoritative, retry a week later (2026-09-12 as backup slot).\n5. Script at scripts/migrate/2026-09-sqlite-to-pg.ts, all phases idempotent, logged to migration_log.\n\nOpen items:\n- I need the Postgres instance sized: my recommendation is 4 vCPU / 16 GB / 100 GB SSD to start.\n- You wanted to inform the two API partners about the maintenance window — that mail should go out by 2026-08-28.\n- Dry-run of precopy+verify against the staging copy next week; I will report the actual timings."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Approved on all five. Order the Postgres at that size. I will send the partner mail — remind me on the 26th. One request: nach dem Dry-Run will ich die echten Zeiten sehen, nicht Schaetzungen."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Alles klar. Postgres-Instanz (4 vCPU / 16 GB / 100 GB SSD) bestelle ich heute. Reminder fuer die Partner-Mail ist auf den 26.08. gesetzt (Versand-Deadline 28.08.). Dry-Run von precopy+verify laeuft naechste Woche gegen die Staging-Kopie — danach bekommst du die gemessenen Zeiten pro Phase aus migration_log, keine Schaetzungen. Cutover bleibt Samstag 05.09., 02:00-04:00 CEST, Backup-Slot 12.09."
+        }
+      ]
+    }
+  ],
+  "checklist": {
+    "literals": [
+      [
+        "48'200'113",
+        "48.2M",
+        "48,2 Mio",
+        "48.2 million",
+        "48.2 M"
+      ],
+      "booking_events",
+      "2026-09-05",
+      "02:00-04:00",
+      "scripts/migrate/2026-09-sqlite-to-pg.ts",
+      [
+        "4 vCPU / 16 GB / 100 GB SSD",
+        "4 vCPU",
+        "16 GB"
+      ],
+      "05:30",
+      "2026-09-12",
+      [
+        "28.08",
+        "26.08"
+      ]
+    ],
+    "rubric": [
+      "Records the cutover decision: Saturday 2026-09-05, 02:00-04:00 CEST, with 2026-09-12 as the backup slot.",
+      "Records the key-strategy decision: keep TEXT UUID primary keys (no bigserial conversion); booking_events keeps its integer sequence.",
+      "Preserves the pre-copy strategy: bulk-copy the append-only booking_events (48.2M rows) ahead of the window with checkpoint resume, only the tail during downtime.",
+      "Preserves the hard abort rule: any verify failure aborts, SQLite stays authoritative, Postgres side wiped for a clean retry.",
+      "Preserves the script location scripts/migrate/2026-09-sqlite-to-pg.ts and that all phases are idempotent and logged.",
+      "Preserves the constraint context: morning batch starts 05:30 CEST and its 6 verification queries are part of the verify phase.",
+      "Records that the user approved all five decisions and the Postgres sizing (4 vCPU / 16 GB / 100 GB SSD) is to be ordered.",
+      "Keeps the open tasks: partner-notification mail (user, reminder 26.08, deadline 28.08) and the staging dry-run with MEASURED per-phase timings reported back."
+    ]
+  }
+}

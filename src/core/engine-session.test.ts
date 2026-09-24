@@ -541,6 +541,14 @@ describe('language reaches the model, not just the snapshot', () => {
     expect(summarizerPrompt).toContain('Summarize the conversation so far');
     expect(summarizerPrompt).toContain('<fact kind=');
     expect(summarizerPrompt).toContain('NOT engine markers');
+    // …and the clause this test is NAMED after, which it never actually checked.
+    // The sibling test above it does, so this was a misleading title rather than an
+    // open hole — but a title that promises a check nobody performs is the thing a
+    // future reader trusts. Concretely: the prompt has since moved into its own
+    // module so a benchmark can measure it, and rebasing that move over the commit
+    // which added this clause resolves cleanly while dropping it. The sibling would
+    // have caught it; these three assertions would not have.
+    expect(summarizerPrompt).toContain('in the language the CONVERSATION is in');
   });
 });
 

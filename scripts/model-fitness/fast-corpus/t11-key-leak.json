@@ -1,0 +1,43 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t11-key-leak",
+  "title": "Leaked API key incident (EN+DE, secret placeholders, rotation runbook)",
+  "targetTokens": 25000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Bad news: our secret scanner flagged that a payment-provider API key was committed to the internal analytics repo three weeks ago. Handle this as an incident please — figure out the blast radius and what needs rotating." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Treating this as SEC incident. First: which key, which repo, how exposed?" }, { "type": "tool_use", "id": "tu_t11_01", "name": "run_scan", "input": { "target": "repo:analytics-pipeline", "scanner": "secret-history", "window": "90d" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t11_01", "content": [ { "type": "text", "text": "Finding SEC-2026-031: file etl/config_local.py committed 2026-07-18 in commit b3f19a2 contains PAYFLOW_API_KEY = 'pfk_live_FAKE00EXAMPLE0000' (masked: pfk_••••0000). Removed again in commit 8c02d11 on 2026-07-19, but present in history. Repo: analytics-pipeline, internal, 14 collaborators, NO public forks, NO mirror. Also in the same commit: DATABASE_URL with password for the analytics replica (read-only user etl_reader).\n\nScanner output:" }, { "type": "pad", "generator": "buildlog", "lines": 450, "seed": 111 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Blast radius assessment for SEC-2026-031:\n\n1. PAYFLOW_API_KEY (pfk_••••0000): a LIVE payment-provider key. Repo is internal with 14 collaborators and no public exposure — but 'internal-only' is containment, not safety: CI runners and two contractors had clone access in the window 2026-07-18 to now. This key MUST be rotated regardless of whether misuse is visible.\n2. etl_reader replica password: read-only on the analytics replica — lower severity, still rotates (same commit, same exposure).\n\nChecking the payment provider's audit log for anomalous usage since 2026-07-18 before rotating, so we do not destroy evidence of misuse." }, { "type": "tool_use", "id": "tu_t11_02", "name": "http_request", "input": { "method": "GET", "url": "https://api.payflow.example/v2/audit/api-key-usage?since=2026-07-18", "auth": "stored:payflow-admin" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t11_02", "content": [ { "type": "text", "text": "Audit result: all calls with the flagged key originate from the two known production egress IPs (198.51.100.7, 198.51.100.8). Zero calls from unknown IPs. Call pattern matches the nightly settlement job. No new API keys created, no webhook changes, no payout-target changes in the window.\n\nFull audit rows:" }, { "type": "pad", "generator": "httplog", "lines": 520, "seed": 112 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "No evidence of misuse — every call in the window comes from our two production egress IPs, and no account mutations occurred. Proceeding with rotation in the safe order:\n\n1. Create new Payflow key pfk_live_(new) with the SAME permission scope (charges:read, settlements:read — the leaked key fortunately had no payout permissions).\n2. Deploy the new key to the settlement job via the vault (payflow-settlement-v2), verify one settlement fetch.\n3. Revoke the leaked key pfk_••••0000.\n4. Rotate the etl_reader replica password, update the ETL vault entry.\n5. History cleanup on analytics-pipeline: purge commit b3f19a2's secrets from history (repo is internal and low-fork, rewrite is feasible), then force-push with team announcement.\n\nSteps 1-4 I can do now; step 5 needs a 30-minute freeze window on the repo — proposing tomorrow 08:00 before the team starts." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Go for 1 bis 4 jetzt. Den History-Rewrite morgen um 08:00 kannst du auch machen, ich informiere die 14 Leute heute noch selber. Aber danach will ich einen Mechanismus, dass so etwas gar nicht mehr committet werden kann — der Scanner hat das Ding ja erst drei Wochen spaeter gefunden." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t11_03", "name": "run_deploy", "input": { "target": "settlement-job", "action": "rotate-secret", "vault_entry": "payflow-settlement-v2" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t11_03", "content": [ { "type": "text", "text": "Rotation executed: new key active, settlement fetch verified OK (43 settlements, matches yesterday's count). Old key pfk_••••0000 revoked at 2026-08-08 16:22 UTC — provider confirms 401 on subsequent test call. etl_reader password rotated, ETL pipeline re-ran green.\n\nDeployment log:" }, { "type": "pad", "generator": "buildlog", "lines": 420, "seed": 113 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Steps 1-4 complete:\n- New Payflow key live (vault: payflow-settlement-v2), settlement fetch verified.\n- Leaked key revoked 2026-08-08 16:22 UTC, provider returns 401 on it.\n- etl_reader password rotated, ETL green.\n\nRemaining plan:\n- Tomorrow 08:00: history rewrite of analytics-pipeline purging b3f19a2, force-push, then re-run the secret scanner over the rewritten history as proof. You inform the 14 collaborators today.\n- Prevention (your requirement): pre-commit secret scanning as a REQUIRED check — scanner runs on the diff before every commit lands, blocking known key shapes (pfk_live_, database URLs with credentials, etc). The 3-week detection gap came from the scanner running weekly on history instead of per-commit on the diff. I will file this as SEC-2026-031-followup with a rollout plan for all internal repos, not just analytics-pipeline.\n- Incident timeline document goes to /security/incidents/SEC-2026-031.md — draft to you by tomorrow noon.\n\nFuer die Meldepflicht-Frage: kein Hinweis auf Missbrauch, keine Kundendaten betroffen (der Key konnte keine Auszahlungen ausloesen und keine Kartendaten lesen) — aus meiner Sicht keine meldepflichtige Verletzung, aber das Incident-Dokument haelt die Begruendung fest, falls es jemand prueft." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Einverstanden. Morgen nach dem Rewrite kurze Bestaetigung an mich, und das Incident-Dokument will ich vor der Ablage lesen." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Festgehalten: morgen 08:00 History-Rewrite mit anschliessendem Scanner-Nachweis und kurzer Bestaetigung an dich; das Incident-Dokument SEC-2026-031.md geht dir VOR der Ablage zum Lesen zu (Entwurf bis Mittag). Danach folgt der Rollout-Plan fuer das Pre-Commit-Scanning als SEC-2026-031-followup. Offene Punkte bei dir: Team-Info an die 14 Collaborators heute." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "SEC-2026-031",
+      "b3f19a2",
+      "analytics-pipeline",
+      "payflow-settlement-v2",
+      "etl_reader",
+      "2026-08-08 16:22",
+      "198.51.100.7",
+      "08:00",
+      "14"
+    ],
+    "rubric": [
+      "Preserves the incident scope: a live payment-provider key AND the etl_reader replica password were in commit b3f19a2 of the internal analytics-pipeline repo (14 collaborators, no public exposure).",
+      "Records the misuse assessment: audit showed all usage from the two known production egress IPs, no account mutations — no evidence of misuse, and rotation proceeded anyway.",
+      "Preserves the completed rotation state: new key live under vault entry payflow-settlement-v2, old key revoked 2026-08-08 16:22 UTC (verified 401), etl_reader rotated, ETL green.",
+      "Preserves the evidence-first ordering decision: audit-log check BEFORE revoking, so rotation would not destroy misuse evidence.",
+      "Keeps the open task: history rewrite tomorrow 08:00 purging b3f19a2, followed by a scanner re-run as proof and a confirmation to the user.",
+      "Records the prevention decision: per-commit pre-commit secret scanning as a required check (root cause of the 3-week gap: weekly history scan instead of per-diff), filed as SEC-2026-031-followup.",
+      "Preserves the reporting-duty assessment: no notifiable breach (no payout/card-data capability on the key), with the reasoning kept in the incident document.",
+      "Keeps the approval gates: user informs the 14 collaborators himself, and reads the incident document BEFORE it is filed."
+    ]
+  }
+}

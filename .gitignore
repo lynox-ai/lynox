@@ -35,6 +35,8 @@ tests/performance/results.json
 tests/performance/*.log
 scripts/set-bench/results/*
 !scripts/set-bench/results/.gitkeep
+scripts/model-fitness/results/*
+!scripts/model-fitness/results/.gitkeep
 tests/fixtures/voice/*.webm
 tests/fixtures/voice/*.wav
 tests/fixtures/voice/*.mp3
