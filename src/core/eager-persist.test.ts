@@ -6,7 +6,7 @@
 // append-the-delta, no-op on empty, idempotency via onPersisted, error-swallow.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker , capStopNote } from './eager-persist.js';
 import type { ThreadStore, DisplayNoteInput } from './thread-store.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
@@ -293,5 +293,73 @@ describe('persistCompactionMarker', () => {
       getMessageCount: vi.fn().mockImplementation(() => { throw new Error('SQLite locked'); }),
     } as unknown as Parameters<typeof persistCompactionMarker>[0];
     expect(persistCompactionMarker(store, 's1')).toBe(false);
+  });
+});
+
+/**
+ * The cap-stop banner decision.
+ *
+ * Extracted from Session for the same reason everything else in this file was:
+ * the branch that decides whether the user is told lives one call away from a
+ * run loop nothing can drive in a unit test, and it went unwritten for as long
+ * as it was in there. The incident it exists for is a prod export where a cap
+ * stopped twenty identical turns and the explanation reached the run record and
+ * nothing else.
+ */
+describe('capStopNote', () => {
+  const stop = (cause: string, tools: string[], count = tools.length) =>
+    ({ cause, pendingTools: tools, pendingToolCount: count });
+
+  it('names the turn limit when tool calls were still pending', () => {
+    expect(capStopNote(stop('iteration_cap', ['data_store_query']), { isInternalRun: false }))
+      .toEqual({ code: 'turn_limit', detail: 'still calling: data_store_query' });
+  });
+
+  it('names the cost budget as its own banner, not as a turn limit', () => {
+    // Two different things happened to the user's turn and two different things
+    // fix it — one is "work in smaller steps", the other is "raise the budget".
+    expect(capStopNote(stop('budget_cap', ['bash']), { isInternalRun: false })?.code)
+      .toBe('cost_budget');
+  });
+
+  it('lists every pending tool, so the banner names what was cut off', () => {
+    expect(capStopNote(stop('iteration_cap', ['a', 'b']), { isInternalRun: false })?.detail)
+      .toBe('still calling: a, b');
+  });
+
+  it('says nothing when the cap landed on a finished answer', () => {
+    // `_finishOnCap` returns the bare text in this case and calls it a normal
+    // end of turn. A banner here would train the reader to ignore banners.
+    expect(capStopNote(stop('iteration_cap', [], 0), { isInternalRun: false })).toBeNull();
+  });
+
+  it('says nothing for an ordinary end of turn', () => {
+    expect(capStopNote(stop('end_turn', [], 0), { isInternalRun: false })).toBeNull();
+    expect(capStopNote(stop('max_tokens', [], 0), { isInternalRun: false })).toBeNull();
+  });
+
+  it('says nothing for a cause it does not know', () => {
+    // Fail closed: a new stop cause must not inherit a banner whose text was
+    // written for a different one.
+    expect(capStopNote(stop('absolute_cap', ['x']), { isInternalRun: false })).toBeNull();
+  });
+
+  it('stays silent on an internal run', () => {
+    // Same reason the failure path is silent: a compaction run's footprint is
+    // neutralized, and a banner would surface machinery nobody asked for.
+    expect(capStopNote(stop('iteration_cap', ['x']), { isInternalRun: true })).toBeNull();
+  });
+
+  it('says nothing when there was no stop to report', () => {
+    expect(capStopNote(null, { isInternalRun: false })).toBeNull();
+  });
+
+  it('carries a detail-less banner when the names were all rejected upstream', () => {
+    // pendingToolCount > 0 with an empty name list is what `safeToolNames`
+    // produces when every name failed its charset gate — the banner still owes
+    // the user the fact that something was cut off.
+    const note = capStopNote(stop('iteration_cap', [], 3), { isInternalRun: false });
+    expect(note?.code).toBe('turn_limit');
+    expect(note?.detail).toBeUndefined();
   });
 });

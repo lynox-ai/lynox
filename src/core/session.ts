@@ -67,7 +67,8 @@ import { isFeatureEnabled } from './features.js';
 import { stripLoadedContext } from './chat-context.js';
 import type { Engine, RunContext, AccumulatedUsage, LynoxHooks } from './engine.js';
 import { setupHistorySubscriptions } from './engine-init.js';
-import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker } from './eager-persist.js';
+import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker, capStopNote } from './eager-persist.js';
+import { buildDisplayNoteContent } from './render-projection.js';
 import { buildPostCompactionMessages } from './compaction-messages.js';
 import type { ToolContext } from './tool-context.js';
 import type { Memory } from './memory.js';
@@ -1183,6 +1184,35 @@ export class Session {
           // internal run — it persisted no message to stamp, so this would clobber
           // the last real message's footer with the compaction run's usage.
           if (!agent.isInternalRun) threadStore.setMessageUsage(this.sessionId, JSON.stringify(runUsage));
+
+          // A cap stopped the loop while tool calls were still pending, and the
+          // reason has to reach the THREAD, not only the run record.
+          //
+          // `_finishOnCap` puts the explanation on the value `send()` RETURNS.
+          // Nothing persists that: the assistant turns were already written per
+          // iteration by the eager checkpoint, so the thread keeps every
+          // repetition and loses the sentence that explains them. Measured on a
+          // prod export 2026-09-24 — twenty identical turns, the marker in the
+          // run record, in zero of the 213 message rows. The reporter saw the
+          // repetitions and no reason, which is the whole complaint.
+          //
+          // A display note is the shape the error paths already use
+          // (persistFailedTurnDisplay). display_only matters twice: it renders
+          // as a banner, and it never re-enters API context — so the model is
+          // not taught to narrate its own caps back at the user.
+          // Stamped AFTER setMessageUsage so the run's cost footer lands on the
+          // last real message rather than on this banner.
+          const capNote = capStopNote(agent.getLastStop(), { isInternalRun: agent.isInternalRun });
+          if (capNote !== null) {
+            const { code, detail } = capNote;
+            const before = threadStore.getMessageCount(this.sessionId);
+            threadStore.appendDisplayNotes(
+              this.sessionId,
+              [{ role: 'assistant', content: buildDisplayNoteContent(code, detail) }],
+              threadStore.getNextSeq(this.sessionId),
+            );
+            threadStore.updateThread(this.sessionId, { message_count: before + 1 });
+          }
         } catch { /* fire-and-forget */ }
       }
 
