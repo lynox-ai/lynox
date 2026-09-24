@@ -161,8 +161,16 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     // cron gate and the library Run gate — without a person in the loop. An
     // imported workflow was already left unconfirmed for the same reason; the
     // only difference was who authored the steps, and that is not what the stamp
-    // means. Consent is given where a human acts: scheduling the workflow
-    // (`POST /api/tasks` with a `pipelineId`) stamps it.
+    // means. Consent is given where a human acts: scheduling an AUTONOMOUS
+    // workflow through `POST /api/tasks` stamps it. An interactive one has no
+    // stamping route and needs none — it only ever runs from a chat, where a
+    // person answers each step.
+    // Written explicitly rather than left to the spread above: `existing` is a
+    // plan_task row and cannot carry a stamp today, so the spread happens to be
+    // safe — but "safe because of what the source cannot contain" is a property
+    // of the caller, not of this function, and it is the kind that a later change
+    // to the source silently revokes.
+    confirmedAt: undefined,
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],

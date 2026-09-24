@@ -5766,15 +5766,22 @@ export class LynoxHTTPApi {
       const plannedForRun = getPipeline(params['id']!, history);
       if (plannedForRun && !plannedForRun.confirmedAt) {
         // The remedy depends on the MODE, because only an autonomous workflow can
-        // take the route the autonomous branch names: `POST /api/tasks` refuses a
-        // non-autonomous one ("is interactive and cannot be scheduled") and the
-        // library renders its Schedule button under `mode === 'autonomous'`. The
-        // two sibling gates carrying this same sentence — `executePipeline` in
-        // pipeline.ts and `WorkerLoop.executePipeline` — each sit BEHIND a mode
-        // check, so an interactive workflow never reaches them and their single
-        // sentence is true. This gate has no mode check in front of it, which is
-        // why the branch belongs here and not there. `getPipeline` labels every
-        // legacy row via `inferPipelineMode`, so `mode` is set whenever it is read.
+        // reach the PRODUCT route the autonomous branch names: this same file's
+        // `POST /api/tasks` refuses a non-autonomous workflow, and the library
+        // renders its Schedule button under `mode === 'autonomous'`. (The agent
+        // tool `task_create` puts any id on a cron without checking either — it
+        // fails at fire time instead — so the honest claim is "cannot be
+        // scheduled through the surface a person uses", not "cannot be
+        // scheduled".) `executePipeline` in pipeline.ts branches the same way and
+        // for the same reason; `WorkerLoop.executePipeline` does not need to,
+        // because its mode check is a standalone `!== 'autonomous'` throw.
+        // On `mode` being present: every producer sets it and the SQLite read
+        // backfills it (`backfillPlannedPipelineDefaults`), but `getPipeline`'s
+        // direct and prefix hits return the stored object untouched — so this is
+        // a convention held up by the writers, not a property of the read. The
+        // branch is written `=== 'interactive'` so that a writer who forgets lands
+        // in the autonomous branch, i.e. on the old text rather than on a wrong
+        // new one.
         errorResponse(
           res,
           403,

@@ -311,6 +311,31 @@ describe('save_workflow — workflow_id source', () => {
     expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
   });
 
+  it('drops a stamp the SOURCE carries, instead of spreading it into the copy', async () => {
+    // The two tests above both start from a plan that has no `confirmedAt`, so
+    // they pass whether the copy clears the field or merely fails to add one.
+    // This is the difference: the source carries a stamp, and the copy must not.
+    //
+    // No product path puts a stamp on a plan_task row today, which is exactly why
+    // this needs saying — without the explicit clear the copy's unconfirmed-ness
+    // is a property of what the CALLER happens to contain, and a later change to
+    // the source revokes it silently, at the one seam that decides whether a
+    // workflow may run with nobody watching.
+    storePipeline('plan-stamped', { ...makePlan(), id: 'plan-stamped', confirmedAt: '2026-01-01T00:00:00.000Z' });
+    const agent = makeAgent({}, mockHistory);
+    const result = await saveWorkflowTool.handler({ name: 'Promoted From Stamped', workflow_id: 'plan-stamped' }, agent);
+
+    const { workflow_id: savedId } = JSON.parse(result) as { workflow_id: string };
+    const stored = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+    expect(stored).toBeDefined();
+    expect(stored?.confirmedAt).toBeUndefined();
+    expect(getPipeline(savedId)).toBeDefined();
+    expect(getPipeline(savedId)?.confirmedAt).toBeUndefined();
+    // Control: the source still has its stamp, so the assertions above are about
+    // the copy and not about a fixture that never carried one.
+    expect(getPipeline('plan-stamped')?.confirmedAt).toBe('2026-01-01T00:00:00.000Z');
+  });
+
   it('promotes a non-template plan into a reusable workflow copy', async () => {
     storePipeline('plan-789', makePlan());
     const agent = makeAgent({}, mockHistory);

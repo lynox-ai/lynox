@@ -580,11 +580,13 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
   });
 
   it('answers an interactive UNCONFIRMED workflow with the MODE, not the consent gate', async () => {
-    // Pins the ORDER, which the test above does not: it leaves `autonomy`
-    // undefined, so the consent gate cannot fire there and the two blocks could
-    // be swapped without it noticing. Here both conditions hold at once —
-    // autonomous caller, interactive workflow, no confirmedAt — and only the
-    // order decides which sentence comes back.
+    // Pins the order for the NO-PROMPTER case, which the test above does not: it
+    // leaves `autonomy` undefined, so the consent gate cannot fire there and the
+    // two blocks could be swapped without it noticing. Here both conditions hold
+    // at once — autonomous caller, interactive workflow, no confirmedAt — and
+    // this agent has no prompt callbacks, so the interactive guard's second
+    // conjunct is satisfied and it answers first. The sibling test below covers
+    // the case where it does NOT, which is the one this file used to miss.
     //
     // It has to be the mode one. "Schedule it (the consent step confirms it)" is
     // a route an interactive workflow does not have: `POST /api/tasks` refuses a
@@ -611,6 +613,69 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
     expect(result).toMatch(/requires a live chat session/);
     expect(result).not.toMatch(/first-run confirmation/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('an autonomous WORKER (which has a prompter) gets the mode answer, not "schedule it"', async () => {
+    // The case the file was blind to, and the reason the message branches on mode
+    // instead of trusting the guard above it. That guard is a CONJUNCTION,
+    // `mode === 'interactive' && !parentPromptUser`, so it stands down whenever a
+    // prompter exists — and an autonomous worker session HAS one: WorkerLoop
+    // assigns `session.promptUser` (through the prompt store, so a human can
+    // answer later), the Session setter forwards it to `agent.promptUser`, and
+    // `run_workflow` builds `parentPrompt` from that. So this reaches the consent
+    // gate with an interactive workflow, which the old single sentence answered
+    // with "Schedule it" — a route this workflow does not have.
+    //
+    // Every agent in this file lacked `promptUser`, so the interactive guard
+    // always fired and this path was unreachable from the tests.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    const pipelineId = 'interactive-worker';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'asks',
+      goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toMatch(/ask_user \/ ask_secret/);
+    expect(result).not.toMatch(/Schedule it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...and an AUTONOMOUS unconfirmed workflow still gets "Schedule it" on that same path', async () => {
+    // The positive half: same prompter, same autonomy, same missing confirmedAt,
+    // only the mode differs. Without it, a message that dropped "Schedule it" for
+    // every workflow would satisfy the test above while removing the only route
+    // an autonomous workflow has.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    const pipelineId = 'autonomous-worker-unconfirmed';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'fetches',
+      goal: 'fetch',
+      steps: [{ id: 's1', task: 'fetch a page' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'autonomous',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toMatch(/Schedule it/);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 

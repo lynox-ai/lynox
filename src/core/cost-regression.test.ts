@@ -400,20 +400,25 @@ function measureStaticPrefixTokens(): number {
 // spelled out "to authorize a provider" and "show it to them". Naming the
 // provider is redundant inside a tool that is entirely about one API profile,
 // and the second clause repeated the verb. Same rule, eight tokens less.
-// 2026-09-24: −109 (23948 → 23839, measured) — three sentences deleted, not rewritten. Two in
-// this prompt ("scheduled via `task_create(workflow_id, schedule)`", "a `workflow_id`
-// for `run_workflow` / `task_create`") and one in `task_create`'s `params` description
-// (firing one workflow per batch). All three named a route that now ends at a consent
-// step the model cannot grant, because `save_workflow` no longer stamps the workflow as
-// confirmed. Naming a DIFFERENT route would be a decision about who may consent, so the
-// sentences are gone rather than replaced — and the ratchet is lowered to what the prompt
-// now actually costs, which is the whole point of it being a ratchet.
-// The same three deletions measured −108 against the pre-`connect` prefix (23913) and
-// −109 against this one. Not a transcription error in either direction: the tokenizer
-// merges across the text a deletion borders, so a delta is only valid against the prefix
-// it was measured on. Rebasing this entry past another one is therefore a
-// RE-MEASUREMENT, never an arithmetic — 23948 − 108 would have written 23840 here, and
-// the guard would have carried a one-token lie that nothing in it can detect.
+// 2026-09-24: −109 (23948 → 23839, measured) — FIVE strings deleted, not rewritten, all of
+// them advertising a route that now ends at a consent step the model cannot grant
+// (`save_workflow` no longer stamps the workflow as confirmed). Two in this prompt
+// ("scheduled via `task_create(workflow_id, schedule)`", "a `workflow_id` for
+// `run_workflow` / `task_create`") and three in tool definitions, which count toward this
+// measurement too: `task_create`'s `params` description (firing one workflow per batch),
+// `http_request`'s batch advice, and `save_workflow`'s "you can pass to run_workflow or
+// task_create". Naming a DIFFERENT route would be a decision about who may consent, so
+// they are gone rather than replaced. 380 characters in total.
+// The same deletion measured −108 against the pre-`connect` prefix (23913) and −109
+// against this one, and the reason is arithmetic rather than linguistic: this measure is
+// `Math.ceil(length / 3.5)` (`estimateTokens`), and 380 / 3.5 = 108.57, so which side of
+// the ceiling the two endpoints fall on depends on the base length. THE DIFFERENCE OF TWO
+// ROUNDED NUMBERS IS NOT THE ROUNDING OF THEIR DIFFERENCE. Rebasing this entry past
+// another one is therefore a RE-MEASUREMENT, never an arithmetic — 23948 − 108 would have
+// written 23840 here, and nothing in the guard can detect a budget that is one too high.
+// (An earlier version of this note blamed a tokenizer merging across text boundaries.
+// There is no tokenizer here; that was a mechanism fitted to the gap, and a refuter
+// caught it by reading `estimateTokens`. The conclusion survived, the reason did not.)
 const STATIC_PREFIX_BUDGET = 23839;
 
 /**
