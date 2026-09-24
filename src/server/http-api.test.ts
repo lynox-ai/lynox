@@ -5594,6 +5594,14 @@ describe('LynoxHTTPApi', () => {
           const res = await jsonFetch('/api/threads/t1/debug-export');
           const body = await res.json() as { messages: Array<{ role: string }> };
           expect(body.messages.filter((m) => m.role === 'assistant')).toHaveLength(2);
+          // The note's one POSITIVE claim: the tool output is HERE. Until this
+          // assert, `target.result = undefined` in render-projection.ts left all
+          // five of these tests green — the sentence was welded and its referent
+          // was free. Pinning where to look without checking that anything is
+          // there is the same defect the note exists to fix, one level down.
+          const withTc = body.messages.find((m) => m.toolCalls !== undefined);
+          expect(withTc?.toolCalls?.[0]?.result, 'the note points readers at this field').toBe('20 rows');
+          expect(withTc?.toolCalls?.[0]?.status).toBe('done');
         });
       });
 
@@ -5633,14 +5641,24 @@ describe('LynoxHTTPApi', () => {
           const res = await jsonFetch('/api/threads/t1/debug-export');
           const body = await res.json() as { messages_projection: { note: string } };
           expect(body.messages_projection.note).toBe(
-            'messages[] is a rendered projection and is shorter than stored_rows for SEVERAL reasons, not one: '
-            + 'a tool-result carrier is merged into the tool call it answers; a tool_result whose tool_use was not '
-            + 'rendered is dropped outright; so are hint-only and tool-guidance-only user rows, and thinking-only '
-            + 'or empty assistant rows. A tool call\'s OUTPUT lives at messages[].toolCalls[].result — NOT in '
+            'messages[] is a rendered projection, so it CAN be shorter than stored_rows — on a thread with no tool '
+            + 'calls the two are equal. It is shorter for SEVERAL reasons, not one: a tool-result carrier is merged '
+            + 'into the tool call it answers; hint-only and tool-guidance-only user rows are dropped, as are '
+            + 'thinking-only assistant rows and assistant rows whose blocks are ALL text and all empty (a turn '
+            + 'carrying an image or a server-tool block is kept). Separately, a tool_result whose tool_use was never '
+            + 'rendered loses its text without costing a further row, so it explains missing CONTENT and not a '
+            + 'missing count. A tool call\'s OUTPUT lives at messages[].toolCalls[].result — NOT in '
             + 'runs[].tool_calls, whose output column is an error ledger (empty on success) and whose input is '
-            + 'redacted and capped at 2000 characters. If truncated_at_limit is true the read dropped the NEWEST '
+            + 'secret-masked and capped at 2000 characters (redacted only for the mail tools, which are the only '
+            + 'two that define redactInputForAudit). If truncated_at_limit is true the read dropped the NEWEST '
             + 'rows (ORDER BY seq ASC), while runs[] is not capped.',
           );
+          // The 2000 above is written out, while the source interpolates
+          // TOOL_AUDIT_INPUT_MAX_CHARS. That asymmetry is deliberate: raising
+          // the cap must FAIL here, so that whoever raises it re-reads the
+          // sentence instead of shipping a note that quietly says the old
+          // number. The source can no longer go stale on its own; the pin is
+          // what forces a human to look.
         });
       });
     });

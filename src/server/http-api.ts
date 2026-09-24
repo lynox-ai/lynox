@@ -40,7 +40,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
-import { RunAbortedError } from '../core/agent.js';
+import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
 import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
@@ -4156,20 +4156,26 @@ export class LynoxHTTPApi {
         thread,
         debug_summary: debugSummary,
         wire_capture_summary: wireCaptureSummary,
-        // `messages` is the RENDERED projection, not the stored rows, and the two
-        // counts differ on purpose: a tool-result carrier is merged INTO the tool
-        // call it answers rather than appearing as its own entry. Stating both
-        // numbers is the point. Without them a reader counts entries, finds fewer
+        // `messages` is the RENDERED projection, not the stored rows. Stating both
+        // numbers is the point: without them a reader counts entries, finds fewer
         // than `thread.message_count`, and concludes rows are missing — which is
         // exactly how a 2026-09-24 loop investigation first read twenty genuine
         // model turns as twenty duplicate writes, and spent a detour on the
-        // persistence layer before the seq gaps gave it away. The raw tool
-        // input/output those carriers hold is under `runs[].tool_calls`.
+        // persistence layer before the seq gaps gave it away.
+        //
+        // The note below enumerates the reasons, and it is the only place that
+        // may: an earlier revision of THIS comment named the carrier merge as if
+        // it were the single cause, and sent the reader to `runs[].tool_calls`
+        // for the raw tool input and output. Both are wrong — `_recordToolCall`
+        // writes '' there on success, so that column is an error ledger — and
+        // they survived the round that fixed the note, because a fix replaces a
+        // string and does not look one line up. There is now ONE statement of
+        // this, and it is the one the reader actually receives.
         messages_projection: {
           rendered: messages.length,
           stored_rows: storedRowCount,
           truncated_at_limit: storedRowCount > MESSAGE_ROW_LIMIT,
-          note: 'messages[] is a rendered projection and is shorter than stored_rows for SEVERAL reasons, not one: a tool-result carrier is merged into the tool call it answers; a tool_result whose tool_use was not rendered is dropped outright; so are hint-only and tool-guidance-only user rows, and thinking-only or empty assistant rows. A tool call\'s OUTPUT lives at messages[].toolCalls[].result — NOT in runs[].tool_calls, whose output column is an error ledger (empty on success) and whose input is redacted and capped at 2000 characters. If truncated_at_limit is true the read dropped the NEWEST rows (ORDER BY seq ASC), while runs[] is not capped.',
+          note: `messages[] is a rendered projection, so it CAN be shorter than stored_rows — on a thread with no tool calls the two are equal. It is shorter for SEVERAL reasons, not one: a tool-result carrier is merged into the tool call it answers; hint-only and tool-guidance-only user rows are dropped, as are thinking-only assistant rows and assistant rows whose blocks are ALL text and all empty (a turn carrying an image or a server-tool block is kept). Separately, a tool_result whose tool_use was never rendered loses its text without costing a further row, so it explains missing CONTENT and not a missing count. A tool call's OUTPUT lives at messages[].toolCalls[].result — NOT in runs[].tool_calls, whose output column is an error ledger (empty on success) and whose input is secret-masked and capped at ${String(TOOL_AUDIT_INPUT_MAX_CHARS)} characters (redacted only for the mail tools, which are the only two that define redactInputForAudit). If truncated_at_limit is true the read dropped the NEWEST rows (ORDER BY seq ASC), while runs[] is not capped.`,
         },
         messages,
         runs,

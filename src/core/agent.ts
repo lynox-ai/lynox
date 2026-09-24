@@ -218,6 +218,14 @@ function stableStringify(value: unknown): string {
  *  - `budget_cap`     the CostGuard's USD budget was consumed, same shape.
  *  - `absolute_cap`   `ABSOLUTE_MAX_ITERATIONS` — the runaway backstop.
  */
+/**
+ * How much of a tool call's input the run ledger keeps. Named and exported
+ * because the debug export DESCRIBES this cap to whoever reads it: a number
+ * repeated in prose is a pointer at code that is free to move, and a note that
+ * says "2000" after this becomes 4000 is worse than one that says nothing.
+ */
+export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
+
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
 
 export interface SendStop {
@@ -3725,7 +3733,7 @@ export class Agent implements IAgent {
 
       const duration = timer.end();
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
-      const rawInput = JSON.stringify(auditInput).slice(0, 2000);
+      const rawInput = JSON.stringify(auditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
       // Persist through the injected sink, which knows the run because WE tell
       // it: `currentRunId` is this agent's own run, so a spawned child books
@@ -3793,7 +3801,7 @@ export class Agent implements IAgent {
       // delta round, 2026-08-24.
       const ledgerMessage = this._ledgerReason(message);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
-      const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
+      const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
