@@ -84,9 +84,24 @@ export interface MigrationManifest {
   chunks: MigrationChunkMeta[];
 }
 
+/**
+ * The chunk types a manifest may declare — and the runtime list IS the type, deliberately.
+ *
+ * It used to be a bare union, which exists only at compile time. The importer therefore kept
+ * its own hand-written table of buckets, and a type present in the union but absent from that
+ * table was dropped in silence (`if (group)`). One declaration makes that shape impossible:
+ * the table is derived from this list, so it cannot lag behind it.
+ */
+export const MIGRATION_CHUNK_TYPES = [
+  'secrets', 'sqlite_db', 'artifacts', 'config', 'memory', 'sweeps', 'portable_dir',
+] as const;
+
+/** A chunk type, derived from the list above so the two can never disagree. */
+export type MigrationChunkType = (typeof MIGRATION_CHUNK_TYPES)[number];
+
 export interface MigrationChunkMeta {
   seq: number;
-  type: 'secrets' | 'sqlite_db' | 'artifacts' | 'config' | 'memory' | 'sweeps' | 'portable_dir';
+  type: MigrationChunkType;
   name: string;                     // e.g. 'history.db', 'vault_secrets'
   originalSize: number;             // bytes before encryption
   checksum: string;                 // SHA-256 of plaintext

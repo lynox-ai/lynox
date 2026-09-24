@@ -1,83 +1,129 @@
 /**
- * Every chunk type the manifest can declare must have a home in the importer's group table.
+ * An unknown chunk type must be REFUSED, loudly, before a byte is transferred.
  *
- * WHY THIS FILE EXISTS, and it is a compatibility property rather than a bug in this tree.
- * `groupChunksByType` builds a fixed table and drops what it does not recognise:
+ * THE DEFECT THIS CLOSES, measured on 2026-09-24 across two real trees, each running its own
+ * code, with the fixture built by neither: v2.14.2's importer consuming an export from
+ * `origin/main` received all five chunks, verified every hash, restored the two types it knew,
+ * and **discarded `sweeps` and two `portable_dir` chunks without a word**. It threw nothing,
+ * and its progress stream ended at `{phase:'done',currentChunk:5,totalChunks:5}` — the
+ * manifest's count, not what was restored. The mechanism was a hand-written bucket table plus
+ * `if (group)`: a type present in the compile-time union but absent from that table fell
+ * through in silence.
  *
- *     const group = groups[meta.type];
- *     if (group) group.push({ meta, data: buf });
+ * WHY THE FIX IS STRUCTURAL AND NOT A SECOND CHECK. The union existed only at compile time, so
+ * the importer needed a runtime table, and the two could drift. `MIGRATION_CHUNK_TYPES` is now
+ * the single declaration — the type is derived from it, and the bucket table is built from it —
+ * so a declared type cannot lack a bucket. The `if (group)` guard is gone, and its absence is
+ * load-bearing: a guard there would re-create the silent drop it was meant to prevent.
  *
- * Measured across two real trees on 2026-09-24 — v2.14.2's importer consuming an export from
- * `origin/main`, both running their own code, the fixture built by neither: a five-chunk
- * export arrived complete (`isComplete()` true, every chunk hash verified), the importer
- * restored the two types it knew, **silently discarded `sweeps` and two `portable_dir`
- * chunks**, threw nothing, and its progress stream ended at `{phase:'done',currentChunk:5,
- * totalChunks:5}`. The number in that last event is the MANIFEST's count, not what was
- * restored, so a watching user sees a completed migration and has an instance missing its
- * sweeps and its `apis/`+`workspace/` files.
- *
- * Two things follow, and the second is why this test is shaped as it is:
- *   · Nothing in this repository can repair that for an ALREADY SHIPPED importer. v2.13.0 and
- *     v2.14.2 read neither `meta.type` against a list nor `manifest.version` at all — measured
- *     — so bumping the format version would be just as silent. That part is a release note,
- *     not a code change.
- *   · What this tree owes is that the NEXT addition cannot be silent. A new chunk type has to
- *     be declared in the union (TypeScript forces that much), so the union is the one place a
- *     guard can stand.
+ * WHAT CANNOT BE FIXED, and it is why this file argues rather than just asserts: nothing here
+ * reaches an ALREADY SHIPPED importer. v2.13.0 and v2.14.2 read neither `meta.type` against a
+ * list nor `manifest.version` at all — measured — so an export from this version restored onto
+ * one of those still loses what they cannot place. That remains a release note.
  */
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { MigrationImporter } from './migration-import.js';
+import {
+  MIGRATION_CHUNK_TYPES, computeManifestHash, generateEphemeralKeypair, serializePublicKey,
+} from './migration-crypto.js';
+import type { MigrationChunkMeta, MigrationManifest } from './migration-crypto.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const TOKEN = 'b'.repeat(64);
 
-/** The declared chunk-type union, read from the contract rather than restated here. */
-function declaredTypes(): string[] {
-  const src = readFileSync(join(HERE, 'migration-crypto.ts'), 'utf-8');
-  const line = src.split('\n').find((l) => /^\s*type:\s*'[a-z_]+'\s*\|/.test(l));
-  expect(line, 'the chunk-type union must be a single line in MigrationChunkMeta').toBeDefined();
-  return [...line!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!);
+/** A manifest carrying `types`, with a hash the importer will accept. */
+function manifestWith(types: string[]): MigrationManifest {
+  const chunks = types.map((t, i) => ({
+    seq: i, type: t as MigrationChunkMeta['type'], name: t,
+    originalSize: 10, checksum: 'c'.repeat(64),
+  }));
+  const base = {
+    version: 1 as const, exportedAt: new Date().toISOString(), lynoxVersion: 'test',
+    totalChunks: chunks.length, chunks,
+  };
+  return { ...base, manifestHash: computeManifestHash(base) };
 }
 
-/** The keys of the importer's group table, read from its source. */
-function groupTableKeys(): string[] {
-  const src = readFileSync(join(HERE, 'migration-import.ts'), 'utf-8');
-  const start = src.indexOf('const groups: Record<string');
-  expect(start, 'groupChunksByType must still build a table literal').toBeGreaterThan(-1);
-  const body = src.slice(start, src.indexOf('};', start));
-  return [...body.matchAll(/^\s{6}([a-z_]+):\s*\[\],?$/gm)].map((m) => m[1]!);
+/** An importer past its handshake, pointed at a throwaway directory. */
+function armed(dir: string): MigrationImporter {
+  const importer = new MigrationImporter({ lynoxDir: dir, vaultKey: 'a-test-vault-key-32-bytes-or-so!' });
+  importer.startHandshake(TOKEN);
+  importer.completeHandshake(serializePublicKey(generateEphemeralKeypair().publicKey));
+  return importer;
 }
 
-describe('a chunk type the importer cannot place is a chunk it drops in silence', () => {
-  it('gives every declared type a group, so nothing this tree exports can vanish', () => {
-    const declared = declaredTypes();
-    const keys = groupTableKeys();
-    // The control first: both parses must have found something, or the comparison below is
-    // two empty sets agreeing with each other.
-    expect(declared.length, 'the union parse found nothing').toBeGreaterThan(4);
-    expect(keys.length, 'the group-table parse found nothing').toBeGreaterThan(4);
-    expect([...keys].sort()).toEqual([...declared].sort());
+describe('a manifest naming a type this build does not know is refused', () => {
+  it('refuses it, and the message NAMES the type — otherwise "too old" cannot be told from "corrupt"', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mig-unknown-'));
+    try {
+      const importer = armed(dir);
+      let msg = '';
+      try { importer.setManifest(manifestWith(['memory', 'time_machine'])); } catch (e) { msg = String(e); }
+      expect(msg).toContain('time_machine');
+      expect(msg).toMatch(/newer lynox/);
+      // The orchestrator's condition, and it is the whole point: the refusal must be
+      // DISTINGUISHABLE from a completed import, not merely a different exit path. A run that
+      // aborts while looking finished is the defect this file exists for, with the sign flipped.
+      expect(importer.isComplete()).toBe(false);
+      expect(() => importer.restore()).toThrow();
+      expect(readdirSync(dir), 'a refused manifest must not have written anything').toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it('pins the type set, so growing it is a DECISION and not a diff', () => {
-    // When this list changes, the addition is fine — what is not fine is adding a type and
-    // shipping it under the same `manifest.version: 1`. An importer older than the release
-    // drops the new type without a word (measured on v2.13.0 and v2.14.2), so the addition
-    // owes a release note saying an export must not be restored onto an older instance, and
-    // it owes a decision about whether this is the release that starts checking the version.
-    expect(declaredTypes().sort()).toEqual([
+  it('accepts a manifest of KNOWN types — the control, or the test above proves nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mig-known-'));
+    try {
+      const importer = armed(dir);
+      expect(() => importer.setManifest(manifestWith(['memory', 'config', 'sweeps']))).not.toThrow();
+      // Accepted, and STILL not complete — no chunk has arrived. `isComplete()` therefore does
+      // not distinguish the two cases on its own, which is why the test above also asserts the
+      // message and the empty directory.
+      expect(importer.isComplete()).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('refuses every unknown type it is given, one at a time', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mig-each-'));
+    try {
+      for (const bad of ['', 'Memory', 'memory ', 'sqlite', 'portable-dir', '__proto__']) {
+        const importer = armed(dir);
+        expect(() => importer.setManifest(manifestWith([bad])), `"${bad}" was accepted`).toThrow(/Unknown chunk type/);
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('the declared list is the single source of the bucket table', () => {
+  it('pins the set, so growing it is a DECISION and not a diff', () => {
+    // Read from the exported list rather than parsed out of source: the list IS the runtime
+    // value now. When it changes, the addition is fine — what is not fine is shipping a new
+    // type under the same `manifest.version: 1`, because an importer older than the release
+    // drops it without a word (measured on v2.13.0 and v2.14.2). That addition owes a release
+    // note, and a decision about whether it is the release that starts checking the version.
+    expect([...MIGRATION_CHUNK_TYPES].sort()).toEqual([
       'artifacts', 'config', 'memory', 'portable_dir', 'secrets', 'sqlite_db', 'sweeps',
     ]);
   });
 
-  it('the importer still reads neither the manifest version nor an allow-list of types', () => {
-    // Not a defect on its own — it is the reason the remedy is a release note. If a future
-    // change adds either check, this assertion is the one that should be revisited, and the
-    // comment above with it.
+  it('builds the buckets FROM that list and keeps no hand-written table', () => {
+    // The structural half. A literal table would drift from the list again, and the drift is
+    // exactly what was silent — so the shape is asserted, not only the behaviour.
     const src = readFileSync(join(HERE, 'migration-import.ts'), 'utf-8');
-    expect(src.includes('manifest.version'), 'a version check would change the remedy').toBe(false);
+    expect(src).toContain('MIGRATION_CHUNK_TYPES.map(');
+    expect(src, 'a re-introduced literal bucket table').not.toMatch(/\n\s+sqlite_db: \[\],/);
+    expect(src, 'the silent-drop guard must stay gone').not.toMatch(/if \(group\) group\.push/);
     // …and the control that the file was read at all.
     expect(src).toContain('groupChunksByType');
+  });
+
+  it('still reads no manifest version, which is why the remedy for old instances is a text', () => {
+    const src = readFileSync(join(HERE, 'migration-import.ts'), 'utf-8');
+    expect(src.includes('manifest.version'), 'a version check would change the remedy').toBe(false);
   });
 });

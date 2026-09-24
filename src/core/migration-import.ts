@@ -43,7 +43,9 @@ import {
   type HandshakeServerPayload,
   type MigrationManifest,
   type MigrationChunkMeta,
+  type MigrationChunkType,
   type EncryptedChunk,
+  MIGRATION_CHUNK_TYPES,
 } from './migration-crypto.js';
 
 // ── Types ──
@@ -118,6 +120,12 @@ const MAX_MERGE_LEDGERS = 50_000;
 const ALLOWED_DB_NAMES = new Set<string>(MIGRATE_SQLITE_DBS);
 
 /** Config fields the importer will accept — defense-in-depth re-validation (matches exporter allowlist). */
+/**
+ * The declared chunk types as a lookup. `setManifest` refuses anything outside it, which is the
+ * only point where an export from a NEWER lynox can be told apart from a corrupt one.
+ */
+const KNOWN_CHUNK_TYPES: ReadonlySet<string> = new Set(MIGRATION_CHUNK_TYPES);
+
 const SAFE_CONFIG_FIELDS = new Set([
   'default_tier', 'thinking_mode', 'effort_level',
   'max_session_cost_usd', 'max_daily_cost_usd', 'max_monthly_cost_usd',
@@ -244,8 +252,22 @@ export class MigrationImporter {
       throw new Error(`Total data size exceeds limit: ${String(totalSize)} > ${String(MAX_TOTAL_BYTES)}`);
     }
 
-    // Validate DB names against whitelist (path traversal prevention)
     for (const chunk of manifest.chunks) {
+      // A type this build does not know means the export came from a NEWER lynox. Refusing
+      // here — before a single chunk is transferred — is the whole point: the alternative is
+      // what shipped versions do, which is to accept everything, restore what they recognise,
+      // and report `done` with the manifest's chunk count. A partial instance that looks
+      // complete is worse than a migration that refuses to start, and the message has to name
+      // the type, because otherwise the operator cannot tell "too old" from "corrupt".
+      if (!KNOWN_CHUNK_TYPES.has(chunk.type)) {
+        throw new Error(
+          `Unknown chunk type "${chunk.type}" in the manifest — this export was written by a `
+          + `newer lynox than this instance. Upgrade this instance before restoring; a restore `
+          + `now would silently leave out everything it cannot place.`,
+        );
+      }
+
+      // Validate DB names against whitelist (path traversal prevention)
       if (chunk.type === 'sqlite_db') {
         const baseName = chunk.name.split(':')[0]!;
         if (!ALLOWED_DB_NAMES.has(baseName)) {
@@ -479,25 +501,25 @@ export class MigrationImporter {
   private groupChunksByType(
     metas: MigrationChunkMeta[],
     data: Map<number, Buffer>,
-  ): Record<MigrationChunkMeta['type'], Array<{ meta: MigrationChunkMeta; data: Buffer }>> {
-    const groups: Record<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>> = {
-      secrets: [],
-      sqlite_db: [],
-      artifacts: [],
-      memory: [],
-      config: [],
-      sweeps: [],
-      portable_dir: [],
-    };
+  ): Record<MigrationChunkType, Array<{ meta: MigrationChunkMeta; data: Buffer }>> {
+    // DERIVED from the declared list, not restated. The hand-written table was the defect:
+    // a type in the union with no bucket here fell through `if (group)` without a word, and a
+    // v2.14.2 importer reading a v2.15 export lost `sweeps` and two `portable_dir` chunks that
+    // way while reporting `done` at 5 of 5 (measured 2026-09-24 across two real trees).
+    const groups = Object.fromEntries(
+      MIGRATION_CHUNK_TYPES.map((t) => [t, [] as Array<{ meta: MigrationChunkMeta; data: Buffer }>]),
+    ) as Record<MigrationChunkType, Array<{ meta: MigrationChunkMeta; data: Buffer }>>;
 
     for (const meta of metas) {
       const buf = data.get(meta.seq);
       if (!buf) continue;
-      const group = groups[meta.type];
-      if (group) group.push({ meta, data: buf });
+      // No `if (group)` guard, and its absence is the point: `meta.type` is a declared type and
+      // every declared type has a bucket above, so the lookup cannot miss. A guard here would
+      // re-create the silent drop it is meant to prevent.
+      groups[meta.type].push({ meta, data: buf });
     }
 
-    return groups as Record<MigrationChunkMeta['type'], Array<{ meta: MigrationChunkMeta; data: Buffer }>>;
+    return groups;
   }
 
   /**
