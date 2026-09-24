@@ -400,7 +400,7 @@ function measureStaticPrefixTokens(): number {
 // spelled out "to authorize a provider" and "show it to them". Naming the
 // provider is redundant inside a tool that is entirely about one API profile,
 // and the second clause repeated the verb. Same rule, eight tokens less.
-// 2026-09-22: −108 (measured 23805) — three sentences deleted, not rewritten. Two in
+// 2026-09-24: −109 (23948 → 23839, measured) — three sentences deleted, not rewritten. Two in
 // this prompt ("scheduled via `task_create(workflow_id, schedule)`", "a `workflow_id`
 // for `run_workflow` / `task_create`") and one in `task_create`'s `params` description
 // (firing one workflow per batch). All three named a route that now ends at a consent
@@ -408,7 +408,13 @@ function measureStaticPrefixTokens(): number {
 // confirmed. Naming a DIFFERENT route would be a decision about who may consent, so the
 // sentences are gone rather than replaced — and the ratchet is lowered to what the prompt
 // now actually costs, which is the whole point of it being a ratchet.
-const STATIC_PREFIX_BUDGET = 23805;
+// The same three deletions measured −108 against the pre-`connect` prefix (23913) and
+// −109 against this one. Not a transcription error in either direction: the tokenizer
+// merges across the text a deletion borders, so a delta is only valid against the prefix
+// it was measured on. Rebasing this entry past another one is therefore a
+// RE-MEASUREMENT, never an arithmetic — 23948 − 108 would have written 23840 here, and
+// the guard would have carried a one-token lie that nothing in it can detect.
+const STATIC_PREFIX_BUDGET = 23839;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
