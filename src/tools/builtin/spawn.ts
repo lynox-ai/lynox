@@ -274,7 +274,12 @@ export function resolveSpawnChildProviderConfig(input: {
 // Control characters (incl. CR/LF) that could be used to spoof log lines or
 // break terminal rendering when `name` is echoed in error messages, channel
 // events, or the `## ${name}` markdown header.
-const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+// U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are line
+// breaks that `[\x00-\x1f\x7f]` does not cover. They matter here for the same
+// reason CR/LF do: a name is echoed one-per-line in the all-failed message, so a
+// name carrying a line break forges an extra row — and a forged row can claim a
+// child SUCCEEDED inside a message whose whole job is to report that none did.
+const CONTROL_CHARS = /[\x00-\x1f\x7f\u0085\u2028\u2029]/;
 
 function validateSpawnInput(input: SpawnAgentInput): void {
   if (!Array.isArray(input.agents) || input.agents.length === 0) {
@@ -325,8 +330,22 @@ function validateSpawnInput(input: SpawnAgentInput): void {
  * makes a silent sub-agent failure undiagnosable after the fact (the exact gap
  * that hid the v2.1.1 hybrid 404s until the DB was read by hand).
  */
-export function formatSpawnError(err: unknown): string {
+/** How deep a `cause` chain is rendered before it is cut. Foreign data. */
+const MAX_CAUSE_DEPTH = 8;
+
+/** HTTP statuses where retrying the SAME request is the correct next action. */
+const TRANSIENT_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504, 529]);
+
+export function formatSpawnError(err: unknown, seen?: Set<unknown>, depth = 0): string {
   if (!(err instanceof Error)) return String(err);
+  // A cause chain is foreign data — an SDK may hand back a cycle, and this
+  // function is also called on the PARTIAL-failure path, where a throw would
+  // discard the results of children that SUCCEEDED. That is the same failure
+  // direction this file exists to remove, one level down. Bounded both ways:
+  // a seen-set for cycles, a depth stop for long linear chains.
+  const visited = seen ?? new Set<unknown>();
+  if (visited.has(err) || depth >= MAX_CAUSE_DEPTH) return `${err.name}: ${err.message} (cause chain truncated)`;
+  visited.add(err);
   const status = (err as { status?: unknown }).status;
   const statusPrefix = typeof status === 'number' ? `[${status}] ` : '';
   // The cause is formatted by THIS function too, not string-interpolated by the
@@ -335,7 +354,7 @@ export function formatSpawnError(err: unknown): string {
   const { cause } = err;
   const causeSuffix = cause === undefined || cause === null
     ? ''
-    : ` (cause: ${cause instanceof Error ? formatSpawnError(cause) : String(cause)})`;
+    : ` (cause: ${cause instanceof Error ? formatSpawnError(cause, visited, depth + 1) : String(cause)})`;
   return `${statusPrefix}${err.name}: ${err.message}${causeSuffix}`;
 }
 
@@ -359,24 +378,51 @@ export function formatSpawnError(err: unknown): string {
  * both would have to be vague enough to be useless for either.
  */
 export function formatAllFailedMessage(failures: readonly { name: string; err: unknown }[]): string {
-  // Formatted ONCE and reused for both the listing and the sameness test. Two
-  // separate `.map(formatSpawnError)` calls could drift, and the whole claim of
-  // the "same way" branch is that the reader is comparing the strings shown.
+  // The NAME is model-written and rendered one per line. Escaped for the same
+  // reason the FAILED section escapes it 50 lines down — same value, same
+  // destination (the parent model's context), so the two must not disagree.
   const formatted = failures.map((f) => formatSpawnError(f.err));
-  const lines = failures.map((f, i) => `- ${f.name}: ${formatted[i] as string}`);
-  // THREE shapes, not two. With a single child there is nothing to compare, and
-  // both comparative sentences are false for it — "every child failed the same
-  // way" and "the children failed differently" each assert a comparison that was
-  // never made. Writing one sentence for the n>1 cases and letting n=1 fall into
-  // the else is how the second one ships.
-  const diagnosis = failures.length < 2
-    ? `It was the only child, so nothing here separates a bad task from a bad route.`
-    : formatted.every((m) => m === formatted[0])
-      ? `Every child failed the SAME way, so this is not ${String(failures.length)} failed tasks — ` +
-        `it is one shared cause: model routing, credentials, or the provider endpoint. ` +
-        `Check the configuration before re-spawning; re-running the same fan-out will fail the same way.`
-      : `The children failed differently, so read each line above on its own — ` +
-        `a shared cause is not indicated.`;
+  const lines = failures.map((f, i) => `- ${escapeXml(f.name)}: ${formatted[i] as string}`);
+
+  // The CLASS, not the rendered text. Comparing whole strings answers "did these
+  // render identically", and the sentences below claim "did these fail of one
+  // cause" — a different quantity. The gateway 404 that this function was
+  // written for would have been called UNRELATED the moment the gateway echoed a
+  // request id, and three flavours of dead network (ECONNREFUSED / EAI_AGAIN /
+  // ETIMEDOUT) are one cause under three strings.
+  const classOf = (err: unknown): string => {
+    if (!(err instanceof Error)) return 'non-error';
+    const status = (err as { status?: unknown }).status;
+    return typeof status === 'number' ? `status:${String(status)}` : `name:${err.name}`;
+  };
+  const classes = failures.map((f) => classOf(f.err));
+  const shared = classes.length > 1 && classes.every((c) => c === classes[0]);
+  const status = (() => {
+    const first = failures[0]?.err;
+    const raw = first instanceof Error ? (first as { status?: unknown }).status : undefined;
+    return typeof raw === 'number' ? raw : undefined;
+  })();
+
+  // FIVE shapes. Each says something materially different, and two of them were
+  // actively harmful when this text had three: a user pressing Stop makes every
+  // child throw RunAbortedError with one identical message, and was told to go
+  // check the routing; a fan-out that hit a 429 was told that re-running would
+  // fail the same way, on the one class where retrying is correct.
+  const diagnosis = failures.every((f) => f.err instanceof RunAbortedError)
+    ? `The run was INTERRUPTED before these children finished — this is not a failure to diagnose. ` +
+      `Nothing about the task, the routing, or the configuration is implicated.`
+    : failures.length < 2
+      ? `It was the only child, so nothing here separates a bad task from a bad route.`
+      : !shared
+        ? `The children failed in DIFFERENT ways, so read each line above on its own — ` +
+          `a shared cause is not indicated.`
+        : status !== undefined && TRANSIENT_STATUSES.has(status)
+          ? `Every child failed the same way, with a status that is usually TRANSIENT (${String(status)}) — ` +
+            `so this is one shared condition upstream rather than ${String(failures.length)} bad tasks, ` +
+            `and re-running the fan-out once is a reasonable next step.`
+          : `Every child failed the same way, so this is not ${String(failures.length)} failed tasks — ` +
+            `it is one shared cause: model routing, credentials, or the provider endpoint. ` +
+            `Check the configuration before re-spawning; re-running the same fan-out will fail the same way.`;
   const count = failures.length === 1 ? '1 sub-agent' : `${String(failures.length)} sub-agents`;
   return `All ${count} failed and none returned a result.\n\n` +
     `${lines.join('\n')}\n\n${diagnosis}`;
