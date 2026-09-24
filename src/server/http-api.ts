@@ -15,8 +15,17 @@ import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
-import { signProfileOAuthState, PROFILE_OAUTH_STATE_TTL_SEC } from '../core/oauth-state-cookie.js';
+import {
+  signProfileOAuthState,
+  verifyProfileOAuthState,
+  PROFILE_OAUTH_STATE_TTL_SEC,
+} from '../core/oauth-state-cookie.js';
 import { createPkcePair } from '../core/oauth-pkce.js';
+import {
+  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused,
+} from '../core/oauth-token-exchange.js';
+import { derivePresetEndpoints } from '../core/oauth-presets.js';
+import { accessTokenKey, refreshTokenKey } from '../core/api-store.js';
 import { decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry } from '../types/memory.js';
@@ -1535,6 +1544,38 @@ export class LynoxHTTPApi {
     return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=${encodeURIComponent(value)}; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=${LynoxHTTPApi.OAUTH_STATE_TTL_SEC}`;
   }
 
+  /**
+   * Charge one request against this client's window.
+   *
+   * Extracted from the dispatch so a route that answers BEFORE the dispatch
+   * reaches it can charge itself. `true` means the response has been written
+   * and the caller must return.
+   *
+   * Keyed on `clientIp` and not on an authenticated identity, which is what
+   * makes it usable from a path that has no identity yet. Loopback is read
+   * from the socket rather than from a header, so a proxy header cannot buy a
+   * higher ceiling.
+   */
+  private _rateLimit(req: IncomingMessage, res: ServerResponse, clientIp: string): boolean {
+    const socketIp = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+    const isLoopback = socketIp === '127.0.0.1' || socketIp === '::1';
+    const limit = isLoopback ? RATE_MAX_LOOPBACK : RATE_MAX;
+    const now = Date.now();
+    let rateEntry = this.rateCounts.get(clientIp);
+    if (!rateEntry || rateEntry.resetAt < now) {
+      rateEntry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+      this.rateCounts.set(clientIp, rateEntry);
+    }
+    rateEntry.count++;
+    if (rateEntry.count > limit) {
+      const retryAfter = Math.ceil((rateEntry.resetAt - now) / 1000);
+      res.setHeader('Retry-After', String(retryAfter));
+      errorResponse(res, 429, 'Too many requests');
+      return true;
+    }
+    return false;
+  }
+
   private _clearOAuthStateCookie(): string {
     return `${LynoxHTTPApi.OAUTH_STATE_COOKIE}=; Path=/api/google/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   }
@@ -1945,6 +1986,24 @@ export class LynoxHTTPApi {
       if (handler) { await handler(req, res, {}, null); return; }
     }
 
+    // API-profile OAuth callback — unauthenticated for the same reason as the
+    // one above: it is a top-level browser redirect arriving from a provider,
+    // so no session travels with it that a dispatch check could read.
+    //
+    // An EXACT path comparison, deliberately, and the profile id is not in it.
+    // A path carrying the id would need a prefix match, and a prefix match
+    // admits everything ever built under it without anyone deciding to admit
+    // it. The id rides in the signed state cookie instead.
+    //
+    // Charged against this client's window before anything else runs, because
+    // this route answers here rather than reaching the dispatch's shared
+    // charge point further down.
+    if (method === 'GET' && pathname === LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH) {
+      if (this._rateLimit(req, res, clientIp)) return;
+      const handler = this.staticRoutes.get(`GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`);
+      if (handler) { await handler(req, res, {}, null); return; }
+    }
+
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
     const requestOrigin = req.headers['origin'] ?? '';
     // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
@@ -2059,26 +2118,9 @@ export class LynoxHTTPApi {
       return;
     }
 
-    // Rate limiting (always applied — uses socket IP for loopback detection to prevent spoofing)
-    {
-      const socketIp = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
-      const isLoopback = socketIp === '127.0.0.1' || socketIp === '::1';
-      const limit = isLoopback ? RATE_MAX_LOOPBACK : RATE_MAX;
-      const ip = clientIp;
-      const now = Date.now();
-      let rateEntry = this.rateCounts.get(ip);
-      if (!rateEntry || rateEntry.resetAt < now) {
-        rateEntry = { count: 0, resetAt: now + RATE_WINDOW_MS };
-        this.rateCounts.set(ip, rateEntry);
-      }
-      rateEntry.count++;
-      if (rateEntry.count > limit) {
-        const retryAfter = Math.ceil((rateEntry.resetAt - now) / 1000);
-        res.setHeader('Retry-After', String(retryAfter));
-        errorResponse(res, 429, 'Too many requests');
-        return;
-      }
-    }
+    // Rate limiting — uses socket IP for loopback detection to prevent spoofing.
+    // Applies to everything that reaches this point.
+    if (this._rateLimit(req, res, clientIp)) return;
 
     // Parse body for POST/PUT/PATCH/DELETE. DELETE carries a JSON body for
     // confirm-guarded destructive routes (e.g. DELETE /api/data's
@@ -7298,6 +7340,130 @@ export class LynoxHTTPApi {
       res.writeHead(302, { Location: authorize.toString(), 'Cache-Control': 'no-store' });
       res.end();
     }));
+
+    // The CALLBACK half. Unauthenticated by construction, and every input it
+    // takes is listed here with the mechanism that bounds it — or with the
+    // plain statement that there is none, which is the only other honest
+    // entry:
+    //
+    //   `state`      — HMAC over the cookie payload, then compared against the
+    //                  query parameter. The engine minted both; neither is
+    //                  trusted alone.
+    //   profile id   — inside that same signature, so a cookie issued for one
+    //                  profile cannot be spent on another.
+    //   PKCE verifier— inside the signature too, and never sent to the
+    //                  provider; only its SHA-256 was.
+    //   redirect hop — `SameSite=Lax` on the cookie: it travels on a top-level
+    //                  navigation and not on a cross-site subresource or a
+    //                  POST. That is the property, not a `Referer` check.
+    //   `code`       — NO mechanism here. It is single-use at the PROVIDER,
+    //                  which is the provider's guarantee and not this engine's.
+    //                  A replay therefore costs one refused exchange, and the
+    //                  window it can happen in is the cookie's TTL.
+    this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res) => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const providerError = url.searchParams.get('error');
+      if (providerError !== null) {
+        // The provider's own word, escaped but not echoed as-is into anything
+        // that parses: a user who declined is the ordinary case here.
+        sendOAuthHtml(res, 400, 'The provider did not complete the authorization.');
+        return;
+      }
+
+      const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
+      const raw = LynoxHTTPApi._readProfileOAuthCookie(req);
+      const signed = raw === null
+        ? null
+        : verifyProfileOAuthState(raw, httpSecret, Math.floor(Date.now() / 1000));
+      const queryState = url.searchParams.get('state');
+      const code = url.searchParams.get('code');
+
+      // One refusal for every way of arriving without a valid round-trip, and
+      // deliberately one TEXT for all of them: which of the five failed is
+      // information about this engine's state, and the person who reaches this
+      // page without a valid cookie is not the person who started the flow.
+      const statesMatch = signed !== null
+        && queryState !== null
+        && queryState.length === signed.state.length
+        && timingSafeEqual(Buffer.from(queryState), Buffer.from(signed.state));
+      if (!signed || !code || !statesMatch) {
+        LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
+        sendOAuthHtml(res, 400, 'This authorization link is no longer valid. Ask for a new one and try again.');
+        return;
+      }
+
+      // Cleared BEFORE the exchange, not after. A browser that replays this URL
+      // then arrives without a cookie and is refused above — which does not
+      // stop somebody who kept the value, and is not claimed to.
+      LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
+
+      const apiStore = engine.getApiStore();
+      const profile = apiStore?.get(signed.profileId);
+      const oauth = profile?.auth?.type === 'oauth2' ? profile.auth.oauth : undefined;
+      if (!apiStore || !profile || !oauth) {
+        sendOAuthHtml(res, 409, 'That connection no longer exists on this engine. Nothing was changed.');
+        return;
+      }
+
+      const endpoints = derivePresetEndpoints(oauth.preset_id ?? '', oauth.preset_params);
+      if ('kind' in endpoints) {
+        sendOAuthHtml(res, 409, 'This connection can no longer be completed on this engine. Nothing was changed.');
+        return;
+      }
+      const vetting = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
+      if (isTokenEndpointRefused(vetting)) {
+        sendOAuthHtml(res, 409, 'This connection points somewhere this engine may not send credentials. Nothing was changed.');
+        return;
+      }
+
+      const secretStore = engine.getSecretStore();
+      const clientId = oauth.client_id_key ? secretStore?.resolve(oauth.client_id_key) : null;
+      const clientSecret = oauth.client_secret_key ? secretStore?.resolve(oauth.client_secret_key) : null;
+      if (!secretStore || !clientId || !clientSecret) {
+        sendOAuthHtml(res, 409, 'The credentials for this connection are no longer in the vault. Set them again, then ask for a new link.');
+        return;
+      }
+
+      const exchanged = await exchangeToken({
+        endpoint: vetting,
+        params: {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: profileOAuthRedirectUri(),
+          client_id: clientId,
+          client_secret: clientSecret,
+          code_verifier: signed.verifier,
+        },
+        bodyFormat: oauth.body_format ?? 'form',
+      }, engine.getToolContext());
+
+      if (!exchanged.ok || !exchanged.responseOk) {
+        // The provider's status and body are NOT rendered. This page is read in
+        // a browser by whoever completed the consent, and a token endpoint's
+        // error body is the one place a client secret has been seen echoed back.
+        sendOAuthHtml(res, 502, 'The provider refused to complete the authorization. Nothing was stored.');
+        return;
+      }
+
+      let parsed: { access_token?: unknown; refresh_token?: unknown };
+      try {
+        parsed = JSON.parse(exchanged.text) as typeof parsed;
+      } catch {
+        sendOAuthHtml(res, 502, 'The provider answered with something this engine could not read. Nothing was stored.');
+        return;
+      }
+      const accessToken = parsed.access_token;
+      if (typeof accessToken !== 'string' || accessToken === '') {
+        sendOAuthHtml(res, 502, 'The provider answered without an access token. Nothing was stored.');
+        return;
+      }
+
+      secretStore.set(accessTokenKey(signed.profileId), accessToken);
+      if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
+        secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
+      }
+      sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
+    });
 
     // ── Knowledge Graph ──────────────────────────────────────────
 
