@@ -5549,6 +5549,38 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('states BOTH counts, so a shorter messages[] does not read as lost rows', async () => {
+      // The projection merges a tool-result carrier INTO the tool call it
+      // answers, so `messages` is legitimately shorter than the stored rows.
+      // Unlabelled, that gap reads as data loss: a 2026-09-24 loop
+      // investigation counted 133 entries against a stored 213 and spent a
+      // detour on the persistence layer before the seq gaps gave it away.
+      const rows = [
+        { seq: 1, role: 'user', content_json: JSON.stringify('do it'), created_at: 'now' },
+        { seq: 2, role: 'assistant', content_json: JSON.stringify([{ type: 'tool_use', id: 'tu1', name: 'data_store_query', input: {} }]), created_at: 'now' },
+        // The carrier — merged into tu1 above, never its own entry.
+        { seq: 3, role: 'user', content_json: JSON.stringify([{ type: 'tool_result', tool_use_id: 'tu1', content: '20 rows' }]), created_at: 'now' },
+      ];
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => rows }),
+        getRunHistory: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        const body = await res.json() as {
+          messages: unknown[];
+          messages_projection: { rendered: number; stored_rows: number; truncated_at_limit: boolean; note: string };
+        };
+        const p = body.messages_projection;
+        expect(p.stored_rows).toBe(rows.length);
+        expect(p.rendered).toBe(body.messages.length);
+        // The whole point: the two differ, and the artefact says so itself.
+        expect(p.rendered).toBeLessThan(p.stored_rows);
+        expect(p.truncated_at_limit).toBe(false);
+        expect(p.note).toMatch(/merged into the tool call/i);
+        expect(p.note).toMatch(/runs\[\]\.tool_calls/);
+      });
+    });
+
     it('wire_capture_summary is null when no run captured snapshots (setting off)', async () => {
       const runHistory = {
         getRunsBySession: () => [{

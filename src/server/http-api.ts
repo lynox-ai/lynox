@@ -3933,7 +3933,9 @@ export class LynoxHTTPApi {
       // Raw per-iteration view: the debug export exists to reveal the row-by-row
       // truth (incl. what the merged chat bubble hides), so it must NOT collapse
       // a turn's assistant iterations the way the UI /messages endpoint does.
-      const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }), { mergeTurns: false });
+      const MESSAGE_ROW_LIMIT = 50000;
+      const messageRows = threadStore.getMessages(id, { fromSeq: 0, limit: MESSAGE_ROW_LIMIT });
+      const messages = projectMessages(messageRows, { mergeTurns: false });
 
       const history = engine.getRunHistory();
       // Extended debug capture (step-3 at-a-glance view): a flat per-turn table across
@@ -4146,6 +4148,21 @@ export class LynoxHTTPApi {
         thread,
         debug_summary: debugSummary,
         wire_capture_summary: wireCaptureSummary,
+        // `messages` is the RENDERED projection, not the stored rows, and the two
+        // counts differ on purpose: a tool-result carrier is merged INTO the tool
+        // call it answers rather than appearing as its own entry. Stating both
+        // numbers is the point. Without them a reader counts entries, finds fewer
+        // than `thread.message_count`, and concludes rows are missing — which is
+        // exactly how a 2026-09-24 loop investigation first read twenty genuine
+        // model turns as twenty duplicate writes, and spent a detour on the
+        // persistence layer before the seq gaps gave it away. The raw tool
+        // input/output those carriers hold is under `runs[].tool_calls`.
+        messages_projection: {
+          rendered: messages.length,
+          stored_rows: messageRows.length,
+          truncated_at_limit: messageRows.length >= MESSAGE_ROW_LIMIT,
+          note: 'messages[] is a rendered projection: tool-result carrier rows are merged into the tool call they answer instead of appearing as their own entry, so it is shorter than stored_rows. Raw tool input/output is under runs[].tool_calls.',
+        },
         messages,
         runs,
         compaction_events: compactionEvents,
