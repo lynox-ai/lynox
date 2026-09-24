@@ -114,6 +114,16 @@ export function reclassifyForeignGrant(
  * reads them as one rule. It names the one way back (a new refresh token from
  * the user) and says plainly not to fetch again with the old one: the 401 hint
  * used to send the model round exactly that loop.
+ *
+ * ⚠ Written before a profile could be authorized by redirect, and it shows: it
+ * sends the model to collect a pasted refresh token, which is the path the
+ * connect link replaces. Deliberately not changed in the first wave — this is
+ * one of several model-visible surfaces that say it, and fixing one of them
+ * leaves the class half-done, which reads as covered to whoever greps next.
+ *
+ * The condition under which it goes from harmless to wrong: the preset register
+ * stops shipping empty. A test in `oauth-presets.test.ts` goes red exactly then
+ * and names this function.
  */
 export function revokedGrantMessage(id: string, refreshKey: string, revokedAt: string | undefined): string {
   const since = revokedAt ? ` (recorded ${revokedAt})` : '';

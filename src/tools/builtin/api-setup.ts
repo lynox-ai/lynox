@@ -20,14 +20,17 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
+import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { describeDisclosure, isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
+import { describeDisclosure, isEndpointAcked, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isInfraSecret, isProtectedSecretWrite } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -52,7 +55,7 @@ const TOKEN_BODY_MAX_BYTES = 64 * 1024;
  */
 const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
-type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token';
+type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect';
 
 interface RefinePatch {
   addGuidelines?: string[] | undefined;
@@ -175,6 +178,61 @@ function validateProfile(profile: ApiProfile): string | null {
         const v = o[field];
         if (v !== undefined && !keyPattern.test(v)) {
           return `Invalid auth.oauth.${field} "${v}": must be UPPER_SNAKE_CASE, start with a letter, 1-64 chars`;
+        }
+      }
+      // The two fields a HOST is derived from. Checked here for the same reason
+      // the username/password keys above are, and the comment there is the whole
+      // argument: these values come from the profile, a prompt-injected agent can
+      // author them, and this is the point where the operator is still present.
+      //
+      // The type says `Record<string, string>`, and the type is not a check — a
+      // profile arrives as model JSON or as a file. The derivation refuses a
+      // non-string later and that refusal is the real boundary; what this adds is
+      // that a structurally broken profile never persists to fail far from
+      // whoever could fix it.
+      if (o.preset_id !== undefined) {
+        // The value is NOT repeated back, and the asymmetry with the two
+        // refusals below is what gave this away: they name the field and never
+        // the value, this one did the opposite. Tool input passes through the
+        // secret resolver before the handler runs, and the consent it asks for
+        // is per-NAME and remembered — so a name consented to once for some
+        // other call is substituted here with no prompt, and a refusal that
+        // quotes what arrived would put the resolved value into the model's
+        // context. It is a provider id; naming the field is enough to fix it.
+        // One check, and it does both jobs. A vault reference has to contain
+        // `secret:` followed by an uppercase letter, and this grammar permits
+        // neither a colon nor an uppercase letter — so every string that could
+        // carry one is already refused here. A separate reference check was
+        // written first and then deleted: a mutation showed it could never
+        // fire, and a branch that cannot fire reads as a guard while guarding
+        // nothing. The test that hands this field a vault reference stays, so
+        // that loosening the grammar turns red rather than quietly reopening
+        // the hole.
+        if (!PRESET_ID_PATTERN.test(o.preset_id)) {
+          return 'Invalid auth.oauth.preset_id: must be a lowercase provider id — letters, digits and hyphens, starting with a letter. A vault reference is not one. Use api_setup connect to see which providers this engine knows.';
+        }
+      }
+      const presetParams: unknown = o.preset_params;
+      if (presetParams !== undefined) {
+        if (typeof presetParams !== 'object' || presetParams === null || Array.isArray(presetParams)) {
+          return 'Invalid auth.oauth.preset_params: must be an object of name/value pairs, e.g. {"shop": "acme"}.';
+        }
+        for (const [name, value] of Object.entries(presetParams)) {
+          if (typeof value !== 'string') {
+            return `Invalid auth.oauth.preset_params.${name}: must be text. These values are substituted into the provider's address, so only a plain string can be one.`;
+          }
+          // The third condition, and the only one that is not about shape. Tool
+          // input passes through `resolveSecretRefs` before this handler runs, so
+          // a parameter written as a vault reference normally arrives here already
+          // holding the VALUE — which would make a credential a DNS label in an
+          // address the engine hands a browser. What still arrives as a literal
+          // reference is the infra-secret case, which that resolver deliberately
+          // leaves unsubstituted; refusing it is what this line can still do, and
+          // it says the thing the model needs to learn: this field is not a place
+          // for a secret at all.
+          if (new RegExp(SECRET_REF_PATTERN.source).test(value)) {
+            return `Invalid auth.oauth.preset_params.${name}: a vault reference cannot be a provider parameter. This value becomes part of the address the user's browser is sent to — pass the plain value (a shop name, a region), never a credential.`;
+          }
         }
       }
     }
@@ -1021,6 +1079,19 @@ function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecre
 }
 
 /**
+ * Is a vault name filled? Asked through the same indirection `fetch_token`
+ * uses, so the value never reaches the model or this function's caller — only
+ * the yes or no does.
+ */
+function vaultHolds(agent: IAgent, name: string): boolean {
+  const store = agent.secretStore;
+  if (!store) return false;
+  const probe = { _: `secret:${name}` };
+  const probed = store.resolveSecretRefs(probe) as { _: string };
+  return probed._ !== `secret:${name}`;
+}
+
+/**
  * The reply for an exchange that finished after its profile was deleted: the
  * delete already ran, so nothing is left to hold a record of what the exchange
  * wrote — it is taken out again now, where it can be, and the reply says what
@@ -1041,13 +1112,13 @@ function deletedMeanwhile(
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   definition: {
     name: 'api_setup',
-    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',
+    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token'],
+          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect'],
           description: 'Action to perform',
         },
         profile: {
@@ -1079,6 +1150,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
     },
   },
   detailedGuidance:
+    'connect: pass `id`. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
     'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
@@ -1270,6 +1342,58 @@ Next steps before calling create:
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
+      // A preset profile authorizes at a host nobody typed into it — the register
+      // derives it — so without this the disclosure would name `base_url` and the
+      // connect route would then ask for an acceptance of a host the save never
+      // offered. That refusal's advice ("save it again and accept") would be
+      // unfollowable, which is the exact shape the comment below remembers from
+      // the `*.openai.azure.com` incident.
+      // And when it CANNOT be derived, that is said rather than skipped. The
+      // first version dropped the host silently on any derivation failure, which
+      // made the completeness of a security disclosure depend on whether an
+      // unrelated parameter happened to validate — with no trace in either
+      // direction. Refusing the save instead was the other candidate and is
+      // worse: a provider retired from the register would make every profile
+      // naming it unsaveable, including the update that would remove the field.
+      let presetNote: string | undefined;
+      const redirectUrls: string[] = [];
+      // Set only where a human actually answered. An acceptance nobody gave is
+      // the one thing this record must never contain.
+      let redirectAccepted = false;
+      if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id) {
+        const presetId = profile.auth.oauth.preset_id;
+        const derived = derivePresetEndpoints(presetId, profile.auth.oauth.preset_params);
+        if (!('kind' in derived)) {
+          egressUrls.push(derived.authorizeUrl, derived.tokenUrl);
+          // …and the SAME host again, on its own list, because a second act is
+          // being asked about. The token exchange sends data there, which is the
+          // egress question; the connect link sends the USER there, which is
+          // not. One host, two consents, and they are stamped separately —
+          // see `CustomEndpointAck.redirect_hosts`.
+          redirectUrls.push(derived.authorizeUrl);
+        } else if (derived.kind === 'unknown-preset') {
+          // The id is NOT repeated back here, and that is the one place in this
+          // note where the omission is deliberate: `auth.oauth.preset_id` is a
+          // model-authored field, tool input passes through the secret resolver
+          // before this handler runs, and a resolved value that happens to look
+          // like a provider id would be echoed into the model's context and into
+          // a human's prompt. When the id IS known the two arms below do name it
+          // — that string equals one of ours, so it discloses nothing.
+          const known = presetIds();
+          presetNote = known.length > 0
+            ? `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known.join(', ')}.`
+            : 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.';
+        } else if (derived.kind === 'bad-preset') {
+          presetNote = `No authorization address could be derived: the built-in provider "${presetId}" is defined wrongly in this engine — ${derived.detail}. Nothing on this profile fixes that; report it.`;
+        } else if (derived.kind === 'missing-param') {
+          presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+        } else {
+          // Supplied and REFUSED, which is a different sentence: telling someone
+          // to set a value they already set is the advice that sends them round
+          // a loop. The value itself is not repeated back.
+          presetNote = `No authorization address could be derived: the value this profile supplies for ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}) is not one the provider "${presetId}" accepts. Correct it with api_setup update — the host is disclosed then.`;
+        }
+      }
       // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
       // http.ts asks the same function, and the two MUST agree. While this asked the
       // broader one, an `*.openai.azure.com` profile saved with no prompt and no ack,
@@ -1277,7 +1401,14 @@ Next steps before calling create:
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
       const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
-      if (nonVetted.length > 0) {
+      // Two questions, one prompt, and the redirect half is asked even when the
+      // host IS vetted. That is not thoroughness: it is what keeps the refusal
+      // at connect time followable. If this only ran for non-vetted hosts, a
+      // preset pointing at a vetted one would save with no prompt, the redirect
+      // would refuse for want of an acceptance, and its advice — save again and
+      // accept — would point at a prompt that never appears. That dead end is
+      // the one this file already carries a scar from.
+      if (nonVetted.length > 0 || redirectUrls.length > 0) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -1287,16 +1418,51 @@ Next steps before calling create:
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
         // EVERY non-vetted egress host so the single accept is informed.
-        const disclosure = nonVetted.map((u) => describeDisclosure(u)).join('\n\n');
+        // Each act gets its own sentence. The egress half says what the ENGINE
+        // will send and where; the redirect half says what will happen to the
+        // PERSON reading it. A consent whose text does not describe the act is
+        // not a consent for that act, and for a while this text described only
+        // the first one while the second was being authorized by it.
+        const redirectHostNames = Array.from(new Set(
+          redirectUrls
+            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+            .filter((h): h is string => h !== null),
+        ));
+        const disclosureParts = [
+          nonVetted.length > 0
+            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${nonVetted.map((u) => describeDisclosure(u)).join('\n\n')}`
+            : undefined,
+          redirectHostNames.length > 0
+            ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
+            : undefined,
+          presetNote,
+        ].filter((part): part is string => part !== undefined && part !== '');
+        const disclosure = disclosureParts.join('\n\n');
         if (!agent.promptUser) {
-          return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
-        }
-        const answer = await agent.promptUser(
-          pv`⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
-          ['Allow', 'Deny', '\x00'],
-        );
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: profile "${profile.id}" not saved — user declined controller-responsibility for the non-vetted host(s).`;
+          // Two halves, two answers, because they fail in opposite directions.
+          // The egress half has to refuse the SAVE: a stored profile with a
+          // non-vetted host is one a later request attaches a credential to, so
+          // saving it without an acceptance is the leak. The redirect half has
+          // nothing to leak at save time — it only decides whether a link may be
+          // handed out later — so the profile is stored WITHOUT the acceptance
+          // and `connect` refuses until somebody is there to be asked. Sharing
+          // one answer made a background run unable to create any preset OAuth
+          // profile at all, which is a new refusal nobody asked for.
+          if (nonVetted.length > 0) {
+            return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
+          }
+        } else {
+          const answer = await agent.promptUser(
+            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            ['Allow', 'Deny', '\x00'],
+          );
+          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+            return `Blocked: profile "${profile.id}" not saved — user declined.`;
+          }
+          // `true`, not `redirectUrls.length > 0`: the guarded value below is
+          // `hostsOf(redirectUrls)`, which is empty when the list is, so the
+          // second test said the same thing twice.
+          redirectAccepted = true;
         }
       }
 
@@ -1308,16 +1474,30 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonVetted.length > 0) {
-        // Reachable only after the human accepted above (else returned).
-        const ackHosts = Array.from(new Set(
-          nonVetted
-            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
-            .filter((h): h is string => h !== null),
-        ));
+      const hostsOf = (urls: readonly string[]): string[] => Array.from(new Set(
+        urls
+          .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+          .filter((h): h is string => h !== null),
+      ));
+      // Computed BEFORE the branch, and the branch reads it, so the guarded
+      // value is the only statement of the rule. While the guard sat in a
+      // ternary and the condition tested `redirectAccepted` separately,
+      // deleting the ternary changed nothing any test could see.
+      const redirectHosts = redirectAccepted ? hostsOf(redirectUrls) : [];
+      if (nonVetted.length > 0 || redirectHosts.length > 0) {
+        // Reachable only after the human accepted above (else returned, or —
+        // for the redirect half in autonomous mode — fell through with
+        // `redirectAccepted` still false, which is what keeps the record honest).
+
+        // Two lists from two sources, never one list used twice. `hosts` still
+        // answers only the data question, so nothing that reads it starts
+        // meaning something wider; `redirect_hosts` is fed from the derived
+        // authorize URL alone, so an acceptance earned by a `base_url` cannot
+        // authorize a redirect even when the two hostnames coincide.
         profile.custom_endpoint_ack = {
           accepted: true,
-          hosts: ackHosts,
+          hosts: hostsOf(nonVetted),
+          ...(redirectHosts.length > 0 ? { redirect_hosts: redirectHosts } : {}),
           accepted_at: new Date().toISOString(),
         };
       } else {
@@ -1394,8 +1574,144 @@ Next steps before calling create:
       if (grantDiscarded) {
         parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
       }
+      // Said here as well, because the disclosure above only runs when some host
+      // was non-vetted. A profile whose base_url is vetted saves with no prompt
+      // at all, and that is the case where the missing authorize host would
+      // otherwise leave no trace anywhere.
+      if (presetNote) parts.push(presetNote);
+      if (redirectUrls.length > 0 && !redirectAccepted) {
+        // Two sentences, because the two cases are not the same event. On a
+        // create nothing was added; on an update an acceptance a human gave
+        // earlier was just DROPPED — the save rebuilds the record from the
+        // incoming profile, and there is no acceptance to carry over when
+        // nobody could be asked. A single sentence let an update read as the
+        // harmless case.
+        parts.push(isUpdate
+          ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
+          : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
+      }
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
+    }
+
+    if (input.action === 'connect') {
+      const id = input.id ?? input.profile?.id;
+      if (!id) return 'Error: "id" is required for connect action.';
+      const apiStore = agent.toolContext?.apiStore;
+      if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
+      const profile = apiStore.get(id);
+      if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
+      if (profile.auth?.type !== 'oauth2') {
+        return `Error: profile "${id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
+      }
+      // The link is built from the server's own origin, never assembled by the
+      // model: a link the model writes is a link the model chooses. Without an
+      // HTTP server there is nothing to send the user to.
+      // ORIGIN is the engine's public address, not a sign that the server is up:
+      // the env registry makes it required on every tier and the installer writes
+      // it unconditionally. So its ABSENCE is what this can answer — that there is
+      // no address to bring the user back to. Whether the route answers is the
+      // route's own business, and W1b gives it a check of its own.
+      const origin = process.env['ORIGIN'];
+      if (!origin) {
+        return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
+      }
+      // Parsed, not merely found. The provider host below is parsed, compared for
+      // identity and checked for userinfo; the host the user is sent to FIRST had
+      // a presence test and one stripped trailing slash. It is operator input
+      // rather than model input, which is why the answer is a refusal and not a
+      // repair — a link a person is told to click is the wrong place to guess
+      // what a malformed address meant.
+      //
+      // None of these refusals echo the value. A misconfigured ORIGIN can hold
+      // anything somebody pasted, including a credential, and this string goes
+      // into the model's context.
+      let base: URL;
+      try {
+        base = new URL(origin);
+      } catch {
+        return 'Error: ORIGIN is not a valid address, so no link can be built from it. Set it to this engine\'s full public address including the scheme, e.g. https://lynox.example.com.';
+      }
+      // The same three questions the redirect guard asks, and deliberately the
+      // same three: this message says "inside the operator's own network", and
+      // while it checked only loopback and numeric private ranges it refused
+      // `http://nas.local:3000` — an ordinary self-hosted address that this
+      // repo's own predicate, two imports away, calls private. A feature with
+      // two definitions of one phrase has the ending the redirect guard's own
+      // docstring describes.
+      // ONE normalisation, read by all three questions — the third used to
+      // normalise the hostname again on its own. Brackets stay on for the URL
+      // form, which is why there are two names and not one.
+      const originRooted = base.hostname.replace(/\.+$/, '');
+      const originHost = originRooted.replace(/^\[|\]$/g, '');
+      const originIsInsideNetwork = originHost === 'localhost'
+        || isPrivateIP(originHost)
+        || isPrivateLanEndpoint(`https://${originRooted}/`);
+      if (base.protocol !== 'https:' && !(base.protocol === 'http:' && originIsInsideNetwork)) {
+        return 'Error: ORIGIN must be an https address. The provider sends the authorization back to it, and plain http exposes that in transit; http is accepted only for an address inside the operator\'s own network.';
+      }
+      if (base.username !== '' || base.password !== '') {
+        return 'Error: ORIGIN carries a username or password in the address. Remove it — this address is shown to the user and handed to the provider.';
+      }
+      if (base.search !== '' || base.hash !== '') {
+        return 'Error: ORIGIN carries a query or a fragment. Set it to the bare public address of this engine — scheme, host, port, and a path prefix only if it is served under one.';
+      }
+      // Derived here only to answer BEFORE sending the user anywhere; the route
+      // derives again at use, and that derivation is the boundary.
+      const endpoints = derivePresetEndpoints(profile.auth.oauth?.preset_id ?? '', profile.auth.oauth?.preset_params);
+      if ('kind' in endpoints) {
+        const ids = presetIds();
+        const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
+        if (endpoints.kind === 'unknown-preset') {
+          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
+        }
+        if (endpoints.kind === 'bad-preset') {
+          // A defect in a compiled preset. Neither the model nor the user can
+          // fix it, so neither is told to try.
+          return `Error: the built-in provider profile "${id}" names is defined wrongly in this engine — ${endpoints.detail}. There is nothing to set on the profile; collect the credentials with ask_secret and use action=fetch_token, and report the provider as broken.`;
+        }
+        if (endpoints.kind === 'missing-param') {
+          return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
+        }
+        return `Error: the value profile "${id}" supplies for ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}) is not one its provider accepts. Ask the user to correct it and set it with api_setup update.`;
+      }
+      // The same question the start route asks, from the same function — so a
+      // link is not handed out that the route will then refuse. While only the
+      // route asked it, the model was told to show a link and the user arrived
+      // at a 403, which is the dead end this feature keeps re-learning.
+      const redirect = checkRedirectTarget(endpoints, profile.custom_endpoint_ack);
+      if (redirect) {
+        return redirect.kind === 'inside-network'
+          ? `Error: profile "${id}" would send the user to ${endpoints.host}, which is inside this engine's own network. That is not the provider, and there is no acceptance that would make it one — the profile has to name a built-in provider.`
+          : `Error: nobody has agreed to be sent to ${endpoints.host} for profile "${id}" yet, and this link would be refused. Save the profile again with api_setup update and let the user accept where they will be sent, then connect.`;
+      }
+      const clientIdKey = profile.auth.oauth?.client_id_key;
+      const clientSecretKey = profile.auth.oauth?.client_secret_key;
+      // Only what is missing, because a reply that names a filled slot sends the
+      // model to collect a value the user already gave — and the user then has to
+      // decide which half of the sentence is about them.
+      const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
+      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
+      if (unnamed.length > 0 || unfilled.length > 0) {
+        if (unnamed.length > 0) {
+          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
+        }
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
+      }
+      // Built from the parsed object, never by string surgery on the raw value.
+      // The path prefix is kept deliberately: an engine served under one needs
+      // it, and `origin` alone would silently produce a link to nothing.
+      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      const grant = profile.oauth_grant;
+      // Three replies, one link. What differs is what the user is walking into,
+      // and saying it here is cheaper than a surprise on the provider's page.
+      if (grant?.state === 'revoked') {
+        return `The provider ended this authorization, so "${id}" has to be authorized again. Show the user this link and let them click it: ${link}\n\nThe old access is gone either way; connecting again is what brings it back.`;
+      }
+      if (grant?.origin === 'callback' && (grant.state === 'connected' || grant.state === 'no-refresh')) {
+        return `"${id}" is already connected. Show the user this link only if they want to authorize again: ${link}\n\nA new authorization replaces the stored token, so anything running against the old one stops working the moment it is used.`;
+      }
+      return `Show the user this link and let them click it: ${link}\n\nIt opens ${endpoints.host}, where they authorize this engine. They come back to this instance, and the connection is stored for you — do not ask them to paste a token, and do not build this link yourself.`;
     }
 
     if (input.action === 'delete') {

@@ -304,6 +304,32 @@ describe('ApiStore — grant record projections', () => {
     expect(cs.get('crm-api')?.status).toBe('active');
   });
 
+  it('does not project a revocation for a profile that names no grant type', () => {
+    // `fetch_token` reads a missing `grant_type` as client credentials, so such a
+    // profile has no user grant to revoke. Nothing pinned the difference between
+    // "is refresh_token" and "is not client_credentials" until this.
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    const base = oauthProfile({ oauth_grant: { state: 'revoked' } });
+    const oauth = { ...base.auth!.oauth! };
+    delete (oauth as { grant_type?: unknown }).grant_type;
+    store.save({ ...base, auth: { ...base.auth!, oauth } });
+
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
+  it.each(['connected', 'no-refresh', 'refresh-dead'] as const)('does not project %s as revoked', (state) => {
+    const cs = makeCs();
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    // Only a revocation blocks the profile. The other three say what the last
+    // exchange left behind, and a connection the user can still use must not
+    // be shown as dead because the record carries something.
+    store.save(oauthProfile({ oauth_grant: { origin: 'callback', state } }));
+    expect(cs.get('crm-api')?.status).toBe('active');
+  });
+
   // The `typeof k === 'string'` guard inside `collectVaultKeys` cannot be killed on
   // its own: `parseVaultKeys` filters the same way when the column is read back, so
   // a non-string that slips into the write is invisible to every reader. The two
