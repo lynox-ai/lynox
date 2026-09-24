@@ -10,12 +10,19 @@ import { profileOAuthCookieAttributes, authorizationCodeParams } from './http-ap
  * no session travels with it. These cases are therefore about what it REFUSES,
  * which is the half a stranger can exercise.
  *
- * ⚠ What is NOT covered here, said rather than implied: the successful
- * round-trip. Completing one needs a provisioned profile, vault credentials and
- * a provider to answer, and this harness starts a real server without any of
- * the three. The exchange itself is covered at its own seam
- * (`core/oauth-token-exchange.test.ts`); what stays untested end to end is the
- * wiring between a verified cookie and a stored token.
+ * ⚠ **What is not covered HERE is a property of this file, not of the tooling
+ * — and that sentence used to read the other way.** It said the successful
+ * round-trip "needs a provisioned profile, vault credentials and a provider to
+ * answer, and this harness has none of the three", which presented a choice as
+ * a limit. It is reachable: `http-api.test.ts` already swaps `getApiStore` and
+ * `getSecretStore` through the engine mock, `derivePresetEndpoints` carries a
+ * register seam, and the exchange mocks like any other module. The success
+ * path and the partial-write case live there now.
+ *
+ * What is true of THIS file is narrower: it boots a real engine on purpose, so
+ * that the refusals below are measured against the server a stranger actually
+ * meets rather than against a mock of it. Naming a gap as a property of the
+ * tooling is how it stops being looked at.
  */
 
 const PORT = 39_517;

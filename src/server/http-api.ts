@@ -7532,9 +7532,29 @@ export class LynoxHTTPApi {
         return;
       }
 
-      secretStore.set(accessTokenKey(signed.profileId), accessToken);
-      if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
-        secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
+      // Guarded, and the message is deliberately NOT "nothing was stored".
+      //
+      // These are two synchronous SQLite writes. If the second one throws —
+      // `SQLITE_BUSY` under write contention, a full disk — the access token is
+      // already persisted and the refresh token is not. That state WORKS until
+      // the access token expires and then fails with no renewal path: a delayed,
+      // silent failure nobody traces back to this minute.
+      //
+      // Every other refusal on this route can honestly say nothing was stored,
+      // because nothing had been. Here something may have been, so the page says
+      // that instead. Retrying heals it — both writes are upserts, so the second
+      // attempt overwrites whatever the first left behind.
+      //
+      // Without this the exception reaches the dispatch's catch-all, which
+      // answers JSON while every other answer from this route is a page.
+      try {
+        secretStore.set(accessTokenKey(signed.profileId), accessToken);
+        if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
+          secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
+        }
+      } catch {
+        sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');
+        return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
     });
