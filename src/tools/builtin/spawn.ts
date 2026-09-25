@@ -11,8 +11,9 @@ import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
 import { getRole, getRoleNames } from '../../core/roles.js';
+import { scopeSecretStore, defaultVaultScope, narrowVaultScope, vaultScopeOf, providerKeySlotReader } from '../../core/secret-scope.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRoutingMode } from '../../core/tier-resolver.js';
-import { resolveProviderApiKey } from '../../core/llm/provider-keys.js';
+import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
@@ -315,6 +316,22 @@ function validateSpawnInput(input: SpawnAgentInput): void {
       if (!Number.isFinite(spec.max_budget_usd) || spec.max_budget_usd < 0 || spec.max_budget_usd > MAX_SPAWN_BUDGET_USD) {
         throw new Error(
           `spawn_agent "${spec.name}": max_budget_usd must be a number in [0, ${MAX_SPAWN_BUDGET_USD}] (got ${spec.max_budget_usd}).`,
+        );
+      }
+    }
+    if (spec.secret_scope !== undefined && spec.secret_scope !== null) {
+      // The JSON schema's `oneOf` is advice to the model, not a gate: the value
+      // arriving here is whatever the model emitted. Unchecked, a bare string
+      // spreads into its characters and becomes a scope of single letters — a
+      // nonsense scope that happens to fail closed, which is the kind of accident
+      // that reads as working until the day it does not.
+      const sc: unknown = spec.secret_scope;
+      const ok = sc === 'all'
+        || (Array.isArray(sc) && sc.every((n) => typeof n === 'string' && n.length > 0));
+      if (!ok) {
+        throw new Error(
+          `spawn_agent "${spec.name}": secret_scope must be an array of vault key names, or the string "all". `
+          + `Got ${Array.isArray(sc) ? 'an array with a non-string entry' : typeof sc === 'string' ? `the string "${sc}"` : typeof sc}.`,
         );
       }
     }
@@ -624,6 +641,27 @@ function promptCallbacksWithOrigin(
   };
 }
 
+/**
+ * Tell the parent which vault keys its child asked for and did not get.
+ *
+ * Without this the parent reads whatever the failing tool said, and every tool
+ * that meets a scoped-out key sees the same thing an empty vault produces —
+ * `resolve()` returning null. `http.ts`, for one, turns that into "the vault has
+ * no access_token under X, mint one first", which is a correct sentence for a
+ * missing key and the wrong instruction for a scoped-out one: the token exists.
+ * The note names the actual cause and the actual remedy, beside that message.
+ */
+function appendDeniedKeyNote(result: string, denied: ReadonlySet<string>): string {
+  if (denied.size === 0) return result;
+  const names = [...denied].join(', ');
+  // "Refused", not "not resolved": a denial can come from a read, a delete or a
+  // consent record, and a sentence that names only the read sends the parent
+  // looking for a missing value when the child was turned away from a delete.
+  return `${result}\n\n[secret_scope] This sub-agent asked for ${denied.size === 1 ? 'a vault key' : 'vault keys'} its spawn order did not name: ${names}. `
+    + `${denied.size === 1 ? 'It was' : 'They were'} refused — if the key exists, this is a scope decision, not a missing secret. `
+    + `To grant ${denied.size === 1 ? 'it' : 'them'}, re-spawn with secret_scope: [${[...denied].map(n => `"${n}"`).join(', ')}].`;
+}
+
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
@@ -648,6 +686,52 @@ async function executeThinker(
   // to announce a model the run refused.
   assertSpawnRoutingPermitted(spec, userConfig);
 
+  // The child's reach into the vault. Default = the keys THIS spawn order names
+  // and nothing else; the parent's own vault is not inherited by omission.
+  //
+  // Resolved here rather than in the handler on purpose: the comment above says
+  // the two paths must never diverge, and a second copy of this decision is
+  // exactly how they would. This is the path that builds the child, so this is
+  // where its reach is decided.
+  const parentScope = vaultScopeOf(parentAgent.secretStore);
+  // Read from the fields the caller writes as INSTRUCTION, never from `context`.
+  // `context` is documented on the schema as carrying verbatim excerpts of source
+  // material, so it is the one field of the order that routinely holds text
+  // somebody else wrote. Scanning it would let a pasted document widen the scope
+  // of the child that reads it — the wrong direction for a default to fail in.
+  // A key genuinely needed for material quoted in `context` is named in
+  // `secret_scope`, and the denial note says so when one is missing.
+  const requestedScope = spec.secret_scope
+    ?? defaultVaultScope({ task: spec.task, system_prompt: spec.system_prompt });
+  const narrowed = narrowVaultScope(parentScope, requestedScope);
+  if ('refusal' in narrowed) {
+    throw new Error(`spawn_agent "${spec.name}": ${narrowed.refusal}`);
+  }
+  // Names the child asked for and did not get. Collected so the PARENT is told
+  // the real reason — a tool that only sees `resolve() === null` reports the key
+  // as missing from the vault and sends the user off to create one they already
+  // have.
+  const deniedKeys = new Set<string>();
+  const childSecretStore = parentAgent.secretStore
+    ? scopeSecretStore(parentAgent.secretStore, narrowed.scope, (n) => deniedKeys.add(n))
+    : undefined;
+
+  // The ONE read that happens outside the child's scope, named here rather than
+  // left to be discovered: the child's own LLM credential. It is provisioned by
+  // the spawner exactly as the parent's is, resolved here in the parent's context
+  // and handed to the child as a configured wire credential — never as a vault
+  // name the child can address. Scoping it would not narrow the child's reach; it
+  // would stop the child from running at all wherever the key lives in the vault
+  // rather than the environment, which is every BYOK tenant.
+  //
+  // Bounded anyway. Before this, the closure below carried the parent's WHOLE
+  // vault, so the exception was unlimited in what it could have read even though
+  // it only ever read one slot. `PROVIDER_KEY_SLOTS` is derived from the model
+  // catalog, so a preset that introduces a new slot stays covered.
+  const wireKeyReader = parentAgent.secretStore
+    ? providerKeySlotReader(parentAgent.secretStore, PROVIDER_KEY_SLOTS)
+    : undefined;
+
   const resolved = spec.role ? getRole(spec.role) : undefined;
   const profile: ModelProfile | undefined = spec.profile
     ? userConfig.model_profiles?.[spec.profile]
@@ -668,7 +752,7 @@ async function executeThinker(
     parent: readParentProviderConfig(parentAgent),
     baseProvider,
     userConfig,
-    resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: parentAgent.secretStore, userConfig }),
+    resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: wireKeyReader, userConfig }),
   });
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
@@ -832,7 +916,16 @@ async function executeThinker(
     // parent's autonomy, and a researcher spawned to query the user's
     // Stripe/Notion API must be able to authenticate and persist a refresh
     // token. Surfaced explicitly in the PR body, not hidden.
-    secretStore: parentAgent.secretStore,
+    // T2-X1 part 2, NARROWED: the child gets a scoped VIEW of the parent's
+    // SecretStore, not the store itself. Everything the old comment described
+    // still holds inside the scope — `ask_secret`, vault reads, credential
+    // lookups and `secretStore.set` all work, because a sub-agent told to query
+    // the user's Stripe account must be able to authenticate and persist a
+    // refreshed token. What changed is the SIZE of "the vault" for that child:
+    // by default only the keys its own spawn order named. Masking is deliberately
+    // NOT scoped (see secret-scope.ts) — a child that stopped masking the keys it
+    // cannot read would spill them into its output instead of containing them.
+    secretStore: childSecretStore,
     // T2-X1 part 3: pass the three prompt callbacks so an `ask_user`/
     // `ask_secret`/`ask_tabs` invoked by the child surfaces to the same UI
     // the parent uses. Without these, child tool invocations that need user
@@ -897,6 +990,11 @@ async function executeThinker(
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
+    // Built HERE, not at the return: `runHistory.updateRun` below stores
+    // `responseText`, and appending the note only on the way out left the run row
+    // holding a version of the result the parent never saw — the one place
+    // somebody looks when asking afterwards why a key came back empty.
+    const notedResult = appendDeniedKeyNote(result, deniedKeys);
     // Why the child stopped — the string above cannot say (see `SendStop`).
     const stop: SendStop | null = childAgent.getLastStop();
 
@@ -937,7 +1035,7 @@ async function executeThinker(
       try {
         const snap = childAgent.getCostSnapshot();
         runHistory.updateRun(childRunId, {
-          responseText: result,
+          responseText: notedResult,
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
@@ -975,7 +1073,7 @@ async function executeThinker(
       reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
     }
 
-    return { result, childRunId: childAgent.currentRunId, model, stop };
+    return { result: notedResult, childRunId: childAgent.currentRunId, model, stop };
   } catch (err) {
     // Mark the child run failed/aborted so the cost cap and history UI don't
     // show it as still-running. Fires for BOTH ctor failures (childAgent
@@ -1002,7 +1100,10 @@ async function executeThinker(
           // Record the FULL structured error so a failed sub-agent is diagnosable
           // (not just status=failed + a null error_text). Skipped for an abort —
           // an intentional interruption isn't an error to store.
-          errorText: childAborted ? undefined : formatSpawnError(err),
+          // A child that died after being refused a key still owes that reason:
+          // "it failed" and "it failed after the vault refused it X" send the
+          // reader to different repairs.
+          errorText: childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys),
         });
       } catch { /* swallow */ }
     }
@@ -1060,6 +1161,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               max_turns: { type: 'number', minimum: 1, maximum: MAX_SPAWN_TURNS },
               max_budget_usd: { type: 'number', minimum: 0, maximum: MAX_SPAWN_BUDGET_USD },
               profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },
+              secret_scope: { oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'string', enum: ['all'] }], description: 'Vault keys this sub-agent may resolve. Default: only keys this task names via secret:NAME — not your whole vault. "all" passes on the full vault.' },
             },
             required: ['name', 'task'],
           },

@@ -372,6 +372,73 @@ describe('ApiStore — grant record projections', () => {
     expect(purge.removed).toEqual(['CRM_API_ACCESS_TOKEN']);
   });
 
+  it('reports a token it could not LOOK at as not-removable, never as nothing-to-do', () => {
+    // A scoped vault view answers null for a key outside its scope, exactly as an
+    // empty vault does. Without the out-of-scope branch the loop `continue`s past
+    // the name, it lands in none of the three buckets, and the caller reads an
+    // empty result as "already clean" while the token is still there.
+    const store = new ApiStore();
+    store.register(oauthProfile({ oauth_grant: { written: [{ name: 'CRM_API_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] } }));
+    const scopedView = {
+      resolve: () => null,
+      explainUnresolved: (n: string) => (n === 'CRM_API_ACCESS_TOKEN' ? 'out-of-scope' : undefined),
+      deleteSecret: () => false,
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const purge = purgeRecordedTokens(store, store.get('crm-api')!, scopedView);
+    expect(purge.removed).toEqual([]);
+    // notVisible, NOT notRemovable: the caller renders the latter as "this vault
+    // has no working delete here", which names a broken delete path for a name
+    // the scope merely refused to show. Delete works fine.
+    expect(purge.notVisible).toEqual(['CRM_API_ACCESS_TOKEN']);
+    expect(purge.notRemovable).toEqual([]);
+    // And not quietly in `kept` either — "still in the vault, the user may need
+    // it" is a third wrong sentence for a name nobody was allowed to look at.
+    expect(purge.kept).toEqual([]);
+  });
+
+  it('reports a CONFIGURED key it could not look at, not only a recorded write', () => {
+    // Two name sources reach this function. Fixing only the `recordedWrites`
+    // half left a profile's own configured keys falling out of `kept` in
+    // silence — the same "reads as done while it is still there" the bucket
+    // exists to prevent, on the other pass.
+    const store = new ApiStore();
+    store.register(oauthProfile({ auth: { type: 'oauth2', oauth: { token_url: 'https://crm.test/t', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } } }));
+    const scopedView = {
+      resolve: () => null,
+      explainUnresolved: (n: string) => (n === 'CRM_CLIENT_SECRET' ? 'out-of-scope' : undefined),
+      deleteSecret: () => false,
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const purge = purgeRecordedTokens(store, store.get('crm-api')!, scopedView);
+    expect(purge.notVisible).toContain('CRM_CLIENT_SECRET');
+    expect(purge.kept).not.toContain('CRM_CLIENT_SECRET');
+  });
+
+  it('never offers a PROTECTED key for removal, from EITHER name source', () => {
+    // Both passes driven on purpose: the profile carries the key as a configured
+    // `vault_keys` entry AND as a recorded write, so pass 1 and pass 2 each meet
+    // it. An earlier version of this test named only the configured half while
+    // its title claimed both.
+    //
+    // And the assertion names every bucket rather than two: `notRemovable` would
+    // otherwise absorb it and print "Could NOT remove ANTHROPIC_API_KEY" — a
+    // different wrong sentence about a key that is simply not this profile's.
+    const store = new ApiStore();
+    store.register(oauthProfile({
+      auth: { type: 'bearer', vault_keys: ['ANTHROPIC_API_KEY'] },
+      oauth_grant: { written: [{ name: 'ANTHROPIC_API_KEY', fp: tokenFingerprint('sk-ant-x') }] },
+    }));
+    const scopedView = {
+      resolve: () => null,
+      explainUnresolved: () => 'out-of-scope',
+      deleteSecret: () => false,
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const purge = purgeRecordedTokens(store, store.get('crm-api')!, scopedView);
+    expect(purge.notVisible).not.toContain('ANTHROPIC_API_KEY');
+    expect(purge.removed).not.toContain('ANTHROPIC_API_KEY');
+    expect(purge.notRemovable).not.toContain('ANTHROPIC_API_KEY');
+    expect(purge.kept).not.toContain('ANTHROPIC_API_KEY');
+  });
+
   it('lists a basic profile\'s username and password keys in the trail', () => {
     const cs = makeCs();
     const store = new ApiStore();

@@ -2227,6 +2227,113 @@ describe('Agent', () => {
       expect(toolResults.content[0]!.content).toContain('DATAFORSEO');
       expect(toolResults.content[0]!.content).toContain("vault doesn't have");
     });
+
+    it('hands spawn_agent the REF, not the value — the scope is computed from it', async () => {
+      // The seam this pins: `_dispatchTools` rewrites `secret:NAME` into the
+      // plaintext before calling a handler, for every tool not exempt. With
+      // spawn_agent on that path, `spawn.ts` received a task with the value
+      // already inlined, found no refs in it, and derived an EMPTY default scope
+      // every time — while the value itself sat in the child's prompt. Tests that
+      // call `spawnAgentTool.handler` directly cannot see this: they hand it the
+      // raw ref themselves, below the point where the rewrite happens.
+      const seen: unknown[] = [];
+      const spawn = makeTool('spawn_agent', vi.fn().mockImplementation((input: unknown) => {
+        seen.push(input);
+        return Promise.resolve('spawned');
+      }));
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'spawn_agent',
+          input: { agents: [{ name: 'biller', task: 'reconcile with secret:MY_KEY' }] },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [spawn], secretStore: store });
+      await agent.send('Delegate it');
+
+      expect(JSON.stringify(seen[0])).toContain('secret:MY_KEY');
+      expect(JSON.stringify(seen[0])).not.toContain('actual-secret-val');
+    });
+
+    it('CONTROL: a non-exempt tool still receives the resolved value', async () => {
+      // Without this, the test above would pass just as well if secret
+      // resolution had stopped working everywhere.
+      const seen: unknown[] = [];
+      const http = makeTool('http_request', vi.fn().mockImplementation((input: unknown) => {
+        seen.push(input);
+        return Promise.resolve('ok');
+      }));
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'http_request',
+          input: { url: 'https://x.test', headers: { A: 'secret:MY_KEY' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [http], secretStore: store });
+      await agent.send('Call it');
+
+      expect(JSON.stringify(seen[0])).toContain('actual-secret-val');
+      expect(JSON.stringify(seen[0])).not.toContain('secret:MY_KEY');
+    });
+
+    it('tells a SCOPED agent the key is out of scope — not to go collect it again', async () => {
+      // A stored-but-out-of-scope key resolves to null exactly like an absent
+      // one. Handed the "call ask_secret and retry" recovery, the agent asks the
+      // user for a credential the vault already holds, stores it, is refused the
+      // read again, and asks once more. The branch is what ends that.
+      const store = makeSecretStore({
+        resolve: vi.fn().mockReturnValue(null),
+        explainUnresolved: vi.fn().mockReturnValue('out-of-scope'),
+      });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'http_request',
+          input: { url: 'https://api.stripe.com', headers: { Authorization: 'Bearer secret:STRIPE_KEY' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], secretStore: store });
+      await agent.send('Call API');
+
+      expect(tool.handler).not.toHaveBeenCalled();
+      const content = (agent.getMessages()[2] as { content: Array<{ content: string }> }).content[0]!.content;
+      expect(content).toContain('outside this agent\'s vault scope');
+      expect(content).toContain('secret_scope: "STRIPE_KEY"');
+      // And it must not assert that the vault holds it: that assertion was an
+      // existence oracle over every name the child cared to guess.
+      expect(content).not.toContain('ARE in the vault');
+      // The wrong remedy must be absent, not merely outweighed.
+      expect(content).not.toContain("vault doesn't have");
+      expect(content).not.toMatch(/then retry the original tool call/);
+    });
+
+    it('keeps the collect-it remedy for a genuinely absent key, and adds the scope note beside it', async () => {
+      const store = makeSecretStore({
+        resolve: vi.fn().mockReturnValue(null),
+        explainUnresolved: vi.fn().mockImplementation((n: string) => (n === 'STRIPE_KEY' ? 'out-of-scope' : undefined)),
+      });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_1', name: 'http_request',
+          input: { url: 'https://x.test', headers: { A: 'secret:STRIPE_KEY', B: 'secret:NEVER_STORED' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], secretStore: store });
+      await agent.send('Call API');
+
+      const content = (agent.getMessages()[2] as { content: Array<{ content: string }> }).content[0]!.content;
+      expect(content).toContain("vault doesn't have");
+      expect(content).toContain('NEVER_STORED');
+      expect(content).toContain('outside this agent\'s vault scope');
+      // The two names must not be merged into one list under one wrong remedy.
+      expect(content).not.toMatch(/doesn't have: "STRIPE_KEY"/);
+    });
   });
 
   describe('unlimited iterations (maxIterations: 0)', () => {

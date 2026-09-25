@@ -139,6 +139,28 @@ describe('initDebugSubscriber', () => {
     expect(secretLine).toContain('action=resolve');
     // Ensure no actual secret value is logged (only name + action)
     expect(secretLine).not.toContain('sk-');
+    // No `op` on the store's own events — the operation is already in `action`.
+    expect(secretLine).not.toContain('op=');
+  });
+
+  it('logs WHICH operation a refusal refused', async () => {
+    // Its own subscriber. Without these two lines it passed only while the test
+    // above it ran first and left one attached — `_resetDebugSubscriber` clears
+    // a flag and never unsubscribes — so it went green in the suite and red in
+    // isolation, which is the shape of a test that proves nothing.
+    process.env['LYNOX_DEBUG'] = 'secret';
+    initDebugSubscriber();
+
+    // The scoped-vault view publishes every refusal as action='denied' and puts
+    // the operation in `op`. Without it in the line, a refused DELETE reads
+    // exactly like a refused lookup — and this trail is what somebody reads
+    // after an incident.
+    const { channels: ch } = await import('./observability.js');
+    ch.secretAccess.publish({ name: 'HR_PAYROLL', action: 'denied', op: 'delete' });
+
+    const line = stderrSpy.mock.calls.map(c => String(c[0])).find(c => c.includes('lynox:secret:access'));
+    expect(line).toContain('action=denied');
+    expect(line).toContain('op=delete');
   });
 
   it('production warning mentions sensitive data', () => {

@@ -78,6 +78,66 @@ export function isInfraSecret(name: string): boolean {
 }
 
 /**
+ * Every `secret:NAME` name written in `input`, in order, deduplicated.
+ *
+ * A pure text scan: it reads no value and needs no store, which is what lets
+ * `secret-scope.ts` derive a spawn's default scope from the spawn order alone.
+ */
+export function extractSecretRefNames(input: unknown): string[] {
+  const text = JSON.stringify(input);
+  const names: string[] = [];
+  const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (!names.includes(match[1]!)) names.push(match[1]!);
+  }
+  return names;
+}
+
+/**
+ * Resolve every `secret:NAME` reference in `input` through `resolve`.
+ *
+ * Extracted from {@link SecretStore.resolveSecretRefs} so a SCOPED view of a
+ * store (see `secret-scope.ts`) can reuse this exact walk with a narrower
+ * resolver instead of re-implementing it. A second implementation would be the
+ * bypass: `resolveSecretRefs` is the path tool input actually travels, so a
+ * scoped store that delegated this one method to the unscoped inner store
+ * would hand the child every secret while every other method looked correct.
+ *
+ * `resolve` returning null leaves the literal `secret:NAME` in place — which is
+ * what makes an out-of-scope reference visible to `findUnresolvedSecretRefs`
+ * and thus to the fail-loud pre-tool gate, rather than silently empty.
+ */
+export function resolveSecretRefsWith(
+  input: unknown,
+  resolve: (name: string) => string | null,
+): unknown {
+  const text = JSON.stringify(input);
+  const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
+  const resolved = text.replace(pattern, (_match, name: string) => {
+    // Infrastructure secrets are never resolved into agent tool input — leave
+    // the literal `secret:NAME` so the credential cannot be exfiltrated to an
+    // external host (the value stays in the vault / credStore path only).
+    if (isInfraSecret(name)) return `secret:${name}`;
+    const value = resolve(name);
+    // Escape for JSON string context
+    return value !== null ? value.replace(/["\\\n\r\t]/g, c => {
+      if (c === '"') return '\\"';
+      if (c === '\\') return '\\\\';
+      if (c === '\n') return '\\n';
+      if (c === '\r') return '\\r';
+      if (c === '\t') return '\\t';
+      return c;
+    }) : `secret:${name}`;
+  });
+  try {
+    return JSON.parse(resolved) as unknown;
+  } catch {
+    return input;
+  }
+}
+
+/**
  * Common secret patterns — regex-based detection for accidental secret leaks.
  * Used by ask_user guard and chat input warning.
  */
@@ -536,42 +596,11 @@ export class SecretStore implements SecretStoreLike {
   }
 
   extractSecretNames(input: unknown): string[] {
-    const text = JSON.stringify(input);
-    const names: string[] = [];
-    const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      if (!names.includes(match[1]!)) {
-        names.push(match[1]!);
-      }
-    }
-    return names;
+    return extractSecretRefNames(input);
   }
 
   resolveSecretRefs(input: unknown): unknown {
-    const text = JSON.stringify(input);
-    const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
-    const resolved = text.replace(pattern, (_match, name: string) => {
-      // Infrastructure secrets are never resolved into agent tool input — leave
-      // the literal `secret:NAME` so the credential cannot be exfiltrated to an
-      // external host (the value stays in the vault / credStore path only).
-      if (isInfraSecret(name)) return `secret:${name}`;
-      const value = this.resolve(name);
-      // Escape for JSON string context
-      return value !== null ? value.replace(/["\\\n\r\t]/g, c => {
-        if (c === '"') return '\\"';
-        if (c === '\\') return '\\\\';
-        if (c === '\n') return '\\n';
-        if (c === '\r') return '\\r';
-        if (c === '\t') return '\\t';
-        return c;
-      }) : `secret:${name}`;
-    });
-    try {
-      return JSON.parse(resolved) as unknown;
-    } catch {
-      return input;
-    }
+    return resolveSecretRefsWith(input, (name) => this.resolve(name));
   }
 
   /**

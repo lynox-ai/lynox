@@ -132,8 +132,13 @@ function formatMessage(channelName: string, msg: unknown): string {
       return `[${ts}] ${padded}  dir=${s(data['dir'])} reason=${trunc(s(data['reason']), 200)}`;
 
     case 'lynox:secret:access':
-      // Never log secret values — only name + action
-      return `[${ts}] ${padded}  name=${s(data['name'])} action=${s(data['action'])}`;
+      // Never log secret values — only name, action, and for a refusal which
+      // operation was refused. Without `op` a denied DELETE reads exactly like a
+      // denied lookup, which is the wrong answer for anyone reading this trail
+      // after an incident. Absent on the store's own events, which carry the
+      // operation in `action` already.
+      return `[${ts}] ${padded}  name=${s(data['name'])} action=${s(data['action'])}`
+        + (data['op'] !== undefined ? ` op=${s(data['op'])}` : '');
 
     default:
       return `[${ts}] ${padded}  ${safeJson(data, 300)}`;
