@@ -19,8 +19,16 @@ import { LynoxHTTPApi } from './http-api.js';
  * `git grep claim-managed -- '*.test.ts'` returns **one** hit and it is a
  * comment (`google-auth.test.ts:1659`), and `requireService` returns **zero**
  * across every test file (positive control in the same run: `jsonResponse`
- * matches in three). A route whose own comment explains which gate it uses,
+ * matches in **four**). A route whose own comment explains which gate it uses,
  * and no test that reaches it.
+ *
+ * ⚠ That control said "three" until a refuter counted it: the command had been
+ * written `git grep -c … | head -3`, so the number was the head limit and not
+ * the answer. It is the second time the same pipe produced a wrong count in the
+ * work that produced this file. The claim it supports is unaffected — the
+ * control's job is to show the search is not structurally blind, and four hits
+ * do that as well as three — but a number is quoted with its command or it is
+ * not evidence.
  *
  * ⚠ **One of the mutations named in the engine-half test cannot be killed
  * there, and this is the file that kills it.** `google-visibility-boot.test.ts`
@@ -149,8 +157,19 @@ describe('a managed tenant with no client pair — the flow the gate must not re
     //
     // MUTATIONS THIS KILLS: (a) `ensureGoogleAuth` → `getGoogleAuth` at the
     // route — the mutation the engine-half test names and cannot reach;
-    // (b) dropping the `LYNOX_MANAGED_INSTANCE_ID` branch in `ensureGoogleAuth`
-    // so it returns null for everyone.
+    // (b) collapsing `ensureGoogleAuth` to an unconditional `return null`.
+    //
+    // ⚠ (b) read "dropping the `LYNOX_MANAGED_INSTANCE_ID` branch … so it
+    // returns null for everyone" until a refuter took that wording literally
+    // and measured it. **Deleting** that line does the opposite: nothing then
+    // refuses a self-host caller, `_createGoogleAuth(null)` succeeds (it
+    // validates no client pair), and every instance gets a credential. So the
+    // phrase named one mutant and described another. Both are real and both
+    // die — the deletion at `:116`/`:126` (503 → 400, measured), the collapse
+    // here — which means the coverage was WIDER than the comment claimed while
+    // the mechanism it stated was backwards. The pre-existing
+    // `google-visibility-boot.test.ts` already describes the deletion
+    // correctly and kills it at the engine level; this file adds the route.
     const res = await claim(b.base);
     expect(res.status).toBe(400);
     expect((await res.json()) as unknown)
