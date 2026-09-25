@@ -43,15 +43,72 @@ interface TaskListInput {
   limit?: number | undefined;
 }
 
+/** How much of a failed run's stored reason is rendered in the listing. */
+const FAILURE_REASON_CHARS = 300;
+
+/** Flattened wherever a stored value is rendered inside a one-per-line listing:
+ *  a line break in it would invent a row, and the value comes from a provider. */
+const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
+
+/**
+ * The second line a scheduled trigger gets when the listing alone would mislead.
+ *
+ * WHY IT EXISTS. `status` said `open` for a schedule that had been switched off
+ * in July and for one whose last run died at the provider, and said the same
+ * thing for a healthy one. The record carries the difference — `enabled`,
+ * `last_run_status`, `last_run_result`, `pipeline_id` all ride on
+ * {@link TriggerRecord} and reached `listTriggers` — and this function dropped
+ * every one of them. Measured on a real instance (2026-09-24): three schedules
+ * in `failed`, three unrelated causes, all three stored, none reachable. Asked
+ * to repair them, the model wrote that it could not reconstruct the
+ * configuration and replaced all three with invented ones.
+ *
+ * Returns '' when there is nothing to add, so an ordinary TODO and a healthy
+ * schedule render exactly as before.
+ */
+export function triggerDetailLine(t: {
+  enabled?: number | undefined;
+  last_run_status?: string | undefined;
+  last_run_result?: string | undefined;
+  last_run_at?: string | undefined;
+  pipeline_id?: string | undefined;
+}): string {
+  const parts: string[] = [];
+  // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
+  // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
+  if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
+  // NOT a whitelist of failure words. The writer stores 'success', 'failed' and
+  // 'timeout' (task-manager: "preserves the actual outcome ('failed' vs
+  // 'timeout')"), and an earlier draft here checked for 'failed' or 'error' —
+  // a word nothing writes — while missing 'timeout', a word something does. A
+  // whitelist also fails in the wrong DIRECTION: a status added later would
+  // render as healthy. Anything recorded that is not success is a run the
+  // reader needs to see; absent means never run, which is not a failure.
+  const failed = t.last_run_status !== undefined && t.last_run_status !== 'success';
+  if (failed) {
+    const when = t.last_run_at ? ` (${t.last_run_at.slice(0, 16)})` : '';
+    const raw = (t.last_run_result ?? '').replace(UNSAFE_IN_LINE, ' ').trim();
+    const reason = raw.length === 0
+      ? 'no reason was stored'
+      : raw.length <= FAILURE_REASON_CHARS ? raw : `${raw.slice(0, FAILURE_REASON_CHARS)}…`;
+    parts.push(`last run FAILED${when}: ${reason}`);
+  }
+  // The workflow id is what makes the failure actionable — it is the thing a
+  // repair has to preserve, and the id is how you find its definition. Shown
+  // whenever the schedule has one, not only on failure.
+  if (t.pipeline_id) parts.push(`workflow ${t.pipeline_id}`);
+  return parts.length === 0 ? '' : `\n    ↳ ${parts.join(' · ')}`;
+}
+
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
-function formatTaskLine(t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined }): string {
+function formatTaskLine(t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined }): string {
   const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${t.scope_id})`;
   const due = t.due_date ? ` — due ${t.due_date}` : '';
   const assign = t.assignee ? ` @${t.assignee}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
+  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]${triggerDetailLine(t)}`;
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote

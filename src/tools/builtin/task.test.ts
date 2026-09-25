@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { RunHistory } from '../../core/run-history.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { TaskManager } from '../../core/task-manager.js';
-import { taskCreateTool, taskUpdateTool, taskListTool } from './task.js';
+import { taskCreateTool, taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 
@@ -685,6 +685,128 @@ describe('Task Tools', () => {
       const updated = tm.listTriggers().find((t) => t.id === task.id);
       expect(updated?.next_run_at).toBeFalsy();
       expect(updated?.schedule_cron).toBeFalsy();
+    });
+  });
+
+  describe('task_list surfaces why a schedule is not working', () => {
+    // End-to-end through the real store: create a scheduled trigger, mark its
+    // run the way the worker does, then read the listing. A stub would prove
+    // the formatter and nothing about whether the fields arrive.
+    const mkSchedule = async (title: string) => {
+      await taskCreateTool.handler({ title, description: 'Check the thing every day', schedule: '0 6 * * *' }, makeAgent());
+      const t = tm.listTriggers().find((x) => x.title === title);
+      expect(t, 'the schedule was not created').toBeDefined();
+      return t!.id;
+    };
+
+    it('a failed run names its cause and when it happened', async () => {
+      // The three real causes from a prod instance (2026-09-24) were all stored
+      // and none was reachable: a deleted target workflow, a model the provider
+      // rejects, a consent gate. The status said `open` for every one of them.
+      const id = await mkSchedule('Weekly API Feature Monitoring');
+      history.updateTriggerRunResult(id, {
+        lastRunAt: '2026-09-21T08:01:20.000Z',
+        lastRunResult: 'OpenAI-compatible API error 400: Invalid model: accounts/fireworks/models/minimax-m3',
+        lastRunStatus: 'failed',
+      });
+      const out = await taskListTool.handler({}, makeAgent());
+      expect(out).toContain('last run FAILED');
+      expect(out).toContain('2026-09-21T08:01');
+      expect(out).toContain('Invalid model: accounts/fireworks/models/minimax-m3');
+    });
+
+    it('a healthy schedule and a plain TODO are rendered exactly as before', async () => {
+      // The regression guard. A detail line that appears on every row would
+      // bury the thing it exists to surface.
+      await mkSchedule('Healthy daily check');
+      tm.create({ title: 'Plain todo' });
+      const out = await taskListTool.handler({}, makeAgent());
+      expect(out).toContain('Healthy daily check');
+      expect(out).toContain('Plain todo');
+      expect(out).not.toContain('↳');
+    });
+
+    it('a switched-off schedule says so, and absent does not mean off', async () => {
+      // `enabled` is 0/1 and ABSENT means enabled — the column defaults to 1, so
+      // the test is `=== 0`, not falsiness. A prod schedule sat at enabled=0
+      // since July with a next_run_at in the future, and the listing showed it
+      // as `[open]`, indistinguishable from a live one.
+      const off = await mkSchedule('Disabled daily research');
+      const on = await mkSchedule('Live daily research');
+      tm.setEnabled(off, false);
+      const out = await taskListTool.handler({}, makeAgent());
+      const lines = out.split('\n');
+      const offIdx = lines.findIndex((l) => l.includes('Disabled daily research'));
+      const onIdx = lines.findIndex((l) => l.includes('Live daily research'));
+      expect(offIdx).toBeGreaterThan(-1);
+      expect(onIdx).toBeGreaterThan(-1);
+      expect(lines[offIdx + 1]).toContain('SCHEDULE OFF');
+      // The live one must NOT carry the marker — a test that only checked the
+      // string was present would pass with the marker on every row.
+      expect(lines[onIdx + 1] ?? '').not.toContain('SCHEDULE OFF');
+    });
+
+    it('a stored reason cannot forge a row, and an empty one says so', async () => {
+      // `last_run_result` is provider text — a gateway body, an HTML page. In a
+      // one-per-line listing a line break in it invents a row.
+      const id = await mkSchedule('Forging schedule');
+      history.updateTriggerRunResult(id, {
+        lastRunAt: '2026-09-21T08:00:00.000Z',
+        lastRunResult: '502 Bad Gateway\n9999 Fake task [open]',
+        lastRunStatus: 'failed',
+      });
+      const out = await taskListTool.handler({}, makeAgent());
+      expect(out).toContain('502 Bad Gateway 9999 Fake task [open]');
+      expect(out.split('\n').some((l) => l.trimStart().startsWith('9999'))).toBe(false);
+
+      const empty = await mkSchedule('Silent failure');
+      history.updateTriggerRunResult(empty, {
+        lastRunAt: '2026-09-21T08:00:00.000Z',
+        lastRunResult: '',
+        lastRunStatus: 'failed',
+      });
+      const out2 = await taskListTool.handler({}, makeAgent());
+      expect(out2).toContain('no reason was stored');
+    });
+
+    it('the target workflow is named whenever the schedule has one', () => {
+      // The workflow id is what a repair has to PRESERVE — it is how its
+      // definition is found. Shown on every schedule that has one, not only on
+      // failure, because the moment you need it is the moment it is gone.
+      // Unit-level: that this line reaches the listing is proven by its
+      // siblings above, which drive the real store end to end.
+      expect(triggerDetailLine({ pipeline_id: '5eec9d20-a778-4e33-9b69-0860da6db527' }))
+        .toContain('workflow 5eec9d20-a778-4e33-9b69-0860da6db527');
+      // Nothing to say → no line at all.
+      expect(triggerDetailLine({})).toBe('');
+      expect(triggerDetailLine({ last_run_status: 'success', enabled: 1 })).toBe('');
+      // A successful last run is not a failure, however it is spelled.
+      expect(triggerDetailLine({ last_run_status: 'success', last_run_result: 'No changes detected' })).toBe('');
+      // Every recorded non-success is one, including the one the writer stores
+      // beside 'failed' — and including a word added after this was written.
+      for (const st of ['failed', 'timeout', 'some_future_word']) {
+        expect(triggerDetailLine({ last_run_status: st, last_run_result: 'boom' }),
+          `${st} must read as a failure`).toContain('last run FAILED');
+      }
+      // Never run is not a failure.
+      expect(triggerDetailLine({ last_run_result: 'boom' })).toBe('');
+      // Both conditions at once read as one line, in a fixed order.
+      const both = triggerDetailLine({ enabled: 0, last_run_status: 'failed', last_run_result: 'boom', pipeline_id: 'wf1' });
+      expect(both).toBe('\n    ↳ SCHEDULE OFF — it will not fire · last run FAILED: boom · workflow wf1');
+    });
+
+    it('a long reason is cut, and the cut is visible', async () => {
+      const id = await mkSchedule('Verbose failure');
+      history.updateTriggerRunResult(id, {
+        lastRunAt: '2026-09-21T08:00:00.000Z',
+        lastRunResult: 'x'.repeat(900),
+        lastRunStatus: 'failed',
+      });
+      const out = await taskListTool.handler({}, makeAgent());
+      const line = out.split('\n').find((l) => l.includes('last run FAILED')) ?? '';
+      expect(line).toContain('…');
+      expect(line).not.toContain('x'.repeat(301));
+      expect(line).toContain('x'.repeat(300));
     });
   });
 
