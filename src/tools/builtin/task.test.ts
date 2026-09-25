@@ -874,24 +874,34 @@ describe('Task Tools', () => {
       // no foreign key and survives, and it is the configuration a rewrite
       // destroyed. An earlier revision rendered the field that disappears and
       // not the one that stays.
+      // Keyed on the EFFECT, not on stored params. Checked against the three
+      // real schedules that started this: exactly the one reporting "target
+      // workflow no longer exists" is effect=run_workflow with an empty id, and
+      // its params are `{}` — a params-keyed test would have missed it. The
+      // other two are effect=run_agent and need no workflow at all.
       const orphan = triggerDetailLine({
+        effect: 'run_workflow',
         last_run_status: 'failed',
         last_run_result: 'Pipeline target workflow no longer exists (skipped)',
-        pipeline_params: '{"region":"eu","batch":3}',
+        pipeline_params: '{}',
       });
-      expect(orphan).toContain('no target workflow');
-      expect(orphan).toContain('params {"region":"eu","batch":3}');
+      expect(orphan).toContain('NO WORKFLOW LINKED');
 
-      // With an id present, the absence line must NOT appear.
-      const linked = triggerDetailLine({ pipeline_id: 'wf-1', pipeline_params: '{"a":1}' });
+      // The real shape, with no params at all — the case the first attempt missed.
+      expect(triggerDetailLine({ effect: 'run_workflow' })).toContain('NO WORKFLOW LINKED');
+
+      // effect=run_agent needs no workflow: saying otherwise would call two
+      // healthy schedules broken.
+      expect(triggerDetailLine({ effect: 'run_agent' })).toBe('');
+      expect(triggerDetailLine({ effect: 'notify' })).toBe('');
+
+      // With an id present the line must NOT appear, whatever the effect.
+      const linked = triggerDetailLine({ effect: 'run_workflow', pipeline_id: 'wf-1', pipeline_params: '{"a":1}' });
       expect(linked).toContain('workflow wf-1');
-      expect(linked).not.toContain('no target workflow');
+      expect(linked).not.toContain('NO WORKFLOW LINKED');
       expect(linked).toContain('params {"a":1}');
 
-      // No params at all → neither line. A schedule without a workflow is not
-      // an orphan, it is a plain schedule.
       expect(triggerDetailLine({})).toBe('');
-      expect(triggerDetailLine({ pipeline_params: '{"a":1}' })).toContain('no target workflow');
     });
 
     it('a creation message keeps its suffix on the HEAD line', async () => {

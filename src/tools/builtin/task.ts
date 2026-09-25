@@ -92,6 +92,7 @@ export function triggerDetailLine(t: {
   last_run_at?: string | undefined;
   pipeline_id?: string | undefined;
   pipeline_params?: string | undefined;
+  effect?: string | undefined;
 }): string {
   const parts: string[] = [];
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
@@ -134,7 +135,18 @@ export function triggerDetailLine(t: {
   // a line break today, but each is safe because of an invariant enforced two
   // modules away for a different reason and written down nowhere near here.
   if (t.pipeline_id) parts.push(`workflow ${clean(t.pipeline_id)}`);
-  else if (t.pipeline_params) parts.push('no target workflow (the id is cleared when a workflow is deleted)');
+  // A schedule whose EFFECT is to run a workflow and which has none is broken
+  // as a matter of its own record, not by inference: the WorkerLoop dispatches
+  // on `effect`, so this one dispatches to a workflow that is not there.
+  //
+  // Keyed on the effect and NOT on stored params, which was the first attempt
+  // and would have missed the real case. Checked against the instance that
+  // started this: of its three failing schedules, exactly the one reporting
+  // "target workflow no longer exists" has effect=run_workflow with an empty
+  // id — its params are `{}`. The other two are effect=run_agent and need no
+  // workflow at all, so a params-keyed test would have said nothing about the
+  // broken one and something about the healthy ones.
+  else if (t.effect === 'run_workflow') parts.push('NO WORKFLOW LINKED — it dispatches to one and has none');
   if (t.pipeline_params) parts.push(`params ${cut(clean(t.pipeline_params), PARAMS_CHARS)}`);
   return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
 }
@@ -143,7 +155,7 @@ export function triggerDetailLine(t: {
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
