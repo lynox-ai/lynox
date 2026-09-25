@@ -130,6 +130,22 @@ describe('a self-host instance with no client pair', () => {
     // reason. If the env check moved above the gate, this answers 400 while
     // the case above still answers 400 too — one assertion cannot separate a
     // deleted gate from a reordered one, and two can.
+    //
+    // ⭐ And it turns out to carry a SECOND property, which is the one worth
+    // having and was not the reason it was written. The case above pins the
+    // REFUSAL; this one pins that nothing was CREATED. `ensureGoogleAuth`
+    // installs what it builds on `this._googleAuth` before it returns, so a
+    // version that builds first and only then refuses self-host still answers
+    // 503 here on the first request — and hands the credential out on the
+    // SECOND, because the early `if (this._googleAuth) return it` no longer
+    // has a reason to say no. Measured: that mutation leaves every other
+    // assertion in this file and in `google-visibility-boot.test.ts` green,
+    // including that file's `resolves.toBeNull()`, which tests the return
+    // value and not the side effect. It fails here, and only here, with
+    // `expected 400 to be 503`.
+    //
+    // So: a second request against the SAME engine is what separates "returned
+    // null" from "created nothing". Do not collapse these two cases into one.
     const res = await claim(b.base, {});
     expect(res.status).toBe(503);
   });
