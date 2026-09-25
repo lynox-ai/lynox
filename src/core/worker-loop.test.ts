@@ -382,6 +382,38 @@ describe('WorkerLoop', () => {
     );
   });
 
+  it('masks credential shapes in BOTH the stored result and the notification body', async () => {
+    // The error text forks three ways — the stored run result, the
+    // notification body and the follow-up prompt — and only the first stays on
+    // this machine. An earlier attempt masked it inside `recordTaskRun`, which
+    // covered the stored copy and left the notification, the reader that
+    // actually leaves the instance, untouched.
+    const secret = 'Authorization: Bearer sk-live-AbCdEf0123456789AbCdEf0123456789';
+    const bare = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd';
+    const task = makeTask();
+    const tm = makeTaskManager([task]);
+    const session = makeSession(new Error(`upstream refused — ${secret} — token ${bare}`));
+    const engine = makeEngine({ taskManager: tm, session });
+    const router = makeNotificationRouter();
+
+    const loop = new WorkerLoop(engine, router, 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const stored = (tm.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    const body = (router.notify as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { body: string; followUps?: { task: string }[] };
+    for (const [where, text] of [['stored', stored], ['notification', body.body], ['follow-up', body.followUps?.[1]?.task ?? '']] as const) {
+      expect(text, `${where} carried the bearer`).not.toContain('sk-live-AbCdEf0123456789AbCdEf0123456789');
+      // The bare token needs `includeGeneric` specifically — it has no prefix
+      // for the shaped patterns to find. Without the option it walks through.
+      expect(text, `${where} carried the bare token`).not.toContain(bare);
+    }
+    // Positive control on the same path: ordinary prose is NOT scrubbed, so the
+    // absences above are masking and not a blanket redaction.
+    expect(stored).toContain('upstream refused');
+    expect(body.body).toContain('upstream refused');
+  });
+
   // ---- 5. failed task → recordTaskRun('failed') + notify high priority ----
 
   it('records failure and sends high-priority notification on failed task', async () => {

@@ -551,9 +551,22 @@ export class WorkerLoop {
       }).catch(() => {});
 
       const isTimeout = err instanceof Error && err.name === 'TimeoutError';
-      const errorMsg = isTimeout
+      // Masked ONCE, here, where the text is known to be a provider's error and
+      // before it forks. It forks three ways — the stored run result, the
+      // notification body, and the follow-up prompt — and only the first of
+      // those stays on the instance. An earlier attempt masked it inside
+      // `recordTaskRun` instead, which covered the stored copy and left the
+      // notification, i.e. the one reader that leaves the machine, untouched.
+      //
+      // Masking here rather than at the store also keeps it OFF the results
+      // that are not errors: `recordTaskRun` is called with a watch run's
+      // SUMMARY too, and `includeGeneric` eats any 40-character run — a commit
+      // SHA, a page slug — so a summary masked on the way in would be compared
+      // against a masked baseline on the next tick.
+      const rawErrorMsg = isTimeout
         ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
         : (err instanceof Error ? err.message : String(err));
+      const errorMsg = maskSecretPatterns(rawErrorMsg, { includeGeneric: true });
       const status = isTimeout ? 'timeout' as const : 'failed' as const;
 
       // Check if task will be retried BEFORE recording (retry_count not yet incremented)

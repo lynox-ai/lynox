@@ -3169,7 +3169,7 @@ export class Agent implements IAgent {
     'remember', 'memory_block_edit', 'memory_retire', 'memory_focus',
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
-    'task_create', 'task_update', 'task_list',
+    'task_create', 'task_update',
     'data_store_create', 'data_store_insert', 'data_store_delete', 'data_store_drop',
     'plan_task',
   ]);
@@ -3182,17 +3182,31 @@ export class Agent implements IAgent {
   // stay exempt. Both scanned tools also sit under EXTERNAL_CONTENT_TOOLS; that is a
   // separate signal and stays: it routes durable writes, this one warns the model
   // and emits the security audit event.
-  // NOTE: `read_file`, `spawn_agent`, `run_workflow` and `api_setup` were removed
-  // from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23 audit). Their
-  // return values now flow through the
-  // full guard chain — `wrapUntrustedData()` at the tool boundary AND
-  // `scanToolResult()` here in the dispatcher — because each can carry
+  // NOTE: `read_file`, `spawn_agent`, `run_workflow`, `api_setup` and `task_list`
+  // were removed from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23
+  // audit + the 2026-09-25 task-listing change), because each can carry
   // attacker-controlled content into the parent agent's context (a read file, a
-  // sub-agent's summary, or a workflow's aggregated step output). The wrap is the
-  // primary defence (it seats the per-run untrusted latch); this scan is
-  // defence-in-depth. `run_workflow` is the identical threat shape to `spawn_agent`
+  // sub-agent's summary, a workflow's aggregated step output, a stored run
+  // result). `scanToolResult()` here in the dispatcher now sees all five.
+  //
+  // Only `read_file` and `spawn_agent` ALSO wrap at the tool boundary, where the
+  // wrap is the primary defence and seats the per-run untrusted latch. An
+  // earlier revision of this note said the full chain applied to every name in
+  // the list; that already did not hold for `api_setup` or `run_workflow`, and
+  // adding a fifth name would have lent the sentence the same credibility a
+  // third time. For the three that do not wrap, this scan is the only control
+  // rather than the second one. `run_workflow` is the identical threat shape to `spawn_agent`
   // — its steps run sub-agents with web/http/read access — so it gets the same
   // treatment its sibling already had.
+  //
+  // `task_list` was the fifth, and it is the one that shows the allowlist has to
+  // be re-read whenever a listed tool's OUTPUT changes, not only when the list
+  // does. Its entry was defensible for as long as every field it rendered was
+  // written by a human or by the model: a title and a description, both scanned
+  // at create time for a trigger that fires. Then the listing started rendering
+  // a stored RUN RESULT — which is whatever the far end said — and the premise
+  // in the docblock above ("results are guaranteed internal") stopped holding.
+  // Nothing about the list changed; the content behind one of its entries did.
   //
   // `api_setup` was the fourth, and the case for it was already written down HERE:
   // it is listed under EXTERNAL_CONTENT_TOOLS above as **direct ingest** ("read
