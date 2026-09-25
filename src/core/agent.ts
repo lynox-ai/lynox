@@ -3169,7 +3169,7 @@ export class Agent implements IAgent {
     'remember', 'memory_block_edit', 'memory_retire', 'memory_focus',
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
-    'task_create', 'task_update', 'task_list',
+    'task_create', 'task_update',
     'data_store_create', 'data_store_insert', 'data_store_delete', 'data_store_drop',
     'plan_task',
   ]);
@@ -3182,8 +3182,9 @@ export class Agent implements IAgent {
   // stay exempt. Both scanned tools also sit under EXTERNAL_CONTENT_TOOLS; that is a
   // separate signal and stays: it routes durable writes, this one warns the model
   // and emits the security audit event.
-  // NOTE: `read_file`, `spawn_agent`, `run_workflow` and `api_setup` were removed
-  // from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23 audit). Their
+  // NOTE: `read_file`, `spawn_agent`, `run_workflow`, `api_setup` and `task_list`
+  // were removed from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23
+  // audit + the 2026-09-25 task-listing change). Their
   // return values now flow through the
   // full guard chain — `wrapUntrustedData()` at the tool boundary AND
   // `scanToolResult()` here in the dispatcher — because each can carry
@@ -3193,6 +3194,15 @@ export class Agent implements IAgent {
   // defence-in-depth. `run_workflow` is the identical threat shape to `spawn_agent`
   // — its steps run sub-agents with web/http/read access — so it gets the same
   // treatment its sibling already had.
+  //
+  // `task_list` was the fifth, and it is the one that shows the allowlist has to
+  // be re-read whenever a listed tool's OUTPUT changes, not only when the list
+  // does. Its entry was defensible for as long as every field it rendered was
+  // written by a human or by the model: a title and a description, both scanned
+  // at create time for a trigger that fires. Then the listing started rendering
+  // a stored RUN RESULT — which is whatever the far end said — and the premise
+  // in the docblock above ("results are guaranteed internal") stopped holding.
+  // Nothing about the list changed; the content behind one of its entries did.
   //
   // `api_setup` was the fourth, and the case for it was already written down HERE:
   // it is listed under EXTERNAL_CONTENT_TOOLS above as **direct ingest** ("read

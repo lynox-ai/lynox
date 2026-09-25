@@ -46,9 +46,28 @@ interface TaskListInput {
 /** How much of a failed run's stored reason is rendered in the listing. */
 const FAILURE_REASON_CHARS = 300;
 
+/** How much of the stored parameter set is rendered. Shorter than the reason:
+ *  it is a pointer to what was configured, not the configuration itself. */
+const PARAMS_CHARS = 200;
+
 /** Flattened wherever a stored value is rendered inside a one-per-line listing:
  *  a line break in it would invent a row, and the value comes from a provider. */
 const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
+
+/** What separates the fields of the detail line. Named because the reason has to
+ *  be stripped of it — a value that can contain the separator can invent a field. */
+const FIELD_SEPARATOR = ' · ';
+
+/** Flatten anything that could end a line or forge a field. */
+const clean = (v: string): string => v.replace(UNSAFE_IN_LINE, ' ');
+
+/** Cut at a CODEPOINT boundary. `slice` counts UTF-16 units, so a provider whose
+ *  error text puts an emoji across the limit leaves a lone surrogate in the
+ *  model's context — the offset is chosen by the far end, not by us. */
+const cut = (v: string, max: number): string => {
+  const points = [...v];
+  return points.length <= max ? v : `${points.slice(0, max).join('')}…`;
+};
 
 /**
  * The second line a scheduled trigger gets when the listing alone would mislead.
@@ -72,6 +91,7 @@ export function triggerDetailLine(t: {
   last_run_result?: string | undefined;
   last_run_at?: string | undefined;
   pipeline_id?: string | undefined;
+  pipeline_params?: string | undefined;
 }): string {
   const parts: string[] = [];
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
@@ -86,29 +106,56 @@ export function triggerDetailLine(t: {
   // reader needs to see; absent means never run, which is not a failure.
   const failed = t.last_run_status !== undefined && t.last_run_status !== 'success';
   if (failed) {
-    const when = t.last_run_at ? ` (${t.last_run_at.slice(0, 16)})` : '';
-    const raw = (t.last_run_result ?? '').replace(UNSAFE_IN_LINE, ' ').trim();
-    const reason = raw.length === 0
-      ? 'no reason was stored'
-      : raw.length <= FAILURE_REASON_CHARS ? raw : `${raw.slice(0, FAILURE_REASON_CHARS)}…`;
+    const when = t.last_run_at ? ` (${clean(t.last_run_at).slice(0, 16)})` : '';
+    // The FIELD SEPARATOR is neutralised inside the reason, not only line
+    // breaks. `parts.join(' · ')` means a reason carrying ` · workflow X` reads
+    // as another field — two workflow attributions on one line, at the moment
+    // the reader is deciding which workflow a repair must preserve. It costs a
+    // middle dot in a provider's prose and removes the ambiguity entirely.
+    const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
+    const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
     parts.push(`last run FAILED${when}: ${reason}`);
   }
-  // The workflow id is what makes the failure actionable — it is the thing a
-  // repair has to preserve, and the id is how you find its definition. Shown
-  // whenever the schedule has one, not only on failure.
-  if (t.pipeline_id) parts.push(`workflow ${t.pipeline_id}`);
-  return parts.length === 0 ? '' : `\n    ↳ ${parts.join(' · ')}`;
+  // The WORKFLOW ID IS NOT THE FIELD TO LEAN ON, and an earlier revision of
+  // this comment claimed the opposite — "the thing a repair has to preserve".
+  // `target_workflow_id` is `REFERENCES workflows(id) ON DELETE SET NULL`, so
+  // deleting the workflow NULLS it: in the one cause that names a missing
+  // workflow, the id is already gone by the time anyone reads the row. Measured
+  // on a real instance — the schedule that reported "target workflow no longer
+  // exists" had an empty id, and I first read that as "it never had one".
+  //
+  // `params_json` has no foreign key and SURVIVES. It is the stored
+  // configuration — the thing that was actually lost when a repair rewrote
+  // three schedules from scratch — so it is rendered too, and its absence is
+  // reported rather than inferred: an empty id beside stored params is a fact
+  // the reader can act on, not a conclusion this line should draw.
+  //
+  // Both are cleaned like every other rendered field. Neither is reachable with
+  // a line break today, but each is safe because of an invariant enforced two
+  // modules away for a different reason and written down nowhere near here.
+  if (t.pipeline_id) parts.push(`workflow ${clean(t.pipeline_id)}`);
+  else if (t.pipeline_params) parts.push('no target workflow (the id is cleared when a workflow is deleted)');
+  if (t.pipeline_params) parts.push(`params ${cut(clean(t.pipeline_params), PARAMS_CHARS)}`);
+  return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
 }
 
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
-function formatTaskLine(t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined }): string {
+function formatTaskLine(
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined },
+  // Callers used to append their own suffix to the RESULT of this function.
+  // That was harmless while the result was one line; with a detail line it put
+  // "— next run: …" underneath "workflow <id>", where it reads as a property of
+  // the workflow. The suffix belongs on the head line, so it is passed in
+  // rather than concatenated on.
+  suffix = '',
+): string {
   const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${t.scope_id})`;
   const due = t.due_date ? ` — due ${t.due_date}` : '';
   const assign = t.assignee ? ` @${t.assignee}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]${triggerDetailLine(t)}`;
+  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -289,7 +336,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
         const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-        return `Workflow task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}${pendingConsent(task)}`;
+        return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
       }
 
       if (input.schedule) {
@@ -298,7 +345,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           scheduleCron: input.schedule,
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-        return `Scheduled task created: ${formatTaskLine(task)}${nextRun}${pendingConsent(task)}`;
+        return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
       }
 
       if (input.watch_url) {
@@ -310,7 +357,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           watchUrl: input.watch_url,
           watchIntervalMinutes: intervalMinutes,
         });
-        return `Watch task created: ${formatTaskLine(task)} — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`;
+        return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
       }
 
       if (input.run_at) {
@@ -318,11 +365,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
         }
         const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
-        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task)}${pendingConsent(task)}`;
+        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
       }
 
       const task = managerRef.create(baseParams);
-      return `Task created: ${formatTaskLine(task)}${pendingConsent(task)}`;
+      return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
     } catch (e: unknown) {
       logErrorChain('task_create', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -399,7 +446,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       // An edit can re-open consent: changing what a trigger RUNS clears the stamp
       // (`trigger-store.ts`), so the row just edited may be held back again — and
       // this report is the only place that says so.
-      return `Task updated: ${formatTaskLine(task)}${scheduleNote}${pendingConsent(task)}`;
+      return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
     } catch (e: unknown) {
       logErrorChain('task_update', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
