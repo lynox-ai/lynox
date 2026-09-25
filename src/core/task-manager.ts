@@ -3,7 +3,6 @@ import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { compose, renderFence } from '../core/data-boundary.js';
-import { maskSecretPatterns } from './secret-store.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -688,20 +687,9 @@ export class TaskManager {
     const mayWriteStatus = task.status !== 'waiting';
 
     const now = new Date();
-    // Masked HERE, at the single point where the run result is stored, rather
-    // than in each reader: this string ends up in the error report, in a
-    // notification body, in the watch prompt and now in the task listing, and a
-    // per-reader fix would have to be repeated once per reader and be wrong
-    // once. The twin call on the reporting path already does exactly this and
-    // records why: without `includeGeneric` a 64-hex instance secret passed
-    // through untouched. This is a provider's text — it can carry a bearer, a
-    // signed URL, a scheme://user:pass@host out of an upstream stack trace —
-    // and none of that is in the tenant secret store, so value-based masking
-    // downstream cannot see it.
-    const masked = maskSecretPatterns(result, { includeGeneric: true });
-    const truncatedResult = masked.length > MAX_RUN_RESULT_CHARS
-      ? masked.slice(0, MAX_RUN_RESULT_CHARS)
-      : masked;
+    const truncatedResult = result.length > MAX_RUN_RESULT_CHARS
+      ? result.slice(0, MAX_RUN_RESULT_CHARS)
+      : result;
 
     // Determine next_run_at based on trigger type.
     // `undefined` = leave column unchanged. `null` = explicitly clear

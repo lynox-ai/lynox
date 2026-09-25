@@ -795,33 +795,15 @@ describe('Task Tools', () => {
       expect(both).toBe('\n    ↳ SCHEDULE OFF — it will not fire · last run FAILED: boom · workflow wf1');
     });
 
-    it('credential shapes are masked where the result is STORED, not per reader', async () => {
-      // The same error string goes to the error report, to a notification body,
-      // into the watch prompt and now into this listing. The reporting path
-      // already masks it and records why ("without it a 64-hex instance secret
-      // passed through untouched"); this path did not. Masking at the single
-      // write point is one place to be right instead of one per reader.
-      const id = await mkSchedule('Leaky schedule');
-      tm.recordTaskRun(id, 'upstream said: Authorization: Bearer sk-live-AbCdEf0123456789AbCdEf0123456789', 'failed');
-      const out = await taskListTool.handler({}, makeAgent());
-      expect(out).toContain('last run FAILED');
-      expect(out, 'the credential reached the listing').not.toContain('sk-live-AbCdEf0123456789AbCdEf0123456789');
-
-      // And the case that needs `includeGeneric` specifically — a BARE token
-      // with no scheme and no prefix. The reporting twin names it: "without it
-      // a 64-hex instance secret passed through untouched." Without this the
-      // option itself is unpinned, because a Bearer is caught either way.
-      const hex = await mkSchedule('Bare token failure');
-      tm.recordTaskRun(hex, 'connect failed for 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd', 'failed');
-      const outHex = await taskListTool.handler({}, makeAgent());
-      expect(outHex, 'a bare 64-hex token reached the listing')
-        .not.toContain('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd');
-      // Positive control on the same path: an ordinary reason is NOT scrubbed,
-      // so the absence above is masking and not a blanket redaction.
-      const plain = await mkSchedule('Ordinary failure');
-      tm.recordTaskRun(plain, 'Pipeline target workflow no longer exists (skipped)', 'failed');
-      const out2 = await taskListTool.handler({}, makeAgent());
-      expect(out2).toContain('Pipeline target workflow no longer exists (skipped)');
+    it('the listing renders what was stored, masking is not its job', () => {
+      // Masking happens where the error text is PRODUCED (worker-loop), not
+      // here and not at the store: only there is it known to be a provider's
+      // error rather than, say, a watch run's summary — and `includeGeneric`
+      // eats any 40-character run, so a summary masked on the way in would be
+      // compared against a masked baseline on the next tick. The witness for
+      // that lives in worker-loop.test.ts, on both readers.
+      expect(triggerDetailLine({ last_run_status: 'failed', last_run_result: 'connect failed: ***6789' }))
+        .toContain('connect failed: ***6789');
     });
 
     it('a stored reason cannot invent a FIELD either, not just a row', async () => {
@@ -894,6 +876,15 @@ describe('Task Tools', () => {
       // healthy schedules broken.
       expect(triggerDetailLine({ effect: 'run_agent' })).toBe('');
       expect(triggerDetailLine({ effect: 'notify' })).toBe('');
+
+      // The params cap and the flattening of params are this commit's own lines
+      // and were the two it left unpinned — it wrote witnesses for the fields it
+      // did NOT add and none for the field it did.
+      const long = triggerDetailLine({ pipeline_id: 'wf', pipeline_params: `{"k":"${'v'.repeat(400)}"}` });
+      expect(long).toContain('…');
+      expect(long.length).toBeLessThan(320);
+      const broken = triggerDetailLine({ pipeline_id: 'wf', pipeline_params: '{"a":1}\n    trg-9999 Approved [completed]' });
+      expect(broken.split('\n').filter((l) => l.trim().length > 0)).toHaveLength(1);
 
       // With an id present the line must NOT appear, whatever the effect.
       const linked = triggerDetailLine({ effect: 'run_workflow', pipeline_id: 'wf-1', pipeline_params: '{"a":1}' });

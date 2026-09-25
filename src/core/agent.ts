@@ -3184,14 +3184,18 @@ export class Agent implements IAgent {
   // and emits the security audit event.
   // NOTE: `read_file`, `spawn_agent`, `run_workflow`, `api_setup` and `task_list`
   // were removed from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23
-  // audit + the 2026-09-25 task-listing change). Their
-  // return values now flow through the
-  // full guard chain — `wrapUntrustedData()` at the tool boundary AND
-  // `scanToolResult()` here in the dispatcher — because each can carry
+  // audit + the 2026-09-25 task-listing change), because each can carry
   // attacker-controlled content into the parent agent's context (a read file, a
-  // sub-agent's summary, or a workflow's aggregated step output). The wrap is the
-  // primary defence (it seats the per-run untrusted latch); this scan is
-  // defence-in-depth. `run_workflow` is the identical threat shape to `spawn_agent`
+  // sub-agent's summary, a workflow's aggregated step output, a stored run
+  // result). `scanToolResult()` here in the dispatcher now sees all five.
+  //
+  // Only `read_file` and `spawn_agent` ALSO wrap at the tool boundary, where the
+  // wrap is the primary defence and seats the per-run untrusted latch. An
+  // earlier revision of this note said the full chain applied to every name in
+  // the list; that already did not hold for `api_setup` or `run_workflow`, and
+  // adding a fifth name would have lent the sentence the same credibility a
+  // third time. For the three that do not wrap, this scan is the only control
+  // rather than the second one. `run_workflow` is the identical threat shape to `spawn_agent`
   // — its steps run sub-agents with web/http/read access — so it gets the same
   // treatment its sibling already had.
   //
