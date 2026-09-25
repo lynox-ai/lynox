@@ -597,6 +597,18 @@ export interface TokenPurge {
   kept: string[];
   /** Recorded names still holding the value written, which this vault cannot delete. */
   notRemovable: string[];
+  /**
+   * Names this caller's vault view may not READ, so whether anything of this
+   * profile's is still there could not be established. Fed by BOTH name sources
+   * — the recorded writes and the profile's configured keys.
+   *
+   * Separate from {@link notRemovable} because the two need opposite sentences:
+   * that one means the delete path is broken, this one means the delete path is
+   * fine and the caller was not allowed to look. Folding them together produced
+   * "this vault has no working delete here" for a name a scoped agent simply
+   * could not see — a true-sounding cause that sends the reader at the wrong repair.
+   */
+  notVisible: string[];
 }
 
 /**
@@ -632,10 +644,30 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
       return null;
     }
   };
+  // Names this profile may never offer for removal, whichever pass meets them:
+  // a protected credential (the comment on PROVIDER_KEY_SLOTS says it — there is
+  // no second copy) or one another profile still holds. Extracted because the
+  // second pass below was written without them and put a provider key into
+  // `notVisible` under a sentence inviting its deletion. A guard that has to be
+  // remembered once per pass is the wrong shape; this is the multiplication made
+  // into one name.
+  const notOursToOffer = (name: string): boolean =>
+    isProtectedSecretWrite(name) || inUseElsewhere.has(name);
+
   const removed: string[] = [];
   const notRemovable: string[] = [];
+  const notVisible: string[] = [];
   for (const w of recordedWrites(profile)) {
-    if (isProtectedSecretWrite(w.name) || inUseElsewhere.has(w.name)) continue;
+    if (notOursToOffer(w.name)) continue;
+    // A store that cannot READ the name cannot judge whether this profile wrote
+    // what sits there. Saying so is the difference between "nothing to purge"
+    // and "I could not look": without this branch a caller whose vault view is
+    // scoped gets an empty result on all three counts and reads it as done,
+    // while the tokens stay.
+    if (secretStore?.explainUnresolved?.(w.name) === 'out-of-scope') {
+      notVisible.push(w.name);
+      continue;
+    }
     const value = valueOf(w.name);
     // Only the value this profile's exchange wrote. Anything else under the
     // name — replaced since, or nothing at all — is not this profile's to take.
@@ -650,9 +682,20 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
       notRemovable.push(w.name);
     }
   }
+  // Same question, second pass. `recordedWrites` above is only one of the two
+  // name sources; a profile's configured keys (client_secret, refresh_token,
+  // username/password) come from `collectVaultKeys`, and an out-of-scope one
+  // resolves null here exactly as an absent one does — so it fell out of `kept`
+  // silently and the message said nothing at all about it. That is the failure
+  // `notVisible` was added for, left in place on the other half of the function.
+  for (const k of collectVaultKeys(profile)) {
+    if (notOursToOffer(k)) continue;
+    if (removed.includes(k) || notRemovable.includes(k) || notVisible.includes(k)) continue;
+    if (secretStore?.explainUnresolved?.(k) === 'out-of-scope') notVisible.push(k);
+  }
   const kept = collectVaultKeys(profile)
-    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
-  return { removed, kept, notRemovable };
+    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !notVisible.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
+  return { removed, kept, notRemovable, notVisible };
 }
 
 /**

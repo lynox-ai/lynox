@@ -419,7 +419,18 @@ function measureStaticPrefixTokens(): number {
 // (An earlier version of this note blamed a tokenizer merging across text boundaries.
 // There is no tokenizer here; that was a mechanism fitted to the gap, and a refuter
 // caught it by reading `estimateTokens`. The conclusion survived, the reason did not.)
-const STATIC_PREFIX_BUDGET = 23839;
+// 2026-09-25: +76 (23839 → 23915, measured) — one new parameter on `spawn_agent`,
+// `secret_scope`, which bounds which vault keys a sub-agent may resolve. The cost is
+// the schema entry itself (an `oneOf` with two branches) plus a one-line description;
+// the reasoning behind the parameter lives in a code comment, which ships nowhere.
+// The first draft of that description cost 140 and was cut to 76 by moving three
+// sentences of explanation out of the prompt and into the source — a reminder that
+// this budget is a price list for PROSE, and that the audience for an explanation is
+// usually the next reader of the file, not the model on every turn.
+// Measured after the cut, not derived from it: 23979 (first draft) − 64 (the cut) would
+// have written 23915 here by luck, and the note above this one exists because that
+// arithmetic is not sound.
+const STATIC_PREFIX_BUDGET = 23915;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

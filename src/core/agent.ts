@@ -3222,19 +3222,40 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret', 'spawn_agent', 'run_workflow',
   ]);
 
-  /** Tools whose input is STORED as part of a workflow definition, not a call
-   *  whose `secret:NAME` refs should be bound to values before it runs. Their refs
-   *  MUST survive verbatim (re-bound later, on the tenant's own vault, when the
-   *  workflow actually RUNS) — resolving them at store-time would bake a plaintext
-   *  credential into the stored blob (and re-export would then leak it), and would
-   *  hard-fail the write for a secret not yet connected.
+  /** Tools whose `secret:NAME` refs must reach the handler VERBATIM, because the
+   *  binding belongs somewhere further along than this dispatch.
+   *
+   *  Two reasons live here, and the set only makes sense if both are named. The
+   *  first is storage: input that is STORED as part of a workflow definition is
+   *  re-bound later, on the tenant's own vault, when the workflow actually RUNS —
+   *  resolving at store-time would bake a plaintext credential into the stored
+   *  blob (and re-export would then leak it), and would hard-fail the write for a
+   *  secret not yet connected. The second is DELEGATION: an order handed to
+   *  another agent names sources for that agent to bind under its own scope and
+   *  its own consent, at its own point of use.
+   *
+   *  What an exemption also switches off, since it is one `if`: the fail-loud
+   *  unresolved-ref gate and the first-use consent prompt. Both are right to skip
+   *  for these — nothing here reaches an external service with the input, and for
+   *  a delegation the consent question belongs to the agent that will actually use
+   *  the value, whose prompt carries the sub-agent's name.
    *   - `import_workflow`: ingests an untrusted shared workflow (its whole point is
    *     import-then-bind on the importer's vault).
    *   - `update_workflow_steps`: edits + persists a stored workflow; a `secret:NAME`
-   *     in an edited task must be stored as a ref, not resolved into the def. */
+   *     in an edited task must be stored as a ref, not resolved into the def.
+   *   - `spawn_agent`: delegation, not storage — see the note on the member itself. */
   private static readonly SECRET_RESOLUTION_EXEMPT = new Set([
     'import_workflow',
     'update_workflow_steps',
+    // `spawn_agent`: a spawn order names sources, it does not consume them. The
+    // child resolves what it needs through its OWN store, under its own scope
+    // and its own consent gate, at the point of use. Resolving here instead put
+    // the plaintext into the child's task text — where it travels into the
+    // child's prompt and its run history — and, since `secret_scope` derives the
+    // child's default reach from the `secret:NAME` refs the order writes, it also
+    // erased the very thing that reach is computed from: by the time the handler
+    // ran there were no refs left to read, so every default scope came out empty.
+    'spawn_agent',
   ]);
 
   private async _dispatchTools(content: BetaContentBlock[]): Promise<BetaToolResultBlockParam[]> {
@@ -3587,9 +3608,17 @@ export class Agent implements IAgent {
         // bodies". They do — when the vault has the value.
         const unresolved = this.secretStore.findUnresolvedSecretRefs(tc.input);
         if (unresolved.length > 0) {
+          // Split first: the near-match hint below is printed beside the ABSENT
+          // list, so it has to be computed from that list. Built from all of
+          // `unresolved` it could offer a twin for a name the sentence never
+          // mentions.
+          const outOfScopeNames = unresolved.filter(
+            (n) => this.secretStore!.explainUnresolved?.(n) === 'out-of-scope',
+          );
+          const absentNames = unresolved.filter((n) => !outOfScopeNames.includes(n));
           // Enrich with a near-match: a guessed spelling (secret:Z_AI_API_KEY vs a
           // stored ZAI_API_KEY) should point at the existing name instead of looping.
-          const suggestions = unresolved
+          const suggestions = absentNames
             .map((n) => {
               const m = this.secretStore!.findNameMatches?.(n) ?? [];
               return m.length > 0 ? `"${n}" → did you mean secret:${m[0]}?` : null;
@@ -3598,10 +3627,27 @@ export class Agent implements IAgent {
           const hint = suggestions.length > 0
             ? ` A near-identical name IS in the vault: ${suggestions.join('; ')} — reference that instead of re-collecting.`
             : '';
+          // Two shapes hide behind one symptom. A key that is STORED but outside
+          // this agent's scope resolves to null exactly like an absent one, and
+          // the recovery below — collect it with ask_secret — cannot work for it:
+          // the write lands in the vault and the next read is refused again, so
+          // the agent asks the user for the same credential forever. Branch on
+          // which it is, and say the thing that is actually true.
+          if (outOfScopeNames.length > 0 && absentNames.length === 0) {
+            return {
+              type: 'tool_result',
+              tool_use_id: tc.id,
+              content: `Tool "${tc.name}" referenced secret(s) outside this agent's vault scope: ${outOfScopeNames.map((n) => `"${n}"`).join(', ')}. This is a scope decision — whether the vault holds them is not something this agent is told, and collecting ${outOfScopeNames.length === 1 ? 'it' : 'them'} again with \`ask_secret\` will not help, because the next read is refused the same way. Either proceed without ${outOfScopeNames.length === 1 ? 'it' : 'them'}, or report back that this task needs ${outOfScopeNames.map((n) => `secret_scope: "${n}"`).join(', ')}.`,
+              is_error: true,
+            };
+          }
+          const scopeNote = outOfScopeNames.length > 0
+            ? ` Separately, ${outOfScopeNames.map((n) => `"${n}"`).join(', ')} ${outOfScopeNames.length === 1 ? 'is' : 'are'} outside this agent's vault scope — re-collecting ${outOfScopeNames.length === 1 ? 'that one' : 'those'} will not help.`
+            : '';
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${unresolved.map((n) => `"${n}"`).join(', ')}.${hint} The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value (or use the suggested existing name), then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
+            content: `Tool "${tc.name}" referenced secret(s) the vault doesn't have: ${absentNames.map((n) => `"${n}"`).join(', ')}.${hint}${scopeNote} The literal \`secret:NAME\` string would have been sent to the external service — that's the failure mode this guard exists to prevent. Recover: call \`ask_secret\` with each missing name to store its value (or use the suggested existing name), then retry the original tool call. Do NOT proceed under the assumption that the tool "doesn't resolve secrets in bodies" — it does, when the vault has them.`,
             is_error: true,
           };
         }

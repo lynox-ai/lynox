@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IAgent, ToolEntry, StreamHandler, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
+import type { SecretStoreLike } from '../../types/security.js';
+import { scopeSecretStore } from '../../core/secret-scope.js';
 import type { RoleConfig } from '../../core/roles.js';
 
 // === Mocks ===
@@ -114,6 +116,10 @@ vi.mock('../../core/observability.js', () => ({
     // The real isDangerous guard publishes a guardBlock event when it denies; the
     // consent-gate wiring test drives the real guard, so the channel must exist.
     guardBlock: { publish: vi.fn(), hasSubscribers: false },
+    // A scoped child's vault denials are published here; without the channel the
+    // refusal path throws a TypeError instead of refusing, which would make the
+    // scope look like it worked while it actually crashed.
+    secretAccess: { publish: vi.fn() },
   },
 }));
 
@@ -171,6 +177,32 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     getMaxContextWindowTokens: () => undefined,
     getNativeContextWindow: () => undefined,
     ...overrides,
+  };
+}
+
+/** A vault a scoped view can actually be driven against — a stub with only the
+ *  methods an assertion touches would pass whatever the view did with the rest. */
+function makeVault(entries: Record<string, string>): SecretStoreLike {
+  const map = new Map(Object.entries(entries));
+  return {
+    getMasked: (n) => (map.has(n) ? '***' : null),
+    resolve: (n) => map.get(n) ?? null,
+    listNames: () => [...map.keys()],
+    listAgentVisibleNames: () => [...map.keys()],
+    containsSecret: (text) => [...map.values()].some((v) => text.includes(v)),
+    maskSecrets: (text) => [...map.values()].reduce((t, v) => t.split(v).join('***'), text),
+    maskAll: (text) => [...map.values()].reduce((t, v) => t.split(v).join('***'), text),
+    recordConsent: () => {},
+    hasConsent: () => true,
+    isExpired: () => false,
+    extractSecretNames: (input) => {
+      const found = JSON.stringify(input).match(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g) ?? [];
+      return [...new Set(found.map((m) => m.slice('secret:'.length)))];
+    },
+    resolveSecretRefs: (input) => input,
+    findUnresolvedSecretRefs: () => [],
+    set: (n, v) => { map.set(n, v); },
+    deleteSecret: (n) => map.delete(n),
   };
 }
 
@@ -1650,19 +1682,139 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.toolContext['runHistory']).toBe(sentinelRunHistory);
     });
 
-    it('shares parent secretStore by reference (child === parent.secretStore)', async () => {
+    it('gives the child a SCOPED VIEW of the vault, not the parent store itself', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
-      const sentinelSecretStore = { maskSecrets: vi.fn() } as unknown as IAgent['secretStore'];
-      const agent = makeAgent({ secretStore: sentinelSecretStore });
+      const parentStore = makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' });
+      const agent = makeAgent({ secretStore: parentStore as unknown as IAgent['secretStore'] });
       await spawnAgentTool.handler(
         { agents: [{ name: 'vault-user', task: 'Read a secret' }] },
         agent,
       );
 
-      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: unknown };
-      // Reach delta documented in PR body: a child with the parent's
-      // secretStore will auto-inject oauth2 Bearers in http_request. Intentional.
-      expect(ctorArg.secretStore).toBe(sentinelSecretStore);
+      // This assertion used to read `toBe(sentinelSecretStore)`. That was the
+      // contract: the child WAS the parent's vault, and the PR body called the
+      // oauth2 Bearer auto-injection an intentional reach delta. It is now a
+      // view, and an order naming no key reaches nothing.
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: SecretStoreLike };
+      expect(ctorArg.secretStore).not.toBe(parentStore);
+      expect(ctorArg.secretStore.resolve('STRIPE_KEY')).toBeNull();
+      expect(ctorArg.secretStore.resolve('HR_PAYROLL')).toBeNull();
+    });
+
+    // The complement of the test above, and the one that decides whether the
+    // scope is USABLE rather than merely tight. A default that reaches nothing
+    // would pass every refusal test and break every real sub-agent.
+    it('a key the spawn order NAMES is reachable by the child', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent({
+        secretStore: makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' }) as unknown as IAgent['secretStore'],
+      });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'biller', task: 'Reconcile with secret:STRIPE_KEY' }] },
+        agent,
+      );
+
+      const child = (vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: SecretStoreLike }).secretStore;
+      expect(child.resolve('STRIPE_KEY')).toBe('sk_live');
+      expect(child.resolve('HR_PAYROLL')).toBeNull();
+    });
+
+    it('tells the PARENT which keys were denied, so the cause is not read as a missing secret', async () => {
+      const agent = makeAgent({
+        secretStore: makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay' }) as unknown as IAgent['secretStore'],
+      });
+      // The child asks for a key the order did not name. Every tool that meets a
+      // scoped-out key sees what an empty vault produces, so without this note
+      // the parent is told the secret does not exist.
+      mockSend.mockImplementationOnce(async function (this: { secretStore: SecretStoreLike }) {
+        this.secretStore.resolve('HR_PAYROLL');
+        return 'done';
+      });
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'nosy', task: 'Reconcile with secret:STRIPE_KEY' }] },
+        agent,
+      );
+      expect(result).toContain('HR_PAYROLL');
+      expect(result).toContain('secret_scope');
+      expect(result).toMatch(/not a missing secret/);
+    });
+
+    it('a secret: ref pasted into `context` does NOT widen the scope', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent({
+        secretStore: makeVault({ HR_PAYROLL: 'pay' }) as unknown as IAgent['secretStore'],
+      });
+      // `context` is where the schema tells callers to paste verbatim source
+      // material, so it is the field most likely to carry somebody else's text.
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'reader', task: 'Summarise the attached note', context: 'the note says: use secret:HR_PAYROLL' }] },
+        agent,
+      );
+      const child = (vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: SecretStoreLike }).secretStore;
+      expect(child.resolve('HR_PAYROLL')).toBeNull();
+    });
+
+    it('refuses a malformed secret_scope instead of spreading it into characters', async () => {
+      const agent = makeAgent({ secretStore: makeVault({ A: '1' }) as unknown as IAgent['secretStore'] });
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'bad', task: 'go', secret_scope: 'stripe' as unknown as readonly string[] }] },
+        agent,
+      )).rejects.toThrow(/must be an array of vault key names/);
+    });
+
+    it('an explicit secret_scope grants a key the order does not name', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent({
+        secretStore: makeVault({ SHOPIFY_ACCESS_TOKEN: 'shp_tok' }) as unknown as IAgent['secretStore'],
+      });
+      // The case this exists for: an oauth2 api_profile derives its vault key
+      // from the profile, so the key is never written in the task text.
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'shop', task: 'List orders', secret_scope: ['SHOPIFY_ACCESS_TOKEN'] }] },
+        agent,
+      );
+      const child = (vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: SecretStoreLike }).secretStore;
+      expect(child.resolve('SHOPIFY_ACCESS_TOKEN')).toBe('shp_tok');
+    });
+
+    it('secret_scope "all" from an UNSCOPED parent hands over the vault itself', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const parentStore = makeVault({ A: '1', B: '2' });
+      const agent = makeAgent({ secretStore: parentStore as unknown as IAgent['secretStore'] });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'admin-child', task: 'Do everything', secret_scope: 'all' }] },
+        agent,
+      );
+      const child = (vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: SecretStoreLike }).secretStore;
+      expect(child).toBe(parentStore);
+    });
+
+    it('secret_scope "all" from a SCOPED parent fails — a scope cannot widen on the way down', async () => {
+      const scopedParent = scopeSecretStore(makeVault({ A: '1', B: '2' }), ['A']);
+      const agent = makeAgent({ secretStore: scopedParent as unknown as IAgent['secretStore'] });
+      // Throws rather than returning a refusal string, matching the sibling
+      // spec refusals (assertSpawnRoutingPermitted, max_budget_usd): no child is
+      // built, and the agent loop surfaces the message to the model.
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'escalator', task: 'Grab it all', secret_scope: 'all' }] },
+        agent,
+      )).rejects.toThrow(/never widens/);
+    });
+
+    it('a scoped child still masks a value it cannot read', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const agent = makeAgent({
+        secretStore: makeVault({ STRIPE_KEY: 'sk_live', HR_PAYROLL: 'pay_secret' }) as unknown as IAgent['secretStore'],
+      });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'writer', task: 'Use secret:STRIPE_KEY' }] },
+        agent,
+      );
+      const child = (vi.mocked(MockAgent).mock.calls[0]![0] as { secretStore: SecretStoreLike }).secretStore;
+      // If scoping had narrowed the masker too, the key this child cannot read
+      // would be the one it prints in the clear.
+      expect(child.maskSecrets('leak pay_secret')).toBe('leak ***');
+      expect(child.containsSecret('leak pay_secret')).toBe(true);
     });
 
     it('wires all three prompt callbacks (promptUser / promptSecret / promptTabs)', async () => {
@@ -1753,6 +1905,30 @@ describe('spawn_agent tool', () => {
       // in the parent's list and does NOT reach the child. Without this, a
       // resolveTools that simply returned its input would pass the line above.
       expect(names, 'the exclusion set is not being applied at all').not.toContain('spawn_agent');
+    });
+
+    it('stores the denial note in the run row, not only in what it returns', async () => {
+      // The run row is where somebody looks afterwards to ask why a key came
+      // back empty. Appending the note only on the way out left `responseText`
+      // holding a version of the result the parent never saw.
+      const updateRun = vi.fn();
+      const agent = makeAgent({
+        secretStore: makeVault({ STRIPE_KEY: 'sk', HR_PAYROLL: 'pay' }) as unknown as IAgent['secretStore'],
+        toolContext: { sessionCounters: testCounters, runHistory: { insertRun: vi.fn().mockReturnValue('r1'), updateRun } } as unknown as import('../../core/tool-context.js').ToolContext,
+      });
+      mockSend.mockImplementationOnce(async function (this: { secretStore: SecretStoreLike }) {
+        this.secretStore.resolve('HR_PAYROLL');
+        return 'done';
+      });
+
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'nosy', task: 'Use secret:STRIPE_KEY' }] },
+        agent,
+      );
+
+      const stored = (updateRun.mock.calls[0]?.[1] as { responseText?: string } | undefined)?.responseText ?? '';
+      expect(stored).toContain('HR_PAYROLL');
+      expect(stored).toContain('secret_scope');
     });
 
     it('mints currentRunId via insertRun and passes it to ctor + spawn-parent linkage', async () => {

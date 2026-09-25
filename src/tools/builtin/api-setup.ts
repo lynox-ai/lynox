@@ -1021,6 +1021,7 @@ function purgeMessage(purge: TokenPurge): string {
   const parts: string[] = [];
   if (purge.removed.length > 0) parts.push(` Removed the tokens its exchanges wrote: ${purge.removed.join(', ')}.`);
   if (purge.notRemovable.length > 0) parts.push(` Could NOT remove ${purge.notRemovable.join(', ')} — this vault has no working delete here.`);
+  if (purge.notVisible.length > 0) parts.push(` Did not look at ${purge.notVisible.join(', ')} — outside this agent's vault scope, so whether anything of this profile's is still there is unknown. Ask the user, or run this from an agent whose scope covers ${purge.notVisible.length === 1 ? 'it' : 'them'}.`);
   if (purge.kept.length > 0) parts.push(` Still in the vault: ${purge.kept.join(', ')}. The user or another profile may need them — ask the user before removing any.`);
   return parts.join('');
 }

@@ -4,6 +4,11 @@ import type { MemoryScopeRef } from './memory.js';
 // Wire contract (CP emits `LYNOX_NETWORK_POLICY`) — SoT in src/contract/vocab.ts.
 import type { NetworkPolicy } from '../contract/vocab.js';
 
+/**
+ * WHERE a secret may be used. Not to be confused with `VaultScope` in
+ * `core/secret-scope.ts`, which is WHICH secrets a given agent may see at all —
+ * a different axis with a confusingly similar name.
+ */
 export type SecretScope = 'http_header' | 'http_body' | 'bash_env' | 'any';
 
 export interface SecretEntry {
@@ -32,6 +37,13 @@ export interface SecretStoreLike {
   extractSecretNames(input: unknown): string[];
   resolveSecretRefs(input: unknown): unknown;
   findUnresolvedSecretRefs(input: unknown): string[];
+  /**
+   * Why `name` came back unresolved, when the store can tell. Optional: a plain
+   * store cannot distinguish, and returns nothing. A SCOPED view can — and the
+   * difference decides which remedy the agent is given, because "store it with
+   * ask_secret" is the wrong instruction for a key that is already stored.
+   */
+  explainUnresolved?(name: string): 'out-of-scope' | undefined;
   set?(name: string, value: string, scope?: SecretScope, ttlMs?: number): void;
   deleteSecret?(name: string): boolean;
 }

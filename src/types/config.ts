@@ -218,6 +218,12 @@ export interface SpawnSpec {
   isolation?:        IsolationConfig | undefined;
   /** Named model profile for non-Claude provider (e.g. 'mistral-eu', 'gemini-research'). */
   profile?:         string | undefined;
+  /**
+   * Vault keys this child may resolve. Omitted = the keys this spawn order
+   * itself names, and nothing else. `'all'` is grantable only by an agent that
+   * holds the full vault — see `core/secret-scope.ts`.
+   */
+  secret_scope?:    readonly string[] | 'all' | undefined;
 }
 
 export interface LynoxConfig {
