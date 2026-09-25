@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
-import type { Server } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LynoxHTTPApi } from './http-api.js';
 import { signProfileOAuthState } from '../core/oauth-state-cookie.js';
 import { profileOAuthCookieAttributes, authorizationCodeParams } from './http-api.js';
@@ -33,8 +35,8 @@ const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
 const VERIFIER = 'v'.repeat(43);
 
 let api: LynoxHTTPApi;
-let server: Server | undefined;
 let baseUrl: string;
+let dataDir: string;
 
 /** A cookie this engine would itself have minted. */
 function mintCookie(profileId = 'bexio', atSec = Math.floor(Date.now() / 1000)): string {
@@ -51,11 +53,23 @@ async function callback(query: string, cookie?: string): Promise<Response> {
 }
 
 beforeAll(async () => {
+  // ⚠ This booted a real engine against the developer's real `~/.lynox`
+  // until 2026-09-25 — no `LYNOX_DATA_DIR`. It went unnoticed because the
+  // teardown below never shut that engine down either, so nothing ever
+  // closed a handle on the shared state. Fixing the teardown without this
+  // made two unrelated DB tests fail in a full run: the bug was hiding the
+  // consequence of the bug.
+  dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauthcb-'));
+  vi.stubEnv('LYNOX_DATA_DIR', dataDir);
   vi.stubEnv('LYNOX_HTTP_SECRET', SECRET);
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   api = new LynoxHTTPApi();
   await api.init();
-  server = await api.start(PORT);
+  // ⚠ `start` returns `Promise<void>`. This used to read `server = await
+  // api.start(PORT)` and close `server` in `afterAll` — always `undefined`, so
+  // the teardown closed no socket and shut no engine down. `shutdown()` is the
+  // handle; corrected 2026-09-25.
+  await api.start(PORT);
   baseUrl = `http://127.0.0.1:${String(PORT)}`;
   for (let i = 0; i < 20; i++) {
     try {
@@ -66,8 +80,9 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => { server ? server.close(() => { resolve(); }) : resolve(); });
+  await api.shutdown();
   vi.unstubAllEnvs();
+  rmSync(dataDir, { recursive: true, force: true });
 });
 
 describe('what a stranger gets', () => {
