@@ -43,6 +43,18 @@ import { detectInjectionAttempt } from '../core/data-boundary.js';
 const LYNOX_SECRET_FILES =
   /\.lynox\/(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
 
+// Every SQLite store the engine keeps in the lynox dir, by location rather than by
+// name. The name list above protects the stores that hold secrets; it was never a
+// list of the engine's databases, and it could not be one — new stores keep
+// appearing (engine, datastore, mail-state, push-subscriptions, ads-optimizer were
+// all outside it). A shell write to any of them bypasses the engine's own
+// invariants, so a database file anywhere under the lynox dir is covered, whatever
+// it is called and whichever command names it. `workspace/` stays out: the agent's
+// own files live there. The match ends at the extension, so the `-wal`/`-shm`/
+// `-journal` siblings are covered too; `.db.md` and the like are not.
+const LYNOX_DB_FILES =
+  /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:db|db3|sqlite3?)(?![\w.])/i;
+
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
 // (`cd ~/.lynox && cat http-secret`). Path-based matching only raises the bar —
@@ -52,6 +64,7 @@ const LYNOX_SECRET_FILES =
 // working area — stays globbable.
 const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
+  { pattern: LYNOX_DB_FILES,       label: 'access lynox engine database (use the built-in tools instead)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
   // Bare-name twin, so the `cd` spelling is covered like `http-secret`'s. Anchored
   // on the leading DOT on purpose: `access-token` unanchored is generic OAuth
@@ -316,6 +329,7 @@ const SENSITIVE_PATHS: RegExp[] = [
   /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
   /\.token$/, /\.secret$/,
   LYNOX_SECRET_FILES,
+  LYNOX_DB_FILES,
   // Shell history files — prime exfil target for env vars, ssh URLs, pasted secrets.
   /\.(bash|zsh|fish|node_repl|python)_?history$/,
   // macOS Keychain — system + user keychains hold credentials, certs, browser passwords.
