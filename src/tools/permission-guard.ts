@@ -49,7 +49,9 @@ const LYNOX_SECRET_FILES =
 // appearing (engine, datastore, mail-state, push-subscriptions, ads-optimizer were
 // all outside it). A shell write to any of them bypasses the engine's own
 // invariants, so a database file anywhere under the lynox dir is covered, whatever
-// it is called and whichever command names it. `workspace/` stays out: the agent's
+// it is called and whichever command spells out its path (a command that reaches it
+// without spelling the path — after a `cd`, or through a script — is not covered;
+// path matching is a bar, not a boundary). `workspace/` stays out: the agent's
 // own files live there. The match ends at the extension, so the `-wal`/`-shm`/
 // `-journal` siblings are covered too; `.db.md` and the like are not.
 const LYNOX_DB_FILES =
@@ -75,7 +77,10 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // `.env` deliberately gets NO bare-name twin: a bare rule here lands in
   // CRITICAL_BASH, which would hard-block reading any project's own env file.
   { pattern: /\.access-token\b/i, label: 'access lynox secret store (secrets)' },
-  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  // Brace, variable and command expansion are treated like a glob: the shell
+  // assembles the real path, so `engine.d{b,}` or `engine.d${X}b` never spells the
+  // name the location rule above keys on.
+  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[{$`]/i, label: 'glob into lynox data dir (secrets)' },
   // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
   // would launder a secret path through it — any dot-dot inside a .lynox path is
   // flagged instead (the model has no reason to spell workspace paths that way).

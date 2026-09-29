@@ -547,6 +547,9 @@ describe('isDangerous', () => {
       'printf x >> ~/.lynox/mail-state.db',
       'cp /tmp/forged.db ~/.lynox/push-subscriptions.db',
       'rm ~/.lynox/engine.db-wal',
+      'truncate -s 0 ~/.lynox/engine.db-shm',
+      'sqlite3 ~/.lynox/cache/index.db3 "DELETE FROM t WHERE a = 1"',
+      'sqlite3 ~/.lynox/queue.sqlite3 "UPDATE t SET a = 1"',
       'sqlite3 "$HOME/.lynox//ads-optimizer.db" "DELETE FROM runs WHERE id = 1"',
     ])('BLOCKS in autonomous mode: %s', (command) => {
       const result = isDangerous('bash', { command }, 'autonomous');
@@ -565,6 +568,28 @@ describe('isDangerous', () => {
       expect(isDangerous('read_file', { path: `/home/op/.lynox/sub/${name}` }, 'autonomous')).toContain('[BLOCKED');
     });
 
+    it.each([
+      // The shell builds the name, so the location rule never sees `.db` — the
+      // expansion itself is what gets flagged.
+      'sqlite3 ~/.lynox/engine.d{b,} "UPDATE t SET a = 1"',
+      'sqlite3 ~/.lynox/engine.{db,x} "UPDATE t SET a = 1"',
+      'sqlite3 ~/.lynox/engine.d${X}b "UPDATE t SET a = 1"',
+      'sqlite3 ~/.lynox/engine.d`echo b` "UPDATE t SET a = 1"',
+    ])('BLOCKS a name assembled by shell expansion: %s', (command) => {
+      const result = isDangerous('bash', { command }, 'autonomous');
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('glob into lynox data dir');
+    });
+
+    it('BLOCKS a traversal out of the working area onto a database', () => {
+      expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/../engine.db "UPDATE t SET a = 1"' }, 'autonomous')).toContain('[BLOCKED');
+    });
+
+    it('treats a pre-approval pattern naming a lynox database as critical', () => {
+      expect(isCriticalTool('bash', 'sqlite3 ~/.lynox/engine.db *')).toBe(true);
+      expect(isCriticalTool('bash', 'sqlite3 ./data/engine.db *')).toBe(false);
+    });
+
     it('asks rather than blocks outside autonomous mode', () => {
       const result = isDangerous('bash', { command: 'sqlite3 ~/.lynox/engine.db "UPDATE t SET a = 1"' });
       expect(result).toContain(DB_LABEL);
@@ -576,6 +601,8 @@ describe('isDangerous', () => {
     it('does NOT block a database in the agent working area', () => {
       expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/app/engine.db "UPDATE t SET a = 1"' }, 'autonomous')).toBeNull();
       expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/new.sqlite "select 1"' }, 'autonomous')).toBeNull();
+      // Expansion stays allowed in the working area — the glob rule keeps its carve-out.
+      expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/${name}.db "select 1"' }, 'autonomous')).toBeNull();
     });
 
     it('does NOT block a database outside the lynox dir', () => {
@@ -587,6 +614,8 @@ describe('isDangerous', () => {
       expect(isDangerous('bash', { command: 'ls -la ~/.lynox/' }, 'autonomous')).toBeNull();
       expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json' }, 'autonomous')).toBeNull();
       expect(isDangerous('bash', { command: 'cat ~/.lynox/notes.db.md' }, 'autonomous')).toBeNull();
+      // A copy with a further suffix is not a live store.
+      expect(isDangerous('bash', { command: 'ls -la ~/.lynox/engine.db.bak' }, 'autonomous')).toBeNull();
     });
   });
 
