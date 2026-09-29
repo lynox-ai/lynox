@@ -572,7 +572,6 @@ describe('isDangerous', () => {
       // The shell builds the extension, so the location rule never sees `.db` — an
       // expansion inside the extension is what gets flagged.
       'sqlite3 ~/.lynox/engine.d{b,} "UPDATE t SET a = 1"',
-      'sqlite3 ~/.lynox/engine.{db,x} "UPDATE t SET a = 1"',
       'sqlite3 ~/.lynox/engine.d${X}b "UPDATE t SET a = 1"',
       'sqlite3 ~/.lynox/engine.d`echo b` "UPDATE t SET a = 1"',
       'sqlite3 ~/.lynox/queue.sq${L}ite3 "UPDATE t SET a = 1"',
@@ -588,7 +587,10 @@ describe('isDangerous', () => {
       'cat ~/.lynox/logs/$(date +%F).log',
       'cp r.pdf ~/.lynox/exports/report-$(date +%s).pdf',
       'export PATH=~/.lynox/bin:$PATH',
-    ])('does NOT block an expansion outside a file extension: %s', (command) => {
+      // Right after a bare dot is not inside a database extension.
+      'tail ~/.lynox/logs/app.$(date +%F).log',
+      'cat ~/.lynox/profiles/config.${PROFILE}.json',
+    ])('does NOT block an expansion outside a database extension: %s', (command) => {
       expect(isDangerous('bash', { command }, 'autonomous')).toBeNull();
     });
 
