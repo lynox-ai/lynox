@@ -10,7 +10,7 @@ import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
-import { getRole, getRoleNames } from '../../core/roles.js';
+import { getRole, getRoleNames, roleToolProfile } from '../../core/roles.js';
 import { scopeSecretStore, defaultVaultScope, narrowVaultScope, vaultScopeOf, providerKeySlotReader } from '../../core/secret-scope.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRoutingMode } from '../../core/tier-resolver.js';
 import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
@@ -765,10 +765,11 @@ async function executeThinker(
   const effort = profile ? undefined : (spec.effort ?? resolved?.effort);
   const maxIterations = spec.max_turns;
 
-  // Tool scoping — map RoleConfig fields to resolveTools interface
-  const roleProfile = resolved
-    ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
-    : null;
+  // Tool scoping — one shared mapping (`roleToolProfile`), so a role's grant shape
+  // cannot differ between this path and the inline pipeline path in
+  // orchestrator/runtime-adapter.ts. A `readOnly` role resolves to
+  // READ_ONLY_TOOL_SURFACE here.
+  const roleProfile = resolved ? roleToolProfile(resolved) : null;
   // Use the parent's FILTERED tool list (honours user-disabled tools from
   // Settings → Tool Toggles). Without this, a spawn from a prompt-injected
   // parent could re-introduce tools the user explicitly disabled — the

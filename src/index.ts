@@ -74,7 +74,7 @@ export type { LynoxContext, ContextSource } from './types/index.js';
 // PWA + Mail/Voice cover every Telegram use case).
 export { GoogleAuth, SCOPES, STANDARD_SCOPES, SENSITIVE_EXTRA_SCOPES, RESTRICTED_SCOPES, FULL_SCOPES, createGoogleTools, createGoogleAuth, GOOGLE_NOT_CONNECTED } from './integrations/google/index.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './integrations/google/index.js';
-export { getRole, getRoleNames, BUILTIN_ROLES } from './core/roles.js';
+export { getRole, getRoleNames, BUILTIN_ROLES, READ_ONLY_TOOL_SURFACE, roleToolProfile } from './core/roles.js';
 export type { RoleConfig } from './core/roles.js';
 export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './core/features.js';
 export type { FeatureFlag } from './core/features.js';

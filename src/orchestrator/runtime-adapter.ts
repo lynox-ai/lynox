@@ -6,7 +6,7 @@ import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
-import { getRole, getRoleNames } from '../core/roles.js';
+import { getRole, getRoleNames, roleToolProfile } from '../core/roles.js';
 import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
 import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -889,10 +889,14 @@ export async function spawnInline(
   // to the profile filter (existing YAML surface, can widen deliberately);
   // otherwise the step draws from `inlineStepToolNames` — its declared set, or
   // the inline pool minus bash when it declared nothing (F2/D2).
-  const roleProfile = resolved
-    ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
-    : null;
+  const roleProfile = resolved ? roleToolProfile(resolved) : null;
   const stepToolNames = inlineStepToolNames(step);
+  // Deliberately keyed on the DECLARED `allowTools`, not on the profile's derived
+  // allowlist: a `readOnly` role now has one, and switching this predicate to it
+  // would WIDEN an inline step from its declared set to the whole parent set. The
+  // narrowing below happens first and `resolveTools` intersects with the surface
+  // after it, so a readOnly step lands on (declared ∩ surface) — narrower than the
+  // surface, which is the safe side of the asymmetry.
   const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
   // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).

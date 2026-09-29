@@ -234,6 +234,59 @@ describe('spawnInline with role', () => {
     expect(tools[0]!.definition.name).toBe('read_file');
   });
 
+  /**
+   * The second grant path. `spawn_agent` has its own version of this in
+   * `tools/builtin/spawn.test.ts` — both must hold, because both build the grant, and
+   * before `roleToolProfile` each built it from the role's fields on its own.
+   *
+   * The witnesses are `memory_store` and `data_store_insert`: both are in
+   * INLINE_CORE_TOOLS, both are declared by the step, and neither appears in
+   * operator's `denyTools`. So `inlineStepToolNames` admits them and the subtraction
+   * keeps them — only the allowlist takes them away. No hypothetical tool needed.
+   */
+  it('a readOnly role drops declared write tools that no denylist names', async () => {
+    const WRITES = ['memory_store', 'data_store_insert'] as const;
+    const entry = (name: string): ToolEntry => ({
+      definition: { name, description: name, input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'ok',
+    });
+    const parent: ToolEntry[] = [...mockParentTools, ...WRITES.map(entry)];
+    const step: ManifestStep = {
+      id: 'probe-step',
+      agent: 'probe-step',
+      runtime: 'inline',
+      role: 'operator',
+      tools: ['read_file', ...WRITES],
+    };
+    const namesOfCall = (i: number): string[] => {
+      const call = vi.mocked(Agent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+      return (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    };
+
+    // CONTROL: the same step and parent set, granted by subtraction.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous',
+      denyTools: ['write_file'], description: 'Monitors',
+    } as RoleConfig);
+    const before = vi.mocked(Agent).mock.calls.length;
+    await spawnInline(step, {}, mockConfig, parent);
+    const control = namesOfCall(before);
+    for (const t of WRITES) {
+      expect(control, `${t} must reach a subtractive role — else this test proves nothing`).toContain(t);
+    }
+
+    // SUBJECT.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const before2 = vi.mocked(Agent).mock.calls.length;
+    await spawnInline(step, {}, mockConfig, parent);
+    const subject = namesOfCall(before2);
+    for (const t of WRITES) expect(subject).not.toContain(t);
+    expect(subject).toContain('read_file');
+  });
+
   it('role defaults to maxIterations 10', async () => {
     const role: RoleConfig = {
       model: 'deep',
