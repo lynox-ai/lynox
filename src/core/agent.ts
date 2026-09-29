@@ -3737,7 +3737,7 @@ export class Agent implements IAgent {
               rawResult,
               new Promise<never>((_, reject) => {
                 toolTimer = setTimeout(
-                  () => reject(new Error(`Tool "${tc.name}" timed out after ${Math.round(Agent.TOOL_TIMEOUT_MS / 1000)}s`)),
+                  () => reject(new Error(toolTimeoutMessage(tc.name, Math.round(Agent.TOOL_TIMEOUT_MS / 1000)))),
                   Agent.TOOL_TIMEOUT_MS,
                 );
               }),
@@ -3944,6 +3944,21 @@ function annotateNonRetryable(message: string): string {
     }
   }
   return message;
+}
+
+/**
+ * The race behind the per-tool timeout only rejects; the handler keeps running,
+ * and a write may already have landed. "timed out" alone reads as "did not
+ * happen", so the model would repeat a write. There is no reliable set of
+ * writing tools to pick from (`destructive` means "needs consent"), so the
+ * sentence carries the write/read split itself. The leading
+ * `Tool "<name>" timed out after <n>s` is kept for anything keyed on it.
+ */
+function toolTimeoutMessage(toolName: string, seconds: number): string {
+  return `Tool "${toolName}" timed out after ${seconds}s, but it may still have run to completion. `
+    + `If this call writes, sends, or changes something, check whether it already took effect `
+    + `before calling it again — repeating a write that landed does it twice. `
+    + `A call that only reads can simply be retried.`;
 }
 
 function extractText(content: BetaContentBlock[]): string {
