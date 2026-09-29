@@ -43,6 +43,20 @@ import { detectInjectionAttempt } from '../core/data-boundary.js';
 const LYNOX_SECRET_FILES =
   /\.lynox\/(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
 
+// Every SQLite store the engine keeps in the lynox dir, by location rather than by
+// name. The name list above protects the stores that hold secrets; it was never a
+// list of the engine's databases, and it could not be one — new stores keep
+// appearing (engine, datastore, mail-state, push-subscriptions, ads-optimizer were
+// all outside it). A shell write to any of them bypasses the engine's own
+// invariants, so a database file anywhere under the lynox dir is covered, whatever
+// it is called and whichever command spells out its path (a command that reaches it
+// without spelling the path — after a `cd`, or through a script — is not covered;
+// path matching is a bar, not a boundary). `workspace/` stays out: the agent's
+// own files live there. The match ends at the extension, so the `-wal`/`-shm`/
+// `-journal` siblings are covered too; `.db.md` and the like are not.
+const LYNOX_DB_FILES =
+  /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:db|db3|sqlite3?)(?![\w.])/i;
+
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
 // (`cd ~/.lynox && cat http-secret`). Path-based matching only raises the bar —
@@ -52,6 +66,7 @@ const LYNOX_SECRET_FILES =
 // working area — stays globbable.
 const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
+  { pattern: LYNOX_DB_FILES,       label: 'access lynox engine database (use the built-in tools instead)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
   // Bare-name twin, so the `cd` spelling is covered like `http-secret`'s. Anchored
   // on the leading DOT on purpose: `access-token` unanchored is generic OAuth
@@ -63,6 +78,15 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // CRITICAL_BASH, which would hard-block reading any project's own env file.
   { pattern: /\.access-token\b/i, label: 'access lynox secret store (secrets)' },
   { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  // The shell can finish a database extension the rule above keys on:
+  // `engine.d{b,}`, `engine.d${X}b` never spell `.db`. An expansion that follows
+  // the start of a database extension (`.d`, `.s`, `.sq`, …) is flagged as if it
+  // were one. Only then: an expansion right after a bare dot (`app.$(date).log`,
+  // `config.${PROFILE}.json`) is ordinary and stays allowed. A text rule cannot
+  // evaluate expansion, so a name assembled any other way — an expansion before
+  // the dot or over the whole name (`engine${EXT}`, `.{db,x}`, `${F}`), a brace
+  // opened before the dot — is not covered.
+  { pattern: /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:d|db|s|sq|sql|sqli|sqlit|sqlite)[{$`]/i, label: 'access lynox engine database (use the built-in tools instead)' },
   // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
   // would launder a secret path through it — any dot-dot inside a .lynox path is
   // flagged instead (the model has no reason to spell workspace paths that way).
@@ -316,6 +340,7 @@ const SENSITIVE_PATHS: RegExp[] = [
   /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
   /\.token$/, /\.secret$/,
   LYNOX_SECRET_FILES,
+  LYNOX_DB_FILES,
   // Shell history files — prime exfil target for env vars, ssh URLs, pasted secrets.
   /\.(bash|zsh|fish|node_repl|python)_?history$/,
   // macOS Keychain — system + user keychains hold credentials, certs, browser passwords.
