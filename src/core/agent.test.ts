@@ -1236,6 +1236,58 @@ describe('Agent', () => {
         vi.useRealTimers();
       }
     });
+
+    // What the MODEL reads on a timeout — asserted on the tool_result in the
+    // conversation, not on the UI stream the test above reads. "timed out" alone
+    // reads as "did not happen", and the race does not cancel the handler, so a
+    // write that already landed would be done a second time on the retry.
+    // Expected text is written out literally: building it with
+    // toolTimeoutMessage() would make the test pass against any sentence.
+    it('tells the model a timed-out call may still have acted, and splits write from read', async () => {
+      vi.useFakeTimers();
+      try {
+        const hangTool = makeTool('hang_tool', () => new Promise<string>(() => { /* never resolves */ }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_hang', name: 'hang_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('recovered'));
+
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [hangTool] });
+        const p = agent.send('use the hang tool');
+        await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
+        await p;
+
+        const content = (agent.getMessages()[2] as { content: Array<{ content: string; is_error?: boolean }> }).content[0]!;
+        expect(content.is_error).toBe(true);
+        // The prefix stays verbatim, so anything keyed on it still matches.
+        expect(content.content).toContain('Tool "hang_tool" timed out after 900s');
+        // The case split: a write must be checked, a read may simply retry.
+        expect(content.content).toContain('may still have run to completion');
+        expect(content.content).toContain('check whether it already took effect');
+        expect(content.content).toContain('A call that only reads can simply be retried');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // The counterpart on the same machinery: an ordinary thrown error takes the
+    // same outer catch and must NOT carry the timeout advice. Without it, the
+    // test above would pass just as well if every tool error were given the
+    // "may still have acted" sentence — which would teach the model to distrust
+    // a clean failure.
+    it('does not give an ordinary tool error the timeout advice', async () => {
+      const failTool = makeTool('boom_tool', vi.fn().mockRejectedValue(new Error('boom')));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_boom', name: 'boom_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [failTool] });
+      await agent.send('use the boom tool');
+
+      const content = (agent.getMessages()[2] as { content: Array<{ content: string; is_error?: boolean }> }).content[0]!;
+      expect(content.is_error).toBe(true);
+      expect(content.content).toContain('boom');
+      expect(content.content).not.toContain('may still have run to completion');
+    });
   });
 
   // -- _dispatchTools() via tool_use response --
