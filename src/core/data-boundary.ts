@@ -157,7 +157,14 @@ const closeTail = (token: string): string =>
   `${BOUNDARY_SEP}\\/${BOUNDARY_SEP}${token}\\b`;
 const BOUNDARY_CLOSE_TAIL = closeTail('untrusted_data');
 const BOUNDARY_OPEN_ANY = '(?:<|&lt;|&#0*60;|&#x0*3c;)';
-const BOUNDARY_OPEN_ENCODED = '(?:&lt;|&#0*60;|&#x0*3c;)';
+// `BOUNDARY_OPEN_ENCODED` — the same alternation without the literal `<` — stood
+// here and is gone. It existed for one reason: the neutraliser ran two ordered
+// passes and the first had to match ONLY the pre-encoded opener, so that the
+// second could not re-match what the first had emitted. That ordering is no
+// longer a thing (see `neutralizeBoundaryTags`), which left the constant with
+// zero readers — lint caught it, and a constant whose only remaining job is to
+// look like it belongs is the kind of thing a later reader rebuilds a pass
+// around.
 
 /**
  * Deaden a matched close tag by escaping ITS OWN opening delimiter, and change
@@ -175,6 +182,109 @@ const BOUNDARY_OPEN_ENCODED = '(?:&lt;|&#0*60;|&#x0*3c;)';
  */
 const deadenOpener = (match: string, open: string): string =>
   `${open.replace(/&/g, '&amp;').replace(/</g, '&lt;')}${match.slice(open.length)}`;
+
+/**
+ * Unicode FORMAT characters — the ones that occupy a position in a string and
+ * render as nothing. Recognition folds them away before it matches.
+ *
+ * ## Why a PROPERTY and not another list
+ *
+ * Everything around the token here is recognised by enumeration: the delimiter
+ * alternation, the separator class. That frame failed four review rounds in a
+ * row, and the shape of the failure is the argument for this constant: each
+ * round produced one further invisible character, each repair was a wider list,
+ * and the wider list did not contain the next one. A fifth list would be the
+ * same move.
+ *
+ * `\p{Cf}` is not a list. It is the Unicode category for format characters, so
+ * a codepoint assigned to that category in a future Unicode revision is folded
+ * by this code without anyone editing it — which is the property a list cannot
+ * have. Measured against the family this module previously named one by one:
+ * U+00AD, U+180E, U+200B, U+200C, U+200D, U+2060, U+FEFF are all `Cf`, and so
+ * are U+200E/U+202E, the bidi overrides, which no list here ever mentioned.
+ *
+ * ⚠ **U+FEFF was already covered, by accident** — JS `\s` happens to include it,
+ * so it fell inside `BOUNDARY_SEP` while its six siblings did not. Folding it
+ * here makes that coverage deliberate. It must NOT be removed from the
+ * separator class in exchange: `BOUNDARY_SEP` still has to match it for input
+ * that reaches a pattern without going through the fold.
+ *
+ * ⚠ **Bounded, and the bound is the point.** Folding closes the invisible half.
+ * It says nothing about re-encodings — percent form, double-encoded entities,
+ * fullwidth delimiters — which are a different substrate and are NOT addressed
+ * here. Do not read a green suite as more than the half it covers.
+ */
+const FORMAT_CHAR = /\p{Cf}/u;
+
+/**
+ * Drop every format character, and keep a map back to the ORIGINAL offsets.
+ *
+ * The map is what makes this usable for neutralisation and not only detection.
+ * A detector may match on a rewritten copy and throw it away; a neutraliser has
+ * to rewrite the caller's real bytes, and this module's whole repair history is
+ * about not losing bytes — the constant that ate payload, the attribute tail
+ * that deleted a url and an amount. So: match on the folded string, then map
+ * the match back and escape the delimiter WHERE IT REALLY SITS, leaving the
+ * invisible characters the sender wrote exactly where they were.
+ *
+ * `map[i]` is the index in `text` of the character at `folded[i]`. `null` means
+ * nothing was folded and `folded === text`, which is the common case and skips
+ * the allocation entirely.
+ */
+function foldFormatChars(text: string): { folded: string; map: number[] | null } {
+  if (!FORMAT_CHAR.test(text)) return { folded: text, map: null };
+  let folded = '';
+  const map: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    const cp = text.codePointAt(i);
+    const ch = String.fromCodePoint(cp as number);
+    if (!FORMAT_CHAR.test(ch)) {
+      for (let k = 0; k < ch.length; k++) map.push(i + k);
+      folded += ch;
+    }
+    i += ch.length;
+  }
+  return { folded, map };
+}
+
+/**
+ * Escape the opening delimiter of every match of `pattern`, matching on the
+ * FOLDED text and rewriting the original.
+ *
+ * One function for both neutralisation sites, because the defect this closes is
+ * that they shared a pattern and would not have shared a repair: a fix applied
+ * to recognition alone leaves the neutraliser passing the tag through, and a
+ * fix applied to one fence leaves the other nineteen call sites of
+ * {@link renderFence} as they were. Sharing the CODE is the only form of that
+ * repair which cannot drift apart again.
+ *
+ * `pattern` must be global; its first capture group is the opener.
+ */
+function deadenMatches(text: string, pattern: RegExp): string {
+  const { folded, map } = foldFormatChars(text);
+  const cuts: Array<[number, number]> = [];
+  for (const m of folded.matchAll(pattern)) {
+    const open = m[1];
+    if (open === undefined || m.index === undefined) continue;
+    const s = m.index;
+    // The opener may itself be split by folded characters (`&l<ZWSP>t;`), so the
+    // original span runs from the first character of the opener to the last —
+    // whatever sits between them is inside the slice and survives verbatim.
+    const from = map ? (map[s] as number) : s;
+    const to = map ? (map[s + open.length - 1] as number) + 1 : s + open.length;
+    cuts.push([from, to]);
+  }
+  if (cuts.length === 0) return text;
+  let out = '';
+  let prev = 0;
+  for (const [from, to] of cuts) {
+    const slice = text.slice(from, to);
+    out += text.slice(prev, from) + deadenOpener(slice, slice);
+    prev = to;
+  }
+  return out + text.slice(prev);
+}
+
 /** Any encoding of the closing tag — the detector's single boundary-escape entry. */
 const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
 
@@ -193,27 +303,25 @@ const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
  * it is interpolated, not escaped, because every call site is a literal in this
  * repo and an escaped-token API would invite passing user input.
  *
- * ## ⛔ WHAT THIS STILL DOES NOT CATCH, and why it is not one more widening
+ * ## The two layers, and why the second one exists
  *
- * Recognition here still ENUMERATES the delimiters and separators around the
- * token, and that frame has now failed four review rounds in a row — each one
- * produced exactly one further encoding, and each repair of mine was a wider
- * enumeration that did not contain the next. Measured open today, on this code:
+ * This pattern ENUMERATES the delimiters and separators around the token, and
+ * enumeration is a frame that failed four review rounds in a row here: each
+ * round produced one further form, and each repair was a wider list that did
+ * not contain the next. The answer was not a fifth list.
  *
- *   - the zero-width family between the delimiter and the token — U+200B, 200C,
- *     200D, 2060, 00AD, 180E: undetected and unneutralised. U+FEFF, the same
- *     family and the same invisibility, IS caught — purely because JS `\s`
- *     happens to include it. Six missed, one covered by accident, which is the
- *     tell that this is a gap and not a boundary.
- *   - percent-encoding (`%3C/untrusted_data%3E`), double-encoded entities
- *     (`&amp;lt;`), and fullwidth forms (`＜`, `／`).
+ * So recognition now runs in two layers. This pattern is the first. The second
+ * is {@link foldFormatChars}, which removes Unicode format characters from the
+ * input before this pattern ever sees it, by PROPERTY rather than by listing
+ * codepoints — see that constant for why a property is the whole point and for
+ * what it deliberately does not reach.
  *
- * The cut that closes the class is NOT a wider character class: it is to
- * NORMALISE the input once (decode entities, strip zero-width and C0/C1) and
- * match the coined token on the normalised string. That changes a primitive
- * every untrusted-data caller depends on and needs its own false-positive
- * measurement. What ships here closes eight measured forms and weakens nothing;
- * it does not close the class.
+ * ⚠ **The fold is applied by the CALLER, not by this function**, and that is a
+ * seam worth knowing about: {@link detectInjectionAttempt} and
+ * {@link deadenMatches} both fold first, so every path that goes through them
+ * inherits it. A NEW call site that takes this pattern and runs it against raw
+ * input gets layer one only. Route new work through `deadenMatches` rather than
+ * matching by hand, and the second layer comes with it.
  */
 export function closeTagPattern(token: string, flags = 'gi'): RegExp {
   return new RegExp(`(${BOUNDARY_OPEN_ANY})${closeTail(token)}`, flags);
@@ -312,13 +420,24 @@ function scanWindowForInjection(content: string): string[] {
  * wildcard patterns stay cheap on arbitrarily long attacker-controlled content.
  */
 export function detectInjectionAttempt(content: string): InjectionResult {
-  if (content.length <= SCAN_WINDOW) {
-    const patterns = scanWindowForInjection(content);
+  // Fold BEFORE scanning, and fold once for the whole result rather than per
+  // pattern. This function returns labels and no offsets, so the folded copy can
+  // be thrown away — the reason the map in {@link foldFormatChars} exists for
+  // the neutraliser and is not needed here.
+  //
+  // Every pattern benefits, not only the boundary-escape entry: an invisible
+  // character inside `ignore previous instructions` defeated the override
+  // patterns in exactly the way it defeated the boundary one, and folding at
+  // this level means a pattern added later inherits the property instead of
+  // having to remember it.
+  const { folded } = foldFormatChars(content);
+  if (folded.length <= SCAN_WINDOW) {
+    const patterns = scanWindowForInjection(folded);
     return { detected: patterns.length > 0, patterns };
   }
   const found = new Set<string>();
-  for (let start = 0; start < content.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
-    for (const label of scanWindowForInjection(content.slice(start, start + SCAN_WINDOW))) {
+  for (let start = 0; start < folded.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
+    for (const label of scanWindowForInjection(folded.slice(start, start + SCAN_WINDOW))) {
       found.add(label);
     }
   }
@@ -392,10 +511,14 @@ export function renderProvenanceFact(opts: {
  * Handles literal tags, HTML entity encoded tags, and numeric entity encoded tags.
  */
 function neutralizeBoundaryTags(text: string): string {
-  return text
-    // Pre-encoded OPENER first, so the literal pass below — whose output starts
-    // with `&lt;` — cannot be re-matched by this one. (Same ordering as before;
-    // the reason survives the rewrite even though the patterns did not.)
+  return (
+    // ⚠ The two passes this comment was written for are now ONE, and the
+    // ordering rule they needed is gone rather than reordered. They ran
+    // sequentially — encoded opener first, literal second — because the first
+    // pass emitted `&lt;` and the second would otherwise have re-matched its own
+    // output. {@link deadenMatches} collects its matches against the FOLDED text
+    // and then rebuilds from the ORIGINAL, so no pass ever reads another pass's
+    // output and the hazard has no place left to occur.
     //
     // This used to substitute a constant, `[blocked:boundary_escape]`. That was
     // the one place left in this module still doing what `deadenOpener`'s own
@@ -425,15 +548,16 @@ function neutralizeBoundaryTags(text: string): string {
     //    trace, and this fix removes it. That is a real loss of signal, taken
     //    knowingly: a marker that eats payload is the worse of the two, and the
     //    detector's window is the defect to fix, not the neutraliser.
-    .replace(new RegExp(`(${BOUNDARY_OPEN_ENCODED})${BOUNDARY_CLOSE_TAIL}`, 'gi'), deadenOpener)
-    // Literal opener last — collapsed to the inert entity form rather than
-    // blanked. The match now ends at the token, so ONLY the delimiter is
-    // rewritten — separators smuggled inside the tag are handed back verbatim
-    // along with everything after it, because `deadenOpener` slices the match
-    // after the opener and does not touch the rest. The previous wording here claimed that
-    // outcome while the code did the opposite, and the claim is why the defect
-    // stood through four review rounds: it was read as the measurement.
-    .replace(new RegExp(`(<)${BOUNDARY_CLOSE_TAIL}`, 'gi'), deadenOpener);
+    // Convergence is unchanged and still measured: run 2 turns `&lt;` into
+    // `&amp;lt;`, run 3 changes nothing, because `&amp;lt;` is not an opener.
+    //
+    // Only the delimiter is rewritten. Separators smuggled inside the tag are
+    // handed back verbatim along with everything after it. The previous wording
+    // here claimed that outcome while the code did the opposite, and the claim
+    // is why the defect stood through four review rounds: it was read as the
+    // measurement.
+    deadenMatches(text, new RegExp(`(${BOUNDARY_OPEN_ANY})${BOUNDARY_CLOSE_TAIL}`, 'gi'))
+  );
 }
 
 export function wrapUntrustedData(content: string, source: string): string {
@@ -636,7 +760,11 @@ export function renderFence(token: string, payload: string, opts?: {
     attrs.push(`${escapeXml(k)}="${escapeXml(String(v))}"`);
   }
   const open = `<${token}${attrs.length ? ' ' + attrs.join(' ') : ''}>`;
-  const safe = payload.replace(closeTagPattern(token), deadenOpener);
+  // The SAME routine the untrusted-data neutraliser uses, deliberately. This
+  // call site is the one with reach — nineteen `renderFence` callers across
+  // twelve files — so a repair that had landed only in `neutralizeBoundaryTags`
+  // would have looked complete and left every fence exactly as it was.
+  const safe = deadenMatches(payload, closeTagPattern(token));
   const head = opts?.preamble ? `${opts.preamble}\n` : '';
   return { [FENCE_TEXT]: `${open}\n${head}${safe}\n</${token}>` };
 }
