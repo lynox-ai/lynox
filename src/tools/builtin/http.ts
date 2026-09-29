@@ -11,7 +11,8 @@ import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, asse
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
-import { isProtectedSecretWrite } from '../../core/secret-store.js';
+import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
+import type { SecretShape } from '../../core/secret-store.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import {
   extractHtmlText,
@@ -346,17 +347,18 @@ export { HTTP_TOOL_HOURLY_LIMIT as DEFAULT_HOURLY_LIMIT, HTTP_TOOL_DAILY_LIMIT a
 
 // === Egress control: detect data exfiltration attempts ===
 
-/** Common secret/API key patterns that should never appear in outbound requests. */
-const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/,                    label: 'Anthropic API key' },
-  { pattern: /sk-[a-zA-Z0-9]{20,}/,                          label: 'OpenAI-style API key' },
-  { pattern: /ghp_[a-zA-Z0-9]{36,}/,                         label: 'GitHub personal access token' },
-  { pattern: /gho_[a-zA-Z0-9]{36,}/,                         label: 'GitHub OAuth token' },
-  { pattern: /\bAKIA[A-Z0-9]{16}\b/,                         label: 'AWS access key' },
-  { pattern: /\bAIza[a-zA-Z0-9_-]{35}\b/,                    label: 'Google API key' },
-  { pattern: /-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,    label: 'private key' },
-  { pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,  label: 'JWT token' },
-];
+// Credential shapes that must never appear in an outbound request, taken from the
+// shared list rather than a copy of it. `contextual` (URL userinfo, `Bearer …`)
+// and `generic` (any long token) stay out on purpose: outbound bodies and
+// headers legitimately carry long IDs and auth headers, and blocking those
+// would refuse ordinary API calls. The egress scan takes only shapes that are a
+// credential wherever they appear.
+const EGRESS_SHAPE_LABELS: ReadonlySet<string> = new Set([
+  'Anthropic API key', 'OpenAI-style API key', 'GitHub token', 'AWS access key',
+  'Google API key', 'private key', 'JWT token',
+]);
+const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
+  SECRET_SHAPES.filter((s) => EGRESS_SHAPE_LABELS.has(s.label));
 
 /**
  * Scan a string for embedded secrets/credentials.

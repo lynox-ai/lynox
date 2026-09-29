@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns } from './secret-store.js';
 import { LLM_CATALOG } from './llm/catalog.js';
 import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
@@ -576,5 +576,45 @@ describe('isProtectedSecretWrite — provider key slots', () => {
     // Same suffix as a provider slot, not a provider slot: a guard keyed on the
     // `_API_KEY` suffix would lock the tenant's own integrations.
     expect(isProtectedSecretWrite('STRIPE_API_KEY')).toBe(false);
+  });
+});
+
+describe('SECRET_SHAPES — the shared credential shape list', () => {
+  // One synthetic value per shape, assembled at runtime so no scanner mistakes
+  // the test file for a leak. A shape added to the list without a value here
+  // fails the first test, which is the point: every shape carries a witness.
+  const WITNESS: Record<string, string> = {
+    'Anthropic API key': 'sk-' + 'ant-api03-' + 'A'.repeat(24),
+    'OpenAI API key': 'sk-' + 'proj-' + 'Ab12_Cd34-' + 'B'.repeat(16),
+    'OpenAI-style API key': 'sk-' + 'C'.repeat(24),
+    'credential in URL': 'postgres://' + 'admin:hunter2' + '@db.example.com/app',
+    'Stripe API key': 'sk_' + 'live_' + 'D'.repeat(20),
+    'GitHub token': 'github_pat_' + 'E'.repeat(24),
+    'AWS access key': 'AKIA' + 'F'.repeat(16),
+    'Google API key': 'AIza' + 'G'.repeat(35),
+    'Slack token': 'xox' + 'b-' + '1234567890-' + 'H'.repeat(12),
+    'Shopify token': 'shp' + 'at_' + '0123456789abcdef'.repeat(2),
+    'JWT token': 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.eyJ' + 'zdWIiOiIxMjM0NTY3ODkwIn0' + '.' + 'I'.repeat(20),
+    'private key': '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----',
+    'bearer token': 'Bearer ' + 'J'.repeat(24),
+    'long token': 'K'.repeat(44),
+  };
+
+  it('every shape has a witness value, and every witness names a shape', () => {
+    expect(Object.keys(WITNESS).sort()).toEqual([...new Set(SECRET_SHAPES.map((s) => s.label))].sort());
+  });
+
+  it.each(SECRET_SHAPES.map((s) => [s.label, s] as const))('the %s shape recognises its witness', (_label, shape) => {
+    expect(shape.pattern.test(WITNESS[shape.label]!)).toBe(true);
+  });
+
+  it('keeps the generic catcher last — short-text callers drop the final entry', () => {
+    expect(SECRET_SHAPES[SECRET_SHAPES.length - 1]!.kind).toBe('generic');
+    expect(SECRET_SHAPES.filter((s) => s.kind === 'generic')).toHaveLength(1);
+  });
+
+  it.each(SECRET_SHAPES.filter((s) => s.kind !== 'generic').map((s) => [s.label]))('masks a %s', (label) => {
+    const witness = WITNESS[label]!;
+    expect(maskSecretPatterns(`value: ${witness} end`)).not.toContain(witness);
   });
 });

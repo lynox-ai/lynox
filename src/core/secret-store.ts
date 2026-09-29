@@ -131,20 +131,34 @@ export function resolveSecretRefsWith(
 }
 
 /**
- * Common secret patterns — regex-based detection for accidental secret leaks.
- * Used by ask_user guard and chat input warning.
+ * The known shapes of a credential — the one list every secret scan in the engine
+ * derives from. A scan picks the kinds it needs rather than keeping its own copy:
+ * copies drift, and a copy that lags is a scan that misses the newest key format.
+ *
+ * - `vendor`: a provider's prefixed key format.
+ * - `key-block` / `jwt`: structural credentials with an unmistakable shape.
+ * - `contextual`: a credential recognisable only by what surrounds it (URL
+ *   userinfo, a `Bearer` header) — ordinary in some places, a leak in others.
+ * - `generic`: any long token. Last on purpose: callers drop it for short text.
  */
-const SECRET_PATTERNS: RegExp[] = [
+export type SecretShapeKind = 'vendor' | 'key-block' | 'jwt' | 'contextual' | 'generic';
+export interface SecretShape {
+  readonly label: string;
+  readonly kind: SecretShapeKind;
+  readonly pattern: RegExp;
+}
+
+export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // Anthropic
-  /\bsk-ant-[A-Za-z0-9_-]{20,}\b/,
+  { label: 'Anthropic API key', kind: 'vendor', pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/ },
   // OpenAI. Two rules on purpose: the plain `sk-` form is alnum-only, but the
   // prefixed forms (`sk-proj-`, `sk-svcacct-`) carry `-` and `_` INSIDE the
   // token, so the alnum rule stops at the first dash and matches four
   // characters. Measured 2026-08-24: a real `sk-proj-…` key passed the masker
   // untouched while the test fixture (`sk-ant-` + 40×A) was caught — the fixture
   // was the reason it looked covered.
-  /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}\b/,
-  /\bsk-[A-Za-z0-9]{20,}\b/,
+  { label: 'OpenAI API key', kind: 'vendor', pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}\b/ },
+  { label: 'OpenAI-style API key', kind: 'vendor', pattern: /\bsk-[A-Za-z0-9]{20,}\b/ },
   // A credential embedded in a URL's userinfo (`scheme://user:pass@host`).
   // Narrow by construction — it needs the `:`…`@` shape — so it does not touch
   // ordinary URLs, and it catches the database and basic-auth strings that
@@ -163,27 +177,35 @@ const SECRET_PATTERNS: RegExp[] = [
   // (verified: 40 and 200 characters of glued prefix both match) while ordinary
   // URLs still do not (`https://api.example.com/…`, `host:8443/…`,
   // `redis://cache:6379/0` — none has the `user:pass@` shape this needs).
-  /[a-z0-9+.-]{0,32}:\/\/[^\s:@/]+:[^\s:@/]+@/i,
+  { label: 'credential in URL', kind: 'contextual', pattern: /[a-z0-9+.-]{0,32}:\/\/[^\s:@/]+:[^\s:@/]+@/i },
   // Stripe
-  /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
+  { label: 'Stripe API key', kind: 'vendor', pattern: /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/ },
   // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
-  /\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}\b/,
+  { label: 'GitHub token', kind: 'vendor', pattern: /\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}\b/ },
   // AWS
-  /\bAKIA[A-Z0-9]{16}\b/,
+  { label: 'AWS access key', kind: 'vendor', pattern: /\bAKIA[A-Z0-9]{16}\b/ },
   // Google
-  /\bAIza[A-Za-z0-9_-]{35}\b/,
+  { label: 'Google API key', kind: 'vendor', pattern: /\bAIza[A-Za-z0-9_-]{35}\b/ },
   // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
-  /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/,
+  { label: 'Slack token', kind: 'vendor', pattern: /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/ },
   // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
   // a Shopify integration flow leaked the prefix into the agent transcript)
-  /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/,
+  { label: 'Shopify token', kind: 'vendor', pattern: /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/ },
   // JWT (three base64-url segments) — catches OAuth ID tokens etc.
-  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/,
+  { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
+  // Private key blocks (PEM / OpenSSH) — any key type, not only RSA.
+  { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
   // Generic Bearer tokens (long base64-ish)
-  /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/,
+  { label: 'bearer token', kind: 'contextual', pattern: /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/ },
   // Generic long hex/base64 secrets (40+ chars, likely tokens)
-  /\b[A-Za-z0-9_-]{40,}\b/,
+  { label: 'long token', kind: 'generic', pattern: /\b[A-Za-z0-9_-]{40,}\b/ },
 ];
+
+/**
+ * Common secret patterns — regex-based detection for accidental secret leaks.
+ * Used by ask_user guard and chat input warning.
+ */
+const SECRET_PATTERNS: RegExp[] = SECRET_SHAPES.map((s) => s.pattern);
 
 /**
  * Check if text likely contains a secret based on common key patterns.

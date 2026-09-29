@@ -786,7 +786,7 @@ describe('httpRequestTool', () => {
     });
 
     it('detects GitHub personal access token', () => {
-      expect(detectSecretInContent('token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij')).toBe('GitHub personal access token');
+      expect(detectSecretInContent('token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij')).toBe('GitHub token');
     });
 
     it('detects AWS access key', () => {
@@ -803,6 +803,31 @@ describe('httpRequestTool', () => {
 
     it('returns null for clean content', () => {
       expect(detectSecretInContent('Hello world, this is a normal message')).toBeNull();
+    });
+
+    // The scan now reads the shared shape list. Each family it takes is pinned
+    // here with a value written out independently of that list — a renamed or
+    // dropped entry in the list fails here instead of silently leaving the scan.
+    it.each([
+      ['Anthropic API key', 'sk-' + 'ant-api03-' + 'A'.repeat(24)],
+      ['OpenAI-style API key', 'sk-' + 'B'.repeat(24)],
+      ['GitHub token', 'ghs_' + 'C'.repeat(24)],
+      ['GitHub token', 'github_pat_' + 'D'.repeat(24)],
+      ['AWS access key', 'AKIA' + 'E'.repeat(16)],
+      ['Google API key', 'AIza' + 'F'.repeat(35)],
+      ['private key', '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'],
+      ['private key', '-----BEGIN ' + 'EC PRIVATE KEY-----'],
+    ])('detects %s in outbound content', (label, value) => {
+      expect(detectSecretInContent(`payload=${value}&x=1`)).toBe(label);
+    });
+
+    it.each([
+      // Kept out of the egress scan on purpose (see the selection in http.ts).
+      'Authorization: Bearer ' + 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
+      'id=' + '0123456789abcdef'.repeat(4),
+      'see https://example.com/docs and http://localhost:8080/health',
+    ])('does not flag ordinary outbound content: %s', (value) => {
+      expect(detectSecretInContent(value)).toBeNull();
     });
   });
 
@@ -870,7 +895,7 @@ describe('httpRequestTool', () => {
         headers: { 'X-Forward-Token': 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij' },
       }, makeAgent());
       expect(result).toContain('Blocked');
-      expect(result).toContain('GitHub personal access token');
+      expect(result).toContain('GitHub token');
     });
 
     it('allows POST when headers + body are clean', async () => {
@@ -918,7 +943,7 @@ describe('httpRequestTool', () => {
       }, agentWithPromptFn());
       expect(result).toContain('Blocked');
       expect(result).toContain('URL');
-      expect(result).toContain('GitHub personal access token');
+      expect(result).toContain('GitHub token');
     });
 
     it('allows a normal URL with a long but non-secret path', async () => {
