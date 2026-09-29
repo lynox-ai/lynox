@@ -77,10 +77,13 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   // `.env` deliberately gets NO bare-name twin: a bare rule here lands in
   // CRITICAL_BASH, which would hard-block reading any project's own env file.
   { pattern: /\.access-token\b/i, label: 'access lynox secret store (secrets)' },
-  // Brace, variable and command expansion are treated like a glob: the shell
-  // assembles the real path, so `engine.d{b,}` or `engine.d${X}b` never spells the
-  // name the location rule above keys on.
-  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[{$`]/i, label: 'glob into lynox data dir (secrets)' },
+  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  // The shell can assemble the extension the rule above keys on — `engine.d{b,}`,
+  // `engine.{db,x}`, `engine.d${X}b` never spell `.db`. An expansion that starts
+  // inside a file extension under the lynox dir is flagged as if it were one. Kept
+  // to the extension on purpose: an expansion elsewhere in a lynox path
+  // (`logs/${DATE}.log`, `bin:$PATH`) is ordinary and stays allowed.
+  { pattern: /\.lynox\/+(?!workspace\/)(?:[^\s'"`;|&<>/]+\/+)*[^\s'"`;|&<>/]*\.(?:d|db|s|sq|sql|sqli|sqlit|sqlite)?[{$`]/i, label: 'access lynox engine database (use the built-in tools instead)' },
   // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
   // would launder a secret path through it — any dot-dot inside a .lynox path is
   // flagged instead (the model has no reason to spell workspace paths that way).

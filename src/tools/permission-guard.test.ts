@@ -569,16 +569,27 @@ describe('isDangerous', () => {
     });
 
     it.each([
-      // The shell builds the name, so the location rule never sees `.db` — the
-      // expansion itself is what gets flagged.
+      // The shell builds the extension, so the location rule never sees `.db` — an
+      // expansion inside the extension is what gets flagged.
       'sqlite3 ~/.lynox/engine.d{b,} "UPDATE t SET a = 1"',
       'sqlite3 ~/.lynox/engine.{db,x} "UPDATE t SET a = 1"',
       'sqlite3 ~/.lynox/engine.d${X}b "UPDATE t SET a = 1"',
       'sqlite3 ~/.lynox/engine.d`echo b` "UPDATE t SET a = 1"',
-    ])('BLOCKS a name assembled by shell expansion: %s', (command) => {
+      'sqlite3 ~/.lynox/queue.sq${L}ite3 "UPDATE t SET a = 1"',
+    ])('BLOCKS an extension assembled by shell expansion: %s', (command) => {
       const result = isDangerous('bash', { command }, 'autonomous');
       expect(result).toContain('[BLOCKED');
-      expect(result).toContain('glob into lynox data dir');
+      expect(result).toContain(DB_LABEL);
+    });
+
+    it.each([
+      // An expansion elsewhere in a lynox path is ordinary shell use.
+      'tail -n 50 ~/.lynox/logs/${DATE}.log',
+      'cat ~/.lynox/logs/$(date +%F).log',
+      'cp r.pdf ~/.lynox/exports/report-$(date +%s).pdf',
+      'export PATH=~/.lynox/bin:$PATH',
+    ])('does NOT block an expansion outside a file extension: %s', (command) => {
+      expect(isDangerous('bash', { command }, 'autonomous')).toBeNull();
     });
 
     it('BLOCKS a traversal out of the working area onto a database', () => {
@@ -601,7 +612,7 @@ describe('isDangerous', () => {
     it('does NOT block a database in the agent working area', () => {
       expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/app/engine.db "UPDATE t SET a = 1"' }, 'autonomous')).toBeNull();
       expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/new.sqlite "select 1"' }, 'autonomous')).toBeNull();
-      // Expansion stays allowed in the working area — the glob rule keeps its carve-out.
+      // Expansion stays allowed in the working area, like everything else there.
       expect(isDangerous('bash', { command: 'sqlite3 ~/.lynox/workspace/${name}.db "select 1"' }, 'autonomous')).toBeNull();
     });
 
