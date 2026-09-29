@@ -29,7 +29,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isInfraSecret, isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -89,7 +89,52 @@ const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
 /** Vault key names are UPPER_SNAKE_CASE. Mirrors the bootstrap input schema, applied on the
  *  create/update path too — that schema only ever guarded the Haiku draft. */
-const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+// The bound is not decoration and it is not new: the OAuth block carried its own
+// copy of this pattern WITH `{0,63}` while this one had no bound at all. Two
+// patterns for one concept, differing in exactly the part that matters, is how
+// the two drifted — so there is one pattern now and it keeps the stricter half.
+const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Every value in a profile that NAMES a vault key, with the path that produced
+ * it — derived from the field NAMES, not from a list kept beside them.
+ *
+ * ## Why derived
+ *
+ * `validateProfile` checked three neighbouring groups of key names at three
+ * different depths: `username_key`/`password_key` against their MEANING
+ * (`isInfraSecret`), `vault_keys[]` against its TYPE (`string`), and the three
+ * `auth.oauth.*_key` slots against their FORM (a regex). Only the first asked
+ * the question that matters — does this name point at a secret the platform
+ * manages rather than one the user supplied for this API.
+ *
+ * Adding the missing fields to the hand-kept list would have fixed the two
+ * groups and left the SHAPE that produced them, so the next field lands beside
+ * the list rather than inside it. The invariant belongs to the function: a
+ * field whose name ends in `_key` names a vault key, and every one of them gets
+ * the same two checks. A slot added to `ApiAuth` tomorrow is covered the day it
+ * is added, without an edit here — and `api-setup.test.ts` pins that by
+ * feeding a synthetic future field.
+ */
+function vaultKeyNamesIn(auth: ApiAuth): Array<readonly [string, unknown]> {
+  const out: Array<readonly [string, unknown]> = [];
+  const harvest = (obj: unknown, prefix: string): void => {
+    if (typeof obj !== 'object' || obj === null) return;
+    for (const [name, value] of Object.entries(obj)) {
+      if (name.endsWith('_key')) out.push([`${prefix}.${name}`, value] as const);
+    }
+  };
+  harvest(auth, 'auth');
+  harvest((auth as { oauth?: unknown }).oauth, 'auth.oauth');
+  // `vault_keys` is the plural form of the same thing: a list of names the
+  // attach resolves. Its entries are not fields, so the suffix rule cannot see
+  // them, and they carry the same authority as any single slot.
+  const list: unknown = auth.vault_keys;
+  if (Array.isArray(list)) {
+    list.forEach((v, i) => out.push([`auth.vault_keys[${i}]`, v] as const));
+  }
+  return out;
+}
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 // `graphql` accepted 2026-05-18 as alias for `reduce` with GraphQL-shaped
 // include paths (e.g. "data.products.edges[*].node"). The reducer treats
@@ -131,24 +176,50 @@ function validateProfile(profile: ApiProfile): string | null {
     // secret. The latter is the one that matters: these names come from the profile, which
     // a prompt-injected agent can author, and `resolve()` — unlike `resolveSecretRefs` —
     // has no infra filter of its own.
-    for (const [field, key] of [
-      ['auth.username_key', profile.auth.username_key],
-      ['auth.password_key', profile.auth.password_key],
-    ] as const) {
-      if (key === undefined) continue;
-      if (!VAULT_KEY_PATTERN.test(key)) {
-        return `Invalid ${field} "${key}": must be an UPPER_SNAKE_CASE vault key name`;
-      }
-      if (isInfraSecret(key)) {
-        return `Invalid ${field} "${key}": that is an infrastructure secret managed by the platform. It is never attached to an outbound request — use a credential the user supplied for this API.`;
-      }
-    }
     // A list of names, or nothing. The attach reads `vault_keys` by index, so any
     // other value still hands it a name, and every other reader would have to
-    // guess the same way.
+    // guess the same way. Checked BEFORE the loop below, which reads its entries.
     const vaultKeys: unknown = profile.auth.vault_keys;
     if (vaultKeys !== undefined && vaultKeys !== null && !(Array.isArray(vaultKeys) && vaultKeys.every((k) => typeof k === 'string'))) {
       return 'Invalid auth.vault_keys: must be a list of vault key names, e.g. ["MY_API_KEY"]. A stored profile holding something else there is fixed with api_setup update.';
+    }
+    // ONE loop over every value that names a vault key — see `vaultKeyNamesIn`
+    // for why the set is derived rather than listed. Both halves matter: the
+    // SHAPE (a vault key name), and the refusal to name an infrastructure
+    // secret. The latter is the one that matters: these names come from the
+    // profile, which a prompt-injected agent can author, and `resolve()` —
+    // unlike `resolveSecretRefs` — has no infra filter of its own.
+    for (const [field, key] of vaultKeyNamesIn(profile.auth)) {
+      if (key === undefined) continue;
+      if (typeof key !== 'string' || !VAULT_KEY_PATTERN.test(key)) {
+        return `Invalid ${field} "${String(key)}": must be an UPPER_SNAKE_CASE vault key name, start with a letter, 1-64 chars`;
+      }
+      // `isProtectedSecretWrite`, not `isInfraSecret`, and the difference is the
+      // whole point of naming these fields at all.
+      //
+      // `isInfraSecret` answers READ VISIBILITY — is this secret engine-internal
+      // and invisible to the model. `PROVIDER_KEY_SLOTS` (ANTHROPIC_API_KEY and
+      // its siblings) is deliberately NOT in it: those are agent-visible by
+      // design, because the setup wizard writes them and the engine resolves
+      // them for the tenant's own LLM calls.
+      //
+      // But a key NAMED here is not read for the tenant's own calls. It is
+      // resolved and SENT — as a basic-auth half, or as an OAuth `client_secret`
+      // to a token endpoint. Agent-visible and safe-to-disclose-to-a-third-party
+      // are different properties, and only the first one had a predicate.
+      // `isProtectedSecretWrite` already unions exactly the set that matters
+      // here — names whose loss the tenant cannot recover, since the wizard
+      // stored them once — so this uses it rather than inventing a fourth
+      // predicate beside three that already disagree.
+      //
+      // ⚠ Its docstring scopes it to WRITE gates. That scoping is about which
+      // question it answers, not a claim that the set is wrong elsewhere; the
+      // set is the right one and the name is narrower than its content. Said
+      // here because borrowing a predicate across the boundary its own comment
+      // draws is exactly how a check ends up meaning something nobody intended.
+      if (isProtectedSecretWrite(key)) {
+        return `Invalid ${field} "${key}": that credential belongs to this instance — an infrastructure secret or the slot holding the tenant's own provider key. It is never attached to an outbound request — use a credential the user supplied for this API.`;
+      }
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
@@ -170,13 +241,13 @@ function validateProfile(profile: ApiProfile): string | null {
       if (o.body_format !== undefined && o.body_format !== 'form' && o.body_format !== 'json') {
         return `Invalid auth.oauth.body_format "${o.body_format}": must be "form" or "json"`;
       }
-      const keyPattern = /^[A-Z][A-Z0-9_]{0,63}$/;
-      for (const field of ['client_id_key', 'client_secret_key', 'refresh_token_key'] as const) {
-        const v = o[field];
-        if (v !== undefined && !keyPattern.test(v)) {
-          return `Invalid auth.oauth.${field} "${v}": must be UPPER_SNAKE_CASE, start with a letter, 1-64 chars`;
-        }
-      }
+      // The three `*_key` slots were checked HERE, against a local copy of the
+      // vault-key pattern, and nowhere else. That is what made them the shallow
+      // end of the function: a form check, with nothing asking whether the name
+      // points at an infrastructure secret. They now go through the single loop
+      // above like every other key name, so this block is gone rather than
+      // narrowed — leaving it would re-check the same fields with the same
+      // pattern and quietly restore the second opinion this repair removes.
       // The two fields a HOST is derived from. Checked here for the same reason
       // the username/password keys above are, and the comment there is the whole
       // argument: these values come from the profile, a prompt-injected agent can
