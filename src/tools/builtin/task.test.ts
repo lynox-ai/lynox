@@ -1021,3 +1021,200 @@ describe('task tools — `waiting` is readable, not settable (§0 E1a)', () => {
     expect(statusEnum(taskUpdateTool)).not.toContain('waiting');
   });
 });
+
+describe('a failure that will not be retried says so', () => {
+  let dir: string;
+  let history: RunHistory;
+  let engine: EngineDb;
+  let tm: TaskManager;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-nextrun-test-'));
+    history = new RunHistory(join(dir, 'test.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    tm = new TaskManager(history);
+    sharedTaskManager = tm;
+  });
+
+  afterEach(() => {
+    history.close();
+    engine.close();
+    rmSync(dir, { recursive: true, force: true });
+    sharedTaskManager = null;
+  });
+
+  const CONFIRMED = '2026-07-02T00:00:00.000Z';
+  const PAST = '2020-01-01T00:00:00.000Z';
+  const NOTE = 'NO NEXT RUN';
+  /** Read back through the real store, not by handing the renderer a literal — the
+   *  column has to survive `getTrigger` to reach this at all. It calls the detail
+   *  renderer DIRECTLY; the whole-line path through `formatTaskLine` has its own
+   *  test below, because that is the function whose parameter type carries the
+   *  column and nothing else here would exercise it. */
+  const line = (id: string): string => triggerDetailLine(history.getTrigger(id)!);
+  const oneShot = (title: string): string =>
+    (tm.create({ title, assignee: 'lynox', nextRunAt: PAST, confirmedAt: CONFIRMED } as never) as { id: string }).id;
+
+  it('a one-shot whose run failed says the failure was the last attempt', () => {
+    const id = oneShot('Einmalig');
+    expect(line(id)).not.toContain(NOTE);            // healthy before the run
+    tm.recordTaskRun(id, 'provider refused the model', 'failed');
+    expect(history.getTrigger(id)?.next_run_at ?? null).toBeNull();
+    const after = line(id);
+    expect(after).toContain('NO NEXT RUN — it will not try again on its own');
+    // It qualifies the failure rather than replacing it: the reader needs the
+    // cause AND that it is over. One without the other is what sent the last
+    // repair down the wrong road.
+    expect(after).toContain('last run FAILED');
+  });
+
+  it('a cron schedule keeps its next run through a failure and is NOT flagged', () => {
+    const t = tm.createScheduled({ title: 'Taeglich', scheduleCron: '0 9 * * *', confirmedAt: CONFIRMED });
+    tm.recordTaskRun(t.id, 'boom', 'failed');
+    expect(history.getTrigger(t.id)?.next_run_at).toBeTruthy();
+    // Witness that the branch RAN and chose not to speak — without it this
+    // assertion would also pass if nothing rendered at all.
+    expect(line(t.id)).toContain('last run FAILED');
+    expect(line(t.id)).not.toContain(NOTE);
+  });
+
+  it('a one-shot that SUCCEEDED is not flagged', () => {
+    const id = oneShot('Fertig');
+    tm.recordTaskRun(id, 'alles gut', 'success');
+    expect(history.getTrigger(id)?.status).toBe('completed');
+    // WITNESS. This row renders an empty detail line, so `not.toContain` alone
+    // would also pass if the renderer had produced nothing at all — the same shape
+    // of empty pass this file pins elsewhere. Switching the row off makes it speak,
+    // which proves the renderer is reached and still declines to add the note.
+    tm.setEnabled(id, false);
+    expect(line(id)).toContain('SCHEDULE OFF');
+    expect(line(id)).not.toContain(NOTE);
+  });
+
+  // ── The four states an empty `next_run_at` ALSO means. Each was a false
+  // positive in the first cut of this line, found by measuring instead of by
+  // reasoning about the column. ────────────────────────────────────────────
+  it('a PARKED row is not flagged — the tick re-arms it when the answer lands', () => {
+    const id = oneShot('Wartet auf Antwort');
+    tm.recordTaskRun(id, 'boom', 'failed');
+    // Production parks through the history, not the manager — `TaskManager.update`
+    // refuses the status outright, which is why the first cut believed this state
+    // was unreachable and shipped a warning for it.
+    expect(() => tm.update(id, { status: 'waiting' as never })).toThrow();
+    // With the deadline, because production never parks without one
+    // (`worker-loop.ts` refuses to) — and the deadline is what makes this
+    // carve-out temporary: the expiry sweep ends the wait, and the note appears.
+    history.updateTrigger(id, { status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z' });
+    expect(history.getTrigger(id)?.status).toBe('waiting');
+    expect(line(id)).toContain('last run FAILED');   // witness: the branch ran
+    expect(line(id)).not.toContain(NOTE);
+  });
+
+  it('a schedule CLOSED by hand after a failure is not flagged', () => {
+    const id = oneShot('Abgehakt');
+    tm.recordTaskRun(id, 'boom', 'failed');
+    tm.complete(id);
+    expect(history.getTrigger(id)?.status).toBe('completed');
+    expect(history.getTrigger(id)?.next_run_at ?? null).toBeNull();  // complete() leaves it empty
+    expect(line(id)).toContain('last run FAILED');   // witness
+    expect(line(id)).not.toContain(NOTE);
+  });
+
+  it('a row UN-SCHEDULED on purpose is not flagged', () => {
+    // `run_at: ''` is documented as "un-schedules (keeps task open)" — the empty
+    // column is what was ordered, not a defect.
+    const id = oneShot('Doch nicht');
+    tm.update(id, { nextRunAt: '' });
+    expect(history.getTrigger(id)?.next_run_at ?? '').toBeFalsy();
+    // WITNESS, for the same reason: an un-scheduled row renders nothing, so make
+    // it render something first.
+    tm.setEnabled(id, false);
+    expect(line(id)).toContain('SCHEDULE OFF');
+    expect(line(id)).not.toContain(NOTE);
+  });
+
+  it('a row that was NEVER scheduled is not flagged', () => {
+    // A reminder assigned to a HUMAN is a real trigger row with an empty next run
+    // — measured: effect='notify', status='open', next_run_at=null. (The same
+    // reminder assigned to lynox gets one, which is why this needs the human.)
+    // The first cut of this line called it broken; it was never a schedule.
+    const t = tm.create({ title: 'Kein Zeitplan', taskType: 'reminder', assignee: 'user' } as never) as { id: string };
+    const row = history.getTrigger(t.id);
+    expect(row).toBeDefined();                       // witness: it IS a trigger…
+    expect(row?.next_run_at ?? null).toBeNull();     // …with the column the note keys on
+    // RENDER witness. Those two attest the ROW; without this the assertion below
+    // would also pass if the renderer returned '' for every input.
+    tm.setEnabled(t.id, false);
+    expect(line(t.id)).toContain('SCHEDULE OFF');
+    expect(line(t.id)).not.toContain(NOTE);
+  });
+
+  it('RESIDUAL: un-subscribing AFTER a failure still carries the note', () => {
+    // Pinned rather than left to be discovered: a row that ran, failed and was then
+    // un-subscribed gets the same sentence as a one-shot that died. True, just
+    // louder than the situation needs. `triggers.source` would tell them apart but
+    // does not suffice on its own — see the note at the condition. The sibling test
+    // above covers the other half: un-subscribed BEFORE it ever ran, where the
+    // failure branch does keep the note away.
+    const t = tm.createScheduled({ title: 'Report', scheduleCron: '0 6 * * *', confirmedAt: CONFIRMED });
+    tm.recordTaskRun(t.id, 'provider refused the model', 'failed');
+    expect(line(t.id)).not.toContain(NOTE);          // still has its next occurrence
+    tm.update(t.id, { scheduleCron: '' });
+    expect(history.getTrigger(t.id)?.next_run_at ?? null).toBeNull();
+    expect(line(t.id)).toContain(NOTE);
+  });
+
+  it('a plain TODO gets no schedule line at all', () => {
+    const todo = tm.create({ title: 'Nur eine Notiz' } as never) as { id: string };
+    expect(history.getTrigger(todo.id)).toBeUndefined();
+    expect(triggerDetailLine({})).toBe('');
+  });
+
+  it('holds for every effect, not just the agent one', () => {
+    // The production story this line comes from is a dead WORKFLOW schedule, so a
+    // guard that only spoke for `run_agent` would miss the case that motivated it
+    // — and nothing would have failed. Measured through the store for each effect
+    // the dispatcher knows.
+    for (const [label, params] of [
+      ['workflow', { taskType: 'pipeline', pipelineId: 'wf-eff' }],
+      ['notify', { taskType: 'reminder' }],
+      ['backup', { taskType: 'backup' }],
+    ] as [string, Record<string, unknown>][]) {
+      history.insertPlannedPipeline({
+        id: 'wf-eff', name: 'w', goal: 'g', steps: [], reasoning: '',
+        estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      } as Parameters<typeof history.insertPlannedPipeline>[0]);
+      const t = tm.create({ title: label, assignee: 'lynox', nextRunAt: PAST, confirmedAt: CONFIRMED, ...params } as never) as { id: string };
+      const row = history.getTrigger(t.id);
+      expect(row, `${label} must be a trigger`).toBeDefined();
+      tm.recordTaskRun(t.id, 'boom', 'failed');
+      expect(history.getTrigger(t.id)?.next_run_at ?? null, `${label} loses its next run`).toBeNull();
+      expect(line(t.id), `${label} must carry the note`).toContain(NOTE);
+    }
+  });
+
+  it('the note survives the whole-line path, not only the detail renderer', async () => {
+    // `formatTaskLine` is the function whose parameter type declares the column,
+    // and it is what every caller in this file actually renders through. Reading
+    // the note off `triggerDetailLine` alone would leave that hop unproven.
+    const id = oneShot('Ganze Zeile');
+    tm.recordTaskRun(id, 'boom', 'failed');
+    const out = await taskListTool.handler({}, makeAgent()) as string;
+    expect(out).toContain('Ganze Zeile');
+    expect(out).toContain(NOTE);
+  });
+
+  it('a dead schedule that is ALSO switched off says both — the switch is not the whole story', () => {
+    // Three schedules were dead for three different reasons and only one of them
+    // was the kill-switch. A reader who sees only "SCHEDULE OFF" switches it on
+    // and nothing happens.
+    const id = oneShot('Beides');
+    tm.recordTaskRun(id, 'boom', 'failed');
+    tm.setEnabled(id, false);
+    const both = line(id);
+    expect(both).toContain('SCHEDULE OFF');
+    expect(both).toContain(NOTE);
+    expect(both.indexOf('SCHEDULE OFF')).toBeLessThan(both.indexOf(NOTE));
+  });
+});

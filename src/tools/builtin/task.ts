@@ -93,6 +93,8 @@ export function triggerDetailLine(t: {
   pipeline_id?: string | undefined;
   pipeline_params?: string | undefined;
   effect?: string | undefined;
+  next_run_at?: string | undefined;
+  status?: string | undefined;
 }): string {
   const parts: string[] = [];
   // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
@@ -116,6 +118,36 @@ export function triggerDetailLine(t: {
     const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
     parts.push(`last run FAILED${when}: ${reason}`);
+    // …and whether that failure was the last word. `last run FAILED` alone does
+    // not say: a cron row keeps its next run through a failure and tries again, a
+    // one-shot loses it (`task-manager.ts` nulls the column) and does not. That is
+    // the question a reader has after seeing a failure, and nothing here answered it.
+    //
+    // The test is per ROW. It lives inside the failure branch so a row that never
+    // ran cannot reach it — a reminder created without a schedule, or a schedule
+    // dropped before it ever fired, is not a broken one. `waiting` and `completed`
+    // are then excluded by name, because those rows DID run: a parked one comes back
+    // when its answer lands (`worker-loop.ts` re-arms it), a triaged one is finished.
+    //
+    // KNOWN RESIDUAL, pinned by a test rather than left to be found: a schedule that
+    // ran, failed and was un-subscribed AFTERWARDS still gets the note. True there,
+    // just louder than the situation calls for. `triggers.source` does separate the
+    // two, but reading it alone would not serve — `deriveSourceEffect` stamps 'cron'
+    // on every reminder and backup row too, so that carve-out would silence a
+    // genuinely dead one.
+    //
+    // "on its own" is load-bearing: `runTriggerNow` consults neither this column nor
+    // `enabled`, so Run-now still works. The sentence says what will not happen by
+    // itself and promises no repair — a new time is necessary and not sufficient,
+    // since `enabled` and `status` gate the row too.
+    //
+    // The `effect` test is defensive typing, not what keeps a TODO out: `TaskRecord`
+    // carries no `last_run_status`, so the branch above already does. It guards a
+    // hand-built object, not a store row.
+    if (t.effect !== undefined && !t.next_run_at
+      && t.status !== 'completed' && t.status !== 'waiting') {
+      parts.push('NO NEXT RUN — it will not try again on its own');
+    }
   }
   // The WORKFLOW ID IS NOT THE FIELD TO LEAN ON, and an earlier revision of
   // this comment claimed the opposite — "the thing a repair has to preserve".
@@ -155,7 +187,7 @@ export function triggerDetailLine(t: {
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
 function formatTaskLine(
-  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined },
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined },
   // Callers used to append their own suffix to the RESULT of this function.
   // That was harmless while the result was one line; with a detail line it put
   // "— next run: …" underneath "workflow <id>", where it reads as a property of
