@@ -1014,6 +1014,46 @@ export class OpenAIAdapter {
       }
     }
 
+    // A model the provider will not let us stop thinking, called below the bound
+    // where thinking does not fit, REFUSES rather than returns the empty string it
+    // would otherwise produce — HTTP 200, `finish_reason: 'length'`, no content and
+    // no error anywhere. The throw changes the failure MODE from "succeeded with
+    // nothing" to "failed". That is the honest claim; it does not by itself make the
+    // failure visible: four of the six callers below the bound swallow it in a bare
+    // `catch` (session, entity-extractor, entity-extractor-v2, retrieval-engine) and
+    // would observe exactly what they observe today, namely nothing. Two do better
+    // (search-reranker records `llm-error`, memory publishes a status). Making those
+    // four report is a separate piece; what this buys is that the condition stops being
+    // indistinguishable from success AT THE WIRE.
+    //
+    // The bound is the MODEL'S, not one shared number: `emptyAtOrBelow` is the largest
+    // budget at which that model was measured silent on a hard prompt (glm-5p3 1024,
+    // gpt-oss-120b 256). A shared bound would refuse gpt-oss calls that work at 512 and
+    // 1024, and an earlier draft of this guard did exactly that.
+    //
+    // Not unreachable: `glm-5p3` sits in a MAIN slot no small caller touches, but
+    // `gpt-oss-120b` is served and selectable in the per-tier picker, and a user who
+    // picks it for the fast tier reaches `session.ts` (64) and `retrieval-engine.ts`
+    // (256) — both inside its silent region, and four of the six callers swallow the
+    // result in a bare `catch`. So this refuses a path that is open today, and it also
+    // keeps the enumerated six safe against a seventh caller added later.
+    //
+    // Not a budget bump and not a tier fallback: either would serve the call at a
+    // size or on a model nobody chose, which is how a cost or a quality change
+    // arrives without a decision.
+    const silentBelow = cap?.thinkingOnly?.emptyAtOrBelow;
+    if (silentBelow !== undefined) {
+      const maxTokens = params['max_tokens'];
+      if (typeof maxTokens === 'number' && maxTokens <= silentBelow) {
+        throw new Error(
+          `${cap?.id ?? 'this model'} cannot think within ${String(maxTokens)} output tokens and the provider `
+          + `refuses to disable its thinking, so this call may return an empty string with `
+          + `HTTP 200. Raise max_tokens above ${String(silentBelow)} or route this call to a `
+          + `tier whose model declares defaultReasoningEffort.`,
+        );
+      }
+    }
+
     // Mistral-native prompt cache: forward prompt_cache_key when caller sets
     // it AND outgoing endpoint is api.mistral.ai. Hostname-gate keeps the
     // Mistral-shaped key from leaking into other OpenAI-compat endpoints

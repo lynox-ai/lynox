@@ -15,6 +15,8 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'claude-opus-4-8',
       'claude-fable-5',
       'mistral-medium-2604',
+      'accounts/fireworks/models/deepseek-v4p1-flash',
+      'accounts/fireworks/models/glm-5p3',
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
       'accounts/fireworks/models/kimi-k3',
@@ -59,6 +61,36 @@ describe('model-presets Wave 1 — new model registrations', () => {
     // completing the check the verify-live-or-false convention owed here.
     expect(m.features.vision).toBe(true);
     expect(m.provenance).toBe('EU');
+  });
+
+  it('DeepSeek v4.1 Flash (Fireworks) — verified $0.22/$0.66, 1M ctx, CN', () => {
+    // The FAST slot of BOTH efficient and balanced since 2026-09-30. Pinned here
+    // because it is MORE expensive than the withdrawn -0731 it replaces — 1.6x the
+    // input and 2.4x the output — so a later edit that "restores" the old numbers
+    // out of familiarity would under-bill every fast-tier call on two presets.
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4p1-flash']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 0.22, output: 0.66, cacheWrite: 0.22, cacheRead: 0.007 });
+    expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
+    expect(m.provenance).toBe('CN');
+    // The suppression is what keeps this slot from answering "" below the bound.
+    expect(m.defaultReasoningEffort).toBe('none');
+  });
+
+  it('GLM 5.3 (Fireworks) — verified $1.40/$4.40, cached 0.26, 1M ctx, CN', () => {
+    // The balanced MAIN slot since 2026-09-30. Uncached and output match the
+    // withdrawn glm-5p2 exactly; the CACHED rate nearly doubled (0.14 → 0.26), which
+    // is the single field a carried-over price would have got wrong.
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/glm-5p3']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 1.4, output: 4.4, cacheWrite: 1.4, cacheRead: 0.26 });
+    expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
+    expect(m.provenance).toBe('CN');
+    // It has NO suppression and must not grow one: the provider refuses it outright.
+    expect(m.defaultReasoningEffort).toBeUndefined();
+    // The bound is the model's own, measured: glm-5p3 is silent through 1024 where
+    // gpt-oss-120b recovers at 512, so one shared number could not serve both.
+    expect(m.thinkingOnly).toEqual({ emptyAtOrBelow: 1024 });
   });
 
   it('GLM 5.2 (Fireworks) — verified $1.40/$4.40, ~1M ctx, text-only, CN', () => {

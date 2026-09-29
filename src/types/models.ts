@@ -494,6 +494,39 @@ export interface ModelCapability {
    * ladder's floor) was measured not to suppress the thinking floor at all.
    */
   defaultReasoningEffort?: 'none' | undefined;
+
+  /**
+   * The provider REFUSES to let thinking be disabled on this model, so there is no
+   * `defaultReasoningEffort` escape hatch — and below `emptyAtOrBelow` output tokens it
+   * answers HTTP 200 with no content at all, the whole budget spent thinking.
+   *
+   * The bound is PER MODEL because one number does not fit the class. Measured
+   * 2026-09-30, three runs per budget on a hard extraction prompt:
+   *   glm-5p3        empty at 64 · 256 · 512, and 2 of 3 at 1024   → 1024
+   *   gpt-oss-120b   empty 3/3 at 64, 2/3 at 256, none at 512+     →  256
+   * A shared bound would either refuse gpt-oss calls that work (512, 1024) or leave
+   * glm-5p3 unprotected where it is silent. The first draft of this field WAS a shared
+   * bound, and the number that made it look fine — "gpt-oss answers from 256 up" — did
+   * not survive its own re-measurement: empty in 5 of 6 runs at 64 and 256.
+   *
+   * Declaring it makes the adapter REFUSE such a call instead of returning the silence.
+   * That direction is the point: an empty success is indistinguishable from a success, so
+   * a caller that lands here gets nothing and reports nothing — and four of the six
+   * callers below the bound swallow errors in a bare `catch`, so the throw changes the
+   * failure MODE at the wire rather than making it visible downstream.
+   *
+   * Deliberately not a budget bump and not a tier fallback: either would serve the call
+   * at a size or on a model nobody chose, which is how a cost or a quality change arrives
+   * without a decision.
+   *
+   * ⚠ The emptiness tracks prompt DIFFICULTY, not a token count. A trivial prompt answers
+   * far below these bounds. The numbers are therefore the largest budget at which a HARD
+   * prompt was still silent, i.e. deliberately pessimistic — they refuse some calls that
+   * an easy prompt would have survived, which is the safe direction for a path whose
+   * failure mode is silence.
+   */
+  thinkingOnly?: { readonly emptyAtOrBelow: number } | undefined;
+
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -1087,6 +1120,84 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // A dated id is the thing this codebase normally avoids (see the Mistral
   // stable-tag rule) — but here the choice is not between dated and floating. The
   // floating alias is GONE; the only alternative is no fast slot at all.
+  'accounts/fireworks/models/deepseek-v4p1-flash': {
+    id: 'accounts/fireworks/models/deepseek-v4p1-flash',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    // ⚠ TEXT features, and that UNDER-claims the model: the provider advertises it as
+    // multimodal in two places (`supports_image_input: true` on the inference listing,
+    // and its model page calls it multimodal with native image input). Its predecessor
+    // -0731 was genuinely text-only, so this object is INHERITED, not measured — the one
+    // thing this change otherwise avoided. The flip needs `FIREWORKS_VISION_FEATURES`
+    // plus the house procedure (`tests/online/fireworks-vision.test.ts` validates vision
+    // on the wire before a model claims it), so it is filed rather than guessed. The
+    // direction is safe: images are refused on this slot, not silently mishandled.
+    features: FIREWORKS_TEXT_FEATURES,
+    // Read off the provider's public MODEL PAGE 2026-09-30 (the pricing OVERVIEW
+    // page does not carry this id at all — a different page). $0.22/M uncached, $0.007/M
+    // cached, $0.66/M output. The mapping was verified against two models whose rows
+    // already existed — glm-5p2 (1.40/0.14/4.40) and minimax-m3 (0.30/0.06/1.20) —
+    // so `input` is the uncached rate and `cacheRead` the cached one, not guessed.
+    //
+    // ⚠ NOT the predecessor's price, which is why carrying it forward would have been
+    // wrong rather than merely unverified: -0731 was 0.14/0.28, so this successor is
+    // 1.6x the input and 2.4x the OUTPUT. A carried number would have under-billed
+    // every fast-tier call on both presets.
+    pricing: { input: 0.22, output: 0.66, cacheWrite: 0.22, cacheRead: 0.007 },
+    uiLabel: 'DeepSeek v4.1 Flash',
+    provenance: 'CN',
+    // Same hybrid-reasoning defect as the -0731 predecessor it replaces, measured on
+    // 2026-09-30 at the real fast-tier budgets: `max_tokens: 64` without this field
+    // returns HTTP 200 with an EMPTY string and `finish_reason: 'length'`, the whole
+    // budget spent on thinking. With it the same call answers. (An earlier draft named
+    // exact lengths and token counts here; re-measured they do not reproduce — they vary
+    // with the prompt, which is the same overspecification this field's doc warns about
+    // two paragraphs up. The reproducible claim is the DIRECTION: silent without the
+    // suppression on a hard prompt at that budget, answering with it.)
+    // The suppression is therefore not inherited by habit — it was re-measured.
+    defaultReasoningEffort: 'none',
+  },
+  'accounts/fireworks/models/glm-5p3': {
+    id: 'accounts/fireworks/models/glm-5p3',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    // Read off the provider's public MODEL PAGE 2026-09-30: $1.40/M uncached,
+    // $0.26/M cached, $4.40/M output. Uncached and output match glm-5p2 exactly; the
+    // CACHED rate nearly doubled (0.14 → 0.26), which is the one field a carried-over
+    // price would have got wrong.
+    pricing: { input: 1.40, output: 4.40, cacheWrite: 1.40, cacheRead: 0.26 },
+    uiLabel: 'GLM 5.3',
+    provenance: 'CN',
+    thinkingOnly: { emptyAtOrBelow: 1024 },
+    // NO `defaultReasoningEffort`, and its absence is load-bearing rather than an
+    // omission: the provider refuses the suppression outright — `HTTP 400: GLM-5.3
+    // is a thinking-only model; disabling thinking (reasoning_effort='none') is not
+    // supported`. Measured 2026-09-30, it returns an EMPTY string below the bound on
+    // HARD prompts — at 64, 256 and 512 on an extraction prompt, and even at exactly
+    // 1024 on a harder one — while a trivial prompt answers at 256. The emptiness tracks
+    // prompt DIFFICULTY, not a token threshold, so the bound is the largest small-budget
+    // caller rather than an observed cut-off.
+    // `'low'` is accepted by the provider and
+    // works, but `defaultReasoningEffort` is deliberately typed `'none'`-only, and
+    // widening it for one model would un-narrow a decision taken for another.
+    //
+    // Safe in the balanced MAIN slot because no caller reaches that slot below the
+    // suppression bound — enumerated 2026-09-30, all six small-budget callers are
+    // `fast`-tier. That enumeration is what makes it safe TODAY; the `thinkingOnly`
+    // refusal in `openai-adapter.ts` is what keeps it safe. (`tier-presets.test.ts`
+    // holds the EVIDENCE labels for the pin, not this guard — an earlier draft sent its
+    // reader there, where they would have found a membership allowlist and concluded the
+    // small-budget case was unprotected.)
+  },
   'accounts/fireworks/models/deepseek-v4-flash-0731': {
     id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
     provider: 'openai',
@@ -1140,6 +1251,18 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.014 },
     uiLabel: 'GPT-OSS 120B',
     provenance: 'US',
+    // Second member of the thinking-only class, measured 2026-09-30 (3 runs per budget,
+    // hard extraction prompt): `reasoning_effort: 'none'` → `HTTP 400: Invalid reasoning
+    // effort: none`; content empty 3/3 at 64, 2/3 at 256, never at 512 or 1024. Its bound
+    // is therefore 256, not the 1024 that fits glm-5p3.
+    //
+    // It is pinned by no preset — but it IS served and it IS an option in the Fireworks
+    // per-tier picker, so a user who selects it for the fast tier reaches `session.ts`
+    // (64) and `retrieval-engine.ts` (256), where both budgets are inside the silent
+    // region and four of the six callers swallow the result. That made this a LIVE gap on
+    // a selectable model rather than a filed one, which is why the bound became per-model
+    // here instead of later.
+    thinkingOnly: { emptyAtOrBelow: 256 },
   },
   'accounts/fireworks/models/kimi-k2p6': {
     id: 'accounts/fireworks/models/kimi-k2p6',

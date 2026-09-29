@@ -98,8 +98,12 @@ const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 
 // THE LADDER (reshaped 2026-08-10). Two Fireworks sets that differ in EXACTLY ONE
 // slot — the main — plus an EU set and an Anthropic set:
 //
-//   ⚡ efficient     deepseek-flash · minimax-m3 · kimi-k3
-//   ⚖️ balanced      deepseek-flash · glm-5p2    · kimi-k3
+//   ⚡ efficient     deepseek-v4p1-flash · minimax-m3 · kimi-k3
+//   ⚖️ balanced      deepseek-v4p1-flash · glm-5p3    · kimi-k3
+// (Both fast slots and balanced's main were REPINNED 2026-09-30 — the provider withdrew
+//  deepseek-v4-flash-0731 and glm-5p2. The measured bases below belong to the WITHDRAWN
+//  models; the successors rest on an operator decision, availability and behaviour, and
+//  no quality measurement. Read them as separate claims.)
 // (An EU-only set was drafted and PULLED on 2026-08-11: a preset whose identity
 //  IS a residency promise must fail closed, and this one degraded silently to the
 //  base provider when a Mistral slot was dropped, while the disclosure panel kept
@@ -120,7 +124,12 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // contradicted by the catalog note this same PR wrote). The old set paid $7.50/M
   // output for a main (mistral-medium) that the /model-smoke sweep found weakest on
   // open turns, while its deep slot already routed here.
-  //   fast  — deepseek-v4-flash-0731: fast-bench HOLD at 89.1% literal recall against a
+  //   fast  — deepseek-v4p1-flash, whose basis is NOT the bench in this sentence. The
+  //           bench belongs to deepseek-v4-flash-0731, WITHDRAWN by the provider on or
+  //           before 2026-09-30 (404 measured live). The successor inherits the SLOT,
+  //           not the result: operator decision on availability plus behaviour, at MORE
+  //           money ($0.22/$0.66 against $0.14/$0.28), no bench. The old result:
+  //           HOLD at 89.1% literal recall against a
   //           90.4% haiku-4.5 reference, with the BEST judge score of the field
   //           (7.83 vs 7.13), at $0.14/$0.28 instead of haiku's $1/$5. This is the
   //           fast SLOT only — it was never benched as a main (rafael 2026-08-10).
@@ -141,21 +150,26 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   efficient: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash-0731'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4p1-flash'),
       balanced: fireworks('accounts/fireworks/models/minimax-m3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },
   },
   // ⚖️ balanced — ⚡ efficient with a stronger main, and nothing else changed. Same
-  // fast slot, same deep slot; GLM 5.2 replaces minimax-m3 in the band that runs
-  // every turn, at $1.40/$4.40 against $0.30/$1.20. Buying quality in exactly one
+  // fast slot, same deep slot; the GLM line replaces minimax-m3 in the band that runs
+  // every turn, at $1.40/$4.40 against $0.30/$1.20. ⚠ The sweep cited below is GLM 5.2's;
+    // the slot holds GLM 5.3 since 2026-09-30 because the provider withdrew 5.2. 5.3 has
+    // no sweep of its own — same uncached and output price, cached nearly doubled
+    // (0.14 → 0.26), and it is thinking-only, which is why it belongs in a MAIN slot and
+    // is refused below the small-budget bound. Buying quality in exactly one
   // slot is the point: it makes the upgrade legible ("the model you talk to gets
   // stronger") instead of shuffling three variables at once. Operator decision
   // (rafael 2026-08-10, "glm main auch") on the strength of the /model-smoke sweep,
   // where GLM grounded task state correctly and carried a 1M window.
   //
   // NOT chosen on the R1/R3 replay floor — see the header. GLM's escalation rate
-  // there (2/8 on body-a) measures whether it DELEGATES, which is both noisy at that
+  // there (2/8 on body-a — GLM 5.2's number, not the 5.3 now pinned) measures whether
+  // it DELEGATES, which is both noisy at that
   // n and moot while proactive deep escalation is off.
   //
   // ⚠️ CONSEQUENCE, stated because it is not obvious: like ⚡ efficient this is an
@@ -186,8 +200,8 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   balanced: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash-0731'),
-      balanced: fireworks('accounts/fireworks/models/glm-5p2'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4p1-flash'),
+      balanced: fireworks('accounts/fireworks/models/glm-5p3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },
   },

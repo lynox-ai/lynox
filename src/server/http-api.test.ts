@@ -3001,7 +3001,7 @@ describe('LynoxHTTPApi', () => {
       // match 'Mistral Medium 3.1' (128k, below the context floor) and 'Mistral Medium
       // (latest)' (the forbidden -latest tag). Labels carry the registry context
       // window since 2026-08-09 ("· 256k").
-      expect(tiers!['balanced']).toBe('GLM 5.2 · 1M');
+      expect(tiers!['balanced']).toBe('GLM 5.3 · 1M');
       expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 
@@ -3035,6 +3035,7 @@ describe('LynoxHTTPApi', () => {
       // Measured on staging 2026-08-11 (build b3b6727c): `active_model` reported
       // `claude-sonnet-5` / provider `anthropic` with Sonnet's FEATURE MATRIX,
       // while `main_chat_tiers` in the SAME response body correctly said "GLM 5.2"
+      // (the label of the day; the balanced main is GLM 5.3 since 2026-09-30)
       // and the run actually executed `accounts/fireworks/models/glm-5p2`. Two
       // fields of one response disagreeing is worse than either being wrong alone:
       // a reader cannot tell which is true.
@@ -3062,7 +3063,7 @@ describe('LynoxHTTPApi', () => {
         tier_set: {
           balanced: {
             provider: 'openai',
-            model_id: 'accounts/fireworks/models/glm-5p2',
+            model_id: 'accounts/fireworks/models/glm-5p3',
             api_base_url: 'https://api.fireworks.ai/inference/v1',
           },
         },
@@ -3079,16 +3080,16 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       const am = body['active_model'] as Record<string, unknown> | undefined;
       expect(am).toBeDefined();
-      expect(am!['id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(am!['id']).toBe('accounts/fireworks/models/glm-5p3');
       expect(am!['provider']).toBe('openai');
-      expect(am!['uiLabel']).toBe('GLM 5.2');
+      expect(am!['uiLabel']).toBe('GLM 5.3');
       const slotFeatures = am!['features'] as Record<string, boolean>;
       expect(slotFeatures['extendedThinking']).toBe(false);
       expect(slotFeatures['vision']).toBe(false);
       expect(slotFeatures['pdfInput']).toBe(false);
       // Same body, same model — the invariant the shared derivation buys.
       const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
-      expect(tiers!['balanced']).toContain('GLM 5.2');
+      expect(tiers!['balanced']).toContain('GLM 5.3');
       // ...and the STRATEGY fields have to come from the same place. The raw file
       // above says nothing about routing, so reporting the file made this
       // `standard` right next to a hybrid `active_model` — the picker then drew
