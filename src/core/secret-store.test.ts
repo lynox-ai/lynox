@@ -565,8 +565,16 @@ describe('isProtectedSecretWrite — provider key slots', () => {
     expect(isProtectedSecretWrite(slot)).toBe(true);
   });
 
+  it('protects the SDK alias slot the engine also resolves a provider key from', () => {
+    // Declared in neither source above, so it is pinned by name.
+    expect(isProtectedSecretWrite('OPENAI_API_KEY')).toBe(true);
+  });
+
   it('does not protect an ordinary API credential name', () => {
     expect(isProtectedSecretWrite('WOO_CS')).toBe(false);
     expect(isProtectedSecretWrite('SHOPIFY_TOKEN')).toBe(false);
+    // Same suffix as a provider slot, not a provider slot: a guard keyed on the
+    // `_API_KEY` suffix would lock the tenant's own integrations.
+    expect(isProtectedSecretWrite('STRIPE_API_KEY')).toBe(false);
   });
 });
