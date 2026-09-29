@@ -1979,7 +1979,7 @@ describe('httpRequestTool', () => {
 
     it('SECURITY: refuses the tenant\'s own PROVIDER key as a credential key', async () => {
       // `isInfraSecret` covers INFRA_SECRET_PATTERNS only; the provider slots live in a
-      // separate set (secret-store.ts PROVIDER_KEY_SLOTS), so the original bound let
+      // separate set (llm/provider-keys.ts PROVIDER_KEY_SLOTS), so the original bound let
       // `username_key: 'ANTHROPIC_API_KEY'` through — the single most valuable key on the
       // instance, aimed at whatever host the profile names. `isProtectedSecretWrite` is
       // the union and is what both credential branches ask.

@@ -6,7 +6,9 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, isInfraSecret, maskSecretPatterns } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns } from './secret-store.js';
+import { LLM_CATALOG } from './llm/catalog.js';
+import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
 
@@ -542,5 +544,29 @@ describe('URL-userinfo rule stays linear', () => {
     for (const scheme of ['postgres', 'amqp', 'mongodb+srv', 'https']) {
       expect(maskSecretPatterns(`${scheme}://user:hunter2@host/db`)).not.toContain('hunter2');
     }
+  });
+});
+
+describe('isProtectedSecretWrite — provider key slots', () => {
+  // The slots are read straight from where they are declared — the model catalog and the
+  // per-provider map — not from the set the guard uses, so a guard that keeps its own
+  // shorter list fails here as soon as the catalog names a slot the list does not.
+  const declaredSlots = [
+    ...Object.values(VAULT_SLOT_BY_PROVIDER),
+    ...LLM_CATALOG.map((e) => e.vault_slot),
+  ].filter((s): s is string => typeof s === 'string');
+
+  it('the catalog declares more than the four first-party slots', () => {
+    // Guards the test itself: with only the four, a hand-kept list would pass.
+    expect(new Set(declaredSlots).size).toBeGreaterThan(4);
+  });
+
+  it.each([...new Set(declaredSlots)])('protects %s against an agent write', (slot) => {
+    expect(isProtectedSecretWrite(slot)).toBe(true);
+  });
+
+  it('does not protect an ordinary API credential name', () => {
+    expect(isProtectedSecretWrite('WOO_CS')).toBe(false);
+    expect(isProtectedSecretWrite('SHOPIFY_TOKEN')).toBe(false);
   });
 });

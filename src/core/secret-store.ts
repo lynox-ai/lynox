@@ -1,6 +1,7 @@
 import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/index.js';
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
+import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -48,26 +49,18 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^CALENDAR_FEED_/,
 ];
 
-/**
- * The vault slots that hold the tenant's OWN LLM credentials.
- *
- * Deliberately NOT in {@link INFRA_SECRET_PATTERNS}: these are agent-VISIBLE by design — the
- * setup wizard writes them and the engine resolves them, and making them infra would change
- * what the model can see. What they must never be is agent-OVERWRITABLE, which is a different
- * question and had no answer: `api_setup fetch_token` picks its own output name, and writing
- * an OAuth token over `ANTHROPIC_API_KEY` destroys a BYOK tenant's access to their own
- * provider. There is no second copy — the wizard stored it once.
- */
-export const PROVIDER_KEY_SLOTS: ReadonlySet<string> = new Set([
-  'ANTHROPIC_API_KEY',
-  'MISTRAL_API_KEY',
-  'OPENAI_API_KEY',
-  'CUSTOM_API_KEY',
-]);
-
 /** True if writing `name` would clobber a credential the tenant cannot recover — either an
- *  infrastructure secret or the slot holding their own provider key. For WRITE gates; read
- *  visibility is still {@link isInfraSecret}'s question. */
+ *  infrastructure secret or a vault slot holding their own LLM provider key. For WRITE gates;
+ *  read visibility is still {@link isInfraSecret}'s question.
+ *
+ *  The provider slots are deliberately NOT in {@link INFRA_SECRET_PATTERNS}: they are
+ *  agent-VISIBLE by design — the setup wizard writes them and the engine resolves them. What
+ *  they must never be is agent-OVERWRITABLE: `api_setup fetch_token` picks its own output
+ *  name, and writing an OAuth token over a provider key destroys the tenant's access to their
+ *  own provider. There is no second copy — the wizard stored it once.
+ *
+ *  The slot set is the one derived from the model catalog (`llm/provider-keys.ts`), not a list
+ *  kept here: a catalog preset that adds a slot is protected without an edit in this file. */
 export function isProtectedSecretWrite(name: string): boolean {
   return isInfraSecret(name) || PROVIDER_KEY_SLOTS.has(name);
 }
