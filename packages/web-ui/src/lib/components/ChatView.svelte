@@ -80,6 +80,7 @@
 	const threadPending = $derived(getThreadPendingCount());
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
+	import { SECRET_SHAPES, looksLikeSecret } from '../utils/secret-shapes.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
@@ -475,12 +476,14 @@
 		};
 	});
 
-	// Mask any secret-like patterns (API keys, tokens) that might leak into display
+	// Mask any secret-like patterns (API keys, tokens) that might leak into display:
+	// the display's own forms plus every shared credential shape.
 	const SECRET_PATTERNS = [
 		/sk-ant-[a-zA-Z0-9_-]{20,}/g,
 		/sk-[a-zA-Z0-9_-]{20,}/g,
 		/tvly-[a-zA-Z0-9_-]{10,}/g,
 		/\d{5,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot token
+		...SECRET_SHAPES.map((s) => new RegExp(s.pattern.source, 'g')),
 	];
 	function maskText(text: string): string {
 		let result = text;
@@ -709,25 +712,6 @@
 		}
 	});
 
-	// Common secret patterns for chat input guard. Coverage matches the
-	// providers we ship with first-class integrations + the prefixes that
-	// most often leak into chat ("here's my Shopify token: shpat_…"). When
-	// a paste matches, the input is rejected with `chat.secret_warning`.
-	const SECRET_INPUT_PATTERNS = [
-		/\bsk-ant-[A-Za-z0-9_-]{20,}/,                       // Anthropic
-		/\bsk-[A-Za-z0-9]{20,}/,                             // OpenAI (sk-, sk-proj-)
-		/\b[sr]k_(live|test)_[A-Za-z0-9]{10,}/,              // Stripe
-		/\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}/, // GitHub
-		/\bAKIA[A-Z0-9]{16}/,                                // AWS access-key
-		/\bAIza[A-Za-z0-9_-]{35}/,                           // Google API key
-		/\bxox[bpoasr]-[A-Za-z0-9-]{10,}/,                   // Slack
-		/\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}/,                    // Shopify (admin / app secret / partner / custom)
-		/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/, // JWT (3 base64 segments — header.payload.signature)
-	];
-
-	function looksLikeSecret(text: string): boolean {
-		return SECRET_INPUT_PATTERNS.some(p => p.test(text));
-	}
 
 	async function handleSecretSave() {
 		if (!pendingSecret || !secretValue.trim()) return;
