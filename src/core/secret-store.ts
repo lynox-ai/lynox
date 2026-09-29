@@ -131,17 +131,22 @@ export function resolveSecretRefsWith(
 }
 
 /**
- * The known shapes of a credential — the one list every secret scan in the engine
- * derives from. A scan picks the kinds it needs rather than keeping its own copy:
- * copies drift, and a copy that lags is a scan that misses the newest key format.
+ * The known shapes of a credential, kept in one place. The detect/mask helpers
+ * below and the http tool's outbound scan read this list rather than keeping
+ * their own copies: copies drift, and a copy that lags misses the newest key
+ * format.
  *
  * - `vendor`: a provider's prefixed key format.
  * - `key-block` / `jwt`: structural credentials with an unmistakable shape.
  * - `contextual`: a credential recognisable only by what surrounds it (URL
  *   userinfo, a `Bearer` header) — ordinary in some places, a leak in others.
+ * - `egress-wide`: a wider spelling of a vendor or JWT form that the outbound
+ *   scan has always used. Kept for that scan only — narrowing it would let
+ *   through something it refuses today, and the detect/mask helpers keep their
+ *   word-bounded forms because the wide ones fire inside ordinary words.
  * - `generic`: any long token. Last on purpose: callers drop it for short text.
  */
-export type SecretShapeKind = 'vendor' | 'key-block' | 'jwt' | 'contextual' | 'generic';
+export type SecretShapeKind = 'vendor' | 'key-block' | 'jwt' | 'contextual' | 'egress-wide' | 'generic';
 export interface SecretShape {
   readonly label: string;
   readonly kind: SecretShapeKind;
@@ -195,6 +200,12 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
   // Private key blocks (PEM / OpenSSH) — any key type, not only RSA.
   { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
+  // The outbound scan's own wider forms: not word-bounded, and a JWT whose
+  // payload segment need not start with `eyJ`. See `egress-wide` above.
+  { label: 'Anthropic API key', kind: 'egress-wide', pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/ },
+  { label: 'OpenAI-style API key', kind: 'egress-wide', pattern: /sk-[a-zA-Z0-9]{20,}/ },
+  { label: 'GitHub token', kind: 'egress-wide', pattern: /gh[po]_[a-zA-Z0-9]{36,}/ },
+  { label: 'JWT token', kind: 'egress-wide', pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./ },
   // Generic Bearer tokens (long base64-ish)
   { label: 'bearer token', kind: 'contextual', pattern: /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/ },
   // Generic long hex/base64 secrets (40+ chars, likely tokens)
@@ -205,7 +216,7 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
  * Common secret patterns — regex-based detection for accidental secret leaks.
  * Used by ask_user guard and chat input warning.
  */
-const SECRET_PATTERNS: RegExp[] = SECRET_SHAPES.map((s) => s.pattern);
+const SECRET_PATTERNS: RegExp[] = SECRET_SHAPES.filter((s) => s.kind !== 'egress-wide').map((s) => s.pattern);
 
 /**
  * Check if text likely contains a secret based on common key patterns.

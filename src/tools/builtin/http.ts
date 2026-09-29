@@ -348,11 +348,11 @@ export { HTTP_TOOL_HOURLY_LIMIT as DEFAULT_HOURLY_LIMIT, HTTP_TOOL_DAILY_LIMIT a
 // === Egress control: detect data exfiltration attempts ===
 
 // Credential shapes that must never appear in an outbound request, taken from the
-// shared list rather than a copy of it. `contextual` (URL userinfo, `Bearer …`)
-// and `generic` (any long token) stay out on purpose: outbound bodies and
-// headers legitimately carry long IDs and auth headers, and blocking those
-// would refuse ordinary API calls. The egress scan takes only shapes that are a
-// credential wherever they appear.
+// shared list rather than a copy of it: the families this scan has covered, in
+// both their shared and their wider `egress-wide` spellings. `contextual` (URL
+// userinfo, `Bearer …`) and `generic` (any long token) stay out on purpose:
+// outbound bodies and headers legitimately carry long IDs and auth headers, and
+// blocking those would refuse ordinary API calls.
 const EGRESS_SHAPE_LABELS: ReadonlySet<string> = new Set([
   'Anthropic API key', 'OpenAI-style API key', 'GitHub token', 'AWS access key',
   'Google API key', 'private key', 'JWT token',

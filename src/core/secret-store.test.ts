@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
 import { LLM_CATALOG } from './llm/catalog.js';
 import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
@@ -604,8 +604,24 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
     expect(Object.keys(WITNESS).sort()).toEqual([...new Set(SECRET_SHAPES.map((s) => s.label))].sort());
   });
 
-  it.each(SECRET_SHAPES.map((s) => [s.label, s] as const))('the %s shape recognises its witness', (_label, shape) => {
-    expect(shape.pattern.test(WITNESS[shape.label]!)).toBe(true);
+  // The outbound scan's wider spellings get their own witnesses: values only the
+  // wide form catches (glued to a word character, a non-`eyJ` JWT payload).
+  const WIDE_WITNESS: Record<string, string> = {
+    'Anthropic API key': 'X_' + 'sk-' + 'ant-api03-' + 'L'.repeat(24),
+    'OpenAI-style API key': 'TOKEN_' + 'sk-' + 'M'.repeat(24),
+    'GitHub token': 'TOKEN_' + 'ghp_' + 'N'.repeat(36),
+    'JWT token': 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.' + 'O'.repeat(16) + '.' + 'P'.repeat(16),
+  };
+
+  it.each(SECRET_SHAPES.map((s) => [`${s.label} (${s.kind})`, s] as const))('the %s shape recognises its witness', (_name, shape) => {
+    const witness = shape.kind === 'egress-wide' ? WIDE_WITNESS[shape.label] : WITNESS[shape.label];
+    expect(witness).toBeDefined();
+    expect(shape.pattern.test(witness!)).toBe(true);
+  });
+
+  it('keeps the wide outbound spellings out of detect/mask — they fire inside words', () => {
+    expect(matchesSecretPattern('see task-abcdefghij1234567890xyz for details')).toBeNull();
+    expect(maskSecretPatterns('see task-abcdefghij1234567890xyz')).toBe('see task-abcdefghij1234567890xyz');
   });
 
   it('keeps the generic catcher last — short-text callers drop the final entry', () => {
@@ -613,7 +629,7 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
     expect(SECRET_SHAPES.filter((s) => s.kind === 'generic')).toHaveLength(1);
   });
 
-  it.each(SECRET_SHAPES.filter((s) => s.kind !== 'generic').map((s) => [s.label]))('masks a %s', (label) => {
+  it.each(SECRET_SHAPES.filter((s) => s.kind !== 'generic' && s.kind !== 'egress-wide').map((s) => [s.label]))('masks a %s', (label) => {
     const witness = WITNESS[label]!;
     expect(maskSecretPatterns(`value: ${witness} end`)).not.toContain(witness);
   });

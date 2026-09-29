@@ -822,6 +822,17 @@ describe('httpRequestTool', () => {
     });
 
     it.each([
+      // The scan's wider spellings still apply: a key glued to a word
+      // character, and a JWT whose payload segment is not `eyJ`.
+      ['Anthropic API key', 'X_' + 'sk-' + 'ant-api03-' + 'Q'.repeat(24)],
+      ['OpenAI-style API key', 'TOKEN_' + 'sk-' + 'R'.repeat(24)],
+      ['GitHub token', 'TOKEN_' + 'ghp_' + 'S'.repeat(36)],
+      ['JWT token', 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.' + 'T'.repeat(16) + '.' + 'U'.repeat(16)],
+    ])('still detects the wider %s spelling', (label, value) => {
+      expect(detectSecretInContent(value)).toBe(label);
+    });
+
+    it.each([
       // Kept out of the egress scan on purpose (see the selection in http.ts).
       'Authorization: Bearer ' + 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
       'id=' + '0123456789abcdef'.repeat(4),
