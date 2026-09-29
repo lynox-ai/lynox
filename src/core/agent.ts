@@ -3947,24 +3947,14 @@ function annotateNonRetryable(message: string): string {
 }
 
 /**
- * The text the model reads when a tool call hits the per-tool wall clock.
- *
- * A timeout is not a failure the model can safely retry. The race that fires it
- * does not cancel the handler, so the call can still finish after the timeout —
- * and a write whose effect had already landed before the clock ran out is not
- * undone by any cancellation either. "timed out" alone reads as "did not
- * happen", and for a call that writes, the model then does it a second time.
- *
- * The advice carries its own case split because the engine has no reliable set
- * of "tools that write" to choose from here: `destructive` means "needs
- * consent", not "has an effect", and the plain bulk writers do not carry it.
- * The model knows whether its own call writes, so the sentence tells it both
- * cases and costs a read-only call nothing.
- *
- * The leading `Tool "<name>" timed out after <n>s` is kept verbatim so anything
- * keyed on that prefix still matches.
+ * The race behind the per-tool timeout only rejects; the handler keeps running,
+ * and a write may already have landed. "timed out" alone reads as "did not
+ * happen", so the model would repeat a write. There is no reliable set of
+ * writing tools to pick from (`destructive` means "needs consent"), so the
+ * sentence carries the write/read split itself. The leading
+ * `Tool "<name>" timed out after <n>s` is kept for anything keyed on it.
  */
-export function toolTimeoutMessage(toolName: string, seconds: number): string {
+function toolTimeoutMessage(toolName: string, seconds: number): string {
   return `Tool "${toolName}" timed out after ${seconds}s, but it may still have run to completion. `
     + `If this call writes, sends, or changes something, check whether it already took effect `
     + `before calling it again — repeating a write that landed does it twice. `

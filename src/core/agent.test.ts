@@ -130,6 +130,16 @@ function thinkingResponse(thinking: string, text: string) {
   };
 }
 
+function toolResultFor(agent: Agent, toolUseId: string): { content: string; is_error?: boolean } {
+  for (const msg of agent.getMessages()) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content as unknown as Array<{ type?: string; tool_use_id?: string; content: string; is_error?: boolean }>) {
+      if (block.type === 'tool_result' && block.tool_use_id === toolUseId) return block;
+    }
+  }
+  throw new Error(`no tool_result for ${toolUseId}`);
+}
+
 function makeTool(name: string, handler?: ToolEntry['handler']): ToolEntry {
   return {
     definition: {
@@ -1241,8 +1251,9 @@ describe('Agent', () => {
     // conversation, not on the UI stream the test above reads. "timed out" alone
     // reads as "did not happen", and the race does not cancel the handler, so a
     // write that already landed would be done a second time on the retry.
-    // Expected text is written out literally: building it with
-    // toolTimeoutMessage() would make the test pass against any sentence.
+    // Expected text is written out literally, in full: building it from the
+    // helper would pass against any sentence, and fragments would pass a
+    // scrambled one.
     it('tells the model a timed-out call may still have acted, and splits write from read', async () => {
       vi.useFakeTimers();
       try {
@@ -1256,14 +1267,14 @@ describe('Agent', () => {
         await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
         await p;
 
-        const content = (agent.getMessages()[2] as { content: Array<{ content: string; is_error?: boolean }> }).content[0]!;
+        const content = toolResultFor(agent, 'tu_hang');
         expect(content.is_error).toBe(true);
-        // The prefix stays verbatim, so anything keyed on it still matches.
-        expect(content.content).toContain('Tool "hang_tool" timed out after 900s');
-        // The case split: a write must be checked, a read may simply retry.
-        expect(content.content).toContain('may still have run to completion');
-        expect(content.content).toContain('check whether it already took effect');
-        expect(content.content).toContain('A call that only reads can simply be retried');
+        expect(content.content).toBe(
+          'Tool "hang_tool" timed out after 900s, but it may still have run to completion. '
+          + 'If this call writes, sends, or changes something, check whether it already took effect '
+          + 'before calling it again — repeating a write that landed does it twice. '
+          + 'A call that only reads can simply be retried.',
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -1283,7 +1294,7 @@ describe('Agent', () => {
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [failTool] });
       await agent.send('use the boom tool');
 
-      const content = (agent.getMessages()[2] as { content: Array<{ content: string; is_error?: boolean }> }).content[0]!;
+      const content = toolResultFor(agent, 'tu_boom');
       expect(content.is_error).toBe(true);
       expect(content.content).toContain('boom');
       expect(content.content).not.toContain('may still have run to completion');
