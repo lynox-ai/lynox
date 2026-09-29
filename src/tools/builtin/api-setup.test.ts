@@ -942,6 +942,98 @@ describe('api_setup tool', () => {
       expect(result).toContain('Created API profile');
     });
 
+    // Every value in a profile that NAMES a vault key gets the same two checks —
+    // the shape, and the refusal to name a credential that belongs to this
+    // instance. The cases below are deliberately spread across the THREE field
+    // groups that used to be checked at three different depths, because the
+    // invariant is a property of `validateProfile`, not of any one group.
+    describe('key names are checked by what they MEAN, wherever they appear', () => {
+      const reject = async (auth: unknown): Promise<string> =>
+        apiSetupTool.handler(
+          { action: 'create', profile: withV2({ auth }) as never },
+          createMockAgent(new ApiStore()),
+        );
+
+      it('refuses a provider key slot in an oauth client slot', async () => {
+        // `ANTHROPIC_API_KEY` is NOT an infrastructure secret — it is
+        // agent-visible by design. What it must not be is handed to a third
+        // party as an OAuth client_secret, which is a disclosure rather than a
+        // write, and is why this check uses `isProtectedSecretWrite`.
+        const out = await reject({
+          type: 'oauth2',
+          vault_keys: ['SHOP_CLIENT_ID'],
+          oauth: { client_secret_key: 'ANTHROPIC_API_KEY' },
+        });
+        expect(out).toContain('auth.oauth.client_secret_key');
+        expect(out).toContain('belongs to this instance');
+      });
+
+      it('refuses an infrastructure secret inside vault_keys, naming the index', async () => {
+        const out = await reject({ type: 'oauth2', vault_keys: ['SHOP_ID', 'LYNOX_HTTP_SECRET'] });
+        expect(out).toContain('auth.vault_keys[1]');
+        expect(out).toContain('belongs to this instance');
+      });
+
+      it('covers a key field that does not exist yet', async () => {
+        // ⚠ THE assertion on the function. The set of key-naming fields is
+        // DERIVED from the `_key` suffix, so a slot added to `ApiAuth` tomorrow
+        // is covered the day it is added. This feeds a field that is not in the
+        // type at all: if someone replaces the derivation with a list of the
+        // five fields that exist today, this is the test that fails — the other
+        // cases above would all still pass.
+        const out = await reject({
+          type: 'bearer',
+          vault_keys: ['SHOP_ID'],
+          some_future_token_key: 'LYNOX_HTTP_SECRET',
+        });
+        expect(out).toContain('auth.some_future_token_key');
+        expect(out).toContain('belongs to this instance');
+      });
+
+      it('applies the shape check to every group too, not only the meaning check', async () => {
+        const out = await reject({
+          type: 'oauth2',
+          vault_keys: ['SHOP_CLIENT_ID'],
+          oauth: { client_id_key: 'not lower case' },
+        });
+        expect(out).toContain('auth.oauth.client_id_key');
+        expect(out).toContain('UPPER_SNAKE_CASE');
+      });
+
+      it('keeps the length bound the two patterns disagreed about', async () => {
+        // The OAuth slots were checked against a local `/^[A-Z][A-Z0-9_]{0,63}$/`
+        // while `VAULT_KEY_PATTERN` had no bound at all — two patterns for one
+        // concept, differing in exactly the part that matters. Unifying them had
+        // to keep the STRICTER half, and nothing asserted that until this line.
+        const out = await reject({ type: 'bearer', vault_keys: [`A${'B'.repeat(64)}`] });
+        expect(out).toContain('auth.vault_keys[0]');
+        expect(out).toContain('1-64 chars');
+      });
+
+      // NEGATIVE CONTROLS. Without these the rule is unfalsifiable: a check that
+      // rejected everything would satisfy every case above.
+      it('accepts key names the user supplied for this API', async () => {
+        const out = await reject({
+          type: 'oauth2',
+          vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+          oauth: { client_secret_key: 'SHOP_CLIENT_SECRET' },
+        });
+        expect(out).toContain('Created API profile');
+      });
+
+      it('does not sweep in a field that merely CONTAINS a protected name', async () => {
+        // `scope` does not end in `_key`, so it names no vault key — it is a
+        // string that happens to hold the same text. The rule is the suffix, not
+        // a substring scan over the profile, and this is what says so.
+        const out = await reject({
+          type: 'oauth2',
+          vault_keys: ['SHOP_CLIENT_ID'],
+          oauth: { scope: 'ANTHROPIC_API_KEY' },
+        });
+        expect(out).toContain('Created API profile');
+      });
+    });
+
     it('rejects invalid auth.basic_format', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(
