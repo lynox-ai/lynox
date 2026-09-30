@@ -211,30 +211,29 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // survived into a sentence about `report` call sites — a number that stayed
   // correct about the set it no longer named.)
   //
-  // ⚠⚠ It is NOT a guarantee, and the first version of this comment said it was —
-  // the third over-claim in a row about this same four-line coupling. It read "a
-  // fourth branch cannot write one without the other, because there is only one way
-  // to say it". A review refuted that from inside this very file: six of its
-  // diagnostics are written as `process.stderr.write`, and a fourth branch in that
-  // idiom warns without setting the flag, with the whole suite green.
+  // ⚠⚠ It is NOT a guarantee, and three versions of this comment claimed it was. The
+  // first read "a fourth branch cannot write one without the other, because there is
+  // only one way to say it" — refuted from inside this very file, where six
+  // `process.stderr.write` call sites are the idiom a fourth diagnostic would be
+  // written in (six CALL SITES; `logRequest` is a latency line, so five are
+  // diagnostics — a right number is easy to quote about a set one member wider).
   //
-  // Six `process.stderr.write` CALL SITES in this file, none inside this function —
-  // that is the idiom a fourth diagnostic would be written in. Six counts call sites,
-  // not diagnostics: `logRequest` is a latency line, so five of the six are
-  // diagnostics. The first version of this sentence said "six of its diagnostics",
-  // a right number quoted about a set one member wider — the same category slip as a
-  // mutation count that is correct for one design and cited for another.
+  // What holds it instead is the test beside this file, and what holds it is a SPY,
+  // not a reading of this text. Five versions of a source scanner were built and
+  // retired: each asked "what does this function SAY" when the question is "what does
+  // it CALL", and each was defeated by something it had not enumerated — the last one
+  // by `process.emitWarning` and by `const { warn } = console`, both measured green
+  // with the whole suite passing. The spies watch `console.error`,
+  // `process.std{out,err}.write` and `process.emitWarning` beside the `console.warn`
+  // one, and they do not care about access shape, aliasing or `bind`.
   //
-  // What exists is a TRIPWIRE, not a proof: the test beside this file scans the body
-  // of this function — comments removed and string content blanked, `report` cut out
-  // by brace matching — for an output channel. It catches the likely accidents and
-  // is defeated by anything it does not enumerate, an alias above all. Calling that
-  // "by construction" is what removed the pressure to think about the idiom the file
-  // actually uses — twice. So it is named for what it is.
-  //
-  // ⚠ And the tripwire is one-sided: it watches for a WARNING without the flag, not
-  // for the flag without a warning. A stray `doubtful = true` would cut the cache to
-  // a minute silently. Filed, not fixed here.
+  // ⚠ Two things the spies do not hold, so nobody has to rediscover them:
+  //   - they are PATH-DEPENDENT. A branch no test walks emits nothing. The static half
+  //     is a lint rule on `process.std*.write` (`no-console` covers `console` only,
+  //     and allows `warn`/`error` anyway); filed as a register row.
+  //   - the OTHER direction. A stray `doubtful = true` outside `report` cuts the cache
+  //     to a minute in silence. Filed too; it costs provider requests, not
+  //     correctness.
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;
