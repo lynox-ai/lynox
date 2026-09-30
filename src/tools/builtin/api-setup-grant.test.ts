@@ -1292,26 +1292,52 @@ describe('an expiring oauth2 token is renewed before the request that needs it',
 
   /**
    * The property the design rests on: the renewal cannot trigger itself. The
-   * exchange runs through `exchangeToken` → `fetchWithValidatedRedirects`, not
-   * through the `http_request` handler, and the attach path has exactly one
-   * caller.
+   * exchange runs through `exchangeToken` → `fetchWithValidatedRedirects` rather
+   * than through the `http_request` handler, so it cannot come back round to the
+   * attach.
    *
-   * ⚠ This reads the SOURCE, so it measures the call graph and not the
-   * behaviour — a proxy, and named as one. It is here because the alternative
-   * is a sentence in a PR body that nothing re-checks: it holds today and
-   * becomes an assumption the moment someone adds a second call site.
+   * ⚠ An earlier version of this test counted mentions of
+   * `attachEngineManagedAuth` in the SOURCE and required exactly three. It was
+   * labelled a proxy, and it behaved like one: `core#1407` added a second,
+   * entirely legitimate caller (`attachStoredCredential`, the bulk worker
+   * effect's entry point) and the count went to four. **The test went red for a
+   * change that is not the defect it exists to catch, and it would have stayed
+   * green for one that is** — re-entry through `httpRequestTool.handler` reaches
+   * the attach without ever naming it.
+   *
+   * So it counts EXCHANGES now, which is the property itself. Recursion would
+   * mint more than one token for one request; nothing else would.
    */
-  it('the attach path keeps exactly one caller, so a renewal cannot re-enter it', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { dirname, join } = await import('node:path');
-    const here = dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(join(here, 'http.ts'), 'utf-8');
-    const mentions = src.split('attachEngineManagedAuth').length - 1;
-    // One declaration, one call, and one mention in the doc comment above the
-    // refusal type. A fourth means a second call site — read it before raising
-    // this number.
-    expect(mentions, 'a new mention of attachEngineManagedAuth appeared — is it a second call site?').toBe(3);
+  it('one renewed request mints exactly one token, so the renewal cannot re-enter', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const { httpRequestTool } = await import('./http.js');
+    await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault({
+        CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+        CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+      })),
+    );
+
+    const exchanges = calls.filter((u) => u.includes('/oauth/token')).length;
+    expect(exchanges, `one request minted ${String(exchanges)} tokens — the renewal re-entered the attach`).toBe(1);
   });
 });
 
@@ -1587,6 +1613,52 @@ describe('the two properties the comments claim, which nothing was checking', ()
     }
     expect(refusal).toMatch(/revoked or expired/);
     expect(calls.some((u) => u.includes('/oauth/token')), 'an exchange was spent on a grant already known to be revoked').toBe(false);
+  });
+
+  /**
+   * Through the REAL seam, not a hand-made fake: `attachStoredCredential` is the
+   * bulk run's worker-effect entry point (core#1407), and it builds
+   * `{ secretStore } as IAgent` by design — a worker effect has no agent to hand
+   * over. It therefore reaches the attach with no tool surface and no session
+   * counters.
+   *
+   * ⚠ This is the test that catches a revert, and it could not be written until
+   * that entry point landed on main — nothing on its own branch reads the field
+   * the gate is about. It is worth more than the predicate test above because it
+   * asserts the interaction at the seam where the two pieces actually meet.
+   *
+   * The temptation on the other side is to make the fabricated agent MORE
+   * complete so the renewal works. Each field added there removes one barrier
+   * here, and the ORDER matters: without `sessionCounters` the exchange throws
+   * before its POST, so today the missing field is what stops an unguarded
+   * egress. A fake that gained `sessionCounters` while still carrying a partial
+   * `toolContext` would POST past the egress controls instead of failing. The
+   * durable answer is an authorization recorded when the run is PLANNED, not
+   * inferred at runtime from an object's shape.
+   */
+  it('spends no exchange for the bulk worker effect, which has no agent at all', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const { calls } = stubBoth();
+    const { attachStoredCredential } = await import('./http.js');
+
+    const headers: Record<string, string> = {};
+    const attached = await attachStoredCredential(
+      'https://api.crm.example/v1/contacts',
+      headers,
+      { apiStore, secretStore: makeVault(SEED) as never },
+    );
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a caller with no agent had a token minted on its behalf').toBe(false);
+    // It still attaches the stored token — the run continues and a dead token
+    // shows up as the provider's own 401, which is what that path reports.
+    expect(attached, 'the stored credential was not attached, so the run lost a capability rather than a renewal').toBe(true);
+    expect(headers['Authorization']).toBe('Bearer OLD_TOKEN');
   });
 
   /**
