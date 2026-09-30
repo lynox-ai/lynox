@@ -591,6 +591,7 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
     'Stripe API key': 'sk_' + 'live_' + 'D'.repeat(20),
     'GitHub token': 'github_pat_' + 'E'.repeat(24),
     'AWS access key': 'AKIA' + 'F'.repeat(16),
+    'Google OAuth token': 'ya29.' + 'G'.repeat(24),
     'Google API key': 'AIza' + 'G'.repeat(35),
     'Slack token': 'xox' + 'b-' + '1234567890-' + 'H'.repeat(12),
     'Shopify token': 'shp' + 'at_' + '0123456789abcdef'.repeat(2),

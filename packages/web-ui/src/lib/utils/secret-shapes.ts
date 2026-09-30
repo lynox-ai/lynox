@@ -26,6 +26,7 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   { label: 'Slack token', kind: 'vendor', pattern: /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/ },
   { label: 'Shopify token', kind: 'vendor', pattern: /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/ },
   { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
+  { label: 'Google OAuth token', kind: 'vendor', pattern: /\bya29\.[A-Za-z0-9_-]{20,}\b/ },
   { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
 ];
 

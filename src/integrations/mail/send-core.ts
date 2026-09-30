@@ -98,7 +98,7 @@ export interface SendCoreBeforeSendCtx {
 
 export type SendCoreResult =
   | { ok: true; result: MailSendResult; followupId: string | null }
-  | { ok: false; status: SendCoreFailureStatus; message: string };
+  | { ok: false; status: SendCoreFailureStatus; message: string; secretLabel?: string | undefined };
 
 export type SendCoreFailureStatus =
   | 'rate_limit'
@@ -139,6 +139,7 @@ export async function sendMail(
       ok: false,
       status: 'secret_in_body',
       message: `outbound message contains a ${secretMatch}; refusing to send`,
+      secretLabel: secretMatch,
     };
   }
 

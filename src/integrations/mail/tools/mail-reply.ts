@@ -86,10 +86,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // mail_send. The reply path is in fact the more likely place for
         // a leak: an agent quoting an inbound mail's "API key:" line back
         // to the sender as part of a reply confirmation.
-        const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
+        const { detectSecretInContent, mailSecretRefusal } = await import('../../../tools/builtin/http.js');
         const secretMatch = detectSecretInContent(input.body);
         if (secretMatch) {
-          return `mail_reply blocked: body appears to contain a ${secretMatch}. Sending secrets via email is not allowed — strip the credential and retry.`;
+          return mailSecretRefusal('mail_reply', secretMatch);
         }
 
         // For the initial fetch, resolve the requested reading account (or default).

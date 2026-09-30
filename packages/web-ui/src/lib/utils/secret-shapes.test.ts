@@ -12,6 +12,7 @@ describe('looksLikeSecret — chat input guard', () => {
     ['GitHub fine-grained token', 'github_pat_' + 'E'.repeat(24)],
     ['Slack token', 'xox' + 'b-' + '1234567890-' + 'F'.repeat(12)],
     ['AWS key', 'AKIA' + 'G'.repeat(16)],
+    ['Google OAuth token', 'ya29.' + 'Z'.repeat(24)],
     ['private key block', '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'],
     ['JWT', 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.eyJ' + 'zdWIiOiIxMjM0NTY3ODkwIn0' + '.' + 'H'.repeat(20)],
     // A key followed directly by a word character is still a key.

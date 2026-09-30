@@ -198,6 +198,8 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   { label: 'Shopify token', kind: 'vendor', pattern: /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/ },
   // JWT (three base64-url segments) — catches OAuth ID tokens etc.
   { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
+  // Google OAuth access token
+  { label: 'Google OAuth token', kind: 'vendor', pattern: /\bya29\.[A-Za-z0-9_-]{20,}\b/ },
   // Private key blocks (PEM / OpenSSH) — any key type, not only RSA.
   { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
   // The outbound scan's own wider forms: not word-bounded, and a JWT whose
