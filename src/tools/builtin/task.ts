@@ -251,6 +251,7 @@ function pendingConsent(task: object): string {
 }
 
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
+  undo: 'compensatable',
   definition: {
     name: 'task_create',
     description: 'Create a task for a concrete deliverable with a deadline or assignee. Not for general notes (use memory_store with status namespace). Only create tasks when the user requests it or a clear action item emerges.',
@@ -422,6 +423,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
 };
 
 export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
+  undo: 'restorable',
   definition: {
     name: 'task_update',
     description: 'Update task fields including its execution schedule. Use `run_at` to reschedule a one-shot task ("move it to tomorrow 9am") or `schedule` to switch a recurring cadence — preferred over delete-and-recreate.',

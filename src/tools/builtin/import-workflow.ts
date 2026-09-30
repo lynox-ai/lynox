@@ -119,6 +119,7 @@ function renderConsent(
  * is injection-scanned by `scanToolResult`, and OUT of TOOL_TIMEOUT_EXEMPT.
  */
 export const importWorkflowTool: ToolEntry<ImportWorkflowInput> = {
+  undo: 'compensatable',
   definition: {
     name: 'import_workflow',
     description:

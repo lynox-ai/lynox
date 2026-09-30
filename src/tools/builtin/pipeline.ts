@@ -945,6 +945,7 @@ interface RunPipelineInput {
 }
 
 export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
+  undo: 'none',
   definition: {
     name: 'run_workflow',
     description:

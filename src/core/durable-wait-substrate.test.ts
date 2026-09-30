@@ -85,7 +85,9 @@ describe('durable wait state — the substrate (§0 E1a/E4/T3/E5)', () => {
     tmpDirs.push(dir);
     const before = new EngineDb(join(dir, 'engine.db'));
     const beforeHistory = new RunHistory(join(dir, 'history.db'));
-    before.getDb().exec("DELETE FROM schema_version WHERE version >= 12; ALTER TABLE triggers DROP COLUMN waiting_until;");
+    // v13 (bulk-run ledger) sits on top of v12, so the rewind undoes it too — otherwise the
+    // replay re-creates its tables over the ones still there.
+    before.getDb().exec("DELETE FROM schema_version WHERE version >= 12; DROP TABLE bulk_targets; DROP TABLE bulk_runs; ALTER TABLE triggers DROP COLUMN waiting_until;");
     beforeHistory.getDb().exec("DELETE FROM schema_version WHERE version >= 53; ALTER TABLE pending_prompts DROP COLUMN trigger_id;");
     const cols = (db: import('better-sqlite3').Database, table: string): string[] =>
       (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);

@@ -240,6 +240,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
   calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  bulkPlanTool: { definition: { name: 'bulk_plan' }, handler: vi.fn() },
+  bulkStatusTool: { definition: { name: 'bulk_status' }, handler: vi.fn() },
   CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
@@ -1393,6 +1395,30 @@ describe('Engine + Session (Orchestrator)', () => {
       } finally {
         // loadConfig() memoises a singleton — reset so the flag does not leak into later tests.
         delete engine.getUserConfig().calendar_enabled;
+      }
+    });
+
+    it('does NOT register the bulk tools while bulk_runs_enabled is off', async () => {
+      const { engine } = await createEngineAndSession();
+      const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+      expect(names).not.toContain('bulk_plan');
+      expect(names).not.toContain('bulk_status');
+      expect(engine.getToolContext().bulkLedger).toBeNull();
+    });
+
+    it('registers the bulk tools with their ledger when bulk_runs_enabled is on', async () => {
+      // Both halves, because each alone is a dead feature: tools without a ledger only
+      // refuse, a ledger without tools is unreachable.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      engine.getUserConfig().bulk_runs_enabled = true;
+      try {
+        await engine.init();
+        const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+        expect(names).toContain('bulk_plan');
+        expect(names).toContain('bulk_status');
+        expect(engine.getToolContext().bulkLedger).not.toBeNull();
+      } finally {
+        delete engine.getUserConfig().bulk_runs_enabled;
       }
     });
 

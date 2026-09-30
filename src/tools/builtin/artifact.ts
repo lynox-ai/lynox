@@ -17,6 +17,9 @@ interface ArtifactDeleteInput {
 }
 
 export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
+  // An update replaces content (the version ring holds the before-image); a save
+  // without `id` only creates.
+  undo: (input) => (input.id ? 'restorable' : 'compensatable'),
   definition: {
     name: 'artifact_save',
     description: 'Save, create, or update a persistent document, note, file, or artifact. Displays inline in the chat AND persists to the Artifacts gallery. PREFER `type: "markdown"` for comparison tables, tier overviews, recommendations, structured prose. Use a data type — `csv`/`tsv` for tabular/spreadsheet data, `json` for structured data, `text` for plain-text files/logs — for anything the user will open in another program (renders as a downloadable file). Reserve `type: "html"` ONLY for genuinely interactive output: dashboards with charts, clickable prototypes, time-series visualizations, mini-apps. Use `id` to update an existing artifact.',
@@ -110,6 +113,7 @@ export const artifactListTool: ToolEntry<ArtifactListInput> = {
 };
 
 export const artifactDeleteTool: ToolEntry<ArtifactDeleteInput> = {
+  undo: 'restorable',
   destructive: { mode: 'data' },
   definition: {
     name: 'artifact_delete',
@@ -172,6 +176,7 @@ export const artifactHistoryTool: ToolEntry<ArtifactHistoryInput> = {
 };
 
 export const artifactRestoreTool: ToolEntry<ArtifactRestoreInput> = {
+  undo: 'restorable',
   definition: {
     name: 'artifact_restore',
     description: 'Restore an artifact to a prior version (from artifact_history). Reversible — the current content is snapshotted first.',

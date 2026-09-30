@@ -25,3 +25,4 @@ export { suggestFollowUpsTool } from './suggest-follow-ups.js';
 export { setThreadContextTool } from './set-thread-context.js';
 export { subjectsMergeTool } from './subjects-merge.js';
 export { mediaProcessTool } from './media-process.js';
+export { bulkPlanTool, bulkStatusTool } from './bulk.js';

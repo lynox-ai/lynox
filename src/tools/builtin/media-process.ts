@@ -212,6 +212,7 @@ function runFfmpeg(args: string[]): Promise<void> {
 }
 
 export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
+  undo: 'compensatable',
   definition: {
     name: 'media_process',
     description:

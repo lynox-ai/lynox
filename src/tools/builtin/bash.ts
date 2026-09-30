@@ -130,6 +130,7 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
 // Input comes from the LLM agent, not from untrusted external users.
 
 export const bashTool: ToolEntry<BashInput> = {
+  undo: 'none',
   definition: {
     name: 'bash',
     // "package management" used to sit in this list, and it was an advertisement

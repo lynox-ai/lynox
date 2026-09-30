@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
@@ -40,6 +40,8 @@ import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+/** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
+const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
@@ -737,6 +739,63 @@ const MIGRATIONS: string[] = [
   // ladder is forward-only and has no down path.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
    ALTER TABLE triggers ADD COLUMN waiting_until TEXT;`,
+
+  // v13 (bulk changes, reversible — PRD bulk-changes-reversible §3.1): the ledger of a
+  // run that applies one rule to N targets. One row per run, one per target, the
+  // before-image of each target taken at dry-run time. `before`/`after_planned` are
+  // customer data and are written through `enc()` like every other content column;
+  // no reader hands them to the model (`bulk_status` returns counters only).
+  //
+  // Deliberately WITHOUT the `atomic` column PRD §3.1 lists: its meaning depends on an
+  // open primitive decision (PRD §9 question 1, option 3 drops it), and nothing in the
+  // dry-run slice reads it. The undo slice adds it once that is decided — an
+  // ADD COLUMN is cheap, a column this forward-only ladder cannot take back is not.
+  //
+  // The approval/contract columns ship here, unused until the approval slice, because
+  // they are the run's own shape (§3.1); leaving them out would mean a second rebuild
+  // of the same table for one feature. `change` is per target and decided at dry-run
+  // time: what the rule would do to it, so a preview and a later apply agree on it.
+  //
+  // `target_key` is encrypted too — a data-store key can be an e-mail address, and
+  // SubjectStore encrypts those. That is why the table is keyed on (run_id, seq)
+  // rather than §3.1's (run_id, target_key): a unique index over a randomly-IV'd
+  // ciphertext enforces nothing, and a deterministic column would hold the key in
+  // clear. Uniqueness of the key within a run is enforced where the plan is built.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (13);
+   CREATE TABLE bulk_runs (
+     id TEXT PRIMARY KEY,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     created_by TEXT,
+     rule_hash TEXT NOT NULL,
+     target_system TEXT NOT NULL,
+     undo TEXT NOT NULL CHECK (undo IN ('restorable','compensatable','none','mixed')),
+     phase TEXT NOT NULL CHECK (phase IN ('planned','previewed','approved','writing','done','aborted','undone')),
+     contract_json TEXT,
+     approved_by TEXT,
+     approved_at TEXT,
+     approval_checksum TEXT,
+     max_targets INTEGER,
+     expires_at TEXT,
+     targets_total INTEGER NOT NULL DEFAULT 0,
+     targets_applied INTEGER NOT NULL DEFAULT 0,
+     targets_failed INTEGER NOT NULL DEFAULT 0,
+     halt_reason TEXT
+   );
+   CREATE INDEX idx_bulk_runs_created ON bulk_runs(created_at);
+   CREATE TABLE bulk_targets (
+     run_id TEXT NOT NULL REFERENCES bulk_runs(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     target_key TEXT NOT NULL,
+     change TEXT NOT NULL CHECK (change IN ('update','create','unchanged','invalid')),
+     undo TEXT CHECK (undo IN ('restorable','compensatable','none')),
+     before TEXT,
+     after_planned TEXT,
+     applied_at TEXT,
+     result TEXT,
+     error TEXT,
+     undone_at TEXT,
+     PRIMARY KEY (run_id, seq)
+   );`,
 ];
 
 /**
@@ -748,6 +807,7 @@ export class EngineDb {
   private db: Database.Database;
   private readonly dbPath: string;
   private readonly _encKey: Buffer | null;
+  private readonly _hashKey: Buffer | null;
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
@@ -764,8 +824,10 @@ export class EngineDb {
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
       this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
+      this._hashKey = null;
     }
   }
 
@@ -912,6 +974,21 @@ export class EngineDb {
     const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
     const tag = cipher.getAuthTag();
     return ENCRYPTED_PREFIX + Buffer.concat([iv, tag, encrypted]).toString('base64');
+  }
+
+  /**
+   * A digest of `parts` that, with a vault key, cannot be dictionary-attacked from a copy
+   * of the file:
+   * HMAC-SHA256 under a subkey derived from the same vault key as `enc()`'s (own HKDF
+   * label), so recomputing it needs that vault key. Without a key it falls back to plain SHA-256 — the same mixed mode as `enc()`,
+   * which stores plaintext then. Parts are fed one at a time, length-prefixed, so a
+   * large input is never joined into one string and no two part lists collide.
+   * @internal — see {@link enc}.
+   */
+  keyedHash(parts: Iterable<string>): string {
+    const h = this._hashKey ? createHmac('sha256', this._hashKey) : createHash('sha256');
+    for (const p of parts) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
+    return h.digest('hex');
   }
 
   /**

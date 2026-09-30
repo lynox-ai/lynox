@@ -1179,6 +1179,16 @@ function deletedMeanwhile(
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+  // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
+  // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
+  // the token at the provider — a vault before-image would restore a dead token. The
+  // rest overwrite a profile or a vault entry. `bootstrap` sits with them without a
+  // check of whether it persists: `restorable` over-requires, it never under-promises.
+  undo: (input) => {
+    if (input.action === 'list' || input.action === 'view') return null;
+    if (input.action === 'fetch_token') return 'none';
+    return 'restorable';
+  },
   definition: {
     name: 'api_setup',
     description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',

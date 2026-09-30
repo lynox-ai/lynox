@@ -58,6 +58,7 @@ function boundPromptText(s: string): string {
 }
 
 export const askSecretTool: ToolEntry<AskSecretInput> = {
+  undo: 'restorable',
   definition: {
     name: 'ask_secret',
     description:

@@ -30,6 +30,7 @@ interface UpdateWorkflowInput {
  * resets the first-run-confirm (the human consented to the OLD steps).
  */
 export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
+  undo: 'restorable',
   definition: {
     name: 'update_workflow_steps',
     description:

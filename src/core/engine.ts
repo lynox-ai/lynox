@@ -87,7 +87,10 @@ import {
   setThreadContextTool,
   subjectsMergeTool,
   mediaProcessTool,
+  bulkPlanTool,
+  bulkStatusTool,
 } from '../tools/builtin/index.js';
+import { BulkLedger } from './bulk-ledger.js';
 import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
@@ -1428,6 +1431,14 @@ export class Engine {
     // absent from the decision space AND from the always-on prefix every turn pays for.
     if (this.userConfig.calendar_enabled === true) {
       this.registry.register(calendarReadTool);
+    }
+
+    // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
+    // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
+    // ledger lives there, and a registered tool with no ledger would only ever refuse.
+    if (this.userConfig.bulk_runs_enabled === true && this.engineDb) {
+      this._toolContext.bulkLedger = new BulkLedger(this.engineDb);
+      this.registry.register(bulkPlanTool).register(bulkStatusTool);
     }
 
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`

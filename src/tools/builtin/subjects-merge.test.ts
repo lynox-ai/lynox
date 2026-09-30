@@ -105,18 +105,45 @@ describe('subjects_merge tool (PR-C3)', () => {
     'cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, ',
   ];
 
-  it('lets no string in this module speak about undoing except the vetted clauses', () => {
-    const file = fileURLToPath(new URL('./subjects-merge.ts', import.meta.url));
-    const sf = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
-
+  // The one literal skipped is the value of the TOOL's own `undo` property — the
+  // undo-contract class (`ToolEntry.undo`), which lives outside `definition`, never reaches
+  // the wire, and says what reversing the effect REQUIRES, not that chat can do it. Skipped
+  // by its place in the tree (a property of `subjectsMergeTool`'s object literal), not by
+  // its text, so the same word anywhere else — including an `undo:` key on some other
+  // object the model reads — still counts.
+  const collectLiterals = (fileName: string, source: string): { plain: string[]; templateParts: string[] } => {
+    const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
     const plain: string[] = [];
     const templateParts: string[] = [];
+    const isToolUndoDeclaration = (node: ts.Node): boolean => {
+      const prop = node.parent;
+      if (!ts.isPropertyAssignment(prop) || prop.initializer !== node) return false;
+      if (!ts.isIdentifier(prop.name) || prop.name.text !== 'undo') return false;
+      const obj = prop.parent;
+      return ts.isObjectLiteralExpression(obj) && ts.isVariableDeclaration(obj.parent) &&
+        ts.isIdentifier(obj.parent.name) && obj.parent.name.text === 'subjectsMergeTool';
+    };
     const walk = (node: ts.Node): void => {
-      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) plain.push(node.text);
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && !isToolUndoDeclaration(node)) plain.push(node.text);
       else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) templateParts.push(node.text);
       ts.forEachChild(node, walk);
     };
     walk(sf);
+    return { plain, templateParts };
+  };
+
+  it('skips only the tool\'s own undo declaration, not an undo: key elsewhere', () => {
+    const { plain } = collectLiterals('probe.ts', [
+      "export const subjectsMergeTool = { undo: 'restorable', definition: { name: 'x' } };",
+      "const result = { undo: 'you can reverse this merge any time' };",
+    ].join('\n'));
+    expect(plain).not.toContain('restorable');
+    expect(plain).toContain('you can reverse this merge any time');
+  });
+
+  it('lets no string in this module speak about undoing except the vetted clauses', () => {
+    const file = fileURLToPath(new URL('./subjects-merge.ts', import.meta.url));
+    const { plain, templateParts } = collectLiterals(file, readFileSync(file, 'utf-8'));
     const literals = [...plain, ...templateParts];
 
     // Guards the guard: if the collector silently stopped seeing one KIND of string,

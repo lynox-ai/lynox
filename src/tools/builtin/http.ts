@@ -971,6 +971,17 @@ interface HttpRequestInput {
 }
 
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
+  // PUT/PATCH overwrite a resource that a prior GET can image. POST is `none`: it is as
+  // often an RPC (send, charge, trigger) as a create, and only the response can tell —
+  // a POST that returned a created id is compensatable per TARGET, which is the bulk
+  // ledger's call, not this declaration's. DELETE is `none`: re-creating a remote
+  // resource from its image is not generally possible (the id is the server's).
+  undo: (input) => {
+    const method = (input.method ?? 'GET').toUpperCase();
+    if (method === 'PUT' || method === 'PATCH') return 'restorable';
+    if (method === 'POST' || method === 'DELETE') return 'none';
+    return null;
+  },
   definition: {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only

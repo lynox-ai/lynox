@@ -22,6 +22,7 @@ interface CreateInput {
 }
 
 export const dataStoreCreateTool: ToolEntry<CreateInput> = {
+  undo: 'compensatable',
   definition: {
     name: 'data_store_create',
     description: 'Set up a table for structured, quantitative data — metrics, KPIs, records with typed columns. Data persists across sessions. NOT for qualitative knowledge or preferences (use memory_store).',
@@ -123,6 +124,7 @@ interface InsertInput {
 }
 
 export const dataStoreInsertTool: ToolEntry<InsertInput> = {
+  undo: 'restorable',
   definition: {
     name: 'data_store_insert',
     description: 'Add or update rows in a data table. Cleans up duplicates automatically when a unique key is set. Max 1000 rows per call.',
@@ -376,6 +378,7 @@ interface DeleteInput {
 }
 
 export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
+  undo: 'restorable',
   destructive: { mode: 'data' },
   definition: {
     name: 'data_store_delete',
@@ -427,6 +430,7 @@ interface DropInput {
 }
 
 export const dataStoreDropTool: ToolEntry<DropInput> = {
+  undo: 'restorable',
   destructive: { mode: 'data' },
   definition: {
     name: 'data_store_drop',

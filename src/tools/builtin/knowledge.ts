@@ -62,6 +62,8 @@ interface RememberInput {
 }
 
 export const rememberTool: ToolEntry<RememberInput> = {
+  // Not a pure create: a near-duplicate returns the EXISTING entry and `pin` updates it.
+  undo: 'restorable',
   definition: {
     name: 'remember',
     description:
@@ -301,6 +303,7 @@ interface BlockEditInput {
 }
 
 export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
+  undo: 'restorable',
   requiresConfirmation: true,
   // A standing-rule change that loads into EVERY turn is destructive-class — defense in
   // depth so isDangerous flags it. The hard refusal in autonomous mode lives in the handler
@@ -393,6 +396,7 @@ interface RetireInput {
 }
 
 export const memoryRetireTool: ToolEntry<RetireInput> = {
+  undo: 'restorable',
   requiresConfirmation: true,
   // H8: retiring knowledge is destructive-class (it leaves the active set). The
   // autonomous hard-refuse lives in the handler, mirroring memory_block_edit.

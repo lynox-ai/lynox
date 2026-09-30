@@ -114,7 +114,29 @@ export interface ToolEntry<TInput = unknown> {
    * stacks with a later tool-availability classifier.
    */
   detailedGuidance?: string | undefined;
+  /**
+   * What reversing this tool's effect takes — the declaration half of the undo
+   * contract (PRD bulk-changes-reversible §1.4). A SEPARATE axis from
+   * `destructive`: `destructive` says "needs consent", `undo` says "how the
+   * effect comes back". The tools that write most (`write_file`, `http_request`)
+   * carry no `destructive` at all, so the two must not be folded.
+   *
+   * - `restorable`    — the effect overwrites or removes existing state; putting
+   *                     it back needs a before-image of that state.
+   * - `compensatable` — the effect only creates; reversing it deletes what was
+   *                     created, no before-image needed.
+   * - `none`          — lynox cannot reverse it (sent, executed, left the system).
+   *
+   * A function classifies per input and returns `null` for an input with no
+   * effect (an HTTP GET). The declaration states what reversal REQUIRES, not
+   * that anything was captured: an ordinary call records no before-image
+   * anywhere (only a bulk run's ledger does), so `restorable` is not a promise
+   * that this particular call can be undone.
+   */
+  undo?: UndoKind | ((input: TInput) => UndoKind | null) | undefined;
 }
+
+export type UndoKind = 'restorable' | 'compensatable' | 'none';
 
 // === 4.3 Stream Event Union ===
 

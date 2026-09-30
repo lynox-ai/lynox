@@ -99,7 +99,10 @@ const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit', 
 // the prefix a default tenant pays does not carry it — measuring it here would budget for a cost
 // nobody is charged, and would quietly hide the real growth of the tools that ARE always on.
 // When the flag becomes the default, move this name out and re-baseline in the same commit.
-const FLAG_GATED_TOOL_NAMES = new Set(['calendar_read']);
+// `bulk_plan`/`bulk_status` are the same case behind `bulk_runs_enabled` (ships OFF): the dry
+// run lands before the approval and apply slices, so no default tenant is offered a tool that
+// can only ever preview.
+const FLAG_GATED_TOOL_NAMES = new Set(['calendar_read', 'bulk_plan', 'bulk_status']);
 
 /** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
  *  swap tools and the flag-gated ones — see above; neither is on a default turn's wire). */

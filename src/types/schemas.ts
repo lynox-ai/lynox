@@ -256,6 +256,10 @@ export const LynoxUserConfigSchema = z.object({
   // warning about this exact trap; the calendar row was added to config.ts and the env bridge
   // and missed here.
   calendar_enabled: z.boolean().optional(),
+  // Bulk runs (bulk_plan/bulk_status), operator-only, ships OFF. Here for the same reason as
+  // the calendar row above: the schema is `.strict()`, and a key the type knows but this
+  // schema does not makes readConfigFile drop the WHOLE config.
+  bulk_runs_enabled: z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one
