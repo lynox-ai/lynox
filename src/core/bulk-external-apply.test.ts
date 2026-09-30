@@ -111,6 +111,7 @@ async function approvedRun(rows: { target: string; after: unknown }[], c: Extern
     createdBy: 't', host: HOST, targets, contract: mintBulkContract(HOST, targets.filter((t) => !('invalid' in t)).map((t) => t.key)),
   });
   if (!out.ok) throw new Error(out.reason);
+  if (!ledger.resumePreview(out.status.id).ok) throw new Error('not started');
   const preview = await runBulkPreview(out.status.id, { ledger, clientFor: () => c, budget: new BulkHostBudget(10_000, 0), sleep: noSleep });
   if (preview.status !== 'done') throw new Error(`preview ${preview.status}`);
   const approved = ledger.approve(out.status.id, { checksum: ledger.computeChecksum(out.status.id)! });

@@ -6018,8 +6018,9 @@ describe('LynoxHTTPApi', () => {
       const planned = bulkLedger.recordExternalPlan({ createdBy: 't', host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
-      bulkLedger.recordRead(id, 0, { before: { price: '2' } });
-      bulkLedger.finishPreview(id);
+      expect(bulkLedger.resumePreview(id).ok).toBe(true);
+      expect(bulkLedger.recordRead(id, 0, { before: { price: '2' } })).toBe(true);
+      expect(bulkLedger.finishPreview(id)).toBe(true);
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
       store.register({
