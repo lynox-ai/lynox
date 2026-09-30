@@ -1501,9 +1501,9 @@ function syncSpawnContext(msg: ChatMessage): void {
 
 /** `deferErrorDisposition`: do NOT decide the turn's fate on an `error` event —
  *  show it, but leave "is this turn dead" to the caller, which asks the server.
- *  Only `_executeRun` passes it (it owns the post-stream probe); `reattachRun`
- *  has no such probe, so it keeps the previous immediate behaviour rather than
- *  silently losing its failure marking. */
+ *  Both stream readers pass it: `_executeRun` probes `/runs/active` and the
+ *  transcript after the stream; `reattachRun` reconciles to the persisted
+ *  transcript after the stream's `done`. */
 function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number, opts?: { deferErrorDisposition?: boolean }): void {
 	// Any event arriving counts as proof the connection is alive. Drives the
 	// "Verbindung scheint langsam" hint in StreamingActivityBar when the gap
@@ -3054,7 +3054,14 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
 						ensureAssistant();
-						handleSSEEvent(eventType, data, assistantIdx, userIdx);
+						// An `error` here does not settle the turn, as in `_executeRun`. This
+						// stream ends with `done` whenever the run ends, however it ended, and
+						// the reconcile below then adopts the persisted transcript — which
+						// carries a failure note where the run persisted one (the toast and
+						// banner raised in the call below report the event either way).
+						// Settling on the event would mark a turn that is still running as
+						// failed and drop its bubble mid-stream.
+						handleSSEEvent(eventType, data, assistantIdx, userIdx, { deferErrorDisposition: true });
 						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed */ }
 					eventType = '';

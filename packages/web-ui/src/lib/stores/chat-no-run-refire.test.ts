@@ -18,11 +18,11 @@ import { fileURLToPath } from 'node:url';
  * explicit tap-to-retry (chat.send_failed renders the failed user bubble as
  * a resend button).
  *
- * Like chat-detach-reset.test.ts this is a source-level guard, not a
- * behavioural one: chat.svelte.ts is a Svelte 5 rune module and the root
- * vitest config carries no svelte plugin, so importing it throws
- * (`$state is not defined`). Anchors THROW when they get lost, so a rename
- * turns this guard red instead of quietly making it vacuous.
+ * Like chat-detach-reset.test.ts this is a source-level guard, written when
+ * the root vitest config could not import a Svelte rune module. It now can;
+ * new store guarantees are tested by driving events through the store (see
+ * chat-error-disposition.svelte.test.ts). Anchors THROW when they get lost, so
+ * a rename turns this guard red instead of quietly making it vacuous.
  */
 
 const SRC = readFileSync(
@@ -172,53 +172,9 @@ describe('chat store — no client-side run re-fire', () => {
 		expect(refire).toBeGreaterThan(decision);
 	});
 
-	it('an engine `error` does not decide the turn is dead — the server does', () => {
-		// THE regression this PR's second half exists for (2026-08-23, thread
-		// 22edd8ee). `stream.ts` emits `type:'error'` for an unparsable tool
-		// input, substitutes `input:{}` and CONTINUES the turn; `agent.ts` emits
-		// the SAME event type for a genuinely dead run. The wire does not
-		// distinguish them, so the client must not guess: it shows the error and
-		// asks the server what became of the turn.
-		//
-		// Measured cost of guessing: run e2684d2e ran 152 s, spawned four
-		// sub-agents and finished `completed`/`end_turn`, while its bubble read
-		// "not sent — tap to retry". The only offered action was buying it twice.
-
-		// 1) The read loop must not count `error` as a terminal end …
-		const body = executeRunBody();
-		expect(body).toMatch(/if \(eventType === 'done'\) sawTerminal = true;/);
-		expect(body).toMatch(/else if \(eventType === 'error'\) sawErrorEvent = true;/);
-
-		// 2) … and `_executeRun` must hand the turn's fate to the probe rather
-		// than let the event handler settle it inline. Asserted on the ARGUMENT:
-		// flipping it to false restores the exact old behaviour while every
-		// other assert in this file stays green.
-		expect(body).toContain('{ deferErrorDisposition: true }');
-
-		// 3) The handler must actually honour the flag — the opt-in is worthless
-		// if the disposition runs anyway. Pin the guard AND what it guards.
-		const h = SRC.indexOf('function handleSSEEvent(');
-		if (h < 0) throw new Error('anchor lost: handleSSEEvent');
-		const errCase = SRC.indexOf("case 'error': {", h);
-		if (errCase < 0) throw new Error('anchor lost: error case');
-		const errBody = SRC.slice(errCase, errCase + 2200);
-		expect(errBody).toContain('if (!opts?.deferErrorDisposition) {');
-		const guard = errBody.indexOf('if (!opts?.deferErrorDisposition) {');
-		const mark = errBody.indexOf('!.failed = true', guard);
-		expect(mark).toBeGreaterThan(guard);
-		// The toast is NOT behind the guard: the user still learns something went
-		// wrong immediately. Only the "this turn is dead" verdict is deferred.
-		expect(errBody.indexOf('addToast(')).toBeLessThan(guard);
-
-		// 4) The OTHER caller keeps the immediate behaviour on purpose —
-		// `reattachRun` has no post-stream probe, so deferring there would lose
-		// the failure marking entirely instead of relocating it.
-		const re = SRC.indexOf('async function reattachRun(');
-		if (re < 0) throw new Error('anchor lost: reattachRun');
-		const reBody = SRC.slice(re, SRC.indexOf('\nexport ', re + 40));
-		expect(reBody).toContain('handleSSEEvent(eventType, data, assistantIdx, userIdx);');
-		expect(reBody).not.toContain('deferErrorDisposition');
-	});
+	// "An engine `error` does not decide the turn is dead — the server does" used
+	// to be asserted here on the source text. It is now driven through the store,
+	// on both paths that read a run's stream: chat-error-disposition.svelte.test.ts.
 
 	it('a deliberate stop is never mistaken for a transport drop', () => {
 		// The server ends an aborted stream WITHOUT a done/error terminal, and
