@@ -22,7 +22,7 @@ import {
 } from '../core/oauth-state-cookie.js';
 import { createPkcePair } from '../core/oauth-pkce.js';
 import {
-  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused,
+  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey } from '../core/api-store.js';
@@ -7713,7 +7713,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -7741,11 +7741,40 @@ export class LynoxHTTPApi {
       //
       // Without this the exception reaches the dispatch's catch-all, which
       // answers JSON while every other answer from this route is a page.
+      //
+      // The expiry rides in the same try for the same reason. This route is the
+      // SECOND writer of `auth.oauth.token_expires_at`; `api_setup fetch_token` is
+      // the first. Until this line it wrote the token and said nothing about its
+      // lifetime, so a profile that had been through a `fetch_token` kept that
+      // older token's stamp — and a reader of the field takes a stamp in the past
+      // for "renew now", on every request, forever. `tokenExpiryFrom` returns
+      // `'unknown'` when the provider omitted `expires_in`, and the stamp is then
+      // REMOVED rather than left standing, because "we do not know" is true and
+      // "it died at 14:02" is not.
+      //
+      // Written after the tokens, not before: the stamp describes the token that
+      // was just stored. If this save is the one that throws, the page below
+      // already says the connection is incomplete and that a new link heals it —
+      // the save is an upsert, so the retry overwrites whatever was left behind.
       try {
         secretStore.set(accessTokenKey(signed.profileId), accessToken);
         if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
           secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
         }
+        const expiry = tokenExpiryFrom(parsed.expires_in);
+        const oauthNext = { ...profile.auth?.oauth };
+        if (expiry === 'unknown') delete oauthNext.token_expires_at;
+        else oauthNext.token_expires_at = expiry;
+        // `apisDir` for the same reason `api_setup` passes it: an engine without
+        // an `engine.db` has no ConnectionStore, and `save` then persists only
+        // when it is told where to. Without it the stamp would live in memory
+        // until the next restart, which is the shape of a fix that works in a
+        // test and not on disk.
+        const { getLynoxDir } = await import('../core/config.js');
+        apiStore.save(
+          { ...profile, auth: { ...profile.auth, oauth: oauthNext } } as typeof profile,
+          join(getLynoxDir(), 'apis'),
+        );
       } catch {
         sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');
         return;

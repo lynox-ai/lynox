@@ -54,6 +54,42 @@ export const TOKEN_EXCHANGE_TIMEOUT_MS = 15_000;
 /** A token response is small JSON; this is the ceiling a hostile one is read to. */
 export const TOKEN_BODY_MAX_BYTES = 64 * 1024;
 
+/**
+ * When a stored access token dies, as an absolute epoch-millisecond stamp — or
+ * `'unknown'` when the provider did not say.
+ *
+ * `'unknown'` is a value, not an absence, and that is the point. Every writer of
+ * an access token has to say something about its lifetime, because the previous
+ * answer described the previous token: a writer that stays silent leaves a stamp
+ * belonging to a token that is gone. Once anything READS this field, a stale
+ * stamp in the past means "renew" forever.
+ */
+export type TokenExpiry = number | 'unknown';
+
+/**
+ * Turn a token response's `expires_in` into a {@link TokenExpiry}.
+ *
+ * One function because there are two writers of the access token — the
+ * `api_setup fetch_token` exchange and the authorization-code callback — and a
+ * bound that lives in two places holds in one of them. `expires_in` is
+ * RECOMMENDED, not REQUIRED (RFC 6749 §5.1), so a conformant provider may omit
+ * it and every caller must handle that.
+ *
+ * Bounded deliberately: an absurd value is not merely wrong. `1e308 * 1000` is
+ * `Infinity`, which `JSON.stringify` writes as `null` into both backing stores —
+ * a null in a `number | undefined` field, which a reader takes for "already
+ * expired". One year is far past any real token and still a finite integer.
+ * Anything outside the bound is `'unknown'` rather than clamped: a number we do
+ * not believe should not be presented as one we do.
+ */
+export function tokenExpiryFrom(expiresIn: unknown, now: number = Date.now()): TokenExpiry {
+  const MAX_TOKEN_LIFETIME_S = 366 * 24 * 60 * 60;
+  return typeof expiresIn === 'number' && Number.isSafeInteger(expiresIn)
+    && expiresIn > 0 && expiresIn <= MAX_TOKEN_LIFETIME_S
+    ? now + expiresIn * 1000
+    : 'unknown';
+}
+
 declare const vetted: unique symbol;
 
 /**

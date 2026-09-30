@@ -396,6 +396,58 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeGreaterThan(Date.now());
   });
 
+  /**
+   * A response with no usable `expires_in` must CLEAR the stored expiry, not keep
+   * the previous one.
+   *
+   * This is a latch if it keeps it, and the latch is what makes it worth a test
+   * rather than a comment. The old value describes a token that has just been
+   * replaced. Leave it in place and the profile permanently claims an expiry in
+   * the past — so a lazy refresh, which reads exactly this field, exchanges a
+   * token on every single request from then on: one secret write, one profile
+   * save and one outbound POST each time, against a session budget of 100, and on
+   * a provider that rotates its refresh token, a burned refresh token per request.
+   *
+   * `expires_in` is RECOMMENDED, not REQUIRED, in RFC 6749 §5.1, so a provider
+   * that omits it is conformant and this is not an exotic response. The absent
+   * field is the honest state: the reader in `http.ts` renews only for a numeric
+   * expiry, so "unknown" correctly means "do not plan against this".
+   */
+  it('clears a stale expiry when the response carries no expires_in', async () => {
+    const store = new ApiStore();
+    const past = Date.now() - 60_000;
+    store.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-2' }));
+
+    await fetchToken(agent);
+
+    const vaulted = (agent as unknown as { secretStore: MockVault }).secretStore;
+    expect(vaulted.peek('CRM_API_ACCESS_TOKEN'), 'the new token was not stored, so this says nothing about the expiry').toBe('at-2');
+    expect(store.get('crm-api')?.auth?.oauth?.token_expires_at, 'the expiry of the REPLACED token was kept, which reads as "already expired" forever').toBeUndefined();
+  });
+
+  /**
+   * The same, for a value that is present but unusable. `expires_in` arriving as
+   * the JSON string `"3600"` is the shape that made this worth splitting out: it
+   * is truthy, it looks right in a log, and it fails `Number.isSafeInteger`, so it
+   * takes the identical path as a missing field.
+   */
+  it('clears a stale expiry when expires_in is present but not a usable number', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: Date.now() - 60_000 } },
+    }));
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-3', expires_in: '3600' }));
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeUndefined();
+  });
+
   it('stamps nothing when no refresh token is in play', async () => {
     const store = new ApiStore();
     store.register(crmProfile({}, 'client_credentials'));
