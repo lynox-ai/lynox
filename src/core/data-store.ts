@@ -481,8 +481,9 @@ export class DataStore {
         outcome = 'inserted';
       }
       this.db.prepare(sql).run(now, now, ...values);
-      const countAfter = (this.db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get() as { cnt: number }).cnt;
-      this.db.prepare('UPDATE ds_collections SET record_count = ?, updated_at = ? WHERE name = ?').run(countAfter, now, collection);
+      // One row in or none: the count moves by the probe's answer, no table scan per write.
+      this.db.prepare('UPDATE ds_collections SET record_count = record_count + ?, updated_at = ? WHERE name = ?')
+        .run(exists ? 0 : 1, now, collection);
     })();
     return outcome;
   }

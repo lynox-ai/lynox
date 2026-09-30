@@ -14,7 +14,7 @@ import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TriggerRecord, PromptText } from '../types/index.js';
+import type { TriggerRecord, PromptText, BulkTriggerEffect } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -624,7 +624,7 @@ export class WorkerLoop {
    * or claims of a loop that died) is re-armed shortly; every other outcome ends the
    * trigger — a halt waits for a human to resume it through the approval route.
    */
-  private async executeBulk(task: TriggerRecord, effect: 'bulk_apply' | 'bulk_undo'): Promise<void> {
+  private async executeBulk(task: TriggerRecord, effect: BulkTriggerEffect): Promise<void> {
     const ledger = this.engine.getBulkLedger();
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);

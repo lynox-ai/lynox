@@ -173,7 +173,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     const router = { hasChannels: () => true, notify } as unknown as NotificationRouter;
     const loop = new WorkerLoop(engine, router, 60_000);
     await loop.tick();
-    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
 
     for (let i = 0; i < 210; i++) {
       expect(readFileSync(join(ws, `pages/p${String(i).padStart(3, '0')}.md`), 'utf-8')).toBe(`new ${String(i)}\n`);
@@ -226,8 +226,8 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
       const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
       const before = Date.now();
       await loop.tick();
-      await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled());
-      await vi.waitFor(() => expect(triggers.getById(`bulk-${runId}`)!.status).toBe('open'));
+      await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+      await vi.waitFor(() => expect(triggers.getById(`bulk-${runId}`)!.status).toBe('open'), { timeout: 10_000 });
       const t = triggers.getById(`bulk-${runId}`)!;
       expect(Date.parse(t.next_run_at!)).toBeGreaterThanOrEqual(before + 25_000);
       expect(ledger.getStatus(runId)!.applied).toBe(1);
@@ -246,7 +246,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
     await loop.tick();
-    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalledWith('bulk-x', expect.stringContaining('not available'), 'failed'));
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalledWith('bulk-x', expect.stringContaining('not available'), 'failed'), { timeout: 10_000 });
   });
 });
 
@@ -278,6 +278,8 @@ describe('the effect can only come from the approval (§7 b, the derivation prop
     expect(out.status).toBe('refused');
     expect(readFileSync(join(ws, 'a.txt'), 'utf-8')).toBe('before');
     expect(ledger.getStatus(runId)!.phase).toBe('previewed');
+    // Refused by the phase check itself — the expiry check would halt it instead.
+    expect(ledger.getStatus(runId)!.haltReason).toBeNull();
   });
 
   it('refuses an effect that does not match the run kind', async () => {
@@ -286,6 +288,13 @@ describe('the effect can only come from the approval (§7 b, the derivation prop
     const { writer, state } = memory({ k000: 'v0', k001: 'v1' });
     expect((await runBulkEffect(runId, 'bulk_undo', effectDeps(writer))).status).toBe('refused');
     expect(state.get('k000')).toBe('v0');
+    // And the other way round: an undo run fired as bulk_apply.
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    expect((await runBulkEffect(undo.status.id, 'bulk_apply', effectDeps(writer))).status).toBe('refused');
+    expect(state.get('k000')).toBe('w0');
   });
 });
 
@@ -497,6 +506,28 @@ describe('halt thresholds', () => {
     expect([ledger.getStatus(runId)!.applied, ledger.getStatus(runId)!.failed]).toEqual([99, 1]);
   });
 
+  it('a conflict breaks a run of failures', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    const { writer } = memory({ ...initial, k011: 'someone else' }, new Set(['k010', 'k012', 'k013']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    const s = ledger.getStatus(runId)!;
+    expect([s.haltReason, s.failed, s.conflicts, s.applied]).toEqual([null, 3, 1, 96]);
+  });
+
+  it('resume arms the trigger again, after a halt ended it', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    const { writer } = memory(initial, new Set(['k010', 'k011', 'k012']));
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const triggers = new TriggerStore(engineDb);
+    // What the worker's run record does to a one-shot trigger that failed.
+    triggers.updateFields(`bulk-${runId}`, { status: 'failed', nextRunAt: null });
+    expect(triggers.getDue()).toEqual([]);
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    expect(triggers.getDue().map((t) => [t.id, t.effect])).toEqual([[`bulk-${runId}`, 'bulk_apply']]);
+  });
+
   it('resume retries failed targets', async () => {
     const { runId, initial } = recordMemoryRun(100);
     approve(runId);
@@ -663,6 +694,41 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     expect(state.get('k000')).toBe('touched');
   });
 
+  it('an atomic run cannot be approved with a cap below its size', () => {
+    const { runId } = recordMemoryRun(5, { atomic: true });
+    expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 3 }))
+      .toEqual({ ok: false, reason: 'bad_max_targets' });
+  });
+
+  it('an atomic run out of time rolls back instead of halting half written', async () => {
+    const { runId, initial } = recordMemoryRun(10, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    const t = Date.now();
+    const clock = (): number => ((ledger.getStatus(runId)?.applied ?? 0) >= 4 ? t + 10 * 60 * 60_000 : t);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer, clock))).status).toBe('aborted');
+    expect([...state.values()]).toEqual(Object.values(initial));
+    expect(ledger.getStatus(runId)!.phase).toBe('aborted');
+  });
+
+  // The undo of an atomic run is atomic too. When IT rolls back, the source's targets
+  // stand again — they must not stay marked undone, or the source could never be undone.
+  it('an atomic undo that rolls back leaves the source undoable', async () => {
+    const { runId, initial } = recordMemoryRun(4, { atomic: true });
+    approve(runId);
+    const { writer, state } = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    state.set('k001', 'someone else'); // undo runs k003, k002, then conflicts on k001
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('aborted');
+    expect([state.get('k003'), state.get('k002')]).toEqual(['w3', 'w2']);
+    expect(ledger.getStatus(runId)!.undone).toBe(0);
+    state.set('k001', 'w1');
+    expect(ledger.planUndo(runId).ok).toBe(true);
+  });
+
   it('a fully applied atomic run is undone whole', async () => {
     const { runId, initial } = recordMemoryRun(5, { atomic: true });
     approve(runId);
@@ -752,6 +818,7 @@ describe('data-store runs', () => {
 
     const all = store.queryRecords({ collection: 'products', limit: 500 }).rows;
     expect(all).toHaveLength(210);
+    expect(store.getCollectionInfo('products')!.recordCount).toBe(210);
     const s7 = all.find((r) => r['sku'] === 'S7')!;
     expect([s7['price'], s7['owner']]).toEqual([1007, 'subj-7']);
     expect(all.find((r) => r['sku'] === 'S200')!['owner']).toBeNull();

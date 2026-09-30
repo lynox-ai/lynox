@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type { DataStore } from './data-store.js';
+import type { BulkTriggerEffect } from '../types/index.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, canonicalJson,
@@ -24,7 +25,7 @@ import {
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, resolveBulkFilePath } from './bulk-plan.js';
 
-export type BulkEffect = 'bulk_apply' | 'bulk_undo';
+export type BulkEffect = BulkTriggerEffect;
 
 /**
  * How the loop reaches a target system. `read` returns the target's current state;
@@ -49,7 +50,7 @@ export interface BulkEffectOutcome {
 export const BULK_RETRY_DELAY_MS = 30_000;
 /** Floor of a run's time budget, whatever its size. */
 const MIN_RUN_BUDGET_MS = 60_000;
-/** Halt thresholds (rafael 30.9.): whichever comes first. */
+/** Halt thresholds (PRD §3.4): whichever comes first. */
 const HALT_FAILURE_SHARE = 0.05;
 const HALT_CONSECUTIVE = 3;
 
@@ -92,20 +93,20 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   }
   if (run.expiresAt === null || now() > Date.parse(run.expiresAt)) {
     ledger.halt(runId, BULK_HALT_REASONS.expired);
-    return { status: 'refused', summary: summarize(ledger, runId, 'Bulk run halted: the approval expired.') };
+    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.expired}.`) };
   }
   if (run.approvalChecksum === null || ledger.computeChecksum(runId) !== run.approvalChecksum) {
     ledger.halt(runId, BULK_HALT_REASONS.checksum);
-    return { status: 'refused', summary: summarize(ledger, runId, 'Bulk run halted: it no longer matches what was approved.') };
+    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.checksum}.`) };
   }
   const writer = deps.writerFor(run);
   if (!writer) {
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
-    return { status: 'refused', summary: summarize(ledger, runId, 'Bulk run halted: the target system is not available.') };
+    return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`) };
   }
   ledger.setPhase(runId, ['approved'], 'writing');
 
-  const writingTotal = ledger.countWritingTargets(runId);
+  const writingTotal = ledger.countWriting(runId);
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
@@ -121,11 +122,13 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     }
     if (current.maxTargets !== null && current.applied >= current.maxTargets) {
       ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run halted: the approved maximum is reached.') };
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
     }
     if (now() > deadline) {
+      // An atomic run must not stop half written: out of time, it rolls back instead.
+      if (run.atomic) return rollBack(ledger, writer, run, now);
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run halted: time budget used up.') };
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.timeBudget}.`) };
     }
     if (!ledger.claimTarget(runId, seq, now())) continue;
     const target = ledger.loadTarget(runId, seq);
@@ -139,16 +142,20 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     }
     ledger.recordFailed(runId, seq, outcome.kind);
     if (run.atomic) return rollBack(ledger, writer, run, now);
-    if (outcome.kind === 'conflict') continue;
+    if (outcome.kind === 'conflict') {
+      // A conflict is not a failure, and it breaks a run of failures.
+      consecutive = 0;
+      continue;
+    }
     consecutive++;
     const failed = ledger.getRunForApply(runId)?.failed ?? 0;
     if (consecutive >= HALT_CONSECUTIVE) {
       ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run halted: three targets in a row failed.') };
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.consecutiveFailures}.`) };
     }
     if (failed > writingTotal * HALT_FAILURE_SHARE) {
       ledger.halt(runId, BULK_HALT_REASONS.failureRate);
-      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run halted: more than 5 % of the targets failed.') };
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.failureRate}.`) };
     }
   }
 
@@ -185,7 +192,7 @@ async function rollBack(ledger: BulkLedger, writer: TargetWriter, run: BulkRunFo
       const cur = await writer.read(t.key);
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
-      ledger.recordRolledBack(run.id, t.seq, now());
+      ledger.recordRolledBack(run, t.seq, now());
     } catch {
       complete = false;
     }
@@ -235,6 +242,8 @@ export function workspaceWriter(): TargetWriter {
       }
     },
     async write(key, after) {
+      // Checked again right before touching the path: the read's check is a step back.
+      if (!confined(key)) throw new Error('path changed');
       if (after.absent) {
         const st = await lstat(key);
         if (!st.isFile()) throw new Error('not a regular file');
@@ -248,7 +257,16 @@ export function workspaceWriter(): TargetWriter {
       // resolve to itself through them.
       if (!confined(key)) throw new Error('path changed');
       let mode: number | undefined;
-      try { mode = (await lstat(key)).mode & 0o7777; } catch { mode = undefined; }
+      try {
+        const st = await lstat(key);
+        // Something other than a file at the leaf (a link planted since the read) is not
+        // what the run planned for — and a link's mode would be copied onto the new file.
+        if (!st.isFile()) throw new Error('not a regular file');
+        mode = st.mode & 0o7777;
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        mode = undefined;
+      }
       const temp = join(dir, `.${basename(key)}.lynox-bulk-${randomUUID()}`);
       const fh = await open(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, mode ?? 0o666);
       try {

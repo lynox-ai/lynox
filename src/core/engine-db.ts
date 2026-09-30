@@ -746,12 +746,11 @@ const MIGRATIONS: string[] = [
   // customer data and are written through `enc()` like every other content column;
   // no reader hands them to the model (`bulk_status` returns counters only).
   //
-  // Deliberately WITHOUT the `atomic` column PRD §3.1 lists: its meaning depends on an
-  // open primitive decision (PRD §9 question 1, option 3 drops it), and nothing in the
-  // dry-run slice reads it. The undo slice adds it once that is decided — an
-  // ADD COLUMN is cheap, a column this forward-only ladder cannot take back is not.
+  // Deliberately WITHOUT the `atomic` column PRD §3.1 lists: its meaning depended on a
+  // primitive decision still open then (PRD §9 question 1). v14 adds it — an ADD COLUMN
+  // is cheap, a column this forward-only ladder cannot take back is not.
   //
-  // The approval/contract columns ship here, unused until the approval slice, because
+  // The approval/contract columns ship here, first read in v14's apply path, because
   // they are the run's own shape (§3.1); leaving them out would mean a second rebuild
   // of the same table for one feature. `change` is per target and decided at dry-run
   // time: what the rule would do to it, so a preview and a later apply agree on it.
@@ -799,7 +798,7 @@ const MIGRATIONS: string[] = [
 
   // v14 (bulk changes, reversible — apply and undo, PRD §3.4/§3.5): what applying a run
   // and taking it back need on top of the dry-run ledger.
-  // - `atomic` (§3.1, decided 30.9. with §9 question 1): 1 = the run is written whole
+  // - `atomic` (§3.1, §9 question 1): 1 = the run is written whole
   //   or rolled back, and only a fully applied run can be undone; 0 = independent
   //   targets, an undo takes back the applied ones.
   // - `kind` + `source_run_id`: an undo is its own run over the applied targets of

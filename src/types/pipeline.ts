@@ -279,6 +279,8 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
  *  approval route creates them — `deriveSourceEffect` never yields them, so no
  *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them. */
 export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo';
+/** The two bulk-run effects. */
+export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo'>;
 
 /** An AGENT-TRIGGER — a rule the WorkerLoop fires to DO work for the user (the
  *  "act" side of the agent loop). Lives in the `triggers` table. Split from

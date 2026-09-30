@@ -75,7 +75,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'Dry-run a change to many targets at once: record, per target, its current state and the state the change would produce — without writing anything. ' +
       'Targets and new states come from a source you prepared: a JSON or CSV file in the workspace (rows with a "target" field and either an "after" field or the new column values), or a data-store collection holding such rows. ' +
       'target_system "workspace": each target is a file path, "after" its full new text. target_system "data_store": each target is a key value of target_collection\'s unique key, the other fields the new column values. ' +
-      'You get back counts only; the user reviews the per-target before/after and approves the run — you cannot apply it. ' +
+      'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it, and there is no screen or button for it you could point them to. ' +
       'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole.',
     input_schema: {
       type: 'object' as const,
@@ -145,7 +145,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
         'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
-          'Only the user can approve and apply it; bulk_status shows how far it got.',
+          'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}`;

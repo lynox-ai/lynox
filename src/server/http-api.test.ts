@@ -5917,6 +5917,17 @@ describe('LynoxHTTPApi', () => {
       expect(ok.status).toBe(200);
     });
 
+    it('answers 404 for an unknown run and 409 for a resume before approval', async () => {
+      for (const action of ['approve', 'resume']) {
+        const res = await jsonFetch(`/api/bulk/runs/nope/${action}`, { method: 'POST', body: JSON.stringify({ checksum: 'x' }) });
+        expect(res.status, action).toBe(404);
+      }
+      expect((await jsonFetch('/api/bulk/runs/nope/undo', { method: 'POST' })).status).toBe(404);
+      const id = planRun();
+      const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      expect(res.status).toBe(409);
+    });
+
     it('plans an undo of a finished run as a previewed run with its own checksum', async () => {
       const id = planRun();
       bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)! });

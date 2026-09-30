@@ -6298,7 +6298,10 @@ export class LynoxHTTPApi {
       if (!ledger) return;
       const status = ledger.getStatus(params['id']!);
       if (!status) { errorResponse(res, 404, 'Bulk run not found.'); return; }
-      jsonResponse(res, 200, { ...status, checksum: ledger.computeChecksum(params['id']!) });
+      // The checksum decrypts every target; it is only needed where it can be presented —
+      // approving a preview or resuming an approved run.
+      const actionable = status.phase === 'previewed' || status.phase === 'approved' || status.phase === 'writing';
+      jsonResponse(res, 200, { ...status, checksum: actionable ? ledger.computeChecksum(params['id']!) : null });
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id/targets', async (req, res, params) => {

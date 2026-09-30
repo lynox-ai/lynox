@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus } from '../types/pipeline.js';
+import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -444,11 +444,11 @@ export class TriggerStore {
    * Arm the trigger that writes an approved bulk run (PRD bulk-changes-reversible §3.4):
    * effect `bulk_apply` or `bulk_undo`, `condition_json.run_id`, due at `nextRunAt`. One
    * trigger per run — id `bulk-<runId>` — so approving, resuming or re-approving re-arms
-   * the same row instead of starting a second loop. This is the only writer of a bulk
+   * the same row instead of starting a second loop. The only path that CREATES a bulk
    * effect: {@link insert} takes its effect from `deriveSourceEffect`, which never
-   * yields one.
+   * yields one, and {@link updateFields} cannot change `effect` or `run_id`.
    */
-  armBulkEffect(params: { runId: string; effect: 'bulk_apply' | 'bulk_undo'; title: string; nextRunAt: string }): string {
+  armBulkEffect(params: { runId: string; effect: BulkTriggerEffect; title: string; nextRunAt: string }): string {
     const id = `bulk-${params.runId}`;
     this.upsert({
       id,

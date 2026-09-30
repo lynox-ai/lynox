@@ -7,7 +7,7 @@
  * - {@link BulkLedger.getStatus} / {@link BulkLedger.listRuns} return COUNTERS and
  *   PHASES only. They are what the model sees (`bulk_status`, the `bulk_plan` result).
  * - {@link BulkLedger.getPreview} returns decrypted before/after/diff per target. It is
- *   the owner's view of the dry run and must never be wired to a model-facing tool:
+ *   the owner's view of a run and must never be wired to a model-facing tool:
  *   before-images are customer data, and a target file may be externally authored.
  *
  * Nothing here writes to a target system either. Approval ({@link BulkLedger.approve}),
@@ -20,12 +20,12 @@ import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 import { TriggerStore } from './trigger-store.js';
 
-/** Target systems the dry-run slice can image. External (`http:<host>`), memory and
- *  artifacts are later slices (PRD §4 D; §3.1 lists the full set). */
+/** Target systems a run can plan and write today. External (`http:<host>`), memory and
+ *  artifacts are not built yet (PRD §4 D; §3.1 lists the full set). */
 export type BulkTargetSystem = 'workspace' | 'data_store';
 
 /** The run's lifecycle (PRD §3.1). A dry run is recorded straight as `previewed`;
- *  `planned` is the schema's name for a run not yet imaged, which this slice never writes. */
+ *  `planned` is the schema's name for a run not yet imaged, which nothing writes today. */
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 /** `delete` is only ever planned by an undo: taking back a created target removes it. */
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
@@ -61,8 +61,8 @@ export type BulkInvalidReason =
 export interface BulkRunStatus {
   id: string;
   createdAt: string;
-  /** Wider than {@link BulkTargetSystem} on purpose: the column also holds the later
-   *  slices' systems (`http:<host>`, …), and a status read must not break on them. */
+  /** Wider than {@link BulkTargetSystem} on purpose: the column is meant to hold the
+   *  systems not built yet (`http:<host>`, …), and a status read must not break on them. */
   targetSystem: string;
   phase: BulkPhase;
   undo: UndoKind | 'mixed';
@@ -99,13 +99,12 @@ export const BULK_HALT_REASONS = {
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
   unavailable: 'the target system is not available',
 } as const;
+export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
 /** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}. */
 export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed';
 
-/** Per target, the time a claim holds: an older claim belongs to a loop that died, and
- *  another loop may take the target. Also the unit of a run's time budget and of the
- *  approval window. */
+/** Per target, the unit of a run's time budget and of its approval window. */
 export const BULK_TARGET_BUDGET_MS = 5_000;
 /** A claim older than this is taken to belong to a dead loop. Longer than one target's
  *  budget, so a slow write is not mistaken for a dead one. */
@@ -326,7 +325,7 @@ export class BulkLedger {
     const rows = this.engineDb.getDb().prepare(
       `SELECT seq, target_key, change, undo, before, after_planned, error FROM bulk_targets
        WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
-    ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 5000)), Math.max(0, opts.offset ?? 0)) as {
+    ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null;
     }[];
@@ -379,9 +378,10 @@ export class BulkLedger {
   computeChecksum(runId: string): string | null {
     const run = this.runRow(runId);
     if (!run) return null;
+    // Iterated, not loaded: a run's images can reach 32 MB before encryption.
     const rows = this.engineDb.getDb().prepare(
       'SELECT seq, target_key, change, before, after_planned FROM bulk_targets WHERE run_id = ? ORDER BY seq',
-    ).all(runId) as { seq: number; target_key: string; change: string; before: string | null; after_planned: string | null }[];
+    ).iterate(runId) as IterableIterator<{ seq: number; target_key: string; change: string; before: string | null; after_planned: string | null }>;
     const db = this.engineDb;
     function* parts(): Generator<string> {
       yield 'bulk-approval-v1';
@@ -402,7 +402,8 @@ export class BulkLedger {
     return this.engineDb.keyedHash(parts());
   }
 
-  private countWriting(runId: string): number {
+  /** Targets the run writes: `update`, `create`, `delete`. */
+  countWriting(runId: string): number {
     return (this.engineDb.getDb().prepare(
       `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}`,
     ).get(runId) as { n: number }).n;
@@ -443,6 +444,8 @@ export class BulkLedger {
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;
     if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
+    // An atomic run capped below its size could only ever stop half written.
+    if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
@@ -586,12 +589,8 @@ export class BulkLedger {
     ).all(runId) as { seq: number }[]).map((r) => r.seq);
   }
 
-  countWritingTargets(runId: string): number {
-    return this.countWriting(runId);
-  }
-
   /**
-   * Claim one target for writing (PRD §3.4, Fable R2 F4). A single conditional UPDATE,
+   * Claim one target for writing (PRD §3.4). A single conditional UPDATE,
    * so test and set are one step: it succeeds only while the target is unapplied,
    * unfailed and unclaimed — or claimed longer ago than {@link BULK_CLAIM_STALE_MS}, by
    * a loop that died. Two loops on one ledger (a restart, a retry, a second trigger)
@@ -657,11 +656,23 @@ export class BulkLedger {
     })();
   }
 
-  /** Mark a target written by this run as taken back (an atomic run's rollback). */
-  recordRolledBack(runId: string, seq: number, now: number = Date.now()): void {
-    this.engineDb.getDb().prepare(
-      'UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NOT NULL',
-    ).run(new Date(now).toISOString(), runId, seq);
+  /**
+   * Mark a target written by this run as taken back (an atomic run's rollback). For an
+   * undo run the rollback restores what the source wrote, so the source target stands
+   * again: its `undone_at` is cleared in the same transaction.
+   */
+  recordRolledBack(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, now: number = Date.now()): void {
+    const db = this.engineDb.getDb();
+    db.transaction(() => {
+      db.prepare('UPDATE bulk_targets SET undone_at = ? WHERE run_id = ? AND seq = ? AND applied_at IS NOT NULL')
+        .run(new Date(now).toISOString(), run.id, seq);
+      if (run.kind === 'undo' && run.sourceRunId !== null) {
+        db.prepare(
+          `UPDATE bulk_targets SET undone_at = NULL WHERE run_id = ?
+             AND seq = (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND seq = ?)`,
+        ).run(run.sourceRunId, run.id, seq);
+      }
+    })();
   }
 
   /** Targets this run applied and has not taken back, newest first — a rollback's order. */
@@ -675,7 +686,7 @@ export class BulkLedger {
   }
 
   /** Move the run's phase, only from one of `from`. */
-  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: string | null = null): boolean {
+  setPhase(runId: string, from: readonly BulkPhase[], to: BulkPhase, haltReason: BulkHaltReason | null = null): boolean {
     return this.engineDb.getDb().prepare(
       `UPDATE bulk_runs SET phase = ?, halt_reason = COALESCE(?, halt_reason)
        WHERE id = ? AND phase IN (${from.map(() => '?').join(',')})`,
@@ -683,7 +694,7 @@ export class BulkLedger {
   }
 
   /** Stop the run where it is: the phase stays, the reason is set. */
-  halt(runId: string, reason: string): void {
+  halt(runId: string, reason: BulkHaltReason): void {
     this.engineDb.getDb().prepare('UPDATE bulk_runs SET halt_reason = ? WHERE id = ?').run(reason, runId);
   }
 
