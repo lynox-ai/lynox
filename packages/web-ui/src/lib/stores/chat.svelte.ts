@@ -3054,7 +3054,12 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
 						ensureAssistant();
-						handleSSEEvent(eventType, data, assistantIdx, userIdx);
+						// An `error` here does not settle the turn, as in `_executeRun`. This
+						// stream ends with `done` whenever the run ends, however it ended, and
+						// the reconcile below then adopts the persisted transcript — which is
+						// where a real failure shows. Settling on the event would mark a turn
+						// that is still running as failed and drop its bubble mid-stream.
+						handleSSEEvent(eventType, data, assistantIdx, userIdx, { deferErrorDisposition: true });
 						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed */ }
 					eventType = '';
