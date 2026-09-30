@@ -50,7 +50,7 @@
  * parser that could disagree about its format; a constant and its type cannot.
  */
 
-/** One entry the model may offer to bootstrap. */
+/** One entry in either list — the ones the model may offer, and the ones it may only act on. */
 export interface SuggestedApi {
   /** Stable slug, lowercase; not shown to the model. */
   readonly id: string;
@@ -81,7 +81,42 @@ export interface SuggestedApiCatalog {
   readonly not_supported_auth_flows: readonly string[];
   /** Categories the model must not bring up on its own. */
   readonly do_not_proactively_suggest: readonly string[];
+  /** Public APIs the model may OFFER when they fit the user's question. */
   readonly suggested_apis: readonly SuggestedApi[];
+  /**
+   * Providers the model is told to set up only once the USER has named one.
+   *
+   * ⚠ Told, not prevented. Nothing downstream enforces it: `api_setup` takes
+   * any `docs_url` the model passes, and the model could reach these providers
+   * by hand-writing a profile or by reading the docs itself. The real friction
+   * is that it cannot finish without a credential the user supplies through
+   * `ask_secret`. Read this list as an instruction with a lookup attached, and
+   * do not cite it as a control.
+   *
+   * Two lists rather than one, because a single list cannot say both things.
+   * `do_not_proactively_suggest` forbids raising an API that moves production
+   * billing, customer records or live financial state unprompted; bexio,
+   * HubSpot, WooCommerce and Shopware are squarely that. Notion, Airtable and
+   * WordPress are NOT — they are here by choice, because a workspace, a base
+   * and a website are the user's own material and offering to wire them
+   * unprompted is presumptuous rather than dangerous. Rendering any of them
+   * under the other list's heading would have called them free, which none of
+   * them is.
+   *
+   * Entry bar, and it is the one Shopify sits outside: the user must be able
+   * to create the credential THEMSELVES, in their own account, and the engine
+   * must be able to attach it. See the note below the constant.
+   *
+   * Each `value_prop` names the API's own host, or says the user supplies it.
+   * That is not decoration: `api_setup` action=bootstrap derives `base_url`
+   * from the DOCS host, and for all seven of these the docs host is not the
+   * API host — for WordPress, WooCommerce and Shopware there is no fixed host
+   * at all, because the API is the user's own site. Three of them (bexio,
+   * Notion, Airtable) additionally get an advisory note from bootstrap's
+   * same-domain host scan, but the drafted `base_url` is wrong in every case:
+   * the scan only appends "verify before swapping", it never swaps.
+   */
+  readonly connect_when_user_asks: readonly SuggestedApi[];
 }
 
 export const SUGGESTED_API_CATALOG: SuggestedApiCatalog = Object.freeze({
@@ -184,4 +219,97 @@ export const SUGGESTED_API_CATALOG: SuggestedApiCatalog = Object.freeze({
       value_prop: "Validate EU VAT numbers via VIES, decode IBANs, fetch ECB FX rates. No key. DACH/EU-relevant for B2B invoicing flows.",
     }),
   ]),
+  connect_when_user_asks: Object.freeze([
+    Object.freeze({
+      id: "bexio",
+      name: "bexio",
+      category: "accounting / invoicing (CH)",
+      docs_url: "https://docs.bexio.com/",
+      auth_type: "bearer",
+      value_prop: "Swiss accounting: contacts, invoices, quotes, projects. API base is https://api.bexio.com/2.0/ — the docs host is not the API host. The user creates a Personal Access Token at developer.bexio.com and it goes in the Authorization header as a Bearer token. Three things bexio states itself, and all three belong in the conversation before anyone connects: a PAT is valid for 60 days; it carries all default scopes and therefore full access to the company's data; and it is \"strictly intended for personal use\" and should never be shared with anyone else — for a case that needs a shared token bexio requires the authorization-code flow, which this engine cannot run.",
+    }),
+    Object.freeze({
+      id: "notion",
+      name: "Notion",
+      category: "notes / databases",
+      docs_url: "https://developers.notion.com/reference/intro",
+      auth_type: "bearer",
+      value_prop: "Notion pages and databases: read, create, update. API base is https://api.notion.com/v1/. The user creates an internal connection in Notion's developer portal and then shares each page with it from the page's ••• menu; without that sharing step the connection sees nothing. The token goes in the Authorization header as a Bearer token and every request also needs a Notion-Version header. No redirect.",
+    }),
+    Object.freeze({
+      id: "hubspot",
+      name: "HubSpot",
+      category: "CRM / contacts",
+      docs_url: "https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview",
+      auth_type: "bearer",
+      value_prop: "HubSpot CRM: contacts, companies, deals, tickets. API base is https://api.hubapi.com/ — a different domain from the docs, so it has to be set by hand. The user creates a private app in their own HubSpot account, which the UI now files under Development, then Legacy apps; its access token goes as a Bearer token. HubSpot's docs describe no automatic expiry, recommend rotating every six months, and offer rotate-and-expire — so it is not a token that lasts forever either.",
+    }),
+    Object.freeze({
+      id: "airtable",
+      name: "Airtable",
+      category: "databases / spreadsheets",
+      docs_url: "https://airtable.com/developers/web/api/authentication",
+      auth_type: "bearer",
+      value_prop: "Airtable bases as structured data: records, fields, views. API base is https://api.airtable.com/v0/. The user creates a personal access token, sent as a Bearer token; it needs both the right scope and the specific base added to it as a resource; Airtable documents 403 Forbidden for credentials that do not have access to a resource, so a missing grant surfaces as an error rather than as an empty result.",
+    }),
+    Object.freeze({
+      id: "wordpress",
+      name: "WordPress",
+      category: "CMS / website",
+      docs_url: "https://developer.wordpress.org/rest-api/using-the-rest-api/authentication/",
+      auth_type: "basic",
+      value_prop: "A WordPress site's own content: posts, pages, media, users. There is no shared host — the API base is the user's own site, https://THEIR-SITE/wp-json/wp/v2/, so ask for it. The user creates an Application Password under Users -> Edit User, in core since WordPress 5.6 with no plugin needed, and it goes as Basic auth. The field only appears on a site served over SSL/HTTPS, and the filters wp_is_application_passwords_available and ..._for_user let a plugin switch it off globally or per user.",
+    }),
+    Object.freeze({
+      id: "woocommerce",
+      name: "WooCommerce",
+      category: "e-commerce / orders",
+      docs_url: "https://woocommerce.github.io/woocommerce-rest-api-docs/",
+      auth_type: "basic",
+      value_prop: "Orders, products and customers on the user's own WooCommerce shop. There is no shared host — the API base is their shop, https://THEIR-SHOP/wp-json/wc/v3/, so ask for it. They create a Consumer Key and Consumer Secret under WooCommerce -> Settings -> Advanced -> REST API, choosing Read, Write or Read/Write; the key is tied to a WordPress user and inherits that user's rights. Over HTTPS the pair goes as Basic auth, key as username and secret as password.",
+    }),
+    Object.freeze({
+      id: "shopware",
+      name: "Shopware 6",
+      category: "e-commerce / orders",
+      docs_url: "https://developer.shopware.com/docs/guides/development/integrations-api/",
+      auth_type: "oauth2 client_credentials",
+      value_prop: "Orders, products and customers on the user's own Shopware 6 shop. There is no shared host — the API base is their shop, https://THEIR-SHOP/api/, so ask for it. They create an Integration under Settings -> System -> Integrations and must switch its Administrator toggle on, or it has no permissions; its client id and secret then exchange for a token at POST /api/oauth/token with grant_type=client_credentials, which needs no browser redirect.",
+    }),
+  ]),
 });
+
+/**
+ * Why Shopify is NOT in the list above, so that its absence reads as a decision
+ * rather than as an oversight — the same reason this file keeps any note at all.
+ *
+ * It was on the shortlist. Two facts, both quoted from shopify.dev on
+ * 2026-09-30, and a third that decides it:
+ *  • the path where a merchant makes their own app in their admin and copies an
+ *    Admin API token is closed — "You can no longer create new admin-created
+ *    custom apps. Existing apps are unaffected and continue to work";
+ *  • the `client_credentials` grant "only works when the app and the store
+ *    belong to the same Shopify organization", and "can't reach a store outside
+ *    your organization, including a client's store". The same page adds that
+ *    "Owning a store or having it installed doesn't automatically place it in
+ *    your org".
+ *
+ * ⚠ That does NOT add up to "impossible", and the first draft of this note said
+ * so — a review was right to push back. The same page describes a server-side
+ * app "acting on stores in your own Shopify organization ... with no redirect
+ * flow to implement", so a merchant whose store sits in a Dev Dashboard
+ * organization they control could create the app, install it, and hand over a
+ * client id and secret. That is the shape Shopware already has here.
+ *
+ * It stays out for two reasons that are about the entry rather than the vendor:
+ * whether an ordinary merchant's store sits in such an organization is not
+ * established by anything we have read, and the token that grant returns lives
+ * 24 hours (`expires_in` 86399), so a connection made this way dies daily
+ * unless something re-exchanges it. An entry the model may act on and usually
+ * cannot finish spends the user's attention and ends in an apology.
+ *
+ * The bar this states, for whoever adds the next one: the user must be able to
+ * create the credential THEMSELVES in their own account, it must ride one of
+ * `supported_auth_flows`, and it must outlive the conversation that created it.
+ * All three, checked at the provider's own docs.
+ */

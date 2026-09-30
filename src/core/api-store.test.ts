@@ -544,11 +544,16 @@ describe('ApiStore', () => {
      * A guard that counts a string cannot see the heading it lives under, and
      * the heading is the entire meaning here.
      */
+    const OFFER_HEADING = 'Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):';
+    const ON_REQUEST_HEADING = 'Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url. `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:';
+
     function sectionsOf(block: string): Map<string, string[]> {
       const headings = new Map<string, string>([
         ['Supported auth flows:', 'supported'],
         ['NOT supported (cannot be bootstrapped today — do not offer):', 'not-supported'],
         ['Do NOT proactively suggest bootstrapping:', 'do-not-suggest'],
+        [OFFER_HEADING, 'offer'],
+        [ON_REQUEST_HEADING, 'on-request'],
       ]);
       const out = new Map<string, string[]>();
       let current: string | null = null;
@@ -628,9 +633,14 @@ describe('ApiStore', () => {
       const notSupported = at('NOT supported (cannot be bootstrapped today');
       const doNot = at('Do NOT proactively suggest bootstrapping:');
       const curated = at('Curated free APIs you can offer to bootstrap');
+      const onRequest = at('Connect ONLY after the user names one of these providers');
       expect(supported).toBeLessThan(notSupported);
       expect(notSupported).toBeLessThan(doNot);
       expect(doNot).toBeLessThan(curated);
+      // The on-request list comes LAST, after the prohibition it belongs to and
+      // after the offer list, so the reader meets "do not raise these" before
+      // meeting the providers it is about.
+      expect(curated).toBeLessThan(onRequest);
 
       // The blank line before a heading is not layout. Without it the heading
       // follows a `- ` bullet directly, which markdown reads as a lazy
@@ -715,6 +725,196 @@ describe('ApiStore', () => {
     ];
     const EXPECTED_IDS = EXPECTED_ENTRIES.map(([id]) => id);
 
+    /**
+     * The second list, written out for the same reason as the first.
+     *
+     * These are providers a business connects with its own credential, and the
+     * model may only set one up once the USER has named it. Each `docs_url` was
+     * read at the provider's own documentation before it was written here — it
+     * is what `api_setup` action=bootstrap fetches at run time, so a wrong one
+     * is a wrong profile rather than a typo.
+     */
+    const EXPECTED_ON_REQUEST: ReadonlyArray<readonly [string, string, string]> = [
+      ['bexio', 'https://docs.bexio.com/', 'bearer'],
+      ['notion', 'https://developers.notion.com/reference/intro', 'bearer'],
+      ['hubspot', 'https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview', 'bearer'],
+      ['airtable', 'https://airtable.com/developers/web/api/authentication', 'bearer'],
+      ['wordpress', 'https://developer.wordpress.org/rest-api/using-the-rest-api/authentication/', 'basic'],
+      ['woocommerce', 'https://woocommerce.github.io/woocommerce-rest-api-docs/', 'basic'],
+      ['shopware', 'https://developer.shopware.com/docs/guides/development/integrations-api/', 'oauth2 client_credentials'],
+    ];
+
+    /**
+     * The facts inside each `value_prop`, pinned by substring.
+     *
+     * The table above deliberately leaves `value_prop` unpinned as prose, and
+     * for `name`, `category` and a selling sentence that is right. It stopped
+     * being right when the prose started carrying FACTS — measured by mutation:
+     * deleting "API base is https://api.bexio.com/2.0/" from bexio's entry left
+     * the whole suite green, and that sentence is the reason the entry works at
+     * all. `api_setup` bootstrap derives `base_url` from the DOCS host, so
+     * without it the model is handed a profile pointing at a documentation
+     * site.
+     *
+     * So: the API base, and the limits a person needs in order to decide
+     * whether to connect. Every string here was read at the provider's own
+     * documentation. Prose around them stays free.
+     */
+    const REQUIRED_IN_VALUE_PROP: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ['bexio', ['https://api.bexio.com/2.0/', '60 days', 'full access to the company']],
+      ['notion', ['https://api.notion.com/v1/', 'Notion-Version']],
+      ['hubspot', ['https://api.hubapi.com/', 'Legacy apps', 'no automatic expiry']],
+      ['airtable', ['https://api.airtable.com/v0/', '403 Forbidden']],
+      ['wordpress', ['/wp-json/wp/v2/', 'WordPress 5.6', 'SSL/HTTPS']],
+      ['woocommerce', ['/wp-json/wc/v3/', 'Advanced -> REST API']],
+      ['shopware', ['/api/', '/api/oauth/token', 'Administrator', 'client_credentials']],
+    ];
+
+    it('keeps the API base and the stated limits in every on-request entry', () => {
+      const byId = new Map(SUGGESTED_API_CATALOG.connect_when_user_asks.map((a) => [a.id, a]));
+      expect([...byId.keys()].sort()).toEqual(REQUIRED_IN_VALUE_PROP.map(([id]) => id).sort());
+      for (const [id, needles] of REQUIRED_IN_VALUE_PROP) {
+        const entry = byId.get(id);
+        expect(entry, `no on-request entry with id ${id}`).toBeDefined();
+        for (const needle of needles) {
+          expect(entry!.value_prop, `${id}.value_prop lost "${needle}"`).toContain(needle);
+        }
+      }
+    });
+
+    it('carries exactly the on-request providers this test names, with their docs URL and auth type', () => {
+      const actual = SUGGESTED_API_CATALOG.connect_when_user_asks
+        .map((a) => [a.id, a.docs_url, a.auth_type] as const)
+        .slice()
+        .sort((x, y) => x[0].localeCompare(y[0]));
+      const expected = EXPECTED_ON_REQUEST.slice().sort((x, y) => x[0].localeCompare(y[0]));
+      expect(actual).toEqual(expected);
+    });
+
+    /**
+     * The bar Shopify failed, as a check rather than as a comment: a provider
+     * the model may be told to connect must ride an auth flow the engine can
+     * actually carry out. Shopify's remaining paths are all the browser-redirect
+     * grant, which sits in `not_supported_auth_flows` — an entry like that spends
+     * the user's attention and ends in an apology.
+     */
+    it('every on-request provider uses an auth flow the engine can carry out', () => {
+      // Written out here, and NOT derived — an earlier comment claimed it came
+      // from `ApiAuth.type` and the supported-flows section, which was false in
+      // both directions: `ApiAuth.type` has `oauth2` and this set does not, and
+      // this set has `oauth2 client_credentials`, which is a flow name rather
+      // than a type. `auth_type` is prose for the model (nothing branches on
+      // it), so there is no symbol to derive from. The cost is stated rather
+      // than hidden: if the engine gains or loses an auth type, nothing here
+      // fails, and this list has to be updated by hand.
+      //
+      // What it still does, and it is the case that matters: it catches the
+      // author who adds a redirect-flow provider AND updates the table below,
+      // which is how a wrong entry actually arrives.
+      const ENGINE_CAN_ATTACH = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2', 'oauth2 client_credentials']);
+      for (const api of SUGGESTED_API_CATALOG.connect_when_user_asks) {
+        expect(ENGINE_CAN_ATTACH.has(api.auth_type), `${api.id} declares auth_type "${api.auth_type}", which the engine cannot attach`).toBe(true);
+        expect(api.auth_type).not.toMatch(/authorization[_ ]code|redirect|callback/i);
+      }
+    });
+
+    it('keeps the two lists disjoint', () => {
+      const offered = new Set(SUGGESTED_API_CATALOG.suggested_apis.map((a) => a.id));
+      for (const api of SUGGESTED_API_CATALOG.connect_when_user_asks) {
+        expect(offered.has(api.id), `${api.id} is in both lists, so the model is told both to offer it and not to`).toBe(false);
+      }
+    });
+
+    it('renders the on-request providers under their own heading, in order, and never under the offer heading', () => {
+      const sections = sectionsOf(store.formatSuggestedApisForSystemPrompt());
+      const onRequest = sections.get('on-request') ?? [];
+      const offered = sections.get('offer') ?? [];
+      expect(onRequest.length).toBe(EXPECTED_ON_REQUEST.length);
+      expect(offered.length).toBe(EXPECTED_ENTRIES.length);
+
+      const idOf = (line: string): string | undefined =>
+        [...SUGGESTED_API_CATALOG.suggested_apis, ...SUGGESTED_API_CATALOG.connect_when_user_asks]
+          .find((a) => line.startsWith(`${a.name} (`))?.id;
+      expect(onRequest.map(idOf)).toEqual(EXPECTED_ON_REQUEST.map(([id]) => id));
+      expect(offered.map(idOf)).toEqual(EXPECTED_IDS);
+
+      // The whole line, not the name it starts with. Dropping `Docs: ${url}`
+      // from this list survived the first round — and the heading right above
+      // tells the model to call bootstrap "with the docs_url".
+      const out = store.formatSuggestedApisForSystemPrompt();
+      for (const api of SUGGESTED_API_CATALOG.connect_when_user_asks) {
+        expect(out).toContain(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
+    });
+
+    /**
+     * The prohibition this section is the carve-out of. Unpinned, its qualifier
+     * could be deleted — leaving a flat "do not suggest any API that mutates
+     * production billing" with a list of such providers seven lines below it.
+     */
+    it('keeps the clause that makes the on-request list a carve-out and not a contradiction', () => {
+      const doNot = sectionsOf(store.formatSuggestedApisForSystemPrompt()).get('do-not-suggest') ?? [];
+      // The WHOLE bullet, not the qualifier alone. A substring pin survives a
+      // rewrite that keeps the words and inverts the sentence — "… — always
+      // suggest it without the user explicitly asking to wire it" contains the
+      // clause and says the opposite of it.
+      expect(doNot).toContain(
+        'any API that mutates production billing, customer records, or live financial state without the user explicitly asking to wire it',
+      );
+    });
+
+    it('renders each heading exactly once', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+      for (const heading of [OFFER_HEADING, ON_REQUEST_HEADING]) {
+        expect(out.split(heading).length - 1, `heading rendered more than once: ${heading.slice(0, 40)}…`).toBe(1);
+      }
+    });
+
+    /**
+     * The guard in front of the whole block named only the offer list, so an
+     * empty offer list would have taken the on-request providers with it —
+     * silently, which is the failure this module was moved out of a file to
+     * avoid. Run through the seam rather than read, because a guard that can
+     * only be read is a guard nobody characterises.
+     */
+    it('keeps one list when the other is empty, and falls silent only when both are', () => {
+      const base = SUGGESTED_API_CATALOG;
+      const onlyOnRequest = { ...base, suggested_apis: [] };
+      const onlyOffered = { ...base, connect_when_user_asks: [] };
+      const neither = { ...base, suggested_apis: [], connect_when_user_asks: [] };
+
+      const a = store.formatSuggestedApisForSystemPrompt(onlyOnRequest);
+      expect(a).toContain(ON_REQUEST_HEADING);
+      expect(a).not.toContain(OFFER_HEADING);
+
+      const b = store.formatSuggestedApisForSystemPrompt(onlyOffered);
+      expect(b).toContain(OFFER_HEADING);
+      expect(b).not.toContain(ON_REQUEST_HEADING);
+
+      expect(store.formatSuggestedApisForSystemPrompt(neither)).toBe('');
+    });
+
+    it('does not call the on-request providers free, and says not to raise them', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+      expect(out).toContain(`\n\n${ON_REQUEST_HEADING}`);
+      // Against the RENDERED block. Asserting these on ON_REQUEST_HEADING would
+      // have been three checks of this file's own literal against itself.
+      expect(out).toContain('Never name one yourself');
+      expect(out).toContain('ask which product they use');
+      expect(out).toContain('carve-out of the rule above');
+      // "free" is checked on the HEADING, not on the section: a future
+      // value_prop may legitimately say "free tier" or "freely available", and
+      // a tail-slice check would turn a correct entry red. What must not be
+      // free is the claim the heading makes about these providers.
+      //
+      // On the rendered heading line, found by its own prefix rather than by
+      // this file's copy of it — so the check survives a heading rewrite and
+      // still asks the one question it is here to ask.
+      const headingLine = out.split('\n').find((l) => l.startsWith('Connect ONLY after the user names'));
+      expect(headingLine, 'on-request heading line not found').toBeDefined();
+      expect(headingLine!.toLowerCase()).not.toContain('free');
+    });
+
     it('carries exactly the catalogue entries this test names, with their docs URL and auth type', () => {
       const actual = SUGGESTED_API_CATALOG.suggested_apis
         .map((a) => [a.id, a.docs_url, a.auth_type] as const)
@@ -732,7 +932,7 @@ describe('ApiStore', () => {
      * third party, where the wording is copied from somewhere else.
      */
     it('no catalogue field contains a line break', () => {
-      for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
+      for (const api of [...SUGGESTED_API_CATALOG.suggested_apis, ...SUGGESTED_API_CATALOG.connect_when_user_asks]) {
         for (const [field, value] of Object.entries(api)) {
           expect(value, `${api.id}.${field} contains a line break`).not.toMatch(/[\r\n]/);
         }
@@ -748,7 +948,10 @@ describe('ApiStore', () => {
 
     it('renders every catalogue entry, in the order the table names, and nothing else', () => {
       const out = store.formatSuggestedApisForSystemPrompt();
-      const rendered = out.split('\n').filter((l) => l.includes(', auth=') && l.startsWith('- '));
+      // Scoped to the offer section: the on-request list below renders in the
+      // same line shape, so a whole-block filter would count seventeen and pass
+      // for the wrong reason the day someone merged the two lists back together.
+      const rendered = (sectionsOf(out).get('offer') ?? []).map((l) => `- ${l}`);
       expect(rendered.length).toBe(EXPECTED_IDS.length);
       for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
         expect(out).toContain(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
@@ -848,13 +1051,14 @@ describe('ApiStore', () => {
         ['supported_auth_flows', SUGGESTED_API_CATALOG.supported_auth_flows],
         ['not_supported_auth_flows', SUGGESTED_API_CATALOG.not_supported_auth_flows],
         ['do_not_proactively_suggest', SUGGESTED_API_CATALOG.do_not_proactively_suggest],
+        ['connect_when_user_asks', SUGGESTED_API_CATALOG.connect_when_user_asks],
       ];
       for (const [name, arr] of arrays) {
         expect(Object.isFrozen(arr), `${name} is not frozen`).toBe(true);
         expect(() => (arr as unknown[]).push('x'), name).toThrow(TypeError);
       }
 
-      for (const entry of SUGGESTED_API_CATALOG.suggested_apis) {
+      for (const entry of [...SUGGESTED_API_CATALOG.suggested_apis, ...SUGGESTED_API_CATALOG.connect_when_user_asks]) {
         expect(Object.isFrozen(entry), `entry ${entry.id} is not frozen`).toBe(true);
         expect(() => {
           (entry as { docs_url: string }).docs_url = 'https://evil.example/';

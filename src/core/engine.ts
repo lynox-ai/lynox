@@ -1394,9 +1394,15 @@ export class Engine {
       // many user-bootstrapped profiles are already loaded. On a fresh
       // install (loaded === 0) this is the only API context the agent has;
       // after the user has wired some APIs it sits alongside, showing what
-      // else they can wire on demand. The catalog is suggestions only —
-      // real profiles are produced at bootstrap time by `api_setup` so the
-      // endpoint schema comes from live docs, not the model's training set.
+      // else they can wire on demand. Real profiles are produced at bootstrap
+      // time by `api_setup` so the endpoint schema comes from live docs, not
+      // the model's training set.
+      //
+      // "Suggestions only" is no longer the whole of it: the block carries a
+      // SECOND list the model is told not to suggest at all and to act on only
+      // once the user names a provider (`suggested-apis.ts`,
+      // `connect_when_user_asks`). Instruction, not enforcement — nothing here
+      // or in `api_setup` checks who raised it.
       // Opt-out: LYNOX_SKIP_SUGGESTED_APIS=1.
       const suggestedContext = this._apiStore.formatSuggestedApisForSystemPrompt();
       if (suggestedContext) {
