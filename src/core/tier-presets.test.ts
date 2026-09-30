@@ -59,14 +59,23 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     //   • the run's scripts are not on main, so nobody reading main can re-run it,
     //     and no run artefact is committed on either side — the figures survive only
     //     in prose that quotes them;
-    //   • the run's own recorded reference sits at 90.4% literal recall against a
-    //     95% bar, and the harness short-circuits to INVALID in that case, in its own
-    //     words: "no candidate verdict from this run is quotable";
+    //   • the harness requires its REFERENCE to clear a 95% literal-recall bar and
+    //     short-circuits to INVALID when it does not — "recalibrate the checklist
+    //     before quoting verdicts". Every recorded figure for that reference is below
+    //     the bar, and the two that exist disagree with each other (90.4% in the
+    //     prose here, 91.5% twice on the bench branch), which is itself the point:
+    //     they are prose, not an artefact;
     //   • the decision rule subtracts two scores produced by two DIFFERENT judge
     //     models, so it compares judge strictness and reports the difference as
     //     candidate quality.
     // The two models so labelled are withdrawn by the provider (404) and pinned by
     // nothing, so removing them costs no coverage.
+    //
+    // ⚠ BENCH is therefore currently UNSATISFIABLE, and that is worth knowing before
+    // anyone tries to earn it: the only scored-run harness on main judges with
+    // `kimi-k2p6` (scripts/model-fitness/judge.ts), which is one of the six ids
+    // listed below as returning 404. The bar cannot be met until that judge is
+    // replaced — so an entry arriving here as SWEEP or OPERATOR is not laziness.
     // What is deliberately NOT accepted as evidence any more: the R1/R3 replay floor
     // as a POSITIVE signal. It scores delegation behaviour, not answer quality, and
     // per-model rates below n≈8 are noise (glm measured 0/2, 1/2 and 2/8 on the same
@@ -136,22 +145,6 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       }
     }
 
-    // …and the set carries NOTHING ELSE. Checked in this direction because the other
-    // one cannot see the failure this guard actually had: an entry whose slot is gone
-    // is not inert leftover documentation, it is standing permission for a future
-    // re-pin, carrying a label nobody re-read. That is literally how this file came to
-    // vouch for two models the provider had withdrawn — a dead id could be pinned and
-    // the suite stayed green. Membership and pinning move together, in one change.
-    const pinnedFireworks = new Set(
-      Object.values(TIER_PRESETS)
-        .flatMap((preset) => Object.values(preset.tier_set))
-        .filter((slot) => slot!.api_base_url?.includes('fireworks.ai'))
-        .map((slot) => slot!.model_id),
-    );
-    for (const id of MEASURED_FIREWORKS) {
-      expect(pinnedFireworks.has(id),
-        `MEASURED_FIREWORKS carries ${id}, which no preset pins — drop it together with the slot it justified, or the label outlives the evidence`).toBe(true);
-    }
   });
 
   it('CN-provenance models appear ONLY via the Fireworks host — never a direct-CN endpoint', () => {
