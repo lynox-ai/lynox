@@ -188,16 +188,31 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // Hoisted so the catch can still see what the loop had collected, and so the
   // cache TTL can depend on whether the walk was clean.
   const partial: VoiceInfo[] = [];
-  // ⚠ ONE flag with ONE meaning: "this walk reported something". It replaces a
-  // flag that was set only in the pagination branch, which made the comment below
-  // false for two of the three diagnostics — a warned, incomplete catalogue was
-  // still cached for an hour. Measured: 29 of 30 voices with two warnings fired,
-  // and the second call five minutes later did not re-fetch.
+  // ONE flag with ONE meaning: "this walk reported something". It replaces a flag
+  // that was set only in the pagination branch, which made the comment below false
+  // for two of the three diagnostics — a warned, incomplete catalogue was still
+  // cached for an hour. Measured: 29 of 30 voices with two warnings fired, and the
+  // second call five minutes later did not re-fetch.
   //
-  // Tying the TTL to "did we warn" rather than to a list of conditions makes the
-  // invariant structural instead of restated: a fourth diagnostic added later
-  // cannot forget to shorten the lifetime, because setting it IS warning.
+  // ⚠⚠ And the first version of THIS comment over-claimed in the same way the file
+  // has had to correct four times already. It said tying the TTL to "did we warn"
+  // makes the invariant "structural instead of restated" and that a fourth
+  // diagnostic "cannot forget" to shorten the lifetime. Neither was true: it was
+  // three hand-written `doubtful = true` assignments guarded by three hand-written
+  // tests. A review proved it by deleting ONE of those tests — the assignment in
+  // the `unusable` branch was then uncovered, and the suite stayed green with the
+  // flag removed. An over-claiming comment is worse than none, because it removes
+  // the pressure to build the thing it describes.
+  //
+  // So the mechanism now exists. Every diagnostic goes through `report`, which sets
+  // the flag and warns in one statement, so "setting it IS warning" is true by
+  // construction rather than by discipline — and a fourth branch cannot write one
+  // without the other, because there is only one way to say it.
   let doubtful = false;
+  const report = (message: string): void => {
+    doubtful = true;
+    console.warn(message);
+  };
   try {
     const controller = new AbortController();
     // ⚠ This said "2 s per request × up to MAX_PAGES pages means worst case ~200 s"
@@ -292,28 +307,25 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
       // different remedies. The earlier single check could not express any of them
       // without also claiming the others.
       if (ignoredPagination) {
-        doubtful = true;
-        console.warn(
+        report(
           '[speak] Mistral voice catalogue: a page came back entirely already-seen — ' +
             'the `offset` parameter is not being honoured. Look at the request.',
         );
       }
       if (total !== undefined && voices.length < total) {
-        doubtful = true;
-        console.warn(
+        report(
           `[speak] Mistral voice catalogue: ${voices.length} of ${total} voices reached the picker ` +
             `(${receivedRaw} entries arrived, ${dupes} duplicate, ${unusable} unusable).`,
         );
       }
       if (unusable > 0) {
-        doubtful = true;
         // ⚠ The tail is conditional, and it has to be: with BOTH causes present the
         // flat version said "not the request" one line below a warning that said
         // "Look at the request." Two diagnostics contradicting each other, in the
         // block whose comment promises that cannot happen. Measured with the offset
         // ignored and one entry unusable — all three fired, and the third denied
         // what the first had just reported.
-        console.warn(
+        report(
           `[speak] Mistral voice catalogue: ${unusable} of ${receivedRaw} arrived entries had no ` +
             'usable voice slug and were dropped — ' +
             (ignoredPagination
@@ -340,7 +352,11 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
     // discarded every voice already in hand and returned the five-entry EN-only
     // fallback with no log line at all — the silent truncation this whole change
     // exists to prevent, worse on the failure path than on the success one.
-    console.warn(`[speak] Mistral voice catalogue: fetch ended early — ${String(err)}`);
+    // Through `report` as well, so the file has exactly ONE `console.warn` and the
+    // claim above is literally true. Setting the flag here is inert — both writes on
+    // this path are hard 60 s — but "every diagnostic goes through report" must not
+    // be a sentence with an exception, or it is the same over-claim again.
+    report(`[speak] Mistral voice catalogue: fetch ended early — ${String(err)}`);
     if (partial.length > 0) {
       _voicesCache = { voices: partial, expiresAt: now + 60_000 };
       return partial;

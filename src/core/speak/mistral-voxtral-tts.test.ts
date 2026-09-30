@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * The voice catalogue fetch shipped paginating with a parameter the endpoint
@@ -306,6 +309,30 @@ describe('the cache keeps a clean result longer than a doubtful one', () => {
   // was individually redundant there and a mutation sweep showed both surviving.
   // A flag that three branches set needs three witnesses, not one that happens to
   // pass through two of them.
+  it('does not hold the EN-only fallback for an hour after an empty 200', async () => {
+    // ⚠ The other half of the same line, and a review had to point at it: an empty
+    // but successful response with no `total` fires NO diagnostic, so `doubtful`
+    // stays false and only `voices.length > 0` keeps the five-entry hardcoded
+    // fallback out of the long cache. That guard had no witness — exactly the class
+    // this commit exists for, on the other half of its own condition.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+        requested.push(String(input));
+        return { ok: true, json: async () => ({ items: [] }) } as unknown as Response;
+      }));
+      const listMistralVoices = await freshListVoices();
+      const voices = await listMistralVoices();
+      expect(voices.length).toBeLessThan(TOTAL); // the fallback, not a catalogue
+      const afterFirst = requested.length;
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      await listMistralVoices();
+      expect(requested.length).toBeGreaterThan(afterFirst);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('re-probes when ONLY the pagination warning fired', async () => {
     vi.useFakeTimers();
     try {
@@ -402,5 +429,28 @@ describe('what was already collected is not thrown away', () => {
     expect(voices.length).toBe(SERVER_PAGE * 2);
     expect(voices.length).toBeGreaterThan(5); // not the fallback
     expect(warned('fetch ended early')).toBe(true);
+  });
+});
+
+describe('there is one way to warn, and a grep holds it that way', () => {
+  it('routes every diagnostic through `report`, so warning and the flag cannot part', () => {
+    // ⚠ This is the mechanism the comment claims. Without it the coupling was three
+    // hand-written assignments guarded by three hand-written tests — a review proved
+    // that by deleting ONE of those tests, after which the assignment it covered was
+    // free to vanish with the suite still green.
+    //
+    // A fourth diagnostic can still be written. What it cannot do is warn without
+    // setting the flag, because there is exactly one `console.warn` in the file and
+    // it lives inside `report`. That is a property of the source, so it is checked
+    // against the source — the same shape as the drift guard that holds a tool list
+    // against the pipeline it describes.
+    const src = readFileSync(
+      resolve(fileURLToPath(import.meta.url), '../mistral-voxtral-tts.ts'),
+      'utf8',
+    );
+    const calls = [...src.matchAll(/console\.warn\(/g)];
+    expect(calls, 'expected exactly one console.warn, inside `report`').toHaveLength(1);
+    // And it is the one inside `report`, not merely one somewhere.
+    expect(src).toContain('const report = (message: string): void => {\n    doubtful = true;\n    console.warn(message);');
   });
 });
