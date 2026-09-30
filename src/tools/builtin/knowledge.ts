@@ -62,7 +62,8 @@ interface RememberInput {
 }
 
 export const rememberTool: ToolEntry<RememberInput> = {
-  undo: 'compensatable',
+  // Not a pure create: a near-duplicate returns the EXISTING entry and `pin` updates it.
+  undo: 'restorable',
   definition: {
     name: 'remember',
     description:

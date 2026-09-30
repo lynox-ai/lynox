@@ -1179,12 +1179,14 @@ function deletedMeanwhile(
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
-  // Every action other than create may overwrite a profile or a vault entry, so they
-  // take the stronger class. `bootstrap` sits with them without a check of whether it
-  // persists: `restorable` over-requires a before-image, it never under-promises.
+  // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
+  // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
+  // the token at the provider — a vault before-image would restore a dead token. The
+  // rest overwrite a profile or a vault entry. `bootstrap` sits with them without a
+  // check of whether it persists: `restorable` over-requires, it never under-promises.
   undo: (input) => {
     if (input.action === 'list' || input.action === 'view') return null;
-    if (input.action === 'create') return 'compensatable';
+    if (input.action === 'fetch_token') return 'none';
     return 'restorable';
   },
   definition: {

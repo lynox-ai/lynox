@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join, dirname } from 'node:path';
 import { renameSync } from 'node:fs';
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, createHmac } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
@@ -969,6 +969,20 @@ export class EngineDb {
     const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
     const tag = cipher.getAuthTag();
     return ENCRYPTED_PREFIX + Buffer.concat([iv, tag, encrypted]).toString('base64');
+  }
+
+  /**
+   * A digest of `parts` that cannot be dictionary-attacked from a copy of the file:
+   * HMAC-SHA256 under the engine key, so recomputing it needs the key that `enc()`
+   * needs. Without a key it falls back to plain SHA-256 — the same mixed mode as `enc()`,
+   * which stores plaintext then. Parts are fed one at a time, length-prefixed, so a
+   * large input is never joined into one string and no two part lists collide.
+   * @internal — see {@link enc}.
+   */
+  keyedHash(parts: Iterable<string>): string {
+    const h = this._encKey ? createHmac('sha256', this._encKey) : createHash('sha256');
+    for (const p of parts) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
+    return h.digest('hex');
   }
 
   /**

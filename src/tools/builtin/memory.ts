@@ -235,7 +235,9 @@ function resolveScope(scopeStr: string | undefined, agent: IAgent): MemoryScopeR
 }
 
 export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
-  undo: 'compensatable',
+  // Not a pure append: the knowledge-layer write supersedes contradicted memories, so
+  // deleting what was stored would not bring those back.
+  undo: 'restorable',
   definition: {
     name: 'memory_store',
     description: 'Save qualitative knowledge for future sessions — business context, preferences, techniques, or lessons learned. NOT for structured/quantitative data (use data_store_insert) or deliverables with deadlines (use task_create).',

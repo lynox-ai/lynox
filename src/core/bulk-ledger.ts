@@ -13,7 +13,7 @@
  * This slice only PLANS: nothing here writes to a target system. Approval, apply and
  * undo are later slices and read the same rows.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 
@@ -21,6 +21,8 @@ import type { UndoKind } from '../types/index.js';
  *  artifacts are later slices (PRD §4 D; §3.1 lists the full set). */
 export type BulkTargetSystem = 'workspace' | 'data_store';
 
+/** The run's lifecycle (PRD §3.1). A dry run is recorded straight as `previewed`;
+ *  `planned` is the schema's name for a run not yet imaged, which this slice never writes. */
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 export type BulkChange = 'update' | 'create' | 'unchanged' | 'invalid';
 
@@ -43,6 +45,8 @@ export type BulkInvalidReason =
   | 'unreadable'
   | 'target_too_large'
   | 'after_not_text'
+  /** the file's bytes are not UTF-8, so no text before-image would be its real content */
+  | 'not_text'
   | 'unknown_column'
   /** a `subject` column: converting it would create a subject, which a dry run must not */
   | 'subject_column'
@@ -52,6 +56,8 @@ export type BulkInvalidReason =
 export interface BulkRunStatus {
   id: string;
   createdAt: string;
+  /** Wider than {@link BulkTargetSystem} on purpose: the column also holds the later
+   *  slices' systems (`http:<host>`, …), and a status read must not break on them. */
   targetSystem: string;
   phase: BulkPhase;
   undo: UndoKind | 'mixed';
@@ -60,8 +66,15 @@ export interface BulkRunStatus {
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
   failed: number;
+  /** Relayed to the model by `bulk_status`, so only ENGINE-authored text may ever be
+   *  written here (nothing writes it in this slice) — never an API response or error. */
   haltReason: string | null;
 }
+
+/** Dry runs kept that were never approved. Recording another drops the oldest beyond
+ *  this: a preview holds nothing to undo, and without a cap repeated calls would grow
+ *  engine.db without bound. Approved runs are not touched — their retention is §3.1's. */
+export const BULK_MAX_PREVIEWED_RUNS = 10;
 
 export type TargetDiff =
   | { kind: 'none' }
@@ -135,13 +148,16 @@ export function diffTarget(before: BeforeImage, after: unknown): TargetDiff {
     : { kind: 'fields', fields: [{ field: '', before: prior, after }] };
 }
 
-/** Hash of the rule as planned: target system, scope and every (key, after) pair.
- *  Order-independent, so the same rule planned twice hashes the same. */
-export function ruleHash(targetSystem: string, scope: string, targets: readonly PlannedTarget[]): string {
-  const pairs = targets
-    .map((t) => ('invalid' in t ? [t.key, null] : [t.key, t.after]))
-    .sort((x, y) => (String(x[0]) < String(y[0]) ? -1 : String(x[0]) > String(y[0]) ? 1 : 0));
-  return createHash('sha256').update(canonicalJson([targetSystem, scope, pairs])).digest('hex');
+/** The (key, after) pairs that make up a rule as planned, in key order, so the same
+ *  rule planned twice yields the same sequence. */
+function* rulePairs(targetSystem: string, scope: string, targets: readonly PlannedTarget[]): Generator<string> {
+  yield targetSystem;
+  yield scope;
+  const sorted = [...targets].sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
+  for (const t of sorted) {
+    yield t.key;
+    yield 'invalid' in t ? '' : canonicalJson(t.after);
+  }
 }
 
 export class BulkLedger {
@@ -179,9 +195,15 @@ export class BulkLedger {
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const prune = db.prepare(
+      `DELETE FROM bulk_runs WHERE phase = 'previewed' AND id NOT IN (
+         SELECT id FROM bulk_runs WHERE phase = 'previewed' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+    );
     db.transaction(() => {
       insertRun.run(
-        id, params.createdBy ?? null, ruleHash(params.targetSystem, params.scope, params.targets),
+        // Keyed: a plain hash over (key, after) pairs would let a copy of the file confirm
+        // guessed keys — the very values `target_key` is encrypted to protect.
+        id, params.createdBy ?? null, this.engineDb.keyedHash(rulePairs(params.targetSystem, params.scope, params.targets)),
         params.targetSystem, runUndo, params.targets.length,
       );
       params.targets.forEach((t, seq) => {
@@ -195,6 +217,7 @@ export class BulkLedger {
           this.engineDb.enc(JSON.stringify(t.before)), this.engineDb.enc(JSON.stringify(t.after ?? null)), null,
         );
       });
+      prune.run(BULK_MAX_PREVIEWED_RUNS);
     })();
     return this.getStatus(id)!;
   }
@@ -214,7 +237,8 @@ export class BulkLedger {
   }
 
   /**
-   * The owner's view of a dry run: per target the before-image, the planned
+   * @internal — no production caller in this slice; the owner-facing view (PRD §3.7)
+   * wires it. The owner's view of a dry run: per target the before-image, the planned
    * after-state and their diff, in plan order. NEVER wire this to a model-facing tool
    * (see the module comment).
    */

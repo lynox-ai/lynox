@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { BulkRunStatus, BulkTargetSystem, PlannedTarget } from '../../core/bulk-ledger.js';
 import {
-  BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BulkSourceError,
+  BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
   parseSourceText, planDataStore, planWorkspace, readBulkImage, resolveBulkFilePath, rowsToSource,
 } from '../../core/bulk-plan.js';
 
@@ -46,16 +46,17 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
   const store = agent.toolContext.dataStore;
   if (!store) throw new BulkSourceError('The data store is not available.');
   const rows: Record<string, unknown>[] = [];
-  for (let offset = 0; ; offset += 500) {
-    const page = store.queryRecords({ collection, filter, limit: 500, offset });
+  for (let offset = 0; ; offset += BULK_QUERY_PAGE) {
+    const page = store.queryRecords({ collection, filter, limit: BULK_QUERY_PAGE, offset });
     rows.push(...page.rows);
-    if (page.rows.length < 500 || rows.length > BULK_MAX_TARGETS || offset + 500 >= page.total) return rows;
+    if (page.rows.length < BULK_QUERY_PAGE || rows.length > BULK_MAX_TARGETS || offset + BULK_QUERY_PAGE >= page.total) return rows;
   }
 }
 
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
-  // Writes a planned run into the ledger, nothing else: deleting that row reverses it.
-  undo: 'compensatable',
+  // Writes only the ledger — but recording a run also drops the oldest unapproved
+  // previews beyond the cap, so it is not a pure create.
+  undo: 'restorable',
   definition: {
     name: 'bulk_plan',
     description:
@@ -94,6 +95,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           throw new BulkSourceError('The source file is not a readable file.');
         }
         if (image === 'too_large') throw new BulkSourceError(`The source file is larger than ${String(BULK_MAX_SOURCE_BYTES / 1024 / 1024)} MB.`);
+        if (image === 'not_text') throw new BulkSourceError('The source file is not UTF-8 text.');
         if (image.absent) throw new BulkSourceError('The source file does not exist.');
         const format = input.source_format ?? (path.toLowerCase().endsWith('.csv') ? 'csv' : 'json');
         rows = parseSourceText(image.value, format);

@@ -82,13 +82,18 @@ describe('ToolEntry.undo declaration', () => {
     expect(contradictory).toEqual([]);
   });
 
-  it('the classes PRD §3.6 names are the classes declared', () => {
+  // PRD §3.6 lists `memory_store` as compensatable. The code says otherwise: its knowledge-
+  // layer write supersedes contradicted memories, so deleting what it stored does not bring
+  // them back. The declaration follows the code; the PRD line is what moves.
+  it('the classes PRD §3.6 names are the classes declared (memory_store corrected, see above)', () => {
     const expected: Record<string, UndoKind> = {
       write_file: 'restorable',
       edit_file: 'restorable',
       memory_update: 'restorable',
       memory_block_edit: 'restorable',
-      memory_store: 'compensatable',
+      memory_store: 'restorable',
+      remember: 'restorable',
+      bulk_plan: 'restorable',
       task_update: 'restorable',
       contacts_save: 'restorable',
       subjects_merge: 'restorable',
@@ -105,21 +110,21 @@ describe('ToolEntry.undo declaration', () => {
       return undo(input);
     };
 
-    it('http_request: PUT/PATCH restorable, POST compensatable, DELETE none, reads no effect', () => {
+    it('http_request: PUT/PATCH restorable, POST and DELETE none, reads no effect', () => {
       expect(classify('http_request', { url: 'https://x.test', method: 'PUT' })).toBe('restorable');
       expect(classify('http_request', { url: 'https://x.test', method: 'patch' })).toBe('restorable');
-      expect(classify('http_request', { url: 'https://x.test', method: 'POST' })).toBe('compensatable');
+      expect(classify('http_request', { url: 'https://x.test', method: 'POST' })).toBe('none');
       expect(classify('http_request', { url: 'https://x.test', method: 'DELETE' })).toBe('none');
       expect(classify('http_request', { url: 'https://x.test', method: 'HEAD' })).toBeNull();
       expect(classify('http_request', { url: 'https://x.test' })).toBeNull();
     });
 
-    it('api_setup: reads no effect, create compensatable, every other action restorable', () => {
+    it('api_setup: reads no effect, fetch_token none, every other action restorable', () => {
       expect(classify('api_setup', { action: 'list' })).toBeNull();
       expect(classify('api_setup', { action: 'view', id: 'a' })).toBeNull();
-      expect(classify('api_setup', { action: 'create' })).toBe('compensatable');
+      expect(classify('api_setup', { action: 'create' })).toBe('restorable');
       expect(classify('api_setup', { action: 'delete', id: 'a' })).toBe('restorable');
-      expect(classify('api_setup', { action: 'fetch_token', id: 'a' })).toBe('restorable');
+      expect(classify('api_setup', { action: 'fetch_token', id: 'a' })).toBe('none');
     });
 
     it('artifact_save: an update restorable, a new artifact compensatable', () => {

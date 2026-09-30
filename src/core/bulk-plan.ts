@@ -17,12 +17,18 @@ import type { BeforeImage, PlannedTarget } from './bulk-ledger.js';
 
 /** Most targets one plan may carry. */
 export const BULK_MAX_TARGETS = 5000;
-/** Largest single target image (a file's content, a planned after-state). */
+/** Largest single target image (a file's content, a planned after-state), serialized. */
 export const BULK_MAX_TARGET_BYTES = 1024 * 1024;
-/** Largest total of before- plus after-images one plan may record. */
-export const BULK_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+/**
+ * Largest total of before- plus after-images one plan may record, counted as the JSON the
+ * ledger serializes (escapes included). Stored size is about 4/3 of that — base64 of the
+ * ciphertext — so one plan writes at most ~43 MB to engine.db.
+ */
+export const BULK_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 /** Largest source file. */
 export const BULK_MAX_SOURCE_BYTES = 5 * 1024 * 1024;
+/** Page size for data-store reads — `queryRecords` caps its `limit` at this. */
+export const BULK_QUERY_PAGE = 500;
 
 /** A source that cannot be planned at all. The message is engine-authored and never
  *  quotes the source, so it is safe to return to the model. */
@@ -32,9 +38,14 @@ export interface SourceRow { target: string; after: unknown }
 
 const META_FIELDS = new Set(['_id', '_created_at', '_updated_at']);
 
+const tooManyTargets = (): BulkSourceError =>
+  new BulkSourceError(`The source has more than ${String(BULK_MAX_TARGETS)} targets.`);
+
 /**
  * RFC 4180 CSV: comma-separated, `"` quoting with `""` as an escaped quote, CRLF or LF
- * line ends, quoted fields may span lines. The first row is the header.
+ * line ends, quoted fields may span lines. The first row is the header. Stops as soon as
+ * the row count passes {@link BULK_MAX_TARGETS}: a 5 MB source of empty lines would
+ * otherwise build millions of rows before any cap applied.
  */
 export function parseCsv(text: string): Record<string, string>[] {
   const rows: string[][] = [];
@@ -42,32 +53,39 @@ export function parseCsv(text: string): Record<string, string>[] {
   let field = '';
   let quoted = false;
   let i = 0;
-  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  while (i < src.length) {
-    const c = src[i]!;
+  const endRow = (): void => {
+    row.push(field);
+    if (!(row.length === 1 && row[0] === '')) {
+      rows.push(row);
+      if (rows.length > BULK_MAX_TARGETS + 1) throw tooManyTargets();
+    }
+    row = [];
+    field = '';
+  };
+  while (i < text.length) {
+    const c = text[i]!;
     if (quoted) {
       if (c === '"') {
-        if (src[i + 1] === '"') { field += '"'; i += 2; continue; }
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
         quoted = false; i++; continue;
       }
       field += c; i++; continue;
     }
     if (c === '"' && field === '') { quoted = true; i++; continue; }
     if (c === ',') { row.push(field); field = ''; i++; continue; }
-    if (c === '\r' && src[i + 1] === '\n') { i++; continue; }
-    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    if (c === '\r' && text[i + 1] === '\n') { i++; continue; }
+    if (c === '\n') { endRow(); i++; continue; }
     field += c; i++;
   }
   if (quoted) throw new BulkSourceError('The CSV source ends inside a quoted field.');
-  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  if (field !== '' || row.length > 0) endRow();
   const [header, ...body] = rows;
   if (!header) return [];
-  return body
-    .filter((r) => !(r.length === 1 && r[0] === ''))
-    .map((r) => {
-      if (r.length !== header.length) throw new BulkSourceError('A CSV row has a different number of fields than the header.');
-      return Object.fromEntries(header.map((h, j) => [h, r[j]!]));
-    });
+  if (new Set(header).size !== header.length) throw new BulkSourceError('The CSV header names a column twice.');
+  return body.map((r) => {
+    if (r.length !== header.length) throw new BulkSourceError('A CSV row has a different number of fields than the header.');
+    return Object.fromEntries(header.map((h, j) => [h, r[j]!]));
+  });
 }
 
 /** Parse a source file's text. JSON: an array of objects. CSV: header row plus rows. */
@@ -75,30 +93,33 @@ export function parseSourceText(text: string, format: 'json' | 'csv'): Record<st
   if (Buffer.byteLength(text, 'utf8') > BULK_MAX_SOURCE_BYTES) {
     throw new BulkSourceError(`The source is larger than ${String(BULK_MAX_SOURCE_BYTES / 1024 / 1024)} MB.`);
   }
-  if (format === 'csv') return parseCsv(text);
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  if (format === 'csv') return parseCsv(body);
   let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { throw new BulkSourceError('The JSON source does not parse.'); }
-  if (!Array.isArray(parsed) || !parsed.every((r) => r !== null && typeof r === 'object' && !Array.isArray(r))) {
+  try { parsed = JSON.parse(body); } catch { throw new BulkSourceError('The JSON source does not parse.'); }
+  if (!Array.isArray(parsed)) throw new BulkSourceError('The JSON source must be an array of objects.');
+  if (parsed.length > BULK_MAX_TARGETS) throw tooManyTargets();
+  if (!parsed.every((r) => r !== null && typeof r === 'object' && !Array.isArray(r))) {
     throw new BulkSourceError('The JSON source must be an array of objects.');
   }
   return parsed as Record<string, unknown>[];
 }
 
 /**
- * Rows → (target, after) pairs. `target` names the target. The after-state is the
- * row's `after` field when it has one; otherwise every other field except the store's
- * own `_id`/`_created_at`/`_updated_at` (so a CSV or a staging collection can carry the
- * new column values directly).
+ * Rows → (target, after) pairs. `target` names the target (a string, or a number or
+ * boolean taken as its text — a number-typed staging column yields numbers). The
+ * after-state is the row's `after` field when it has one; otherwise every other field
+ * except the store's own `_id`/`_created_at`/`_updated_at` (so a CSV or a staging
+ * collection can carry the new column values directly).
  */
 export function rowsToSource(rows: readonly Record<string, unknown>[]): SourceRow[] {
   if (rows.length === 0) throw new BulkSourceError('The source has no rows.');
-  if (rows.length > BULK_MAX_TARGETS) {
-    throw new BulkSourceError(`The source has more than ${String(BULK_MAX_TARGETS)} targets.`);
-  }
+  if (rows.length > BULK_MAX_TARGETS) throw tooManyTargets();
   return rows.map((row) => {
-    const target = row['target'];
+    const raw = row['target'];
+    const target = typeof raw === 'number' || typeof raw === 'boolean' ? String(raw) : raw;
     if (typeof target !== 'string' || target.trim() === '') {
-      throw new BulkSourceError('Every source row needs a non-empty string field "target".');
+      throw new BulkSourceError('Every source row needs a non-empty field "target".');
     }
     if ('after' in row) return { target, after: row['after'] };
     const after: Record<string, unknown> = {};
@@ -115,28 +136,29 @@ function rejectDuplicates(keys: readonly string[]): void {
   }
 }
 
+/** Serialized size of an image — the quantity both caps are about. Measured once. */
+function imageBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
+}
+
 class ByteBudget {
   private used = 0;
-  charge(value: unknown): void {
-    this.used += Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value) ?? '', 'utf8');
+  charge(bytes: number): void {
+    this.used += bytes;
     if (this.used > BULK_MAX_TOTAL_BYTES) {
       throw new BulkSourceError(`The plan's images exceed ${String(BULK_MAX_TOTAL_BYTES / 1024 / 1024)} MB in total.`);
     }
   }
 }
 
-function tooLarge(value: unknown): boolean {
-  return Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value) ?? '', 'utf8') > BULK_MAX_TARGET_BYTES;
-}
-
 /**
  * A bulk run's workspace file — target or source — as an absolute path in the file
- * area, or `null` when it leaves the area. Built on `resolveFileAreaPath`, the one
- * confinement resolver the download route and `media_process` share, and stricter in
- * one case that resolver leaves to the caller: a path that does not exist yet is
- * checked through the real path of its closest existing ancestor, so a symlinked
- * directory cannot carry a planned target out of the area. An existing file is keyed
- * by its real path, so two spellings of one file are one target.
+ * area, or `null` when it leaves the area. Built on
+ * `resolveFileAreaPath`, the one confinement resolver the download route and
+ * `media_process` share, and stricter in one case that resolver leaves to the caller: a
+ * path that does not exist yet is checked through the real path of its closest existing
+ * ancestor, so a symlinked directory cannot carry a planned target out of the area. An
+ * existing file is keyed by its real path, so two spellings of one file are one target.
  */
 export function resolveBulkFilePath(target: string): string | null {
   const logical = resolveFileAreaPath(target);
@@ -160,14 +182,19 @@ export function resolveBulkFilePath(target: string): string | null {
 
 /**
  * A file's current content — its before-image — or absent. Opens once and stats the
- * same descriptor (nothing can be swapped between check and read), and refuses a
- * symlink planted at the leaf after the path was resolved. `too_large` above
- * `maxBytes`; throws for anything that is not a regular file.
+ * same descriptor (nothing can be swapped between check and read), refuses a symlink
+ * planted at the leaf after the path was resolved, and opens non-blocking so a FIFO
+ * cannot park the engine's event loop inside `open`. `too_large` above `maxBytes`;
+ * `not_text` when the bytes are not UTF-8 — decoding would replace them, and a
+ * before-image that is not the file's real content restores something else. Throws for
+ * anything that is not a regular file.
  */
-export function readBulkImage(absPath: string, maxBytes: number): { absent: true } | { absent: false; value: string } | 'too_large' {
+export function readBulkImage(
+  absPath: string, maxBytes: number,
+): { absent: true } | { absent: false; value: string } | 'too_large' | 'not_text' {
   let fd: number;
   try {
-    fd = openSync(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    fd = openSync(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { absent: true };
     throw err;
@@ -178,7 +205,9 @@ export function readBulkImage(absPath: string, maxBytes: number): { absent: true
     if (stats.size > maxBytes) return 'too_large';
     const buf = Buffer.alloc(stats.size);
     if (stats.size > 0) readSync(fd, buf, 0, stats.size, 0);
-    return { absent: false, value: buf.toString('utf-8') };
+    const value = buf.toString('utf-8');
+    if (!Buffer.from(value, 'utf-8').equals(buf)) return 'not_text';
+    return { absent: false, value };
   } finally {
     closeSync(fd);
   }
@@ -189,8 +218,8 @@ export function readBulkImage(absPath: string, maxBytes: number): { absent: true
 export interface WorkspaceAccess {
   /** Absolute, confined path for a target; null when it leaves the workspace. */
   resolve(target: string): string | null;
-  /** Current content, or absent. Returns `too_large` over {@link BULK_MAX_TARGET_BYTES}. */
-  read(absPath: string): BeforeImage | 'too_large';
+  /** Current content, or absent. `too_large` over {@link BULK_MAX_TARGET_BYTES}. */
+  read(absPath: string): BeforeImage | 'too_large' | 'not_text';
 }
 
 /** Plan workspace targets: each target is a file, its after-state the full new text. */
@@ -203,22 +232,25 @@ export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAcc
       return { row, path: null };
     }
   });
-  // Every path has to be known before any file is read: a doubled target refuses the
-  // whole plan rather than recording half of it.
-  rejectDuplicates(resolved.filter((r) => r.path !== null).map((r) => r.path!));
+  // Every key has to be known before any file is read: a doubled target refuses the
+  // whole plan rather than recording half of it. Invalid targets are keyed by what the
+  // source said, so they count too.
+  rejectDuplicates(resolved.map((r) => r.path ?? r.row.target));
   return resolved.map(({ row, path }): PlannedTarget => {
     if (path === null) return { key: row.target, invalid: 'path_outside_workspace' };
     if (typeof row.after !== 'string') return { key: path, invalid: 'after_not_text' };
-    if (tooLarge(row.after)) return { key: path, invalid: 'target_too_large' };
-    let before: BeforeImage | 'too_large';
+    const afterBytes = imageBytes(row.after);
+    if (afterBytes > BULK_MAX_TARGET_BYTES) return { key: path, invalid: 'target_too_large' };
+    let before: BeforeImage | 'too_large' | 'not_text';
     try {
       before = access.read(path);
     } catch {
       return { key: path, invalid: 'unreadable' };
     }
     if (before === 'too_large') return { key: path, invalid: 'target_too_large' };
-    budget.charge(row.after);
-    if (!before.absent) budget.charge(before.value);
+    if (before === 'not_text') return { key: path, invalid: 'not_text' };
+    budget.charge(afterBytes);
+    if (!before.absent) budget.charge(imageBytes(before.value));
     return { key: path, before, after: row.after };
   });
 }
@@ -253,14 +285,14 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
       return { row, stored: null, key: null };
     }
   });
-  rejectDuplicates(keyed.filter((k) => k.key !== null).map((k) => k.key!));
+  rejectDuplicates(keyed.map((k) => k.key ?? k.row.target));
 
   // Before-images in batches of the query's own maximum page size.
   const beforeByKey = new Map<string, Record<string, unknown>>();
   const lookups = keyed.filter((k) => k.key !== null);
-  for (let i = 0; i < lookups.length; i += 500) {
-    const batch = lookups.slice(i, i + 500).map((k) => k.stored);
-    const { rows } = store.queryRecords({ collection, filter: { [keyCol]: { $in: batch } }, limit: 500 });
+  for (let i = 0; i < lookups.length; i += BULK_QUERY_PAGE) {
+    const batch = lookups.slice(i, i + BULK_QUERY_PAGE).map((k) => k.stored);
+    const { rows } = store.queryRecords({ collection, filter: { [keyCol]: { $in: batch } }, limit: BULK_QUERY_PAGE });
     for (const r of rows) {
       const clean: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(r)) if (!META_FIELDS.has(k)) clean[k] = v;
@@ -280,7 +312,14 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
       const col = colDefs.get(field);
       if (!col) return { key, invalid: 'unknown_column' };
       if (col.type === 'subject') return { key, invalid: 'subject_column' };
-      if (value === null || value === undefined) { planned[field] = null; continue; }
+      // An empty CSV cell means "no value" for a typed column; only text keeps ''.
+      const absent = value === null || value === undefined || (value === '' && col.type !== 'string');
+      if (absent) {
+        // Nulling the key would plan a row that no longer answers to its key.
+        if (field === keyCol) return { key, invalid: 'bad_key' };
+        planned[field] = null;
+        continue;
+      }
       try {
         planned[field] = coercePlainColumnValue(value, col);
       } catch {
@@ -293,9 +332,10 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
     const full: Record<string, unknown> = existing
       ? { ...existing, ...planned }
       : { ...Object.fromEntries(info.columns.map((c) => [c.name, null])), ...planned, [keyCol]: stored };
-    if (tooLarge(full)) return { key, invalid: 'target_too_large' };
-    budget.charge(full);
-    if (existing) budget.charge(existing);
+    const fullBytes = imageBytes(full);
+    if (fullBytes > BULK_MAX_TARGET_BYTES) return { key, invalid: 'target_too_large' };
+    budget.charge(fullBytes);
+    if (existing) budget.charge(imageBytes(existing));
     return { key, before, after: full };
   });
 }

@@ -276,6 +276,33 @@ describe('bulk_plan over data-store rows', () => {
     expect(result).toContain('Targets: 2 — update 1, create 0, unchanged 1, invalid 0');
   });
 
+  it('pages a staging collection past one query page, and caps it at the target limit', async () => {
+    seed();
+    store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });
+    const put = (from: number, to: number): void => {
+      for (let i = from; i < to; i += 100) {
+        store.insertRecords({
+          collection: 'staged',
+          records: Array.from({ length: Math.min(100, to - i) }, (_, j) => ({ target: `X${String(i + j)}`, price: 1 })),
+        });
+      }
+    };
+    put(0, 501);
+    const paged = await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, agent());
+    expect(paged).toContain('Targets: 501 — update 0, create 501');
+
+    put(501, BULK_MAX_TARGETS + 1);
+    expect(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'products', source_collection: 'staged' }, agent()))
+      .toContain(`more than ${String(BULK_MAX_TARGETS)} targets`);
+  });
+
+  it('refuses a source file that is not UTF-8', async () => {
+    seed();
+    writeFileSync(join(ws, 'latin1.csv'), Buffer.from('target,price\nS\xe9,1\n', 'latin1'));
+    expect(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'products', source_file: 'latin1.csv' }, agent()))
+      .toBe('Error: The source file is not UTF-8 text.');
+  });
+
   it('marks unknown columns, subject columns and unconvertible values invalid, by reason', async () => {
     store.createCollection({
       name: 'people', scope, uniqueKey: ['email'],
