@@ -1289,6 +1289,20 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     for (const api of cat.suggested_apis) {
       lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
     }
+
+    // The second list, and it gets the opposite instruction. These providers are
+    // the ones `do_not_proactively_suggest` covers — they move billing, customer
+    // records or orders — so the model may not raise them. When the USER raises
+    // one, this is the path. Rendering them into the list above would have put
+    // "you can offer" and "do not suggest" three lines apart about the same
+    // provider, under a heading calling them free, which none of them is.
+    if (cat.connect_when_user_asks.length > 0) {
+      lines.push('');
+      lines.push('Connect ONLY when the user names the provider — these are NOT suggestions, do not raise them unprompted. Each needs a credential the user creates in their own account: walk them through creating it, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url:');
+      for (const api of cat.connect_when_user_asks) {
+        lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
+    }
     return compose([renderFence('api_bootstrap_hints', lines.join('\n'))]);
   }
 
