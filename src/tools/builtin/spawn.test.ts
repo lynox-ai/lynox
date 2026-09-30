@@ -129,11 +129,18 @@ const mockGetRoleNames = vi.fn().mockReturnValue(['researcher', 'creator', 'oper
 // unit tests in roles.test.ts; spawn tests only care that the override
 // threads through without being dropped.
 const mockApplyTierGate = vi.fn().mockImplementation((requested: unknown) => requested);
-vi.mock('../../core/roles.js', () => ({
-  getRole: (...args: unknown[]) => mockGetRole(...args),
-  getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
-  applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
-}));
+// Partial mock: role LOOKUP and the tier gate are stubbed, everything else stays real.
+// `roleToolProfile` in particular must be the real one — it is what turns a role into
+// the grant spawn.ts applies, so a stub here would test the stub's idea of a role.
+vi.mock('../../core/roles.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/roles.js')>();
+  return {
+    ...actual,
+    getRole: (...args: unknown[]) => mockGetRole(...args),
+    getRoleNames: (...args: unknown[]) => mockGetRoleNames(...args),
+    applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
+  };
+});
 
 import { RunAbortedError, ToolLoopBreakError } from '../../core/agent.js';
 import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, formatAllFailedMessage, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
@@ -1012,6 +1019,106 @@ describe('spawn_agent tool', () => {
     expect(toolNames).not.toContain('write_file');
     expect(toolNames).not.toContain('bash');
     expect(toolNames).not.toContain('spawn_agent');
+  });
+
+  /**
+   * The point of granting a read-only role by allowlist instead of subtraction: the
+   * tool that does not exist yet.
+   *
+   * `zz_future_write_tool` stands in for the next write tool someone registers. It is
+   * in the parent's set and named in no role's denyTools — the one case a subtraction
+   * cannot cover, because the list would have to have been written before the tool was.
+   */
+  it('a write tool no denylist names reaches a subtractive role and not a readOnly one', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const FUTURE = 'zz_future_write_tool';
+    // `bash` is the real witness — registered today, in the parent set, and named in
+    // operator's denyTools nowhere. FUTURE covers the tool nobody has written yet.
+    const parentTools = [makeTool('read_file'), makeTool('write_file'), makeTool('bash'), makeTool(FUTURE)];
+    const childToolsOfCall = (i: number): string[] => {
+      const call = vi.mocked(MockAgent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+      return (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    };
+
+    // CONTROL, and deliberately from the other population — a role granted by
+    // subtraction. Without it, "the tool is absent" cannot be told apart from "the
+    // tool never reached the resolver".
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'guided',
+      denyTools: ['write_file'], description: 'Content creation. No system commands.',
+    } as RoleConfig);
+    const before = vi.mocked(MockAgent).mock.calls.length;
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'c1', task: 'do', role: 'creator' }] },
+      makeAgent({ tools: parentTools }),
+    );
+    const control = childToolsOfCall(before);
+    expect(control, 'the injected tool must reach a subtractive role — else this test proves nothing')
+      .toContain(FUTURE);
+    expect(control).toContain('bash');
+    expect(control).not.toContain('write_file');
+
+    // SUBJECT: the same parent set, the same unlisted tool, a readOnly role.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const before2 = vi.mocked(MockAgent).mock.calls.length;
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'o1', task: 'do', role: 'operator' }] },
+      makeAgent({ tools: parentTools }),
+    );
+    const subject = childToolsOfCall(before2);
+    expect(subject).not.toContain(FUTURE);
+    expect(subject).not.toContain('bash');
+    expect(subject).not.toContain('write_file');
+    // Not simply empty — the grant still carries the read side.
+    expect(subject).toContain('read_file');
+  });
+
+  /**
+   * The invariant: for a role whose grant is a CEILING, an explicit `spec.tools` may
+   * select WITHIN it and never beyond it. Both directions are asserted, because a
+   * clamp that also broke narrowing would pass a one-sided test while making the
+   * explicit list useless. `resolveTools` applies the ceiling at its single exit, so
+   * tier 1 returning first cannot route around it.
+   *
+   * The precedence itself is untouched for every other role; `spec.tools overrides
+   * role tool scoping` below still pins that.
+   */
+  it('an explicit tool list narrows a readOnly role and cannot widen it', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const parentTools = [makeTool('read_file'), makeTool('task_list'), makeTool('bash'), makeTool('write_file')];
+    // No `allowTools` on the fixture: for a `readOnly` role the ceiling IS the
+    // surface, so listing one here would imply a narrowing this test does not exercise.
+    const readOnlyRole = {
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig;
+    const childToolsOfCall = (i: number): string[] => {
+      const call = vi.mocked(MockAgent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+      return (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    };
+
+    // WIDEN: names a tool the ceiling does not hold.
+    mockGetRole.mockReturnValue(readOnlyRole);
+    const before = vi.mocked(MockAgent).mock.calls.length;
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'o1', task: 'do', role: 'operator', tools: ['bash', 'read_file'] }] },
+      makeAgent({ tools: parentTools }),
+    );
+    const widened = childToolsOfCall(before);
+    expect(widened).not.toContain('bash');
+    expect(widened).toContain('read_file');
+
+    // NARROW: names a subset of the ceiling, and gets exactly that subset — not the
+    // whole ceiling, which would mean the explicit list had stopped being honoured.
+    const before2 = vi.mocked(MockAgent).mock.calls.length;
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'o2', task: 'do', role: 'operator', tools: ['read_file'] }] },
+      makeAgent({ tools: parentTools }),
+    );
+    expect(childToolsOfCall(before2)).toEqual(['read_file']);
   });
 
   // === F5/S8: spawn seeds the child's sticky taint from a tainted parent ===

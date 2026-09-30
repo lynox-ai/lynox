@@ -234,6 +234,293 @@ describe('spawnInline with role', () => {
     expect(tools[0]!.definition.name).toBe('read_file');
   });
 
+  /**
+   * The second grant path. `spawn_agent` has its own version of this in
+   * `tools/builtin/spawn.test.ts` — both must hold, because both build the grant, and
+   * before `roleToolProfile` each built it from the role's fields on its own.
+   *
+   * The witnesses are `memory_store` and `data_store_insert`: both are in
+   * INLINE_CORE_TOOLS, both are declared by the step, and neither appears in
+   * operator's `denyTools`. So `inlineStepToolNames` admits them and the subtraction
+   * keeps them — only the allowlist takes them away. No hypothetical tool needed.
+   */
+  it('a readOnly role drops declared write tools that no denylist names', async () => {
+    const WRITES = ['memory_store', 'data_store_insert'] as const;
+    const entry = (name: string): ToolEntry => ({
+      definition: { name, description: name, input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'ok',
+    });
+    const parent: ToolEntry[] = [...mockParentTools, ...WRITES.map(entry)];
+    const step: ManifestStep = {
+      id: 'probe-step',
+      agent: 'probe-step',
+      runtime: 'inline',
+      role: 'operator',
+      tools: ['read_file', ...WRITES],
+    };
+    const namesOfCall = (i: number): string[] => {
+      const call = vi.mocked(Agent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+      return (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    };
+
+    // CONTROL: the same step and parent set, granted by subtraction.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous',
+      denyTools: ['write_file'], description: 'Monitors',
+    } as RoleConfig);
+    const before = vi.mocked(Agent).mock.calls.length;
+    await spawnInline(step, {}, mockConfig, parent);
+    const control = namesOfCall(before);
+    for (const t of WRITES) {
+      expect(control, `${t} must reach a subtractive role — else this test proves nothing`).toContain(t);
+    }
+
+    // SUBJECT.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const before2 = vi.mocked(Agent).mock.calls.length;
+    await spawnInline(step, {}, mockConfig, parent);
+    const subject = namesOfCall(before2);
+    for (const t of WRITES) expect(subject).not.toContain(t);
+    expect(subject).toContain('read_file');
+  });
+
+  /**
+   * The THIRD grant path. `spawnViaAgent` grants the agent definition's own tools —
+   * module-provided functions rather than registry entries — which the read-only
+   * surface cannot bound. Refusing is the only response that leaves the author
+   * informed; the two alternatives are a label the grant does not support, and a step
+   * that runs with nothing.
+   */
+  it('refuses a readOnly role on the agent runtime instead of ignoring it', async () => {
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'ro-agent-step', agent: 'ro-agent-step', runtime: 'agent', role: 'operator',
+    };
+    const agentDef: AgentDef = {
+      name: 'ro-agent-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
+    };
+    await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
+      .rejects.toThrow(/read-only role "operator" on the agent runtime/);
+  });
+
+  it('leaves a NON-readOnly role on the agent runtime alone', async () => {
+    // The other direction: the refusal must key on the flag, not on the presence of a
+    // role. `creator` has always been legal here and still is.
+    mockGetRole.mockReturnValue({
+      model: 'balanced', effort: 'high', autonomy: 'guided',
+      denyTools: ['bash'], description: 'Content creation, tone adaptation. No system commands.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'rw-agent-step', agent: 'rw-agent-step', runtime: 'agent', role: 'creator',
+    };
+    const agentDef: AgentDef = {
+      name: 'rw-agent-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
+    };
+    await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
+      .resolves.toBeDefined();
+  });
+
+  /**
+   * The same rule on the inline runtime, where it can bite with EXISTING tools:
+   * `ask_user` is in `INLINE_CORE_TOOLS` and outside the read-only surface, so a step
+   * that declares only tools like it resolves to an empty grant. An empty grant on a
+   * step that named tools is the "runs and does nothing" state, so it is refused here
+   * too rather than left silent.
+   */
+  it('refuses an inline readOnly step whose declared tools are all outside the ceiling', async () => {
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'empty-ro-step', agent: 'empty-ro-step', runtime: 'inline', role: 'operator',
+      tools: ['ask_user'],
+    };
+    await expect(spawnInline(step, {}, mockConfig, mockParentTools))
+      .rejects.toThrow(/would run with no tools at all/);
+  });
+
+  it('does NOT refuse an inline readOnly step that keeps at least one declared tool', async () => {
+    // The other direction: a partial narrowing is the point of an explicit list and
+    // must stay silent. Without this, the refusal above could be widened to "any tool
+    // was dropped" and nothing would notice.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'partial-ro-step', agent: 'partial-ro-step', runtime: 'inline', role: 'operator',
+      tools: ['ask_user', 'read_file'],
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const call = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const names = (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(names).toEqual(['read_file']);
+  });
+
+  it('does NOT refuse an inline readOnly step that declared no tools at all', async () => {
+    // The gate the refusal hangs on: `removedByRole` is empty for a step that declared
+    // nothing, so nothing throws. Drop that term from the empty-grant throw and this
+    // test fires — that is the mutant it exists to kill, and it can only kill it while
+    // that term is the single thing standing between an empty grant and a throw.
+    //
+    // Reaching the branch needs an empty grant with no declaration, and the parent set
+    // below is built so the SURFACE
+    // is what empties it — `http_request` is in the inline pool and in no role's
+    // denyTools, so neither the pool nor the denylist can be the cause. (A denylist
+    // covering everything the pool admits would empty it too; this fixture keeps that
+    // second route out of the picture rather than claiming it does not exist.)
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const noSurfaceParent: ToolEntry[] = ['http_request'].map(name => ({
+      definition: { name, description: name, input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'ok',
+    }));
+    const step: ManifestStep = {
+      id: 'undeclared-ro-step', agent: 'undeclared-ro-step', runtime: 'inline', role: 'operator',
+    };
+    await spawnInline(step, {}, mockConfig, noSurfaceParent);
+    const call = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    // It ran, and with nothing — which is the pre-existing outcome for an undeclared
+    // step and deliberately not what this guard is for.
+    expect((call['tools'] as ToolEntry[])).toHaveLength(0);
+  });
+
+  it('refuses an inline readOnly step whose REPLAY tool the role cannot hold', async () => {
+    // `step.tool` is a declaration too: `inlineStepToolNames` admits it from the pool
+    // because the step exists to make exactly that call. The grant here is non-empty
+    // (the default pool still yields `read_file`), so the empty-grant branch above
+    // cannot catch it — the step would run and simply never replay.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'replay-ro-step', agent: 'replay-ro-step', runtime: 'inline', role: 'operator',
+      tool: 'ask_user',
+    };
+    await expect(spawnInline(step, {}, mockConfig, mockParentTools))
+      .rejects.toThrow(/replays "ask_user".*without the one call it exists to make/s);
+  });
+
+  it('leaves a replay step alone when the role CAN hold the replayed tool', async () => {
+    // The other direction, so the refusal keys on the grant and not on the presence of
+    // a `tool` field.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'replay-ok-step', agent: 'replay-ok-step', runtime: 'inline', role: 'operator',
+      tool: 'read_file',
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const call = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect((call['tools'] as ToolEntry[]).map(t => t.definition.name)).toContain('read_file');
+  });
+
+  it('narrows a readOnly role that also names allowTools to the step\'s declared set', async () => {
+    // The one shape that carries both. The parent-set predicate keys on the declared
+    // `allowTools`, which such a role has — so without the `readOnly` term it hands the
+    // step the WHOLE parent set and the step's own `tools` stop binding. `task_list` is
+    // in the parent, in the surface and in the role's list, so it comes back exactly
+    // when the step's declaration has been bypassed.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'guided', readOnly: true,
+      allowTools: ['read_file', 'task_list'],
+      description: 'Narrow reader. Read-only.',
+    } as RoleConfig);
+    const parent: ToolEntry[] = ['read_file', 'task_list'].map(name => ({
+      definition: { name, description: name, input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'ok',
+    }));
+    const step: ManifestStep = {
+      id: 'both-shape-step', agent: 'both-shape-step', runtime: 'inline', role: 'operator',
+      tools: ['read_file'],
+    };
+    await spawnInline(step, {}, mockConfig, parent);
+    const call = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect((call['tools'] as ToolEntry[]).map(t => t.definition.name)).toEqual(['read_file']);
+  });
+
+  /**
+   * The refusal names the role, so it must only fire where the ROLE is the cause. Three
+   * things make a declared tool absent, and two of them have nothing to do with roles:
+   * the inline pool never admits the name, or the parent set does not carry it. An
+   * author told "a read-only role does not hold this" in either case is sent to the
+   * wrong fix — the step shape is what is wrong, and the identical step without a role
+   * behaves the same way.
+   */
+  const READ_ONLY_OPERATOR = {
+    model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+    denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+  } as RoleConfig;
+  const parentOf = (names: string[]): ToolEntry[] => names.map(name => ({
+    definition: { name, description: name, input_schema: { type: 'object' } } as ToolEntry['definition'],
+    handler: async () => 'ok',
+  }));
+
+  it('does NOT blame the role for a declared tool the inline pool never admits', async () => {
+    // `mail_send` is registered and capturable but is not in INLINE_CORE_TOOLS, so no
+    // role on this runtime could hold it. Pre-existing and role-independent: the step
+    // runs with what the pool gives, exactly as it would with no role at all.
+    mockGetRole.mockReturnValue(READ_ONLY_OPERATOR);
+    const step: ManifestStep = {
+      id: 'out-of-pool-step', agent: 'out-of-pool-step', runtime: 'inline', role: 'operator',
+      tools: ['mail_send'],
+    };
+    await expect(spawnInline(step, {}, mockConfig, parentOf(['mail_send', 'read_file'])))
+      .resolves.toBeDefined();
+  });
+
+  it('does NOT blame the role for a REPLAY tool the inline pool never admits', async () => {
+    mockGetRole.mockReturnValue(READ_ONLY_OPERATOR);
+    const step: ManifestStep = {
+      id: 'out-of-pool-replay', agent: 'out-of-pool-replay', runtime: 'inline', role: 'operator',
+      tool: 'mail_send',
+    };
+    await expect(spawnInline(step, {}, mockConfig, parentOf(['mail_send', 'read_file'])))
+      .resolves.toBeDefined();
+  });
+
+  it('does NOT blame the role when the PARENT set is what lacks the replayed tool', async () => {
+    // `read_file` is in the pool and in the ceiling — the role holds it. It is absent
+    // only because this parent set does not carry it, which is the third cause and also
+    // not the role's doing.
+    mockGetRole.mockReturnValue(READ_ONLY_OPERATOR);
+    const step: ManifestStep = {
+      id: 'parent-lacks-step', agent: 'parent-lacks-step', runtime: 'inline', role: 'operator',
+      tool: 'read_file',
+    };
+    await expect(spawnInline(step, {}, mockConfig, parentOf(['http_request'])))
+      .resolves.toBeDefined();
+  });
+
+  it('names the role when its own denylist, not the ceiling, removed the declared tool', async () => {
+    // The second half of "the role is the cause". A role may hold a surface member in
+    // its ceiling and deny it in the same breath; the grant is then empty for a reason
+    // that is still entirely the role's. No built-in role has that shape — which is why
+    // the term needs a test of its own, or nothing would ever exercise it.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['read_file'], description: 'Denies what it allows. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'self-denying-step', agent: 'self-denying-step', runtime: 'inline', role: 'operator',
+      tools: ['read_file'],
+    };
+    await expect(spawnInline(step, {}, mockConfig, parentOf(['read_file'])))
+      .rejects.toThrow(/does not hold \[read_file\]/);
+  });
+
   it('role defaults to maxIterations 10', async () => {
     const role: RoleConfig = {
       model: 'deep',

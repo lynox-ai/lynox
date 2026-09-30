@@ -6,7 +6,7 @@ import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
-import { getRole, getRoleNames } from '../core/roles.js';
+import { getRole, getRoleNames, roleToolProfile } from '../core/roles.js';
 import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
 import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -630,6 +630,25 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
+  // A read-only role cannot be honoured on THIS runtime, so it is refused.
+  //
+  // The grant here is `convertAgentTools(agentDef.tools)` — module-provided
+  // functions rather than registry entries, so `READ_ONLY_TOOL_SURFACE` has nothing
+  // to say about them and cannot bound them. Of the three ways to respond, refusing
+  // is the only one that leaves the author informed: granting the definition's tools
+  // would carry a label the grant does not support, and withholding them would leave
+  // a step that runs and does nothing. `role` is permitted on any `ManifestStep`, and
+  // no manifest in this repo declares one on `runtime: 'agent'`.
+  const declaredRole = step.role ? getRole(step.role) : undefined;
+  if (declaredRole?.readOnly === true) {
+    throw new Error(
+      `Step "${step.id}" declares the read-only role "${step.role ?? ''}" on the agent `
+      + `runtime, which grants the agent definition's own tools — a read-only grant `
+      + `cannot be applied to them. Use runtime: 'inline' for a read-only role, or drop `
+      + `the role from this step.`,
+    );
+  }
+
   // Single chokepoint: override gate (now a pass-through, D8) + clamp to
   // max_tier + map to the provider's id. The clamp is the cost cap that applies.
   // Headless deep-consent parity: the step-side twin of spawn's D2 clamp, as a
@@ -889,12 +908,75 @@ export async function spawnInline(
   // to the profile filter (existing YAML surface, can widen deliberately);
   // otherwise the step draws from `inlineStepToolNames` — its declared set, or
   // the inline pool minus bash when it declared nothing (F2/D2).
-  const roleProfile = resolved
-    ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
-    : null;
+  const roleProfile = resolved ? roleToolProfile(resolved) : null;
   const stepToolNames = inlineStepToolNames(step);
-  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => stepToolNames.has(t.definition.name));
+  // Keyed on the DECLARED `allowTools` and explicitly NOT on the profile's derived
+  // allowlist, which every `readOnly` role has: switching it would widen an inline
+  // step from its declared set to the whole parent set. The `readOnly` term carries
+  // the same rule for the one shape that has both — a role with `readOnly` AND its
+  // own `allowTools` — so such a role narrows to the step's declared set like any
+  // other readOnly role instead of bypassing it. `resolveTools` then intersects with
+  // the surface, so a readOnly step lands on (declared ∩ surface ∩ allowTools), which
+  // is narrower than the surface either way.
+  const roleGrantsFullParent = resolved?.allowTools !== undefined && resolved.readOnly !== true;
+  const filteredParent = roleGrantsFullParent
+    ? parentTools
+    : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
+  // Symmetry with the agent runtime's refusal above: a step that NAMES tools and
+  // cannot do the thing it named runs and does nothing, which is the one outcome both
+  // runtimes should reach loudly or not at all.
+  //
+  // Scoped to a `readOnly` role on purpose, and NOT because the ceiling is the only
+  // way to empty a grant — it is not. A declared empty `tools: []` empties it
+  // deliberately (a pure-reasoning step, see `inlineStepToolNames`), and a declared
+  // name outside `INLINE_CORE_TOOLS` empties it with no role involved. Both predate
+  // this and neither is the claim being kept here.
+  //
+  // `step.tool` counts as a declaration alongside `step.tools`: a captured replay step
+  // exists to make exactly that one call, so a non-empty grant that happens to lack it
+  // is the same silent no-op one level down. The filters below (human-in-the-loop,
+  // user-disabled tools) may still empty a step — those are the operator's choices.
+  const declaredToolNames = [
+    ...(step.tools ?? []),
+    ...(step.tool !== undefined ? [step.tool] : []),
+  ];
+  if (resolved?.readOnly === true) {
+    const roleName = step.role ?? '';
+    const ceilingNames = new Set(roleProfile?.allowedTools ?? []);
+    const deniedNames = new Set(roleProfile?.deniedTools ?? []);
+    // Name the ROLE only for what the role did, or the message sends the author to the
+    // wrong fix. A declared name the inline pool never admits (`INLINE_CORE_TOOLS`) is
+    // absent whatever role is on the step, and so is one the parent set does not carry;
+    // both are role-independent and both predate this. The role is the cause exactly
+    // when the pool DID admit the name and the role's own grant then removed it —
+    // either because its ceiling does not hold it or because its denylist names it.
+    //
+    // This set carries the whole condition, and deliberately alone. A filter over
+    // `declaredToolNames` cannot be non-empty when that list is empty, and both throws
+    // below require it — so an outer length check would be a term no test could
+    // distinguish from its own removal, and a term like that absorbs the coverage the
+    // condition beside it was supposed to carry.
+    const removedByRole = declaredToolNames.filter(
+      n => stepToolNames.has(n) && (!ceilingNames.has(n) || deniedNames.has(n)),
+    );
+    if (removedByRole.length > 0 && tools.length === 0) {
+      throw new Error(
+        `Step "${step.id}" declares the read-only role "${roleName}" together with `
+        + `[${[...new Set(declaredToolNames)].join(', ')}]. That role's grant does not hold `
+        + `[${[...new Set(removedByRole)].join(', ')}], so the step would run with no tools `
+        + `at all. Name tools the role can hold, or drop the role from this step.`,
+      );
+    }
+    if (step.tool !== undefined && removedByRole.includes(step.tool)) {
+      throw new Error(
+        `Step "${step.id}" replays "${step.tool}" and declares the read-only role `
+        + `"${roleName}", whose grant does not hold that tool — the step would run without `
+        + `the one call it exists to make. Drop the role from this step, or replay a tool `
+        + `the role can hold.`,
+      );
+    }
+  }
   // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
   // Belt-and-suspenders: validator/scheduler should already block this path,
   // but a registry drift here would silently throw at tool dispatch time.
