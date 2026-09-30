@@ -367,8 +367,8 @@ const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
  * any network call:
  * - `none`: no api_profile for the host → connect the service.
  * - `attached`: the engine attached the profile's key → the extra one is not needed.
- * - `not-attached`: a bearer or header profile exists but its key was not attached
- *   → check the profile.
+ * - `not-attached`: a profile of an engine-attached type (bearer, header, oauth2,
+ *   basic with split credentials) exists but its key was not attached → check it.
  * - `model-owned`: a profile whose auth type the engine never attaches (query,
  *   none, pre-encoded basic) → send the key the way the profile describes.
  */
@@ -1096,9 +1096,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       } catch { return 'none'; }
       if (!profile) return 'none';
       const a = profile.auth;
-      // Only bearer and header can end here without attaching: oauth2 and split
-      // basic either attach (→ 'attached' above) or refuse before this scan runs.
-      return a?.type === 'bearer' || a?.type === 'header' ? 'not-attached' : 'model-owned';
+      // Auth types the engine attaches: when one reaches here unattached (no
+      // recorded acceptance, no vault value — or no secret store on this agent,
+      // which ends the attach before any branch), the profile needs checking.
+      const engineAttached = a?.type === 'bearer' || a?.type === 'header' || a?.type === 'oauth2'
+        || (a?.type === 'basic' && a.basic_format === 'user_pass_split');
+      return engineAttached ? 'not-attached' : 'model-owned';
     };
 
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).

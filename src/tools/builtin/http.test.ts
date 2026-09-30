@@ -3015,6 +3015,30 @@ describe('httpRequestTool', () => {
       expect(result).not.toContain('connect that service with api_setup');
     });
 
+    // Without a secret store on the agent the attach ends before any branch, so an
+    // oauth2 or split-basic profile reaches the scan unattached as well.
+    it.each([
+      ['oauth2', { type: 'oauth2', vault_keys: ['SVC_TOKEN'] }],
+      ['split basic', { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['SVC_USER', 'SVC_PASS'] }],
+    ])('an %s profile the engine could not attach for is told to check the profile', async (_name, auth) => {
+      const store = await storeFor('svc.example.com', auth);
+      const key = 'sk_' + 'live_' + 'R'.repeat(20);
+      mockDnsPublic();
+      const noVaultAgent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await visible({ url: 'https://svc.example.com/v1/x', headers: { 'X-Key': key } }, noVaultAgent);
+      expect(result).toContain('This service has an api_profile, but the engine did not attach its stored key to this request');
+      expect(result).not.toContain('whose auth type the engine does not attach');
+    });
+
+    it('a pre-encoded basic profile is pointed at its own route, not at re-saving', async () => {
+      const store = await storeFor('svc2.example.com', { type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['SVC_B64'] });
+      const key = 'shp' + 'at_' + '0123456789abcdef'.repeat(2);
+      mockDnsPublic();
+      const result = await visible({ url: 'https://svc2.example.com/v1/x', headers: { 'X-Key': key } }, agentWith(store, { SVC_B64: 'x' }));
+      expect(result).toContain('whose auth type the engine does not attach');
+      expect(result).not.toContain('re-save it');
+    });
+
     it('a profile-authored vault key name never reaches the refusal', async () => {
       // The refusal fires before any network call; it carries fixed sentences only.
       const { ApiStore } = await import('../../core/api-store.js');
