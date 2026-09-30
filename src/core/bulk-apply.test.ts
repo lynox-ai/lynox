@@ -940,6 +940,8 @@ describe('§7(i) before-images reach no model context', () => {
       if (i < 15) writeFileSync(join(ws, name), `${IN_BEFORE} ${String(i)}\n`);
       rows.push({ target: name, after: `${IN_AFTER} ${String(i)}\n` });
     }
+    // One row the plan refuses, so the `invalid (reason n)` part of the status renders.
+    rows.push({ target: `pages/${IN_KEY}-bad.md`, after: 42 as unknown as string });
     const seen: string[] = [];
     writeFileSync(join(ws, 'src.json'), JSON.stringify(rows));
     const planned = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent());
@@ -985,9 +987,17 @@ describe('§7(i) before-images reach no model context', () => {
     const undo = ledger.planUndo(runId);
     if (!undo.ok) throw new Error(undo.reason);
     approve(undo.status.id);
-    await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(workspaceWriter()));
+    // The undo is the path that writes before-images BACK — its summary is a channel too.
+    const undone = await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(workspaceWriter()));
+    expect(undone.status).toBe('done');
+    seen.push(undone.summary);
 
-    seen.push(await bulkStatusTool.handler({}, agent()));
+    // Both worker runs notified; the notification is a channel only if it was sent.
+    expect(notify).toHaveBeenCalledTimes(2);
+
+    const statuses = await bulkStatusTool.handler({}, agent());
+    expect(statuses).toContain('after_not_text 1');
+    seen.push(statuses);
     for (const id of [runId, runId2, undo.status.id]) seen.push(await bulkStatusTool.handler({ run_id: id }, agent()));
 
     // task_list as the model calls it, over the bulk triggers.
@@ -998,6 +1008,8 @@ describe('§7(i) before-images reach no model context', () => {
     } as unknown as IAgent;
     const listed = await taskListTool.handler({}, listAgent);
     expect(listed).toContain(`Bulk run ${runId2}`);
+    // The failed run's result is rendered — the line that could carry a leak.
+    expect(listed).toContain('last run FAILED');
     seen.push(listed);
 
     // The same tool results after a compaction parked them, recalled by handle.
