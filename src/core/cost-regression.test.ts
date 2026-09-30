@@ -433,7 +433,17 @@ function measureStaticPrefixTokens(): number {
 // Measured after the cut, not derived from it: 23979 (first draft) − 64 (the cut) would
 // have written 23915 here by luck, and the note above this one exists because that
 // arithmetic is not sound.
-const STATIC_PREFIX_BUDGET = 23915;
+// 2026-10-01: +39 (23915 → 23954, measured) — a description on `spawn_agent`'s `tools`
+// parameter, which had none. The parameter narrows the child's tool set, and a role's
+// own grant now binds over every route into the resolver, so a caller naming a tool the
+// role withholds gets a child without it. That outcome is silent, which is what the
+// prose buys: without it the model's only way to learn the rule is a child that cannot
+// do its task.
+// Priced against the shorter wording in the same run: dropping the second sentence
+// ("a tool the role withholds is not added by naming it") saves 15 and leaves only the
+// claim that a grant binds, which is the half a reader can already guess. Measured at
+// the final wording, per the note above — the two variants were 23939 and 23954.
+const STATIC_PREFIX_BUDGET = 23954;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

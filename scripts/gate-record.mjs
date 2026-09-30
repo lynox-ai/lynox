@@ -106,6 +106,15 @@ export const SECURITY_PATHS = [
   /^src\/core\/migration-crypto\.ts$/,
   /^src\/core\/input-guard\.ts$/,
   /^src\/tools\/permission-guard\.ts$/,
+  // The single exit every tool grant to a child agent passes through: the caller's
+  // requested list, a role's own grant, and the parent set all meet here. Added
+  // 2026-10-01, because it was NOT here while it was where a role's grant was decided
+  // — a change confined to this file owed no security gate, and the change that made
+  // that grant bind on every route in only owed one because it also touched
+  // `src/tools/builtin/`. Cheap by the measure the note above uses: touched by 2 of the
+  // last 300 commits on main, one of them the release root, against 19 for
+  // `permission-guard.ts` beside it.
+  /^src\/tools\/resolve-tools\.ts$/,
   /^src\/tools\/builtin\//,
   /^src\/server\//,
   /^src\/integrations\//,

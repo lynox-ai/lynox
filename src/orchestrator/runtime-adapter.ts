@@ -6,7 +6,7 @@ import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
-import { getRole, getRoleNames, roleToolProfile } from '../core/roles.js';
+import { getRole, getRoleNames, roleToolProfile, statedToolGrant } from '../core/roles.js';
 import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
 import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
 import { resolveTools } from '../tools/resolve-tools.js';
@@ -630,22 +630,37 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
-  // A read-only role cannot be honoured on THIS runtime, so it is refused.
+  // A role that states anything about the child's tools cannot be honoured on THIS
+  // runtime, so it is refused.
   //
-  // The grant here is `convertAgentTools(agentDef.tools)` — module-provided
-  // functions rather than registry entries, so `READ_ONLY_TOOL_SURFACE` has nothing
-  // to say about them and cannot bound them. Of the three ways to respond, refusing
-  // is the only one that leaves the author informed: granting the definition's tools
-  // would carry a label the grant does not support, and withholding them would leave
-  // a step that runs and does nothing. `role` is permitted on any `ManifestStep`, and
-  // no manifest in this repo declares one on `runtime: 'agent'`.
+  // The grant here is `convertAgentTools(agentDef.tools)` — module-provided functions
+  // rather than registry entries, so a role's grant is a list of REGISTRY names about a
+  // namespace that belongs to the definition. Of the three ways to respond, refusing is
+  // the only one that leaves the author informed: granting the definition's tools would
+  // carry a label the grant does not support, and withholding them would leave a step
+  // that runs and does nothing.
+  //
+  // Keyed on the stated GRANT rather than on `readOnly` since 2026-10-01. The flag was
+  // never what made a grant unapplicable here — `creator` denying `bash` and `collector`
+  // naming an allowlist make the same promise about the child's tools, and this runtime
+  // can keep none of the three. A name-wise subtraction over a foreign namespace would
+  // be the worst of the responses rather than a partial one: it binds the NAME and
+  // reports the capability.
+  //
+  // This discards a part of the role the runtime COULD honour — model, effort, autonomy
+  // — and does so on purpose: those are visible in the manifest next to the step, and
+  // the tool promise is the part a reader cannot check there. `role` is permitted on any
+  // `ManifestStep` and no manifest in this repo declares one on `runtime: 'agent'`, so
+  // user manifests are where this lands: loudly, with the remedy in the message.
   const declaredRole = step.role ? getRole(step.role) : undefined;
-  if (declaredRole?.readOnly === true) {
+  const statedGrant = declaredRole === undefined ? null : statedToolGrant(declaredRole);
+  if (statedGrant !== null) {
     throw new Error(
-      `Step "${step.id}" declares the read-only role "${step.role ?? ''}" on the agent `
-      + `runtime, which grants the agent definition's own tools — a read-only grant `
-      + `cannot be applied to them. Use runtime: 'inline' for a read-only role, or drop `
-      + `the role from this step.`,
+      `Step "${step.id}" declares the role "${step.role ?? ''}" on the agent runtime, `
+      + `which grants the agent definition's own tools — and that role ${statedGrant}, `
+      + `which cannot be applied to them: the names there are the definition's own, so a `
+      + `name-wise subtraction would bind the name and not the capability. Use `
+      + `runtime: 'inline' for a role with a tool grant, or drop the role from this step.`,
     );
   }
 

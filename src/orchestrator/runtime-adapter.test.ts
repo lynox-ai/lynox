@@ -289,40 +289,54 @@ describe('spawnInline with role', () => {
 
   /**
    * The THIRD grant path. `spawnViaAgent` grants the agent definition's own tools —
-   * module-provided functions rather than registry entries — which the read-only
-   * surface cannot bound. Refusing is the only response that leaves the author
-   * informed; the two alternatives are a label the grant does not support, and a step
-   * that runs with nothing.
+   * module-provided functions rather than registry entries — so a role's grant is a
+   * list of REGISTRY names about a namespace that is not the registry's. Refusing is
+   * the only response that leaves the author informed; the two alternatives are a label
+   * the grant does not support, and a step that runs with nothing.
    */
+  const agentStep = (id: string, role: string): ManifestStep =>
+    ({ id, agent: id, runtime: 'agent', role });
+  const agentDefOf = (name: string): AgentDef =>
+    ({ name, version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] });
+
   it('refuses a readOnly role on the agent runtime instead of ignoring it', async () => {
     mockGetRole.mockReturnValue({
       model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
       description: 'Fast status checks, concise reporting. Read-only.',
     } as RoleConfig);
-    const step: ManifestStep = {
-      id: 'ro-agent-step', agent: 'ro-agent-step', runtime: 'agent', role: 'operator',
-    };
-    const agentDef: AgentDef = {
-      name: 'ro-agent-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
-    };
-    await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
-      .rejects.toThrow(/read-only role "operator" on the agent runtime/);
+    // The message still names the CAUSE, which is why the phrase is asserted and not
+    // just the refusal: an author told only "not allowed here" has to guess which of
+    // the role's fields did it.
+    await expect(spawnViaAgent(agentStep('ro-agent-step', 'operator'), agentDefOf('ro-agent-step'), {}, mockConfig, undefined, 'run-1'))
+      .rejects.toThrow(/role "operator" on the agent runtime/);
+    await expect(spawnViaAgent(agentStep('ro-agent-step', 'operator'), agentDefOf('ro-agent-step'), {}, mockConfig, undefined, 'run-1'))
+      .rejects.toThrow(/is read-only/);
   });
 
-  it('leaves a NON-readOnly role on the agent runtime alone', async () => {
-    // The other direction: the refusal must key on the flag, not on the presence of a
-    // role. `creator` has always been legal here and still is.
+  it('refuses a role whose grant is a DENYLIST here too', async () => {
+    // Pinned the opposite until 2026-10-01 ('leaves a NON-readOnly role on the agent
+    // runtime alone', with the comment "`creator` has always been legal here and still
+    // is"). The flag was never what made a grant unapplicable on this runtime — a
+    // denylist makes the same promise about the child's tools, and this runtime can keep
+    // neither. Rewritten rather than deleted: a deleted pin is a silent change of it.
     mockGetRole.mockReturnValue({
       model: 'balanced', effort: 'high', autonomy: 'guided',
       denyTools: ['bash'], description: 'Content creation, tone adaptation. No system commands.',
     } as RoleConfig);
-    const step: ManifestStep = {
-      id: 'rw-agent-step', agent: 'rw-agent-step', runtime: 'agent', role: 'creator',
-    };
-    const agentDef: AgentDef = {
-      name: 'rw-agent-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
-    };
-    await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
+    await expect(spawnViaAgent(agentStep('rw-agent-step', 'creator'), agentDefOf('rw-agent-step'), {}, mockConfig, undefined, 'run-1'))
+      .rejects.toThrow(/denies bash/);
+  });
+
+  it('leaves a role that states NOTHING about tools alone', async () => {
+    // The other direction, and the one that keeps the refusal from being "any role":
+    // model, effort and autonomy are honourable on this runtime, so a role carrying only
+    // those still runs. Without this the refusal above would pass just as well if it
+    // rejected every `role` on the step.
+    mockGetRole.mockReturnValue({
+      model: 'balanced', effort: 'high', autonomy: 'guided',
+      description: 'A tier and an effort, and nothing about tools.',
+    } as RoleConfig);
+    await expect(spawnViaAgent(agentStep('plain-agent-step', 'custom'), agentDefOf('plain-agent-step'), {}, mockConfig, undefined, 'run-1'))
       .resolves.toBeDefined();
   });
 

@@ -142,6 +142,22 @@ export function roleToolProfile(role: RoleConfig): RoleToolProfile {
   };
 }
 
+/**
+ * What a role STATES about the child's tools, as a phrase for a message, or `null` when
+ * it states nothing at all.
+ *
+ * Pure and exported so a runtime that cannot KEEP such a statement can refuse on the
+ * predicate rather than on the flag that happens to be set. The three shapes are one
+ * promise: `readOnly` names a surface, `allowTools` names a list, `denyTools` names a
+ * subtraction — and a runtime either applies all three or keeps none of them.
+ */
+export function statedToolGrant(role: RoleConfig): string | null {
+  if (role.readOnly === true) return 'is read-only';
+  if (role.allowTools !== undefined) return `grants only ${role.allowTools.join(', ')}`;
+  if (role.denyTools !== undefined) return `denies ${role.denyTools.join(', ')}`;
+  return null;
+}
+
 export const BUILTIN_ROLES: Record<string, RoleConfig> = {
   researcher: {
     // Default is the `balanced` tier for all accounts — bench (2026-04) showed
