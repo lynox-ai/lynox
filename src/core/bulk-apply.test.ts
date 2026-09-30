@@ -428,6 +428,27 @@ describe('stop at ~80 % and resume (§7 c)', () => {
   });
 });
 
+describe('the claim predicate (BulkLedger.claimTarget)', () => {
+  // Asserted directly: in the loop, an applied target that is claimed again only reaches
+  // the "already holds the planned state" path, which hides a claim that should never
+  // have been granted — harmless for a local file, a second request for an external one.
+  it('grants a claim only on a target that is open, or held by a dead loop', () => {
+    const { runId } = recordMemoryRun(3);
+    approve(runId);
+    const t0 = Date.now();
+    expect(ledger.claimTarget(runId, 0, t0)).toBe(true);
+    expect(ledger.claimTarget(runId, 0, t0 + 1_000)).toBe(false);
+    expect(ledger.claimTarget(runId, 0, t0 + BULK_CLAIM_STALE_MS + 1_000)).toBe(true);
+
+    ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, 0, 'ok');
+    expect(ledger.claimTarget(runId, 0, t0 + 10 * BULK_CLAIM_STALE_MS)).toBe(false);
+
+    expect(ledger.claimTarget(runId, 1, t0)).toBe(true);
+    ledger.recordFailed(runId, 1, 'write_failed');
+    expect(ledger.claimTarget(runId, 1, t0 + 10 * BULK_CLAIM_STALE_MS)).toBe(false);
+  });
+});
+
 describe('a run closed by the other loop', () => {
   // The loop that finds the run already closed must report `done`, not a halt: the
   // worker turns a non-done outcome into a failure notice.
@@ -608,6 +629,13 @@ describe('atomic runs (§3.1, decided 30.9.)', () => {
     const s = ledger.getStatus(runId)!;
     expect([s.phase, s.haltReason, s.undone]).toEqual(['aborted', BULK_HALT_REASONS.atomicRolledBack, 6]);
     expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'atomic_partial' });
+    // Its trigger firing again (a restart, a model re-arming the task) writes nothing:
+    // an aborted run is not approved any more.
+    const refire = await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer));
+    expect(refire.status).toBe('refused');
+    const again = memory(initial);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(again.writer));
+    expect([...again.state.values()]).toEqual(Object.values(initial));
   });
 
   it('a conflict also rolls an atomic run back', async () => {
