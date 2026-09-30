@@ -361,13 +361,17 @@ const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
 /**
  * What the model reads when a request is refused for carrying a credential.
  * The scanner cannot tell a real key from a placeholder written in the same
- * format, so the text names the way out for each: a real key goes through a
- * connected service (the engine attaches it, and that slot is not scanned);
- * example text is rewritten without the key's format.
+ * format, so the text names the way out for each. For a real key the way out
+ * depends on the host: with no profile, connect the service; with a profile the
+ * engine did not attach (no recorded acceptance, no vault value, …), the reason
+ * it did not — the service is already connected, so "connect it" would be wrong.
  */
-export function egressSecretRefusal(where: string, label: string): string {
-  return `Blocked: ${where} appears to contain a ${label}. A key is never sent to an external server from a request you compose. `
-    + `If this is a real key for the service you are calling, connect that service once with api_setup — the engine then attaches the key itself, in the header or query parameter the service expects, and the request goes through without it in your input. `
+export function egressSecretRefusal(where: string, label: string, profileHint?: string | undefined): string {
+  const realKey = profileHint !== undefined
+    ? `This service has an api_profile, but the engine did not attach its stored key: ${profileHint} Once it does, leave the key out of your request. `
+    : `If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — for a bearer or header profile the engine attaches the stored key itself. `;
+  return `Blocked: ${where} appears to contain a ${label}, so this request was not sent. `
+    + realKey
     + `If it is example or placeholder text, write it without the key's format (for example <your token>).`;
 }
 
@@ -1071,6 +1075,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // no access_token …`), so it goes to the ledger verbatim.
     if (auth.refusal) blockedVerbatim(auth.refusal);
     const attachedAuthSlot = auth.slot;
+    // Why the engine did not attach, if it did not — a refusal for a key the model
+    // set by hand names this instead of telling it to connect a connected service.
+    // Resolved only on a refusal, keeping the hint as lazy as the 401 path keeps it.
+    const profileHint = (): string | undefined => auth.hint?.({ crossOriginRedirect: false });
 
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
     // Headers are an equally valid exfil channel as bodies — `Authorization:
@@ -1084,7 +1092,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (attachedAuthSlot !== undefined && headerName.toLowerCase() === attachedAuthSlot) continue;
       const headerMatch = detectSecretInContent(headerValue);
       if (headerMatch) {
-        blockedVerbatim(egressSecretRefusal(`request header '${headerName}'`, headerMatch));
+        blockedVerbatim(egressSecretRefusal(`request header '${headerName}'`, headerMatch, profileHint()));
       }
     }
 
@@ -1108,7 +1116,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
-        blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch));
+        blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch, profileHint()));
       }
     }
 
@@ -1153,7 +1161,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (input.body && WRITE_METHODS.has(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
-        blockedVerbatim(egressSecretRefusal('request body', secretMatch));
+        blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileHint()));
       }
     }
 

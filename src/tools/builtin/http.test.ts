@@ -864,10 +864,20 @@ describe('httpRequestTool', () => {
     // real key AND for example text, because the scan cannot tell them apart.
     it('names the connected-service route and the placeholder route', () => {
       expect(egressSecretRefusal('request body', 'Stripe API key')).toBe(
-        'Blocked: request body appears to contain a Stripe API key. A key is never sent to an external server from a request you compose. '
-        + 'If this is a real key for the service you are calling, connect that service once with api_setup — the engine then attaches the key itself, in the header or query parameter the service expects, and the request goes through without it in your input. '
+        'Blocked: request body appears to contain a Stripe API key, so this request was not sent. '
+        + 'If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — for a bearer or header profile the engine attaches the stored key itself. '
         + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>).',
       );
+    });
+
+    it('for a service that already has a profile, names why its key was not attached instead', () => {
+      const text = egressSecretRefusal('request header \'X-Api-Key\'', 'Slack token', 'The profile needs re-saving.');
+      expect(text).toBe(
+        'Blocked: request header \'X-Api-Key\' appears to contain a Slack token, so this request was not sent. '
+        + 'This service has an api_profile, but the engine did not attach its stored key: The profile needs re-saving. Once it does, leave the key out of your request. '
+        + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>).',
+      );
+      expect(text).not.toContain('connect that service');
     });
 
     it('for mail, names only the placeholder route — a real key is never mailed', () => {
@@ -2936,7 +2946,30 @@ describe('httpRequestTool', () => {
       );
       expect(result).toContain('Blocked');
       expect(result).toContain('Stripe API key');
-      expect(result).toContain('connect that service once with api_setup');
+      expect(result).toContain('connect that service with api_setup');
+    });
+
+    it('a profile without a recorded acceptance is refused with the reason, not told to connect', async () => {
+      // A profile saved before acceptances were recorded (or migrated, which strips
+      // them) is not attached; the model's own header is then scanned. The refusal
+      // has to name why the stored key was not attached — the service IS connected.
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: 'https://legacy-shop.example.com', description: 'shop',
+        auth: { type: 'header', header_name: 'X-Shop-Token', vault_keys: ['SHOP_TOKEN'] } as never,
+      });
+      const shopToken = 'shp' + 'at_' + '0123456789abcdef'.repeat(2);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible(
+        { url: 'https://legacy-shop.example.com/admin/orders', headers: { 'X-Shop-Token': shopToken } },
+        agentWith(store, { SHOP_TOKEN: shopToken }),
+      );
+      expect(result).toContain('Blocked');
+      expect(result).toContain('This service has an api_profile, but the engine did not attach its stored key');
+      expect(result).toContain('accept controller-responsibility');
+      expect(result).not.toContain('connect that service with api_setup');
     });
 
     it('a query-auth profile host may carry its key in the URL', async () => {
