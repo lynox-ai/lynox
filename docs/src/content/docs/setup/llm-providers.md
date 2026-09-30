@@ -307,7 +307,7 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
 | **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no US CLOUD Act exposure |
-| **Fully local** | Ollama on your server | Docker on your server | Nothing leaves your network |
+| **Fully local** | Ollama on your server | Docker on your server | The model call stays on your server |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.
 
