@@ -3058,7 +3058,7 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 						// stream ends with `done` whenever the run ends, however it ended, and
 						// the reconcile below then adopts the persisted transcript — which
 						// carries a failure note where the run persisted one (the toast and
-						// banner above report the event either way). Settling on the event
+						// banner raised in the call below report the event either way). Settling on the event
 						// would mark a turn that is still running as failed and drop its
 						// bubble mid-stream.
 						handleSSEEvent(eventType, data, assistantIdx, userIdx, { deferErrorDisposition: true });
