@@ -638,6 +638,7 @@ describe('ApiStore', () => {
       // arrive as part of the last not-supported item, and the offer list as
       // part of the last prohibition. Reported as a harmless survivor in the
       // first mutation round; it is not.
+      expect(out).toContain('\n\nSupported auth flows:');
       expect(out).toContain('\n\nNOT supported (cannot be bootstrapped today');
       expect(out).toContain('\n\nDo NOT proactively suggest bootstrapping:');
       expect(out).toContain('\n\nCurated free APIs you can offer to bootstrap');

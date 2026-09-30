@@ -14,14 +14,15 @@
  * and no registration function for presets — if you are adding one, you are
  * moving the boundary, and that belongs in a decision, not in a patch.
  *
- * ⚠ The catalogue used to BE that file, and this paragraph cited it as the
- * contrast. It is a compiled constant now ({@link ./suggested-apis.ts}) — but
- * it moved because the file never reached the container, NOT because anyone
- * showed a file was unsafe for it. So do not read the move as this argument
- * winning a second case. The ranking here is untouched by it and is the part
- * that matters: a preset decides which site a user is sent to and hands
- * consent to, enforced by host validation below; a hint is text the model must
- * ask about before acting on.
+ * ⚠ Until 2026-09-30 the sentence above named the catalogue's own file as the
+ * contrast, because it had one: `data/suggested-apis.json`, read at boot. It is
+ * a compiled constant now ({@link ./suggested-apis.ts}) — but it moved because
+ * that file never reached the container, NOT because anyone showed a file was
+ * unsafe for it. So do not read the move as this paragraph's argument winning a
+ * second case. The argument itself is unchanged, and so is the ranking it
+ * draws, which is the part that matters here: a preset decides which site a
+ * user is sent to and hands consent to, enforced by host validation below; a
+ * hint is text the model must ask about before acting on.
  *
  * Every function here takes the register as a parameter with the constant as
  * its default, so tests can hand in their own. That is a test seam, not an

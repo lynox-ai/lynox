@@ -26,21 +26,25 @@
  *
  * ⚠ **What this does NOT buy, because the first draft of this comment claimed
  * it and a review refuted it:** it is not a hardening, and nothing here should
- * be cited as one. The draft argued that keeping the text in a data file made
- * it an editable input and that a constant closes that. Measured in the
- * published image, the built module and a data file would sit under the same
- * owner and the same mode, so the move changes where the text lives and not
- * what can reach it. If you need that property, it is a separate piece of work
- * with its own measurement — this is not it.
+ * be cited as one. The draft argued that a data file is an editable input and
+ * that a constant is not. The reason that does not follow is in the Dockerfile
+ * and needs no more than reading it: the production stage copies `dist/` with
+ * `--chown=lynox:lynox` and then sets `USER lynox`, so the built module sits in
+ * a tree owned by the account the engine runs under. Whatever holds for a file
+ * beside it holds for the module too. The move changes where the text lives,
+ * not what can reach it. If you want that second property, it is a separate
+ * piece of work with its own measurement — this is not it, and a later reader
+ * should not restore the claim because this file sounds like it earned one.
  *
  * ⚠ Its neighbour {@link ./oauth-presets.ts} argues that the OAuth preset
- * register must not be a file, and names this catalogue as the justified
- * exception — "right for a list of hints the model may read". That ranking is
- * correct and stands: a preset decides which site a user is sent to and hands
- * consent to, enforced by host validation; this is hint text the model is told
- * to ask about before acting on. This module moved for a different reason than
- * that one did, so do not read the move as the preset argument winning a second
- * case — that paragraph is unchanged, and this one is not evidence for it.
+ * register must not come from a file, and draws a ranking while doing so: an
+ * env-var opt-out is "right for a list of hints the model may read" and wrong
+ * for presets. That ranking is correct and stands — a preset decides which site
+ * a user is sent to and hands consent to, enforced by host validation; this is
+ * hint text the model is told to ask about before acting on. This module moved
+ * for a different reason than that one did, so do not read the move as the
+ * preset argument winning a second case. Its ARGUMENT is untouched; its wording
+ * changed here only where it described this catalogue's old mechanism.
  *
  * There is no `schema_version` here. It was a handshake between a file and a
  * parser that could disagree about its format; a constant and its type cannot.
