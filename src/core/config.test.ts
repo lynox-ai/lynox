@@ -180,12 +180,12 @@ describe('Config', () => {
       // the multi-variable difference this ladder was reshaped to remove (2026-08-10).
       expect(config.tier_set?.fast).toEqual({
         provider: 'openai',
-        model_id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
+        model_id: 'accounts/fireworks/models/deepseek-v4p1-flash',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
       expect(config.tier_set?.balanced).toEqual({
         provider: 'openai',
-        model_id: 'accounts/fireworks/models/glm-5p2',
+        model_id: 'accounts/fireworks/models/glm-5p3',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
       expect(config.tier_set?.deep).toEqual({
@@ -203,7 +203,7 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('my-own-model'); // env slot won
-      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p2'); // preset slot kept
+      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p3'); // preset slot kept
     });
 
     it('a CP-pinned LYNOX_TIER_PRESET expands like a config.json one', async () => {
@@ -634,7 +634,7 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('claude-opus-4-8'); // config override won over the preset's sonnet-5
-      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p2'); // preset slot kept
+      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p3'); // preset slot kept
     });
 
     it('a config tier_set override with an UNREGISTERED model FAILS CLOSED (post-merge guard)', async () => {
@@ -659,7 +659,7 @@ describe('Config', () => {
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
       expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/minimax-m3');
-      expect(config.tier_set?.fast?.model_id).toBe('accounts/fireworks/models/deepseek-v4-flash-0731');
+      expect(config.tier_set?.fast?.model_id).toBe('accounts/fireworks/models/deepseek-v4p1-flash');
       for (const tier of ['fast', 'balanced', 'deep'] as const) {
         expect(config.tier_set?.[tier]?.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
       }

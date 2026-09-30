@@ -1263,6 +1263,74 @@ describe('OpenAIAdapter', () => {
       expect(body['reasoning_effort']).toBe('none');
     });
 
+    // ── thinkingOnly ──────────────────────────────────────────────
+    // A model the provider refuses to let us stop thinking. Without the refusal it
+    // answers HTTP 200 with an empty string below the bound — measured on `glm-5p3`
+    // 2026-09-30: silent through 1024 on a hard prompt (2 of 3 runs at 1024), and
+    // `reasoning_effort: 'none'` comes back `HTTP 400: GLM-5.3 is a thinking-only
+    // model`. No caller reaches it that small today; these pin that a future one
+    // fails LOUDLY instead of receiving silence.
+    const THINKING_ONLY = 'accounts/fireworks/models/glm-5p3';
+
+    it('REFUSES a thinking-only model below the bound instead of returning an empty answer', async () => {
+      await expect(captureBody(THINKING_ONLY, undefined, 512)).rejects.toThrow(
+        /glm-5p3 cannot think within 512 output tokens/,
+      );
+    });
+
+    it('refuses exactly AT the bound — the same edge the suppression covers', async () => {
+      await expect(captureBody(THINKING_ONLY, undefined, REASONING_SUPPRESSION_MAX_TOKENS))
+        .rejects.toThrow(/cannot think within 1024 output tokens/);
+    });
+
+    it('names the way out, not just the problem', async () => {
+      // A refusal that does not say what to do sends its reader guessing, and the two
+      // ways out are not interchangeable: raise the budget, or route to a tier whose
+      // model can stop thinking.
+      await expect(captureBody(THINKING_ONLY, undefined, 64)).rejects.toThrow(
+        /Raise max_tokens above 1024 or route this call to a tier whose model declares defaultReasoningEffort/,
+      );
+    });
+
+    it('uses the MODEL\'s bound, not one shared number', async () => {
+      // gpt-oss-120b is silent through 256 and recovers at 512 (measured); glm-5p3 is
+      // silent through 1024. A shared bound would refuse the gpt-oss calls that work.
+      const OSS = 'accounts/fireworks/models/gpt-oss-120b';
+      await expect(captureBody(OSS, undefined, 256)).rejects.toThrow(/Raise max_tokens above 256/);
+      const body = await captureBody(OSS, undefined, 512);
+      expect(body).not.toHaveProperty('reasoning_effort');
+      // …and the other member is still refused at 512, where it is still silent.
+      await expect(captureBody(THINKING_ONLY, undefined, 512)).rejects.toThrow(/Raise max_tokens above 1024/);
+    });
+
+    it('lets the same model through ABOVE the bound — thinking fits there', async () => {
+      const body = await captureBody(THINKING_ONLY, undefined, REASONING_SUPPRESSION_MAX_TOKENS + 1);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('does not refuse a model that CAN stop thinking at the same budget', async () => {
+      // Witness that the refusal is keyed on the flag and not on the budget: the same
+      // 512 that throws above goes through here, and carries the suppression.
+      const body = await captureBody(FAST, undefined, 512);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    // The id above is the WITHDRAWN predecessor, kept because it is still registered and
+    // every suppression test was written against it. These two cover the model the
+    // presets actually route to, so removing the dead row later cannot delete the only
+    // coverage of the live path.
+    const FAST_LIVE = 'accounts/fireworks/models/deepseek-v4p1-flash';
+
+    it('suppresses on the LIVE fast slot, not only on the withdrawn one', async () => {
+      const body = await captureBody(FAST_LIVE, undefined, 512);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('leaves the live fast slot self-adaptive above the bound', async () => {
+      const body = await captureBody(FAST_LIVE, undefined, REASONING_SUPPRESSION_MAX_TOKENS + 1);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
     it('sends nothing for a model that declares no default', async () => {
       const body = await captureBody(NO_DEFAULT, undefined);
       expect(body).not.toHaveProperty('reasoning_effort');

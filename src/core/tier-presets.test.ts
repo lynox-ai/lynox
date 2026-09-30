@@ -79,6 +79,50 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       // window. There is no deep-tier bench in the repo to measure it against — if
       // one is ever built, this line is the first thing it should check.
       'accounts/fireworks/models/kimi-k3',
+      // OPERATOR DECISION 2026-09-30, and the LEAST evidence any entry here rests
+      // on — read the labels literally, this one is not a bench and not a sweep.
+      //
+      // Forced, not chosen: their predecessors were WITHDRAWN by the provider.
+      // Measured live with a credential against `core@fd3c6d9e`, one
+      // `POST /chat/completions` per id, `max_tokens: 1`: SIX of the nine Fireworks
+      // ids in our catalog answer `404 Model not found, inaccessible, and/or not
+      // deployed` — `deepseek-v4-flash-0731` (the fast slot of BOTH efficient and
+      // balanced), `glm-5p2` (the balanced main), plus `deepseek-v4-pro`,
+      // `kimi-k2p6`, `kimi-k2p7-code`, `qwen3p7-plus`. Only `gpt-oss-120b`,
+      // `kimi-k3` and `minimax-m3` still serve. On the `balanced` preset that left
+      // TWO of three slots dead.
+      //
+      // ⚠ The `/models` listing is NOT a check for this: it lists 27 ids including
+      // all six dead ones. A catalog validated against the listing reads green.
+      // Only a real inference call separates "the provider knows the name" from
+      // "the call works".
+      //
+      // What IS measured about these two, and it is availability and behaviour,
+      // never quality: both answer 200; both carry a 1,048,576-token window and
+      // `supports_tools: true` (provider metadata); and their reasoning behaviour
+      // was probed at the real fast-tier budgets. `deepseek-v4p1-flash` reproduces
+      // its predecessor's defect exactly — at `max_tokens: 64` without
+      // `reasoning_effort: 'none'` it returns HTTP 200 with an EMPTY string, the
+      // whole budget spent on thinking — and the existing `defaultReasoningEffort`
+      // suppression fixes it, so that field carries over unchanged.
+      //
+      // What is NOT measured: quality. No bench, no sweep, no judged output. A
+      // bench is tracked internally, and the thing being tracked is this: both slots
+      // hold a model with no repeatable scored run and no judged sweep, so the label
+      // above is OPERATOR and stays OPERATOR until one exists.
+      'accounts/fireworks/models/deepseek-v4p1-flash',
+      // OPERATOR DECISION 2026-09-30, same forcing and same non-evidence as above.
+      // ⚠ It differs from its predecessor in a way that bounds where it may be
+      // pinned: the provider calls it thinking-only in as many words — `HTTP 400:
+      // GLM-5.3 is a thinking-only model; disabling thinking (reasoning_effort=
+      // 'none') is not supported`. Measured, it returns an EMPTY string below the
+      // bound on HARD prompts — and even at exactly 1024 on a hard enough one — while a
+      // trivial prompt answers at 256. It tracks prompt difficulty, not a threshold. It is safe in the balanced
+      // MAIN slot because nothing calls that slot that small, and the `thinkingOnly`
+      // refusal in `openai-adapter.ts` — NOT the membership assert below, which only
+      // checks that an id has a named basis —
+      // is what keeps that true rather than the enumeration that established it.
+      'accounts/fireworks/models/glm-5p3',
     ]);
     for (const [name, preset] of Object.entries(TIER_PRESETS)) {
       for (const [tier, slot] of Object.entries(preset.tier_set)) {
@@ -142,7 +186,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
   it('expandTierPreset: known → {routing_mode, tier_set}; unknown → undefined', () => {
     const expanded = expandTierPreset('balanced');
     expect(expanded?.routing_mode).toBe('hybrid');
-    expect(expanded?.tier_set.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p2');
+    expect(expanded?.tier_set.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p3');
     expect(expandTierPreset('does-not-exist')).toBeUndefined();
   });
 

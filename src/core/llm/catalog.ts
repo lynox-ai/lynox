@@ -506,6 +506,30 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     // field — all are `tier: null` in MODEL_CAPABILITIES (no measured tier map).
     tier_models: [
       {
+        // FIRST in tier_models on purpose, and it is a behaviour change worth naming:
+        // `defaultTierModelId` pre-selects `models[0]` when no entry carries a tier tag,
+        // and no Fireworks entry does — so the Fireworks dropdown's default moves from
+        // glm-5p2 to this one in all three tier pickers. The old default 404s, so the
+        // direction is right; the mechanism is list position rather than a decision,
+        // which is why it is written down here.
+        id: 'accounts/fireworks/models/deepseek-v4p1-flash',
+        label: 'DeepSeek v4.1 Flash',
+        context_window: 1_000_000,
+        pricing: { input: 0.22, output: 0.66 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; the FAST slot of efficient and balanced since 2026-09-30, replacing deepseek-v4-flash-0731 after the provider withdrew it (404 measured live). Same hybrid-reasoning defect as its predecessor: empty answer below the small-budget bound on hard prompts without the reasoning suppression, which is declared for it. Priced $0.22/$0.66 per 1M (cached 0.007), verified 2026-09-30 on the provider\'s public MODEL PAGE — the pricing OVERVIEW page does not carry this id, which is a different page. It costs MORE than the predecessor it replaces (0.14/0.28).',
+      },
+      {
+        id: 'accounts/fireworks/models/glm-5p3',
+        label: 'GLM 5.3',
+        context_window: 1_000_000,
+        pricing: { input: 1.40, output: 4.40 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; the MAIN slot of the balanced preset since 2026-09-30, replacing glm-5p2 after the provider withdrew it (404 measured live). THINKING-ONLY by provider statement — it refuses reasoning_effort:none with HTTP 400 and returns an empty answer below the small-budget bound on hard prompts (difficulty-dependent, not a token threshold), so it is only safe in a main slot; the adapter refuses a smaller call rather than passing the silence on. Text-only (no vision). Priced $1.40/$4.40 per 1M (cached 0.26), verified 2026-09-30 on the provider\'s public MODEL PAGE — the pricing OVERVIEW page lists GLM 5.3 under Serverless TRAINING only, which is not this number.',
+      },
+      {
         id: 'accounts/fireworks/models/glm-5p2',
         label: 'GLM 5.2',
         context_window: 1_000_000,
