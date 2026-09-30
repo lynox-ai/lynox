@@ -83,7 +83,11 @@ export function resolveTools(
  * grant the parent's whole set.
  */
 function profileCeiling(profile: ToolResolutionProfile | null): ReadonlySet<string> | null {
-  if (profile === null) return null;
+  // `undefined` as well as `null`, because the line that reads `deniedTools` beside this
+  // one optional-chains and this one dereferences: one half of the same function
+  // tolerating a value the other throws on is the asymmetry, not the type signature.
+  // Neither caller passes it; a third one written in JS would have found the difference.
+  if (profile === null || profile === undefined) return null;
   if (profile.allowedTools !== undefined) return new Set(profile.allowedTools);
   return profile.readOnly === true ? new Set<string>() : null;
 }

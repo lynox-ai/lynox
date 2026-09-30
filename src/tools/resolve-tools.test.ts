@@ -142,6 +142,22 @@ describe('resolveTools — a profile without readOnly bounds the result too', ()
       .toEqual([]);
   });
 
+  it('treats an absent profile the same whether it is null or undefined', () => {
+    // The signature says `| null` and both production callers pass exactly that, so this
+    // is not about the type — it is about the function's two halves agreeing. The line
+    // reading `deniedTools` optional-chains; the one reading `allowedTools` dereferences.
+    // A caller arriving from JS met that difference as a THROW.
+    const absent = undefined as unknown as ToolResolutionProfile | null;
+    expect(names(resolveTools(['bash'], absent, BASE))).toEqual(['bash']);
+    expect(names(resolveTools(undefined, absent, BASE)))
+      .toEqual(['read_file', 'task_list', 'bash', 'write_file']);
+    // The same two calls with `null`, so what is asserted is that they AGREE rather than
+    // that one of them works.
+    expect(names(resolveTools(['bash'], null, BASE))).toEqual(['bash']);
+    expect(names(resolveTools(undefined, null, BASE)))
+      .toEqual(['read_file', 'task_list', 'bash', 'write_file']);
+  });
+
   it('an allowlist of `[]` is a declared bound, not an absent one', () => {
     // `[]` and `undefined` are the same value to a `?? []`, and that collapse is what
     // would turn every denylist-only role into a role with no tools at all. Asserted in

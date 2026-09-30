@@ -42,6 +42,15 @@ describe('BUILTIN_ROLES', () => {
   it('getRole returns the named role, undefined on miss', () => {
     expect(getRole('researcher')?.model).toBe('balanced');
     expect(getRole('nonexistent')).toBeUndefined();
+    // Inherited keys are a miss too. They were not: a bracket read on an object literal
+    // reaches `Object.prototype`, so these three came back truthy and every guard of the
+    // form `!getRole(name)` let them through as KNOWN roles.
+    for (const inherited of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      expect(getRole(inherited), inherited).toBeUndefined();
+    }
+    // The control for the line above: a real name still resolves, so this is a
+    // prototype test and not `getRole` returning undefined for everything.
+    expect(getRole('collector')).toBeDefined();
   });
 });
 
@@ -206,11 +215,14 @@ describe('read-only roles are granted by an allowlist', () => {
 });
 
 /**
- * The grant is a promise made in text the model reads ("No system commands."), and the
- * route it is kept on is `resolveTools`. So the claim is asserted over the SET of
- * built-in roles rather than at the role the finding named: keyed on `denyTools` the set
- * would be three roles and would miss `collector`, which states its grant as an
- * allowlist and denies nothing.
+ * The grant is a promise in the text the NEXT AUTHOR reads — `description` is not
+ * model-facing, per the dated sweep above — and the route it is kept on is
+ * `resolveTools`. A role whose stated shape and enforced shape disagree is how the
+ * enforced one drifts, which is why the two are asserted together.
+ *
+ * The claim is asserted over the SET of built-in roles rather than at the role the
+ * finding named: keyed on `denyTools` the set would be three roles and would miss
+ * `collector`, which states its grant as an allowlist and denies nothing.
  */
 describe("a role's stated grant binds whether or not the caller names the tool", () => {
   /**
@@ -262,10 +274,11 @@ describe("a role's stated grant binds whether or not the caller names the tool",
     expect(names(resolveTools([granted!], profile, parentTools))).toEqual([granted]);
   });
 
-  it('creator keeps the sentence its description makes to the model', () => {
+  it('creator keeps the sentence its description makes', () => {
     const creator = BUILTIN_ROLES['creator']!;
-    // The promise is a string the model reads, so the test reads it: a role that drops
-    // the sentence takes this red instead of passing quietly with a weaker claim.
+    // The sentence is read by the next author, not by the model (see the sweep above),
+    // and that is exactly why it is pinned to the behaviour: prose nobody enforces drifts
+    // from the code, and here the drift would be a role that reads stricter than it is.
     expect(creator.description).toContain('No system commands');
     expect(creator.denyTools).toContain('bash');
 

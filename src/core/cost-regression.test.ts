@@ -433,17 +433,25 @@ function measureStaticPrefixTokens(): number {
 // Measured after the cut, not derived from it: 23979 (first draft) − 64 (the cut) would
 // have written 23915 here by luck, and the note above this one exists because that
 // arithmetic is not sound.
-// 2026-10-01: +39 (23915 → 23954, measured) — a description on `spawn_agent`'s `tools`
-// parameter, which had none. The parameter narrows the child's tool set, and a role's
-// own grant now binds over every route into the resolver, so a caller naming a tool the
-// role withholds gets a child without it. That outcome is silent, which is what the
-// prose buys: without it the model's only way to learn the rule is a child that cannot
-// do its task.
-// Priced against the shorter wording in the same run: dropping the second sentence
-// ("a tool the role withholds is not added by naming it") saves 15 and leaves only the
-// claim that a grant binds, which is the half a reader can already guess. Measured at
-// the final wording, per the note above — the two variants were 23939 and 23954.
-const STATIC_PREFIX_BUDGET = 23954;
+// 2026-10-01: +24 (23915 → 23939, measured) — a description on `spawn_agent`'s `tools`
+// parameter, which had none. It narrows a child's tool set and cannot widen a grant, and
+// the outcome of naming something outside the grant is silent: without the sentence, the
+// model's only way to learn the rule is a child that cannot do its task.
+//
+// Four wordings were measured, not derived, and the cheapest that carries the rule won:
+// 23939 for the one that shipped, 23950 and 23952 for two that also spell out what gets
+// dropped, 23954 for a first draft that instead said a role's promise "still binds".
+// That draft was cut for being TOO STRONG rather than too long: it reads as a claim about
+// everything the child can reach, and one parameter description is not the place to make
+// a claim that wide. The baseline was re-measured in the same run (23915, no description),
+// so the +24 is a difference between two measurements and not an arithmetic guess.
+//
+// How the numbers were taken, since the guard only prints them when it fails: the budget
+// was set to 1 for the measuring runs, which makes each run report `prefix is N tokens`.
+// The slack ratchet above pins the result from the other side — budget minus measurement
+// must stay under 50, so a budget left at 23954 over a 23939 prefix would still pass
+// this test and fail that one.
+const STATIC_PREFIX_BUDGET = 23939;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

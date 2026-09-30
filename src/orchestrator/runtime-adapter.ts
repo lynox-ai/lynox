@@ -650,9 +650,20 @@ export async function spawnViaAgent(
   // This discards a part of the role the runtime COULD honour — model, effort, autonomy
   // — and does so on purpose: those are visible in the manifest next to the step, and
   // the tool promise is the part a reader cannot check there. `role` is permitted on any
-  // `ManifestStep` and no manifest in this repo declares one on `runtime: 'agent'`, so
-  // user manifests are where this lands: loudly, with the remedy in the message.
+  // `ManifestStep`, and this repo holds no manifest that declares one on
+  // `runtime: 'agent'` — it holds no manifests at all, they are user-supplied, which is
+  // the stronger statement and the honest one: the whole reach of this refusal is in
+  // trees nobody here can grep. It lands loudly, with the remedy in the message.
   const declaredRole = step.role ? getRole(step.role) : undefined;
+  // A name no role has is refused here as it is on the inline runtime (below) and in
+  // `spawn_agent`. Without it a TYPO reached the refusal as `declaredRole === undefined`,
+  // which reads as "states nothing about tools" — so the step ran with the definition's
+  // tools, and the author who wrote `role: 'reseacher'` was told nothing. The one
+  // outcome this block exists to prevent, reached through a misspelling of the thing
+  // that prevents it.
+  if (step.role !== undefined && declaredRole === undefined) {
+    throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
+  }
   const statedGrant = declaredRole === undefined ? null : statedToolGrant(declaredRole);
   if (statedGrant !== null) {
     throw new Error(

@@ -1327,10 +1327,11 @@ describe('spawn_agent tool', () => {
     const description = schema.properties.agents.items.properties.tools.description;
     expect(description).toBeDefined();
     expect(description).toMatch(/[Nn]arrows/);
-    // The operative half: not that a grant exists, but that naming a tool does not
-    // defeat it. That sentence is what the 15 extra tokens in the budget note bought.
-    expect(description).toContain('A role grant still binds');
-    expect(description).toContain('not added by naming it');
+    // The operative half is about THIS parameter and deliberately not about the child:
+    // an explicit list cannot widen a grant. A sentence of the form "the role's promise
+    // holds" would be a claim about everything the child can reach, which one parameter
+    // description is not the place to make and not the code to keep.
+    expect(description).toContain('cannot widen a grant');
   });
 
   it('spec.tools narrows within the role grant and cannot reach past it', async () => {

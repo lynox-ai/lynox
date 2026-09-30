@@ -327,6 +327,16 @@ describe('spawnInline with role', () => {
       .rejects.toThrow(/denies bash/);
   });
 
+  it('refuses a role name nothing knows, instead of reading "states nothing" from it', async () => {
+    // The typo case, and the reason the two tests above do not cover it: an unknown name
+    // makes `getRole` return undefined, which the refusal reads as "this role says
+    // nothing about tools" — indistinguishable from a legitimately silent role. The
+    // inline runtime and `spawn_agent` both throw on it; this runtime did not.
+    mockGetRole.mockReturnValue(undefined as unknown as RoleConfig);
+    await expect(spawnViaAgent(agentStep('typo-agent-step', 'reseacher'), agentDefOf('typo-agent-step'), {}, mockConfig, undefined, 'run-1'))
+      .rejects.toThrow(/Unknown role "reseacher" on step "typo-agent-step"/);
+  });
+
   it('leaves a role that states NOTHING about tools alone', async () => {
     // The other direction, and the one that keeps the refusal from being "any role":
     // model, effort and autonomy are honourable on this runtime, so a role carrying only
