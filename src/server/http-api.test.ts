@@ -5130,6 +5130,40 @@ describe('LynoxHTTPApi', () => {
       return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
     }
 
+    it('never carries a bulk run\'s targets, even with a ledger holding them (build plan B §5)', async () => {
+      const MARK = 'ZXQ-BULK-BEFORE-IMAGE';
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-bulk-debug-'));
+      const db = new EngineDb(join(dir, 'engine.db'), 'route-key');
+      const ledger = new BulkLedger(db);
+      ledger.recordDryRun({
+        createdBy: 't1', targetSystem: 'workspace', scope: 'w',
+        targets: [{ key: `/ws/${MARK}.md`, before: { absent: false, value: `old ${MARK}` }, after: `new ${MARK}` }],
+      });
+      const getBulkLedger = vi.fn(() => ledger);
+      try {
+        await swapEngine({
+          getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [], getMessageCount: () => 0 }),
+          getRunHistory: () => ({
+            getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null,
+            getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [],
+          }),
+          getBulkLedger,
+        }, async () => {
+          const res = await jsonFetch('/api/threads/t1/debug-export');
+          expect(res.status).toBe(200);
+          expect(await res.text()).not.toContain(MARK);
+        });
+        // The export path does not reach the ledger at all — a later reader of engine.db
+        // would show up here before it shows up in a bundle.
+        expect(getBulkLedger).not.toHaveBeenCalled();
+        // The positive control: the same ledger does hand the image to its owner route.
+        expect(JSON.stringify(ledger.getPreview(ledger.listRuns(1)[0]!.id))).toContain(MARK);
+      } finally {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('GET /api/threads/:id/debug-export 404s an unknown thread', async () => {
       await swapEngine({ getThreadStore: () => ({ getThread: () => null, getMessages: () => [], getMessageCount: () => 0 }) }, async () => {
         const res = await jsonFetch('/api/threads/nope/debug-export');
@@ -5944,10 +5978,52 @@ describe('LynoxHTTPApi', () => {
 
       bulkLedger.recordRead(id, 0, { before: { price: '2' } });
       expect(bulkLedger.finishPreview(id)).toBe(true);
-      const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
-      expect(res.status).toBe(409);
-      expect(((await res.json()) as { error: string }).error).toMatch(/external system is not available yet/);
+      const approve = (): Promise<Response> =>
+        jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+
+      // No profile for the host: the credential would not be attached, so no approval.
+      mockGetApiStore.mockReturnValue(null);
+      const refused = await approve();
+      expect(refused.status).toBe(409);
+      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
       expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+
+      // A vetted profile whose vault key holds a token: approved, and the approval says
+      // how it was authenticated.
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      try {
+        const ok = await approve();
+        expect(ok.status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('approved');
+        const row = bulkDb.getDb().prepare('SELECT approved_by FROM bulk_runs WHERE id = ?').get(id) as { approved_by: string };
+        expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer' });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
+    it('records how a local run\'s approval was authenticated — a session is a tag, never its cookie', async () => {
+      const id = planRun();
+      const { createHash: hash } = await import('node:crypto');
+      const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
+      const res = await fetch(`${baseUrl}/api/bulk/runs/${id}/approve`, {
+        method: 'POST', headers: { cookie: `lynox_session=${cookie}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }),
+      });
+      expect(res.status).toBe(200);
+      const row = bulkDb.getDb().prepare('SELECT approved_by FROM bulk_runs WHERE id = ?').get(id) as { approved_by: string };
+      expect(JSON.parse(row.approved_by)).toEqual({ auth: `cookie:${hash('sha256').update(cookie).digest('hex').slice(0, 16)}` });
+      expect(row.approved_by).not.toContain(cookie);
     });
 
     it('rejects a maxTargets that is not a number in range', async () => {

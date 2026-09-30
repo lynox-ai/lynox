@@ -637,10 +637,17 @@ export class WorkerLoop {
       return;
     }
     const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
+    const { externalWriter } = await import('./bulk-external.js');
     const dataStore = this.engine.getDataStore();
+    // Built only for an external run: a local run needs none of the stores it reads.
+    const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
+    const clientFor = external ? await this.bulkClientFactory() : (): null => null;
     const outcome = await runBulkEffect(task.bulk_run_id, effect, {
       ledger,
-      writerFor: (run) => bulkWriterFor(run, dataStore),
+      writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
+        const client = clientFor(r.contractJson);
+        return client ? externalWriter(client) : null;
+      }),
     });
     if (outcome.status === 'pending') {
       this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
@@ -666,12 +673,8 @@ export class WorkerLoop {
     }
     const { runBulkPreview } = await import('./bulk-preview.js');
     const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
-    const { externalClient, parseBulkContract } = await import('./bulk-external.js');
-    const { attachStoredCredential } = await import('../tools/builtin/http.js');
-    const { resolveGuardedAckHosts } = await import('./tool-context.js');
+    const clientFor = await this.bulkClientFactory();
     const apiStore = this.engine.getApiStore();
-    const secretStore = this.engine.getSecretStore();
-    const toolContext = this.engine.getToolContext();
     const run = ledger.getRunForPreview(task.bulk_run_id);
     const host = run ? externalHostOf(run.targetSystem) : null;
     const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
@@ -681,17 +684,7 @@ export class WorkerLoop {
         ledger,
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-        clientFor: (run) => {
-          const contract = parseBulkContract(run.contractJson);
-          if (!contract || !apiStore || !secretStore) return null;
-          return externalClient({
-            contract,
-            hostPolicy: toolContext,
-            ackHosts: resolveGuardedAckHosts(toolContext),
-            attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore }),
-            rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
-          });
-        },
+        clientFor: (r) => clientFor(r.contractJson),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -712,6 +705,32 @@ export class WorkerLoop {
       return;
     }
     this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
+  }
+
+  /**
+   * How an external bulk run reaches its host: the run's own contract, the engine's
+   * network policy and profile store, and the credential attach `http_request` uses.
+   * Null when the contract is unreadable or the stores are missing — the run then halts
+   * as unavailable rather than sending anything.
+   */
+  private async bulkClientFactory(): Promise<(contractJson: string | null) => import('./bulk-external.js').ExternalClient | null> {
+    const { externalClient, parseBulkContract } = await import('./bulk-external.js');
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { resolveGuardedAckHosts } = await import('./tool-context.js');
+    const apiStore = this.engine.getApiStore();
+    const secretStore = this.engine.getSecretStore();
+    const toolContext = this.engine.getToolContext();
+    return (contractJson) => {
+      const contract = parseBulkContract(contractJson);
+      if (!contract || !apiStore || !secretStore) return null;
+      return externalClient({
+        contract,
+        hostPolicy: toolContext,
+        ackHosts: resolveGuardedAckHosts(toolContext),
+        attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore }),
+        rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
+      });
+    };
   }
 
   /** Execute a backup task — no LLM needed, direct BackupManager call. */

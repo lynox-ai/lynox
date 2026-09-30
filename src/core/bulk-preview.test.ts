@@ -312,9 +312,9 @@ describe('the preview effect', () => {
       expect(preview[1]!.diff).toEqual({ kind: 'fields', fields: [{ field: 'price', before: '12.00', after: '15.00' }] });
       expect(JSON.stringify(preview)).not.toContain(MARK);
       expect(out.summary).not.toContain(MARK);
-      // Reviewable, and the write side is not built: approval is refused, nothing sent.
+      // Reviewable and approvable; approving sends nothing — the write effect does.
       const sent = s.requests.length;
-      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! })).toEqual({ ok: false, reason: 'external_not_writable' });
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
       expect(s.requests.length).toBe(sent);
     } finally {
       restore();
@@ -765,6 +765,9 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       expect(planned).not.toContain(MARK);
       expect(s.requests).toEqual([]);
       const runId = /Bulk run ([0-9a-f-]{36})/.exec(planned)![1]!;
+      // An external host has no rollback: an atomic external plan is refused.
+      expect(await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json', atomic: true }, agent))
+        .toMatch(/cannot be atomic/);
       // The owner starts it; while it reads, a second external plan is refused.
       expect(ledger.resumePreview(runId).ok).toBe(true);
       expect(await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent)).toMatch(/another external dry run/);

@@ -835,6 +835,13 @@ const MIGRATIONS: string[] = [
      SELECT run_id, seq, target_key, change, undo, before, after_planned, applied_at, result, error, undone_at FROM bulk_targets;
    DROP TABLE bulk_targets;
    ALTER TABLE bulk_targets_v14 RENAME TO bulk_targets;`,
+
+  // v15 (bulk changes, external targets — build plan B §2): what an external target held
+  // right after the run wrote it, read back with a GET and projected onto the fields the
+  // run writes. A shop normalises what it is sent ("12" → "12.00"), so the undo has to
+  // expect what is there, not what was sent. Customer data, written through `enc()`.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (15);
+   ALTER TABLE bulk_targets ADD COLUMN after_actual TEXT;`,
 ];
 
 /**

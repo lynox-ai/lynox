@@ -9,13 +9,17 @@
  * could set: a larger F only turns more targets into conflicts, a smaller one also
  * writes less.
  *
- * This module plans and reads. Nothing here sends a PATCH.
+ * Reading is `externalClient`; writing is `externalWriter`, the target writer of an
+ * approved run. Every request passes the run's contract with its real method, and none
+ * follows a redirect. There is no DELETE and no PUT: a PATCH writes exactly F.
  */
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
+import { BulkRedirectError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
+import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
 export type ExternalImage = Record<string, string | number | boolean | null>;
@@ -113,10 +117,10 @@ export function project(value: Record<string, unknown>, fields: readonly string[
  * object holding every field of F, each a scalar (plan §6 P2, P3). Presence is
  * `Object.hasOwn`, not a serialised form, in which a missing field and `null` look alike.
  */
-export function beforeOverFields(value: unknown, after: ExternalImage):
+export function beforeOverFields(value: unknown, after: ExternalImage | readonly string[]):
   { before: ExternalImage } | { invalid: BulkInvalidReason } {
   if (!isPlainObject(value)) return { invalid: 'before_not_object' };
-  const fields = Object.keys(after);
+  const fields = Array.isArray(after) ? after as readonly string[] : Object.keys(after);
   for (const f of fields) {
     // A field PATCH cannot remove, the undo could not restore to missing.
     if (!Object.hasOwn(value, f)) return { invalid: 'field_missing' };
@@ -251,6 +255,8 @@ export interface ExternalClientDeps {
 
 export interface ExternalClient {
   get(url: string, signal?: AbortSignal): Promise<ExternalRead>;
+  /** PATCH `body` as JSON. `ok` carries no value: success is the status alone. */
+  patch(url: string, body: unknown, signal?: AbortSignal): Promise<ExternalRead>;
   /** Requests that went out — each is one billable call on a per-call profile. */
   readonly sent: number;
 }
@@ -263,40 +269,46 @@ export interface ExternalClient {
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const now = deps.now ?? Date.now;
   let sent = 0;
+  const send = async (method: 'GET' | 'PATCH', url: string, body: unknown, signal: AbortSignal | undefined): Promise<ExternalRead> => {
+    if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
+    const hostname = new URL(url).hostname;
+    try {
+      assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
+    } catch {
+      return { kind: 'blocked' };
+    }
+    const headers: Record<string, string> = { accept: 'application/json' };
+    if (method === 'PATCH') headers['content-type'] = 'application/json';
+    if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
+    if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
+    const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
+    let res: Response;
+    sent++;
+    try {
+      res = await fetchPinned(url, {
+        method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        ...(method === 'PATCH' ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
+      return { kind: 'failed' };
+    }
+    // The body streams after the headers: a reset or a timeout there is a failed read
+    // like one before them, never an exception out of the effect.
+    try {
+      return await readResponse(res, now(), method === 'GET');
+    } catch {
+      return { kind: 'failed' };
+    }
+  };
   return {
     get sent() { return sent; },
-    async get(url, signal) {
-      if (!contractGrants('http_request', { url, method: 'GET' }, deps.contract)) return { kind: 'not_granted' };
-      const hostname = new URL(url).hostname;
-      try {
-        assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
-      } catch {
-        return { kind: 'blocked' };
-      }
-      const headers: Record<string, string> = { accept: 'application/json' };
-      if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
-      if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
-      const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
-      let res: Response;
-      sent++;
-      try {
-        res = await fetchPinned(url, { method: 'GET', headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
-      } catch (err: unknown) {
-        if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
-        return { kind: 'failed' };
-      }
-      // The body streams after the headers: a reset or a timeout there is a failed read
-      // like one before them, never an exception out of the effect.
-      try {
-        return await readResponse(res, now());
-      } catch {
-        return { kind: 'failed' };
-      }
-    },
+    get: (url, signal) => send('GET', url, undefined, signal),
+    patch: (url, body, signal) => send('PATCH', url, body, signal),
   };
 }
 
-async function readResponse(res: Response, now: number): Promise<ExternalRead> {
+async function readResponse(res: Response, now: number, parse: boolean): Promise<ExternalRead> {
   const status = res.status;
   const answer = ((): ExternalRead | null => {
     if (status >= 300 && status < 400) return { kind: 'redirect' };
@@ -307,9 +319,9 @@ async function readResponse(res: Response, now: number): Promise<ExternalRead> {
     if (status < 200 || status >= 300) return { kind: 'failed' };
     return null;
   })();
-  if (answer !== null) {
+  if (answer !== null || !parse) {
     await res.body?.cancel().catch(() => {});
-    return answer;
+    return answer ?? { kind: 'ok', value: undefined };
   }
   const body = await readCapped(res, BULK_MAX_TARGET_BYTES);
   if (body === null) return { kind: 'too_large' };
@@ -339,4 +351,65 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * The target writer of an approved external run (build plan B §1.4, §2.3). `read` GETs the
+ * target and projects it onto the fields the run writes; a target that no longer has that
+ * shape, or is gone, is `foreign` — a conflict, never overwritten. `write` PATCHes exactly
+ * the after-state's fields, then reads the target back: what the host kept is what an undo
+ * must expect. Never a DELETE: an external target this run did not create is not removed.
+ *
+ * A missing credential, a refused one, a blocked host or a call outside the contract halts
+ * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`). One 429
+ * per request is waited out (capped); anything else that is not a success fails the target.
+ */
+export function externalWriter(client: ExternalClient, opts: {
+  sleep?: (ms: number) => Promise<void>;
+} = {}): TargetWriter {
+  const sleep = opts.sleep ?? (async (ms: number): Promise<void> => { await new Promise((r) => setTimeout(r, ms)); });
+  const call = async (once: () => Promise<ExternalRead>): Promise<ExternalRead> => {
+    let got = await once();
+    if (got.kind === 'retry_after' || got.kind === 'rate_limited') {
+      await sleep(got.kind === 'retry_after' ? got.ms : BULK_RETRY_AFTER_CAP_MS);
+      got = await once();
+    }
+    switch (got.kind) {
+      case 'no_credential': throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
+      case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
+      case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
+      case 'redirect': throw new BulkRedirectError();
+      default: return got;
+    }
+  };
+  const readOver = async (key: string, fields: readonly string[]): Promise<ExternalImage | 'foreign'> => {
+    const got = await call(() => client.get(key));
+    if (got.kind === 'not_found') return 'foreign';
+    if (got.kind !== 'ok') throw new Error('read failed');
+    const over = beforeOverFields(got.value, fields);
+    return 'before' in over ? over.before : 'foreign';
+  };
+  return {
+    readsBack: true,
+    async read(key, fields) {
+      if (fields === null) return 'foreign';
+      const image = await readOver(key, fields);
+      return image === 'foreign' ? 'foreign' : { absent: false, value: image };
+    },
+    async write(key, after) {
+      if (after.absent || !isPlainObject(after.value)) throw new Error('an external target is only ever patched');
+      const fields = Object.keys(after.value);
+      const got = await call(() => client.patch(key, after.value));
+      if (got.kind !== 'ok') throw new Error('write failed');
+      // Read back once. When that fails the write stands; the undo then expects what was
+      // sent, and a host that changed it answers as a conflict.
+      // Even a halt here does not unwrite the target: it is recorded, and the next one halts.
+      try {
+        const back = await readOver(key, fields);
+        if (back !== 'foreign') return { result: 'written', actual: { value: back, estimated: false } };
+      } catch { /* estimated below */ }
+      return { result: 'written', actual: { value: after.value, estimated: true } };
+    },
+  };
 }

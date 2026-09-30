@@ -148,6 +148,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       } else if (input.target_system === 'http') {
         const host = input.target_host === undefined ? null : canonicalHost(input.target_host);
         if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
+        // An external host has no transaction to roll back into (PRD §3.4).
+        if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
         const external = planExternal(source, host, detectSecretInContent);
         const keys = external.filter((t) => !('invalid' in t)).map((t) => t.key);
         const out = ledger.recordExternalPlan({

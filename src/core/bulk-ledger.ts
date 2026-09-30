@@ -146,8 +146,14 @@ export const BULK_HALT_REASONS = {
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
-/** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}. */
-export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed';
+/** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}.
+ *  `redirect`: an external target answered a write with a redirect, which is never followed. */
+export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect';
+
+/** What an external target held right after the run wrote it, over the fields it wrote.
+ *  `estimated`: the read-back failed and this is what was sent — an undo then finds a
+ *  target the host normalised as a conflict, the safe direction. */
+export interface ActualImage { value: unknown; estimated: boolean }
 
 /** Per target, the unit of a run's time budget and of its approval window. */
 export const BULK_TARGET_BUDGET_MS = 5_000;
@@ -223,6 +229,8 @@ export interface BulkRunForApply {
   failed: number;
   haltReason: string | null;
   sourceRunId: string | null;
+  /** The contract an external run was planned with; null for a local run. */
+  contractJson: string | null;
 }
 
 /** One target as the effect loop writes it: the state it must find, the state it writes. */
@@ -569,6 +577,15 @@ export class BulkLedger {
     return this.engineDb.keyedHash(parts());
   }
 
+  /** The key of the run's first writing target, or null. For the approval route's check
+   *  that an external run can reach its host — a key only, never a value. */
+  firstWritingKey(runId: string): string | null {
+    const r = this.engineDb.getDb().prepare(
+      `SELECT target_key FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES} ORDER BY seq LIMIT 1`,
+    ).get(runId) as { target_key: string } | undefined;
+    return r ? this.engineDb.dec(r.target_key) : null;
+  }
+
   /** Targets the run writes: `update`, `create`, `delete`. */
   countWriting(runId: string): number {
     return (this.engineDb.getDb().prepare(
@@ -602,13 +619,10 @@ export class BulkLedger {
     maxTargets?: number | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'external_not_writable' } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
-    // The write side of external runs is not built: an external run is previewed and
-    // reviewed, never applied, until it is.
-    if (externalHostOf(run.target_system) !== null) return { ok: false, reason: 'external_not_writable' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
     const writing = this.countWriting(runId);
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
@@ -627,6 +641,9 @@ export class BulkLedger {
       ).run(params.approvedBy ?? null, new Date(now).toISOString(), params.checksum, maxTargets,
         this.approvalWindow(writing, now), runId);
       if (res.changes !== 1) return false;
+      // An external run's preview is over once it is approved; its trigger must not fire
+      // again into a run that is no longer planned.
+      new TriggerStore(this.engineDb).remove(bulkPreviewTriggerId(runId));
       triggerId = this.armTrigger(run, now);
       return true;
     })();
@@ -690,15 +707,18 @@ export class BulkLedger {
       if (src.phase !== 'done' || partial.n > 0) return { ok: false, reason: 'atomic_partial' };
     }
     const rows = db.prepare(
-      `SELECT seq, target_key, change, before, after_planned FROM bulk_targets
+      `SELECT seq, target_key, change, before, after_planned, after_actual FROM bulk_targets
        WHERE run_id = ? AND applied_at IS NOT NULL AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
        ORDER BY seq DESC`,
-    ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null }[];
+    ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null }[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
 
     const planned = rows.map((r) => {
       const t = this.toApplyTarget({ ...r, source_seq: null });
-      const expected = t.after;
+      // An external target is expected to hold what the host kept of the write, read back
+      // after it — not what was sent (build plan B §2.4). Local targets hold what was sent.
+      const actual = r.after_actual === null ? null : JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage;
+      const expected: BeforeImage = actual === null ? t.after : { absent: false, value: actual.value };
       const after = t.expected;
       const change: ApplyTarget['change'] = after.absent ? 'delete' : expected.absent ? 'create' : 'update';
       return { key: t.key, sourceSeq: r.seq, expected, after, change };
@@ -716,12 +736,13 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     db.transaction(() => {
+      // The undo writes the same host and paths as its source, under the same contract.
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, kind,
-           source_run_id, target_collection)
-         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?)`,
+           source_run_id, target_collection, contract_json)
+         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?)`,
       ).run(id, params.createdBy ?? null, this.engineDb.keyedHash(hashParts()), src.target_system, runUndo,
-        planned.length, src.atomic, sourceRunId, src.target_collection);
+        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json);
       planned.forEach((t, seq) => {
         insertTarget.run(
           id, seq, this.engineDb.enc(t.key), t.change, undoFor(t.expected),
@@ -873,7 +894,7 @@ export class BulkLedger {
       id: r.id, kind: r.kind, targetSystem: r.target_system, targetCollection: r.target_collection,
       atomic: r.atomic === 1, phase: r.phase, approvalChecksum: r.approval_checksum, maxTargets: r.max_targets,
       expiresAt: r.expires_at, applied: r.targets_applied, failed: r.targets_failed, haltReason: r.halt_reason,
-      sourceRunId: r.source_run_id,
+      sourceRunId: r.source_run_id, contractJson: r.contract_json,
     };
   }
 
@@ -920,13 +941,18 @@ export class BulkLedger {
    * Record a written target, releasing its claim, in one transaction with the run's
    * counter — and, for an undo target, the source target it took back.
    */
-  recordApplied(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now: number = Date.now()): void {
+  recordApplied(
+    run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>, seq: number, result: string, now: number = Date.now(),
+    actual: ActualImage | null = null,
+  ): void {
     const db = this.engineDb.getDb();
     const at = new Date(now).toISOString();
     db.transaction(() => {
+      // `result` through enc() too: for an external target it is the host's own answer
+      // class, and nothing about a target is stored in clear.
       const res = db.prepare(
-        'UPDATE bulk_targets SET applied_at = ?, result = ?, claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL',
-      ).run(at, result, run.id, seq);
+        'UPDATE bulk_targets SET applied_at = ?, result = ?, after_actual = ?, claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL',
+      ).run(at, this.engineDb.enc(result), actual === null ? null : this.engineDb.enc(JSON.stringify(actual)), run.id, seq);
       if (res.changes !== 1) return;
       db.prepare('UPDATE bulk_runs SET targets_applied = targets_applied + 1 WHERE id = ?').run(run.id);
       if (run.kind === 'undo' && run.sourceRunId !== null) {
@@ -936,6 +962,12 @@ export class BulkLedger {
         ).run(at, run.sourceRunId, run.id, seq);
       }
     })();
+  }
+
+  /** Give a claimed target back unwritten, for a loop that stops before writing it. */
+  releaseClaim(runId: string, seq: number): void {
+    this.engineDb.getDb().prepare('UPDATE bulk_targets SET claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL')
+      .run(runId, seq);
   }
 
   /** Record a target that was not written. A conflict is not counted as a failure: the
