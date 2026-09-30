@@ -942,17 +942,25 @@ export async function spawnInline(
     ...(step.tool !== undefined ? [step.tool] : []),
   ];
   if (resolved?.readOnly === true && declaredToolNames.length > 0) {
-    const grantedNames = new Set(tools.map(t => t.definition.name));
     const roleName = step.role ?? '';
-    if (tools.length === 0) {
+    const ceilingNames = new Set(roleProfile?.allowedTools ?? []);
+    // Name the ROLE only for what the role did, or the message sends the author to the
+    // wrong fix. A declared name the inline pool never admits (`INLINE_CORE_TOOLS`) is
+    // absent whatever role is on the step, and so is one the parent set does not carry;
+    // both are role-independent and both predate this. The cause is the ceiling exactly
+    // when the pool DID admit the name and the ceiling does not hold it.
+    const removedByCeiling = declaredToolNames.filter(
+      n => stepToolNames.has(n) && !ceilingNames.has(n),
+    );
+    if (removedByCeiling.length > 0 && tools.length === 0) {
       throw new Error(
         `Step "${step.id}" declares the read-only role "${roleName}" together with `
-        + `[${declaredToolNames.join(', ')}] — a read-only role holds none of those, so the `
-        + `step would run with no tools at all. Name tools a read-only role can hold, or `
-        + `drop the role from this step.`,
+        + `[${declaredToolNames.join(', ')}]. A read-only role does not hold `
+        + `[${removedByCeiling.join(', ')}], so the step would run with no tools at all. `
+        + `Name tools a read-only role can hold, or drop the role from this step.`,
       );
     }
-    if (step.tool !== undefined && !grantedNames.has(step.tool)) {
+    if (step.tool !== undefined && removedByCeiling.includes(step.tool)) {
       throw new Error(
         `Step "${step.id}" replays "${step.tool}" and declares the read-only role `
         + `"${roleName}", which does not hold that tool — the step would run without the `
