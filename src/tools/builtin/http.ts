@@ -1525,11 +1525,11 @@ export async function attachStoredCredential(
   headers: Record<string, string>,
   stores: { apiStore: NonNullable<ToolContext['apiStore']>; secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']> },
 ): Promise<boolean> {
-  const toolContext = { apiStore: stores.apiStore } as Pick<ToolContext, 'apiStore'> as ToolContext;
-  // The agent stand-in carries the tool context too: anything the attach calls on the
-  // agent's behalf (a token renewal through api_setup) reads the profile store from
-  // `agent.toolContext`, and without it would report the profile as missing.
-  const agent = { secretStore: stores.secretStore, toolContext } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'toolContext'> as import('../../types/index.js').IAgent;
-  const auth = await attachEngineManagedAuth(url, headers, toolContext, agent);
+  const auth = await attachEngineManagedAuth(
+    url,
+    headers,
+    { apiStore: stores.apiStore } as Pick<ToolContext, 'apiStore'> as ToolContext,
+    { secretStore: stores.secretStore } as Pick<import('../../types/index.js').IAgent, 'secretStore'> as import('../../types/index.js').IAgent,
+  );
   return auth.slot !== undefined && auth.refusal === undefined;
 }
