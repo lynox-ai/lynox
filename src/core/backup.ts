@@ -144,11 +144,13 @@ export class BackupManager {
 
       // 5. Encryption (optional)
       //
-      // `didEncrypt` is deliberately set INSIDE the branch and nowhere else. The manifest below
-      // must record what HAPPENED, not what was configured: a field derived from the intent is a
-      // declaration, and anything downstream that treats it as a fact — the upload gate in step
-      // 10 above all — is then reading a correlate of the truth instead of the truth.
-      let didEncrypt = false;
+      // `this.encrypt` is safe to read as "this archive IS ciphertext" only because the
+      // constructor derives it with the same predicate this branch asks for. An earlier draft
+      // also carried a separate `didEncrypt`, set inside this branch, so the manifest would
+      // record the pass rather than the intent. It was removed: with one predicate the two are
+      // identical, no mutation could tell them apart, and a redundancy no test can see is worse
+      // than none — it makes the coverage look larger than it is. The `&& this.vaultKey` below is
+      // type narrowing for `deriveBackupKey`, not a second condition.
       if (this.encrypt && this.vaultKey) {
         const key = deriveBackupKey(this.vaultKey);
         for (const entry of files) {
@@ -160,7 +162,6 @@ export class BackupManager {
           entry.checksum_sha256 = computeFileChecksum(filePath);
           entry.size_bytes = statSync(filePath).size;
         }
-        didEncrypt = true;
       }
 
       // 6. Read version
@@ -182,7 +183,7 @@ export class BackupManager {
         version,
         created_at: new Date().toISOString(),
         lynox_dir: this.lynoxDir,
-        encrypted: didEncrypt,
+        encrypted: this.encrypt,
         files,
         checksum,
       };
@@ -194,9 +195,7 @@ export class BackupManager {
 
       // 9. Verify (skip SQLite integrity for encrypted backups — files are ciphertext)
       const verifiableFiles = files.filter(f => f.type !== 'directory');
-      // `didEncrypt`, for the same reason as the manifest: the SQLite integrity check is skipped
-      // because the files are ciphertext, which is a fact about this run, not a configured wish.
-      const verifyFiles = didEncrypt
+      const verifyFiles = this.encrypt
         ? verifiableFiles.map(f => f.type === 'sqlite' ? { ...f, type: 'file' as const } : f)
         : verifiableFiles;
       const verification = verifyBackup(finalDir, verifyFiles);
@@ -212,19 +211,19 @@ export class BackupManager {
 
       // 10. Upload to Google Drive (best-effort — local backup is the primary)
       //
-      // `manifest.encrypted` is the second condition, and it is the PROPERTY because the field is
-      // a RECORD rather than a declaration: step 5 sets `didEncrypt` inside the encryption branch
-      // and nowhere else, and that branch runs `encryptFile` over every non-directory entry,
-      // recomputing checksum and size. So `encrypted === true` means the pass actually ran over
-      // this archive.
+      // `manifest.encrypted` is the second condition, and it says what it seems to say only
+      // because ONE predicate decides encryption: the constructor's `config.encrypt && !!vaultKey`
+      // is exactly what step 5 acts on, so `encrypted === true` means the pass ran over this
+      // archive.
       //
-      // It was NOT that before, and the difference was a gate bypass rather than a nicety. The
-      // field used to come from `this.encrypt`, i.e. from the intent, and the constructor derived
-      // that intent with `vaultKey !== null` while the branch asks for a truthy key — the two
-      // diverge on the empty string, which `LYNOX_VAULT_KEY=` produces and `?? null` preserves.
-      // Nothing was encrypted, the manifest said `encrypted: true`, and a gate reading that field
-      // would have uploaded a plaintext archive believing the opposite. Both halves are fixed: the
-      // constructor uses the same predicate as the branch, and the manifest reports the branch.
+      // That was NOT true before, and the difference was a gate bypass rather than a nicety. The
+      // constructor derived the flag with `vaultKey !== null` while step 5 asks for a truthy key,
+      // and the two diverge on the empty string — which `LYNOX_VAULT_KEY=` produces and `?? null`
+      // preserves. Nothing was encrypted, the manifest said `encrypted: true`, the SQLite
+      // integrity check was skipped as if the files were ciphertext, and a gate reading that field
+      // would have uploaded a plaintext archive believing the opposite. One question now has one
+      // predicate, which is the only shape in which this field can be trusted.
+      //
       // Reading the environment variable here would be the remaining proxy — that answers whether
       // a key exists somewhere, not whether THIS archive was encrypted.
       //
