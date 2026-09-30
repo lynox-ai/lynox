@@ -575,6 +575,16 @@ export interface LynoxUserConfig {
    */
   calendar_enabled?: boolean | undefined;
   /**
+   * Bulk runs (`bulk_plan`, `bulk_status`; PRD bulk-changes-reversible). When false the
+   * tools are not registered — decision space and always-on prefix byte-identical to a
+   * build without them. Ships OFF while only the dry run exists: an agent offered a tool
+   * whose runs can never be applied would promise the user something the build cannot do.
+   * Operator-only, and intentionally NOT in PROJECT_SAFE_KEYS. config.json only for now:
+   * an env bridge is a wire-contract entry (`src/contract/env-registry.ts`), which belongs
+   * with the slice that makes the flag worth turning on.
+   */
+  bulk_runs_enabled?: boolean | undefined;
+  /**
    * Extended debug capture (operator surface). When true, the engine persists a
    * REDACTED per-turn {@link import('../core/wire-capture.js').WireSnapshot} — the
    * fully-assembled outbound request (system-prompt hash, the FULL last user message

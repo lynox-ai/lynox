@@ -737,6 +737,63 @@ const MIGRATIONS: string[] = [
   // ladder is forward-only and has no down path.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
    ALTER TABLE triggers ADD COLUMN waiting_until TEXT;`,
+
+  // v13 (bulk changes, reversible — PRD bulk-changes-reversible §3.1): the ledger of a
+  // run that applies one rule to N targets. One row per run, one per target, the
+  // before-image of each target taken at dry-run time. `before`/`after_planned` are
+  // customer data and are written through `enc()` like every other content column;
+  // no reader hands them to the model (`bulk_status` returns counters only).
+  //
+  // Deliberately WITHOUT the `atomic` column PRD §3.1 lists: its meaning depends on an
+  // open primitive decision (PRD §9 question 1, option 3 drops it), and nothing in the
+  // dry-run slice reads it. The undo slice adds it once that is decided — an
+  // ADD COLUMN is cheap, a column this forward-only ladder cannot take back is not.
+  //
+  // The approval/contract columns ship here, unused until the approval slice, because
+  // they are the run's own shape (§3.1); leaving them out would mean a second rebuild
+  // of the same table for one feature. `change` is per target and decided at dry-run
+  // time: what the rule would do to it, so a preview and a later apply agree on it.
+  //
+  // `target_key` is encrypted too — a data-store key can be an e-mail address, and
+  // SubjectStore encrypts those. That is why the table is keyed on (run_id, seq)
+  // rather than §3.1's (run_id, target_key): a unique index over a randomly-IV'd
+  // ciphertext enforces nothing, and a deterministic column would hold the key in
+  // clear. Uniqueness of the key within a run is enforced where the plan is built.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (13);
+   CREATE TABLE bulk_runs (
+     id TEXT PRIMARY KEY,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     created_by TEXT,
+     rule_hash TEXT NOT NULL,
+     target_system TEXT NOT NULL,
+     undo TEXT NOT NULL CHECK (undo IN ('restorable','compensatable','none','mixed')),
+     phase TEXT NOT NULL CHECK (phase IN ('planned','previewed','approved','writing','done','aborted','undone')),
+     contract_json TEXT,
+     approved_by TEXT,
+     approved_at TEXT,
+     approval_checksum TEXT,
+     max_targets INTEGER,
+     expires_at TEXT,
+     targets_total INTEGER NOT NULL DEFAULT 0,
+     targets_applied INTEGER NOT NULL DEFAULT 0,
+     targets_failed INTEGER NOT NULL DEFAULT 0,
+     halt_reason TEXT
+   );
+   CREATE INDEX idx_bulk_runs_created ON bulk_runs(created_at);
+   CREATE TABLE bulk_targets (
+     run_id TEXT NOT NULL REFERENCES bulk_runs(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     target_key TEXT NOT NULL,
+     change TEXT NOT NULL CHECK (change IN ('update','create','unchanged','invalid')),
+     undo TEXT CHECK (undo IN ('restorable','compensatable','none')),
+     before TEXT,
+     after_planned TEXT,
+     applied_at TEXT,
+     result TEXT,
+     error TEXT,
+     undone_at TEXT,
+     PRIMARY KEY (run_id, seq)
+   );`,
 ];
 
 /**

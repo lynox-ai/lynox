@@ -1,0 +1,301 @@
+/**
+ * The dry-run half of a bulk run (PRD bulk-changes-reversible §3.2): turn a source of
+ * (target, after) pairs into planned targets with their before-images. Reads only —
+ * no function here writes to a target system, and the tests assert the target system
+ * is byte-identical afterwards.
+ *
+ * The source is DATA the model, a script or a workflow step wrote (a workspace file,
+ * or a data-store query), never a tool argument with N entries — the loop is not in
+ * the model (PRD §1.6).
+ */
+import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import type { DataStore } from './data-store.js';
+import { coercePlainColumnValue } from './data-store.js';
+import { getFileAreaDir, isPathWithin, resolveFileAreaPath } from './workspace.js';
+import type { BeforeImage, PlannedTarget } from './bulk-ledger.js';
+
+/** Most targets one plan may carry. */
+export const BULK_MAX_TARGETS = 5000;
+/** Largest single target image (a file's content, a planned after-state). */
+export const BULK_MAX_TARGET_BYTES = 1024 * 1024;
+/** Largest total of before- plus after-images one plan may record. */
+export const BULK_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+/** Largest source file. */
+export const BULK_MAX_SOURCE_BYTES = 5 * 1024 * 1024;
+
+/** A source that cannot be planned at all. The message is engine-authored and never
+ *  quotes the source, so it is safe to return to the model. */
+export class BulkSourceError extends Error {}
+
+export interface SourceRow { target: string; after: unknown }
+
+const META_FIELDS = new Set(['_id', '_created_at', '_updated_at']);
+
+/**
+ * RFC 4180 CSV: comma-separated, `"` quoting with `""` as an escaped quote, CRLF or LF
+ * line ends, quoted fields may span lines. The first row is the header.
+ */
+export function parseCsv(text: string): Record<string, string>[] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  let i = 0;
+  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  while (i < src.length) {
+    const c = src[i]!;
+    if (quoted) {
+      if (c === '"') {
+        if (src[i + 1] === '"') { field += '"'; i += 2; continue; }
+        quoted = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"' && field === '') { quoted = true; i++; continue; }
+    if (c === ',') { row.push(field); field = ''; i++; continue; }
+    if (c === '\r' && src[i + 1] === '\n') { i++; continue; }
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    field += c; i++;
+  }
+  if (quoted) throw new BulkSourceError('The CSV source ends inside a quoted field.');
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  const [header, ...body] = rows;
+  if (!header) return [];
+  return body
+    .filter((r) => !(r.length === 1 && r[0] === ''))
+    .map((r) => {
+      if (r.length !== header.length) throw new BulkSourceError('A CSV row has a different number of fields than the header.');
+      return Object.fromEntries(header.map((h, j) => [h, r[j]!]));
+    });
+}
+
+/** Parse a source file's text. JSON: an array of objects. CSV: header row plus rows. */
+export function parseSourceText(text: string, format: 'json' | 'csv'): Record<string, unknown>[] {
+  if (Buffer.byteLength(text, 'utf8') > BULK_MAX_SOURCE_BYTES) {
+    throw new BulkSourceError(`The source is larger than ${String(BULK_MAX_SOURCE_BYTES / 1024 / 1024)} MB.`);
+  }
+  if (format === 'csv') return parseCsv(text);
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { throw new BulkSourceError('The JSON source does not parse.'); }
+  if (!Array.isArray(parsed) || !parsed.every((r) => r !== null && typeof r === 'object' && !Array.isArray(r))) {
+    throw new BulkSourceError('The JSON source must be an array of objects.');
+  }
+  return parsed as Record<string, unknown>[];
+}
+
+/**
+ * Rows → (target, after) pairs. `target` names the target. The after-state is the
+ * row's `after` field when it has one; otherwise every other field except the store's
+ * own `_id`/`_created_at`/`_updated_at` (so a CSV or a staging collection can carry the
+ * new column values directly).
+ */
+export function rowsToSource(rows: readonly Record<string, unknown>[]): SourceRow[] {
+  if (rows.length === 0) throw new BulkSourceError('The source has no rows.');
+  if (rows.length > BULK_MAX_TARGETS) {
+    throw new BulkSourceError(`The source has more than ${String(BULK_MAX_TARGETS)} targets.`);
+  }
+  return rows.map((row) => {
+    const target = row['target'];
+    if (typeof target !== 'string' || target.trim() === '') {
+      throw new BulkSourceError('Every source row needs a non-empty string field "target".');
+    }
+    if ('after' in row) return { target, after: row['after'] };
+    const after: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(row)) if (k !== 'target' && !META_FIELDS.has(k)) after[k] = v;
+    return { target, after };
+  });
+}
+
+function rejectDuplicates(keys: readonly string[]): void {
+  const seen = new Set<string>();
+  for (const k of keys) {
+    if (seen.has(k)) throw new BulkSourceError('The source names the same target more than once.');
+    seen.add(k);
+  }
+}
+
+class ByteBudget {
+  private used = 0;
+  charge(value: unknown): void {
+    this.used += Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value) ?? '', 'utf8');
+    if (this.used > BULK_MAX_TOTAL_BYTES) {
+      throw new BulkSourceError(`The plan's images exceed ${String(BULK_MAX_TOTAL_BYTES / 1024 / 1024)} MB in total.`);
+    }
+  }
+}
+
+function tooLarge(value: unknown): boolean {
+  return Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value) ?? '', 'utf8') > BULK_MAX_TARGET_BYTES;
+}
+
+/**
+ * A bulk run's workspace file — target or source — as an absolute path in the file
+ * area, or `null` when it leaves the area. Built on `resolveFileAreaPath`, the one
+ * confinement resolver the download route and `media_process` share, and stricter in
+ * one case that resolver leaves to the caller: a path that does not exist yet is
+ * checked through the real path of its closest existing ancestor, so a symlinked
+ * directory cannot carry a planned target out of the area. An existing file is keyed
+ * by its real path, so two spellings of one file are one target.
+ */
+export function resolveBulkFilePath(target: string): string | null {
+  const logical = resolveFileAreaPath(target);
+  if (logical === null) return null;
+  const base = getFileAreaDir();
+  const realBase = existsSync(base) ? realpathSync(base) : base;
+  if (existsSync(logical)) {
+    const real = realpathSync(logical);
+    return isPathWithin(real, realBase) ? real : null;
+  }
+  let ancestor = dirname(logical);
+  let tail = basename(logical);
+  while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) {
+    tail = join(basename(ancestor), tail);
+    ancestor = dirname(ancestor);
+  }
+  if (!existsSync(ancestor)) return null;
+  const real = join(realpathSync(ancestor), tail);
+  return isPathWithin(real, realBase) ? real : null;
+}
+
+/**
+ * A file's current content — its before-image — or absent. Opens once and stats the
+ * same descriptor (nothing can be swapped between check and read), and refuses a
+ * symlink planted at the leaf after the path was resolved. `too_large` above
+ * `maxBytes`; throws for anything that is not a regular file.
+ */
+export function readBulkImage(absPath: string, maxBytes: number): { absent: true } | { absent: false; value: string } | 'too_large' {
+  let fd: number;
+  try {
+    fd = openSync(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { absent: true };
+    throw err;
+  }
+  try {
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) throw new Error('not a regular file');
+    if (stats.size > maxBytes) return 'too_large';
+    const buf = Buffer.alloc(stats.size);
+    if (stats.size > 0) readSync(fd, buf, 0, stats.size, 0);
+    return { absent: false, value: buf.toString('utf-8') };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** How workspace targets are located and read. Injected so a test can drive the
+ *  planning logic against a fake file system. */
+export interface WorkspaceAccess {
+  /** Absolute, confined path for a target; null when it leaves the workspace. */
+  resolve(target: string): string | null;
+  /** Current content, or absent. Returns `too_large` over {@link BULK_MAX_TARGET_BYTES}. */
+  read(absPath: string): BeforeImage | 'too_large';
+}
+
+/** Plan workspace targets: each target is a file, its after-state the full new text. */
+export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAccess): PlannedTarget[] {
+  const budget = new ByteBudget();
+  const resolved = source.map((row) => {
+    try {
+      return { row, path: access.resolve(row.target) };
+    } catch {
+      return { row, path: null };
+    }
+  });
+  // Every path has to be known before any file is read: a doubled target refuses the
+  // whole plan rather than recording half of it.
+  rejectDuplicates(resolved.filter((r) => r.path !== null).map((r) => r.path!));
+  return resolved.map(({ row, path }): PlannedTarget => {
+    if (path === null) return { key: row.target, invalid: 'path_outside_workspace' };
+    if (typeof row.after !== 'string') return { key: path, invalid: 'after_not_text' };
+    if (tooLarge(row.after)) return { key: path, invalid: 'target_too_large' };
+    let before: BeforeImage | 'too_large';
+    try {
+      before = access.read(path);
+    } catch {
+      return { key: path, invalid: 'unreadable' };
+    }
+    if (before === 'too_large') return { key: path, invalid: 'target_too_large' };
+    budget.charge(row.after);
+    if (!before.absent) budget.charge(before.value);
+    return { key: path, before, after: row.after };
+  });
+}
+
+/**
+ * Plan data-store targets in one collection. The collection needs a single-column
+ * unique key; `target` is that key's value. The after-state is the FULL row the rule
+ * produces (the existing row with the named fields replaced), because an upsert
+ * writes every column — a partial after-state would plan a different row than the
+ * one an apply writes.
+ */
+export function planDataStore(source: readonly SourceRow[], store: DataStore, collection: string): PlannedTarget[] {
+  const info = store.getCollectionInfo(collection);
+  if (!info) throw new BulkSourceError('The target collection does not exist.');
+  if (!info.uniqueKey || info.uniqueKey.length !== 1) {
+    throw new BulkSourceError('The target collection needs a single-column unique key to address its rows.');
+  }
+  const keyCol = info.uniqueKey[0]!;
+  const colDefs = new Map(info.columns.map((c) => [c.name, c]));
+  const keyDef = colDefs.get(keyCol)!;
+  if (keyDef.type === 'subject') {
+    throw new BulkSourceError('The target collection is keyed on a subject column, which a dry run cannot resolve without writing.');
+  }
+
+  // The key as the column stores it, so "12" and "12.0" on a number key are one
+  // target, not two plans for the same row.
+  const keyed = source.map((row) => {
+    try {
+      const stored = coercePlainColumnValue(row.target, keyDef);
+      return { row, stored, key: String(stored) };
+    } catch {
+      return { row, stored: null, key: null };
+    }
+  });
+  rejectDuplicates(keyed.filter((k) => k.key !== null).map((k) => k.key!));
+
+  // Before-images in batches of the query's own maximum page size.
+  const beforeByKey = new Map<string, Record<string, unknown>>();
+  const lookups = keyed.filter((k) => k.key !== null);
+  for (let i = 0; i < lookups.length; i += 500) {
+    const batch = lookups.slice(i, i + 500).map((k) => k.stored);
+    const { rows } = store.queryRecords({ collection, filter: { [keyCol]: { $in: batch } }, limit: 500 });
+    for (const r of rows) {
+      const clean: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(r)) if (!META_FIELDS.has(k)) clean[k] = v;
+      beforeByKey.set(String(r[keyCol]), clean);
+    }
+  }
+
+  const budget = new ByteBudget();
+  return keyed.map(({ row, stored, key }): PlannedTarget => {
+    if (key === null) return { key: row.target, invalid: 'bad_key' };
+    const after = row.after;
+    if (after === null || typeof after !== 'object' || Array.isArray(after)) {
+      return { key, invalid: 'bad_value' };
+    }
+    const planned: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(after as Record<string, unknown>)) {
+      const col = colDefs.get(field);
+      if (!col) return { key, invalid: 'unknown_column' };
+      if (col.type === 'subject') return { key, invalid: 'subject_column' };
+      if (value === null || value === undefined) { planned[field] = null; continue; }
+      try {
+        planned[field] = coercePlainColumnValue(value, col);
+      } catch {
+        return { key, invalid: 'bad_value' };
+      }
+      if (field === keyCol && String(planned[field]) !== key) return { key, invalid: 'bad_key' };
+    }
+    const existing = beforeByKey.get(key);
+    const before: BeforeImage = existing ? { absent: false, value: existing } : { absent: true };
+    const full: Record<string, unknown> = existing
+      ? { ...existing, ...planned }
+      : { ...Object.fromEntries(info.columns.map((c) => [c.name, null])), ...planned, [keyCol]: stored };
+    if (tooLarge(full)) return { key, invalid: 'target_too_large' };
+    budget.charge(full);
+    if (existing) budget.charge(existing);
+    return { key, before, after: full };
+  });
+}

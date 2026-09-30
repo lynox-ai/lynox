@@ -1179,6 +1179,14 @@ function deletedMeanwhile(
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+  // Every action other than create may overwrite a profile or a vault entry, so they
+  // take the stronger class. `bootstrap` sits with them without a check of whether it
+  // persists: `restorable` over-requires a before-image, it never under-promises.
+  undo: (input) => {
+    if (input.action === 'list' || input.action === 'view') return null;
+    if (input.action === 'create') return 'compensatable';
+    return 'restorable';
+  },
   definition: {
     name: 'api_setup',
     description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',

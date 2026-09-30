@@ -50,6 +50,7 @@ function findFiles(dir: string, pattern: string, depth = 0, count = { value: 0 }
 }
 
 export const batchFilesTool: ToolEntry<BatchFilesInput> = {
+  undo: 'restorable',
   definition: {
     name: 'batch_files',
     description: 'Apply changes to multiple files at once — rename, move, or find-and-replace text across files matching a pattern.',

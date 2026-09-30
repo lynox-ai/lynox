@@ -93,6 +93,41 @@ export interface SubjectRepointRecord {
   ids: number[];
 }
 
+/**
+ * The value a column would store for `val`, for every column type that converts
+ * without side effects — i.e. all but `subject`, whose conversion finds-or-creates a
+ * subject and so WRITES. Shared by insert and by the bulk dry run, which must predict
+ * the stored value without writing anything; a `subject` column is refused by the
+ * caller rather than passed here.
+ */
+export function coercePlainColumnValue(val: unknown, col: DataStoreColumnDef): unknown {
+  const colName = col.name;
+  switch (col.type) {
+    case 'string':
+      return String(val);
+    case 'number': {
+      const n = Number(val);
+      if (Number.isNaN(n)) {
+        throw new Error(`Column "${colName}": cannot convert "${String(val)}" to number.`);
+      }
+      return n;
+    }
+    case 'date':
+      if (typeof val === 'string') return val;
+      throw new Error(`Column "${colName}": expected date string, got ${typeof val}.`);
+    case 'boolean':
+      if (typeof val === 'boolean') return val ? 1 : 0;
+      if (val === 1 || val === 0) return val;
+      if (val === 'true') return 1;
+      if (val === 'false') return 0;
+      throw new Error(`Column "${colName}": cannot convert "${String(val)}" to boolean.`);
+    case 'json':
+      return typeof val === 'string' ? val : JSON.stringify(val);
+    default:
+      return val;
+  }
+}
+
 export class DataStore {
   private db: Database.Database;
 
@@ -843,28 +878,7 @@ export class DataStore {
   }
 
   private _coerceValue(val: unknown, col: DataStoreColumnDef): unknown {
-    const colName = col.name;
     switch (col.type) {
-      case 'string':
-        return String(val);
-      case 'number': {
-        const n = Number(val);
-        if (Number.isNaN(n)) {
-          throw new Error(`Column "${colName}": cannot convert "${String(val)}" to number.`);
-        }
-        return n;
-      }
-      case 'date':
-        if (typeof val === 'string') return val;
-        throw new Error(`Column "${colName}": expected date string, got ${typeof val}.`);
-      case 'boolean':
-        if (typeof val === 'boolean') return val ? 1 : 0;
-        if (val === 1 || val === 0) return val;
-        if (val === 'true') return 1;
-        if (val === 'false') return 0;
-        throw new Error(`Column "${colName}": cannot convert "${String(val)}" to boolean.`);
-      case 'json':
-        return typeof val === 'string' ? val : JSON.stringify(val);
       case 'subject': {
         // Resolve the row's name → a real subject_id via the injected resolver.
         // No resolver at all (flag off) → degrade to storing the raw string, so
@@ -881,7 +895,7 @@ export class DataStore {
         return this._subjectBridge.resolve(raw, kind) ?? null;
       }
       default:
-        return val;
+        return coercePlainColumnValue(val, col);
     }
   }
 

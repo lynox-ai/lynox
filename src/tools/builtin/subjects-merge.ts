@@ -48,6 +48,7 @@ interface SubjectsMergeInput {
 }
 
 export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
+  undo: 'restorable',
   requiresConfirmation: true,
   // A graph-wide repoint of every note/task/mention is destructive-class (like its
   // data-store/memory peers) — defense-in-depth so isDangerous flags it. The actual

@@ -111,8 +111,15 @@ describe('subjects_merge tool (PR-C3)', () => {
 
     const plain: string[] = [];
     const templateParts: string[] = [];
+    // The one literal skipped is the value of the tool's `undo` property — the undo-contract
+    // class (`ToolEntry.undo`), which lives outside `definition`, never reaches the wire, and
+    // says what reversing the effect REQUIRES, not that chat can do it. Skipped by its place
+    // in the tree, not by its text, so the same word in a sentence anywhere else still counts.
+    const isUndoDeclaration = (node: ts.Node): boolean =>
+      ts.isPropertyAssignment(node.parent) && node.parent.initializer === node &&
+      ts.isIdentifier(node.parent.name) && node.parent.name.text === 'undo';
     const walk = (node: ts.Node): void => {
-      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) plain.push(node.text);
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && !isUndoDeclaration(node)) plain.push(node.text);
       else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) templateParts.push(node.text);
       ts.forEachChild(node, walk);
     };

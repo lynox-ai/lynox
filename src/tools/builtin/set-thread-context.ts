@@ -29,6 +29,7 @@ interface SetThreadContextInput {
 // there; two clients can each have a "Website" project and stay distinct rows.
 
 export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
+  undo: 'restorable',
   definition: {
     name: 'set_thread_context',
     description:

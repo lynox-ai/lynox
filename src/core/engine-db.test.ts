@@ -45,10 +45,10 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v12', () => {
+  it('creates the database and stamps schema_version v13', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(12); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state)
+    expect(row.v).toBe(13); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger)
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -181,7 +181,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(byId['g-workflow']).toBeNull();
     expect(byId['g-backup']).toBeNull();
     expect(byId['g-notify']).toBeNull();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
     e.close();
   });
 
@@ -208,7 +208,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
     expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
     e.close();
   });
 
@@ -243,7 +243,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       text: 'a fact from before v8', source_type: 'user_asserted',
       source_channel: null, source_untrusted: 0, embedding_model: null,
     });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
     e.close();
   });
 
@@ -279,7 +279,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // The two v9 tables exist and are empty.
     expect((db.prepare("SELECT COUNT(*) c FROM knowledge_entries").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_blocks").get() as { c: number }).c).toBe(0);
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
 
     // H6 (pin is a store invariant): an active, trusted row MAY pin.
     expect(() =>
@@ -441,7 +441,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(12); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(13); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -551,9 +551,13 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     db.prepare("INSERT INTO tasks (id, title, due_trigger_id) VALUES ('tk','Todo','tr')").run();
     db.prepare("INSERT INTO connections (id, kind, name) VALUES ('cn','api','API')").run();
     db.prepare("INSERT INTO artifacts (id, type, thread_id) VALUES ('ar','html','t1')").run();
+    // The bulk-run ledger holds before-images — customer data — so it is in the slice.
+    db.prepare("INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase) VALUES ('br','h','workspace','restorable','previewed')").run();
+    db.prepare("INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before) VALUES ('br',0,?,'update','restorable',?)").run(e.enc('a.txt'), e.enc('{"absent":false,"value":"x"}'));
 
     // Sanity: the slice really populated rows, so "all empty after" is not vacuous
     // (a future no-op INSERT couldn't make the wipe assertion trivially green).
+    expect((db.prepare("SELECT COUNT(*) c FROM bulk_targets").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT COUNT(*) c FROM subjects").get() as { c: number }).c).toBe(2);
     expect((db.prepare("SELECT COUNT(*) c FROM relationships").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_subjects").get() as { c: number }).c).toBe(1);
@@ -575,7 +579,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // boot backfill re-populating from the still-present legacy history.db).
     expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -586,7 +590,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
     e.close();
   });
 
@@ -601,7 +605,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
     e.close();
   });
 });
@@ -648,6 +652,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
       DELETE FROM schema_version WHERE version >= 11;
       DELETE FROM onboarding_flags;
       ALTER TABLE triggers DROP COLUMN waiting_until;   -- v12
+      DROP TABLE bulk_targets; DROP TABLE bulk_runs;    -- v13
     `);
     e.close();
   };

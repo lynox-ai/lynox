@@ -38,6 +38,7 @@ interface ContactsSaveInput {
 }
 
 export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
+  undo: 'restorable',
   definition: {
     name: 'contacts_save',
     description:

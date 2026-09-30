@@ -79,6 +79,11 @@ export interface ToolContext {
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
 
+  // ── Bulk runs (bulk_plan / bulk_status) ──
+  /** The bulk-run ledger in engine.db. Null unless `bulk_runs_enabled` is on and
+   *  engine.db opened. */
+  bulkLedger: import('./bulk-ledger.js').BulkLedger | null;
+
   // ── Isolation (bash tool) ──
   isolationEnvOverride: Record<string, string> | undefined;
   isolationMinimalEnv: boolean;
@@ -120,6 +125,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     enforceHttps: false,
     apiStore: null,
     artifactStore: null,
+    bulkLedger: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     pendingStepHint: null,

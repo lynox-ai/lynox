@@ -333,6 +333,7 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
 }
 
 export const saveWorkflowTool: ToolEntry<SaveWorkflowInput> = {
+  undo: 'restorable',
   definition: {
     name: 'save_workflow',
     description:

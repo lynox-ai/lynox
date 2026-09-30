@@ -971,6 +971,16 @@ interface HttpRequestInput {
 }
 
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
+  // PUT/PATCH overwrite a resource that a prior GET can image; POST creates one that
+  // can be deleted. DELETE is `none`: re-creating a remote resource from its image is
+  // not generally possible (the id is the server's), and autonomous DELETE is blocked.
+  undo: (input) => {
+    const method = (input.method ?? 'GET').toUpperCase();
+    if (method === 'PUT' || method === 'PATCH') return 'restorable';
+    if (method === 'POST') return 'compensatable';
+    if (method === 'DELETE') return 'none';
+    return null;
+  },
   definition: {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only
