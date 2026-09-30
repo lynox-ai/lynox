@@ -773,7 +773,7 @@ describe('ApiStore', () => {
      * a claim: a file at the path the old reader used must not reach the
      * briefing. Without this, "it comes from the constant now" is only true
      * until someone reinstates a fallback, and a fallback is exactly what hid
-     * the shipping gap for a year.
+     * the shipping gap for four months.
      *
      * Two things this had to get right, both found by review:
      *  • It plants a file inside the repository. The first cut removed the

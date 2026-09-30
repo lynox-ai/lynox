@@ -1247,7 +1247,8 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
    * ⚠ It used to have two more ways to return `''` — catalogue file missing,
    * catalogue file malformed — each swallowed without a word. The first of
    * those was not the dev-tree edge case the comment claimed: it was every
-   * container we ship, for a year, because the image never carried `data/`.
+   * container we ship, from the catalogue's first day (core#558, 2026-05-24)
+   * to 2026-09-30, because the image never carried `data/`.
    * A silent fallback on a briefing text cannot be told apart from an empty
    * briefing, so there is no fallback here any more. See
    * {@link ./suggested-apis.ts} for the measurement.

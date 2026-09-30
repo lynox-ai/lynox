@@ -19,7 +19,7 @@
  * The fix is not "ship the file too". It is that **the catalogue can no longer
  * go missing on its own.** A file read has a failure mode the code treats as
  * normal — absent is indistinguishable from deliberately empty — which is
- * precisely why a year passed without anyone noticing. A constant compiled
+ * precisely why four months passed without anyone noticing. A constant compiled
  * into `dist/` cannot be selectively absent: if it is gone the module does not
  * load, and that breaks far more than a list of hints. One home instead of
  * two, and one that cannot quietly evaporate.
