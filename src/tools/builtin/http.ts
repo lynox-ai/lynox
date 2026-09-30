@@ -583,6 +583,49 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
 }
 
 /**
+ * Whether this PROFILE may be renewed unattended — a different question from
+ * whether the CALLER may trigger one, which is why it is a second predicate and
+ * not another condition in the first.
+ *
+ * Refuses exactly one shape: a stored refresh token with no explicit
+ * `grant_type`. That combination is ambiguous, and automating it makes the
+ * ambiguity destructive.
+ *
+ * `auth.oauth.grant_type` is OPTIONAL on a profile — the validator checks it
+ * only when present — and `fetch_token` defaults it to `client_credentials`.
+ * The authorization-code flow sends `grant_type: 'authorization_code'` in the
+ * token REQUEST and never writes one onto the profile, so a profile created by
+ * `connect` carries a user-delegated refresh token and no grant type at all.
+ * Renew that and `fetch_token` posts a CLIENT-CREDENTIALS grant: it either fails,
+ * or it succeeds and replaces the token the user consented to with an app-level
+ * one that can see different data.
+ *
+ * A model calling `fetch_token` by hand has always been able to do that. What
+ * this change would add is doing it BY ITSELF, on expiry, with nobody choosing
+ * it — so the automated path declines and leaves the decision where it was.
+ *
+ * What it does NOT refuse, because these are unambiguous:
+ *   · `grant_type: 'refresh_token'` — the intended case;
+ *   · no refresh token at all — `client_credentials` is then the only thing the
+ *     profile can mean, which is the Shopify shape this piece exists for;
+ *   · `grant_type: 'client_credentials'`, explicitly chosen.
+ *
+ * ⚠ The refusal is not a workaround for the missing piece, it is a pointer at
+ * it: nothing switches a profile to `refresh_token` after an authorization-code
+ * exchange, which is the other half of the row this branch closes. Until that
+ * lands, such a profile has to be given its grant type before it can renew, and
+ * the log line says which profile.
+ */
+export function oauthProfileMayBeRenewedUnattended(
+  profile: { auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined },
+  hasStoredRefreshToken: boolean,
+): boolean {
+  const grantType = profile.auth?.oauth?.grant_type;
+  if (grantType !== undefined) return true;
+  return !hasStoredRefreshToken;
+}
+
+/**
  * One renewal per profile at a time.
  *
  * Not a nicety: `api_setup` has no in-flight guard of its own — the comment at
@@ -881,7 +924,18 @@ async function attachEngineManagedAuth(
     // reads of a credential on a request that was never going to be sent.
     const expiresAt = profile.auth?.oauth?.token_expires_at;
     if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
-      await renewExpiringOAuthToken(profile.id, agent);
+      // Asked HERE rather than inside the renewal because only this scope can
+      // answer the second argument: whether the vault actually holds a refresh
+      // token for this profile. The profile can NAME a slot that is empty.
+      const refreshSlot = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+      const holdsRefresh = secretStore.resolve(refreshSlot) !== null;
+      if (oauthProfileMayBeRenewedUnattended(profile, holdsRefresh)) {
+        await renewExpiringOAuthToken(profile.id, agent);
+      } else {
+        process.stderr.write(
+          `[lynox:http] oauth token renewal declined for profile "${profile.id}": it holds a refresh token but names no auth.oauth.grant_type, and the default would post a client-credentials grant that replaces the user's delegated token. Set grant_type to "refresh_token" with api_setup update.\n`,
+        );
+      }
     }
 
     const tokenKey = accessTokenKey(profile.id);

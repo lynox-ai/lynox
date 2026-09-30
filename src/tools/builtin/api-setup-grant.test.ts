@@ -1528,6 +1528,38 @@ describe('who may have a token renewed on their behalf', () => {
   });
 });
 
+describe('which profiles may be renewed unattended', () => {
+  /**
+   * The second predicate, asserted directly. It answers a different question
+   * from the caller gate — not "may this actor renew" but "does renewing this
+   * profile mean what we think it means".
+   */
+  it('permits an explicit refresh_token grant', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { grant_type: 'refresh_token' } } }, true)).toBe(true);
+  });
+
+  it('permits a profile with no refresh token, which is the client-credentials shape', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // Shopify: `client_credentials`, 24-hour token, nothing to rotate. This is
+    // the case the whole piece exists for, so it must not be caught.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: {} } }, false)).toBe(true);
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { grant_type: 'client_credentials' } } }, false)).toBe(true);
+  });
+
+  it('refuses a stored refresh token with no declared grant type', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // The shape `connect` produces: a user-delegated refresh token and no
+    // `grant_type`, because the authorization-code flow sends that value in the
+    // token REQUEST and never writes it onto the profile. `fetch_token` would
+    // default to client_credentials and replace the delegated token with an
+    // app-level one.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: {} } }, true)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended({ auth: {} }, true)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended({}, true)).toBe(false);
+  });
+});
+
 describe('the two properties the comments claim, which nothing was checking', () => {
   // Module-scoped so a THROWN refusal does not take the record with it: `run`
   // never returns in that case, and the calls are exactly what has to be
@@ -1703,6 +1735,36 @@ describe('the two properties the comments claim, which nothing was checking', ()
     );
     expect(calls.some((u) => u.includes('/oauth/token')), 'a caller without api_setup had a token minted on its behalf').toBe(false);
     expect(calls.some((u) => u.includes('/v1/contacts')), 'the request itself did not go out, so this is a regression rather than a degradation').toBe(true);
+    expect(out).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * The profile guard at the EFFECT level: a connect-shaped profile spends no
+   * exchange, and says why in the log.
+   *
+   * `crmProfile` declares `grant_type: 'refresh_token'`, so the shape has to be
+   * built by removing it — which is exactly what a profile created through
+   * `connect` looks like, since that flow writes the grant type into the token
+   * request and never onto the profile.
+   */
+  it('declines a connect-shaped profile whose grant type is undeclared', async () => {
+    const past = Date.now() - 1000;
+    const base = crmProfile();
+    const oauthNoGrant = { ...base.auth!.oauth! } as Record<string, unknown>;
+    delete oauthNoGrant['grant_type'];
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+
+    const { calls, out } = await run(crmProfile({
+      auth: { ...base.auth!, oauth: { ...oauthNoGrant, token_expires_at: past } as never },
+    }));
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a client-credentials grant was posted for a profile holding a delegated refresh token').toBe(false);
+    expect(written.join(''), 'the decision was silent, so nobody can find out why the token stopped renewing').toMatch(/renewal declined for profile "crm-api"/);
+    // The request still goes out on the stored token.
     expect(out).not.toMatch(/^Error:/);
   });
 
