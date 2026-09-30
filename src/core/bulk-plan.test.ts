@@ -99,10 +99,14 @@ describe('planWorkspace bounds and reasons', () => {
     expect(() => planWorkspace(source.slice(0, 4), fakeAccess(files))).not.toThrow();
   });
 
-  it('counts target keys against the total cap', () => {
-    // Invalid targets keep the source's text as their key; 40 keys of 1 MB are 40 MB.
-    const source = Array.from({ length: 40 }, (_, i) => ({ target: `../${'k'.repeat(1024 * 1024)}${String(i)}`, after: 'x' }));
-    expect(() => planWorkspace(source, fakeAccess({}))).toThrow('in total');
+  it('counts target keys and images against ONE total cap', () => {
+    // 20 MB of keys (invalid targets keep the source's text) plus ~18 MB of after-states:
+    // each half alone is under 32 MB, so separate budgets would let this through.
+    const keys = Array.from({ length: 20 }, (_, i) => ({ target: `../${'k'.repeat(1024 * 1024)}${String(i)}`, after: 'x' }));
+    const images = Array.from({ length: 20 }, (_, i) => ({ target: `f${String(i)}`, after: 'y'.repeat(900 * 1024) }));
+    expect(() => planWorkspace(keys, fakeAccess({}))).not.toThrow();
+    expect(() => planWorkspace(images, fakeAccess({}))).not.toThrow();
+    expect(() => planWorkspace([...keys, ...images], fakeAccess({}))).toThrow('in total');
   });
 
   it('marks a non-text after-state and an unreadable target by reason', () => {
@@ -190,8 +194,10 @@ describe('planDataStore', () => {
 
   it('counts target keys against the total cap', () => {
     // A number key the column cannot hold stays invalid with the source's text as its key,
-    // so only the keys are charged: 40 keys of 1 MB. (For a valid target the key is also
-    // inside its after-row, so keys alone cannot be isolated there.)
+    // so only the keys are charged: 40 keys of 1 MB. This shows the data-store planner
+    // charges keys at all; that keys and images share ONE budget is shown on the
+    // workspace planner above. (For a valid target the key is also inside its after-row,
+    // so keys alone cannot be isolated here.)
     store.createCollection({ name: 'nums', scope, uniqueKey: ['n'], columns: [{ name: 'n', type: 'number' }] });
     const source = Array.from({ length: 40 }, (_, i) => ({ target: `${'x'.repeat(1024 * 1024)}${String(i)}`, after: {} }));
     expect(() => planDataStore(source, store, 'nums')).toThrow('in total');

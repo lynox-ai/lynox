@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -299,16 +299,19 @@ describe('bulk_plan over data-store rows', () => {
   it('holds a collection source to the same byte cap as a file', async () => {
     seed();
     store.createCollection({ name: 'fat', scope, columns: [{ name: 'target', type: 'string' }, { name: 'note', type: 'string' }] });
-    // 600 rows of ~9 KB: under the cap on the first page of 500, over it on the second —
-    // so a cap counted per page, or checked only after the loop, fails here.
-    for (let i = 0; i < 600; i += 100) {
+    // 1100 rows of ~9 KB over three pages of 500: under the cap after page one, over it
+    // after page two. The read must stop there — a cap counted per page never trips, and
+    // one checked only after the loop reads page three first.
+    for (let i = 0; i < 1100; i += 100) {
       store.insertRecords({
         collection: 'fat',
         records: Array.from({ length: 100 }, (_, j) => ({ target: `F${String(i + j)}`, note: 'n'.repeat(9 * 1024) })),
       });
     }
+    const reads = vi.spyOn(store, 'queryRecords');
     expect(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'products', source_collection: 'fat' }, agent()))
       .toBe('Error: The source is larger than 5 MB.');
+    expect(reads.mock.calls.filter(([p]) => p.collection === 'fat')).toHaveLength(2);
   });
 
   it('refuses a source file that is not UTF-8', async () => {
