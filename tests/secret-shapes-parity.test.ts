@@ -9,6 +9,9 @@ import { SECRET_SHAPES as ENGINE_SHAPES } from '../src/core/secret-store.js';
 import { SECRET_SHAPES as WEB_UI_SHAPES } from '../packages/web-ui/src/lib/utils/secret-shapes.js';
 
 const WEB_UI_KINDS = new Set(['vendor', 'jwt', 'key-block']);
+// Kinds the web UI deliberately does not take: recognisable only by context,
+// the outbound scan's wide spellings, and the any-long-token catcher.
+const EXCLUDED_KINDS = new Set(['contextual', 'egress-wide', 'generic']);
 const key = (s: { label: string; kind: string; pattern: RegExp }): string =>
   `${s.label} | ${s.kind} | ${s.pattern.source} | ${s.pattern.flags}`;
 
@@ -17,6 +20,12 @@ describe('secret shapes: web UI copy equals the engine list', () => {
     const engine = ENGINE_SHAPES.filter((s) => WEB_UI_KINDS.has(s.kind)).map(key).sort();
     const webUi = WEB_UI_SHAPES.map(key).sort();
     expect(webUi).toEqual(engine);
+  });
+
+  it('decides every engine kind — a new kind is neither silently taken nor silently skipped', () => {
+    for (const kind of new Set(ENGINE_SHAPES.map((s) => s.kind))) {
+      expect(WEB_UI_KINDS.has(kind) || EXCLUDED_KINDS.has(kind), `engine kind "${kind}" is in neither set`).toBe(true);
+    }
   });
 
   it('takes a non-empty share of each kind — an empty filter would pass the equality', () => {
