@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
+import type { GDriveBackupUploader, UploadResult } from './backup-upload-gdrive.js';
 import type { LynoxConfig } from '../types/index.js';
 import { SubjectStore } from './subject-store.js';
 import type { ExtractionResult } from './entity-extractor.js';
@@ -40,6 +41,12 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     'LYNOX_DATA_DIR', 'LYNOX_SUBJECT_GRAPH_ENABLED',
     'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
     'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE',
+    // `ensureVaultKey()` WRITES this into `process.env` on the first boot and then returns early
+    // forever, so without clearing it the first test's key is inherited by every later boot —
+    // whose own `vault.key` file is never created and whose referenced path is then deleted by
+    // `afterEach`. No assertion depended on it, but it is exactly the uncontrolled cross-case
+    // state the comment below argues against for the other seven.
+    'LYNOX_VAULT_KEY',
   ] as const;
   const saved = new Map<string, string | undefined>();
 
@@ -125,7 +132,7 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     expect(existsSync(foreign)).toBe(true);   // a file runMerge never wrote is not ours to delete
   });
 
-  // ─── Gate 2: the Drive-upload gates — tier AND consent ──────────────────────────────────
+  // ─── Gate 2: the Drive-upload gates — tier at boot, consent at upload ───────────────────
 
   /**
    * The user config `loadConfig()` will read: `getUserConfigDir()` honours `LYNOX_DATA_DIR`, which
@@ -136,45 +143,38 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     writeFileSync(join(dir, 'config.json'), JSON.stringify(config, null, 2));
   }
 
-  it('wires the Drive uploader on self-host WHEN the user opted in', async () => {
-    const dir = freshDataDir('drive-selfhost');
+  /** A stub with `upload`'s real signature, recording each call. */
+  function spyUploader(): { calls: string[]; uploader: GDriveBackupUploader } {
+    const calls: string[] = [];
+    const stub = {
+      upload: async (backupDir: string): Promise<UploadResult> => {
+        calls.push(backupDir);
+        return { success: true, folderId: 'stub', filesUploaded: 1 };
+      },
+    };
+    return { calls, uploader: stub as unknown as GDriveBackupUploader };
+  }
+
+  /** Enough of a data dir for `createBackup()` to have something to copy. */
+  function seedBackupSource(dir: string): void {
+    mkdirSync(join(dir, 'memory', '_global'), { recursive: true });
+    writeFileSync(join(dir, 'memory', '_global', 'facts.txt'), 'a fact');
+  }
+
+  it('wires the Drive uploader on self-host — the TIER condition, asked at boot', async () => {
+    freshDataDir('drive-selfhost');
     setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
     setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
-    // No provisioning marker set → self-host, the one tier that keeps Drive.
-    // And the consent the tier does not imply. Both halves are needed now; this test asserted
-    // only the first until the setting had a reader, and it FAILED the moment it gained one —
-    // which is the cheapest possible proof that `init()` consults it.
-    writeUserConfig(dir, { backup_gdrive: true });
+    // No provisioning marker → self-host, the one tier that keeps Drive. Note there is no opt-in
+    // here and the uploader is attached anyway: consent is not a wiring condition any more, it is
+    // asked at the upload. The two cases below prove that it is asked at all.
     const engine = await boot();
 
-    // FIXTURE GUARD: without Google auth the gate is never reached and `null` below would mean
-    // nothing. This asserts the test is exercising the branch it claims to.
-    expect(engine.getGoogleAuth()).not.toBeNull();
     expect(engine.getBackupManager()).not.toBeNull();
-
     expect(engine.getBackupManager()!.getGDriveUploader()).not.toBeNull();
   });
 
-  it('refuses the Drive uploader on self-host when the setting is untouched', async () => {
-    // The SHIPPED state, and the case the gate exists for: on self-host `driveBackupAllowed()`
-    // is `true` by design, so the tier condition alone cannot distinguish an owner who wants an
-    // off-site copy from one who has never thought about it. The default must be the second.
-    //
-    // Deliberately the absent case rather than `backup_gdrive: false`: absent is what a real
-    // installation has, and the difference between the two is the pure predicate's business
-    // (`backup-upload-opt-in.test.ts`), not a second engine boot.
-    freshDataDir('drive-selfhost-default');
-    setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
-    setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
-    const engine = await boot();
-
-    expect(engine.getGoogleAuth()).not.toBeNull();     // fixture guard, as above
-    expect(engine.getBackupManager()).not.toBeNull();   // the local backup is unaffected
-
-    expect(engine.getBackupManager()!.getGDriveUploader()).toBeNull();
-  });
-
-  it('refuses the Drive uploader on a CP-provisioned instance EVEN WITH consent', async () => {
+  it('refuses the Drive uploader on a CP-provisioned instance', async () => {
     // Any ONE provisioning marker closes the gate — `driveBackupAllowed` delegates to
     // `isProvisionedInstance`, which fails closed on a partial env. The instance-id marker is
     // used here deliberately: `LYNOX_BILLING_TIER` additionally arms the managed usage hook
@@ -186,22 +186,66 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     // decision, and it is covered in `backup-drive-tier-boundary.test.ts`. This asserts only
     // that `init()` consults that decision at all.
     //
-    // ⚠ `backup_gdrive: true` is what makes this test still test its own subject. The consent
-    // gate is ALSO in that `if`, so without an opt-in here a null uploader would be explained by
-    // either condition and would prove neither — two causes, one observation. Adding the second
-    // condition to the code silently turned this assertion into a tautology, and the fix is to
-    // switch the other condition ON so only the tier can be doing the refusing.
-    const dir = freshDataDir('drive-provisioned');
+    // No opt-in is written, and none is needed: tier is now the ONLY wiring condition, so a null
+    // uploader here has exactly one possible cause. That is what the previous version of this
+    // test could not claim — it passed with the consent read structurally broken, because either
+    // condition explained the observation.
+    freshDataDir('drive-provisioned');
     setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
     setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
     setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test-0001');
+    const engine = await boot();
+
+    expect(engine.getBackupManager()).not.toBeNull();
+    expect(engine.getBackupManager()!.getGDriveUploader()).toBeNull();
+  });
+
+  it('REVOKING the opt-in stops uploads in the running process, without a restart', async () => {
+    // The test the whole gate exists for, and the one a boot-time-only check cannot pass. Two
+    // backups through the SAME engine, with the setting flipped in between — so the assertion is
+    // about the decision being current, not about it having been made once.
+    //
+    // Before this, the opt-in was read in `init()` only: turning it off left the uploader
+    // attached and backups going out until the process restarted. Fail-open, and the same class
+    // `_reconcileBugsink` exists to close for the privacy toggle.
+    const dir = freshDataDir('drive-revoke');
+    seedBackupSource(dir);
+    setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
     writeUserConfig(dir, { backup_gdrive: true });
     const engine = await boot();
 
-    expect(engine.getGoogleAuth()).not.toBeNull();     // fixture guard, as above
-    expect(engine.getBackupManager()).not.toBeNull();
+    const manager = engine.getBackupManager();
+    expect(manager).not.toBeNull();
+    const { calls, uploader } = spyUploader();
+    manager!.setGDriveUploader(uploader);
 
-    expect(engine.getBackupManager()!.getGDriveUploader()).toBeNull();
+    // FIXTURE GUARD, and it is the one the previous version of these tests was missing: the
+    // opt-in has to have REACHED the engine's config. Writing it to disk does not establish that
+    // it arrived, and without this a passing test below could be explained by either condition.
+    expect(engine.getUserConfig().backup_gdrive, 'the opt-in must have reached userConfig').toBe(true);
+
+    const first = await manager!.createBackup();
+    expect(first.success).toBe(true);
+    // FIXTURE GUARD: the upload also needs an encrypted archive, so if this were false the
+    // assertion below would pass for the wrong reason.
+    expect(first.manifest.encrypted, 'the boot must have produced a vault key').toBe(true);
+    expect(calls).toEqual([first.path]);
+
+    // Now revoke it the way the product does: write the config, clear the cache, reload.
+    writeUserConfig(dir, { backup_gdrive: false });
+    reloadConfig();
+    await engine.reloadUserConfig();
+    expect(engine.getUserConfig().backup_gdrive, 'the revocation must have reached userConfig').toBe(false);
+
+    const second = await manager!.createBackup();
+    expect(second.success).toBe(true);
+    expect(second.manifest.encrypted).toBe(true);   // still encrypted — only consent changed
+    expect(second.path).not.toBe(first.path);       // a second, real archive
+    // WITNESS 1: the local backup still happened.
+    expect(existsSync(join(second.path, 'manifest.json'))).toBe(true);
+    // WITNESS 2: and nothing went out for it.
+    expect(calls).toEqual([first.path]);
   });
 });
 

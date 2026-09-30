@@ -665,6 +665,34 @@ describe('Config', () => {
       }
     });
 
+    it('backup_gdrive in a PROJECT config is IGNORED — a cwd file must not switch on the Drive upload', async () => {
+      // The prose in `backup-upload-gdrive.ts` and in `features/backup.md` both promise this, and
+      // until now nothing held it but two absences: `backup_gdrive` is not in `PROJECT_SAFE_KEYS`
+      // and has no env override. Adding one line to that set would let a file in a working
+      // directory switch on uploading the memory database, with the whole suite green. This is the
+      // line that turns the promise into a mechanism.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      // The user said no by saying nothing — the shipped state.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_gdrive: true }));
+
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+
+      expect(config.backup_gdrive).toBeUndefined();
+      // Positive control in the same fixture: a key that IS project-safe comes through, so an
+      // `undefined` above cannot be explained by the project file having been ignored wholesale.
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_gdrive: true, backup_retention_days: 7 }));
+      const { reloadConfig } = await import('./config.js');
+      reloadConfig();
+      const again = loadConfig();
+      expect(again.backup_retention_days).toBe(7);
+      expect(again.backup_gdrive).toBeUndefined();
+    });
+
     it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {
       const projectDir = join(fakeProject, '.lynox');
       mkdirSync(projectDir, { recursive: true });

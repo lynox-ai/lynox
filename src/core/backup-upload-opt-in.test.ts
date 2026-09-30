@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -66,11 +66,35 @@ function spyUploader(): Spy {
   return { calls, uploader: stub as unknown as GDriveBackupUploader };
 }
 
-/** Both witnesses of "the local backup is intact", read off disk rather than off the result. */
+/**
+ * "The local backup is intact", read off DISK rather than off the result.
+ *
+ * ⚠ The first version of this helper counted directory entries and manifest rows — both
+ * CORRELATES of intact. Executed against a fixture with a manifest listing three files and none
+ * of them on disk, it returned `true`; a zero-byte database also passed. So it is now the
+ * property: every non-directory entry the manifest claims must exist with non-zero size, and the
+ * database must open. Anything weaker lets the assertion it serves pass on an empty archive.
+ */
 function localArchiveIsReadable(path: string): boolean {
   if (!existsSync(join(path, 'manifest.json'))) return false;
   const manifest = JSON.parse(readFileSync(join(path, 'manifest.json'), 'utf-8')) as BackupManifest;
-  return manifest.files.length > 0 && readdirSync(path).length > 1;
+  const files = manifest.files.filter(f => f.type !== 'directory');
+  if (files.length === 0) return false;
+  for (const f of files) {
+    const full = join(path, f.path);
+    if (!existsSync(full)) return false;
+    if (statSync(full).size === 0) return false;
+  }
+  // And the database is a database — unless the archive is ciphertext, where it must NOT be.
+  const dbPath = join(path, 'history.db');
+  if (!existsSync(dbPath)) return false;
+  if (manifest.encrypted) return isEncryptedBackupFile(dbPath);
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return (db.prepare('SELECT count(*) AS n FROM test').get() as { n: number }).n > 0;
+  } finally {
+    db.close();
+  }
 }
 
 describe('driveUploadOptedIn — the consent condition, decided without a boot', () => {
@@ -131,9 +155,18 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
     return manager.createBackup().then(result => {
       expect(result.success).toBe(true);
       expect(result.manifest.encrypted).toBe(true);
+      // ⚠ THE WITNESS THIS SUITE WAS MISSING: that encryption actually RAN. Without it, breaking
+      // step 5 to `if (false && this.vaultKey)` left all ten tests green — nothing encrypted,
+      // `manifest.encrypted` still true, and the spy recording an upload of a plaintext archive
+      // labelled encrypted, which is the exact scenario this file's header exists to prevent. The
+      // manifest field and the spy's copy of it are three fields and zero bytes; this reads bytes.
+      expect(isEncryptedBackupFile(join(result.path, 'history.db'))).toBe(true);
+      expect(localArchiveIsReadable(result.path)).toBe(true);
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.encrypted).toBe(true);
       expect(calls[0]!.dir).toBe(result.path);
+      // And the skip line must NOT appear on a successful upload — otherwise the message stops
+      // discriminating and its readers learn to ignore it.
+      expect(stderrText()).not.toContain('Google Drive upload skipped');
     });
   });
 
@@ -217,17 +250,112 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
 
     await manager.createBackup();
 
-    const text = stderrText();
-    expect(text).toContain('Google Drive upload skipped');
-    expect(text).toContain('not encrypted');
-    expect(text).toContain('LYNOX_VAULT_KEY');
-    expect(text).toContain('local backup is intact');
+    // ⚠ Asserted as ONE sentence, not as four unordered substrings. With `toContain` × 4 the
+    // actionable half — the part that tells the operator what to do — could be deleted, and the
+    // message could be made to say the opposite of what happened, with every assertion green.
+    // What a person reads is the promise; a token set is not.
+    expect(stderrText()).toBe(
+      '[lynox:backup] Google Drive upload skipped — this backup is not encrypted. '
+      + 'Set LYNOX_VAULT_KEY to a non-empty value (and do not set backup_encrypt to false) '
+      + 'to upload. The local backup is intact.\n',
+    );
+  });
+
+  it('uploadAllowed() === false refuses the upload even on an encrypted archive', async () => {
+    // The consent condition at the UNIT level. It lives here rather than at the wiring because a
+    // wiring gate answers "was it true at the last boot"; this answers "is it true now", which is
+    // the only form in which revoking the setting can take effect without a restart. The engine
+    // hands in a closure over its live config; the boot suite proves the revocation end to end.
+    const { calls, uploader } = spyUploader();
+    const manager = new BackupManager(
+      lynoxDir,
+      { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: uploader, uploadAllowed: () => false },
+      VAULT_KEY,
+    );
+
+    const result = await manager.createBackup();
+
+    expect(result.success).toBe(true);
+    expect(result.manifest.encrypted).toBe(true);          // encryption is unaffected
+    expect(localArchiveIsReadable(result.path)).toBe(true); // witness 1
+    expect(calls).toHaveLength(0);                          // witness 2
+    // And silent: not opting in is the normal state, so a line here would fire on every backup of
+    // every instance that never asked for an upload.
+    expect(stderrText()).not.toContain('Google Drive upload skipped');
+  });
+
+  it('a FAILED upload is reported, not swallowed', async () => {
+    // The real uploader does not throw on a refusal — a missing `drive.file` scope, an API error
+    // and a network failure all come back as `{ success: false, error }`. The result used to be
+    // discarded, so a genuine failure was completely silent while the code claimed its refusals
+    // were written. A spy that returns a failure is the only way to reach that path.
+    const failing = {
+      upload: async (): Promise<UploadResult> => ({
+        success: false, folderId: '', filesUploaded: 0,
+        error: 'Missing drive.file scope. Run /google auth to grant access.',
+      }),
+    } as unknown as GDriveBackupUploader;
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: failing }, VAULT_KEY,
+    );
+
+    const result = await manager.createBackup();
+
+    expect(result.success).toBe(true);   // an upload failure does not fail the backup
+    expect(stderrText()).toContain('Google Drive upload failed');
+    expect(stderrText()).toContain('Missing drive.file scope');
+  });
+
+  it('verifyBackup accepts an ENCRYPTED archive — the sqlite relabel it used to omit', async () => {
+    // Three sites answer "are these files ciphertext, so skip the SQLite integrity check":
+    // `createBackup` step 9, `restoreBackup`, and this public method — which did not ask. On an
+    // encrypted archive `PRAGMA integrity_check` runs against ciphertext and throws "file is not
+    // a database", so every encrypted backup was reported invalid. Its own tests ran on an
+    // unencrypted manager, where the relabel is a no-op, which is why nothing saw it.
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true }, VAULT_KEY,
+    );
+    const created = await manager.createBackup();
+    expect(created.manifest.encrypted).toBe(true);
+
+    const verdict = manager.verifyBackup(created.path);
+
+    expect(verdict.errors).toEqual([]);
+    expect(verdict.valid).toBe(true);
+    expect(verdict.files_checked).toBeGreaterThan(0);
+  });
+
+  it('verifyBackup still catches a corrupt database in an UNENCRYPTED archive', async () => {
+    // The other direction, and the one that makes the relabel a decision rather than a blanket
+    // skip: without it, mutating the condition to always relabel would silently stop checking
+    // SQLite integrity on every unencrypted backup — a corrupt `VACUUM INTO` output would be
+    // promoted as a good archive. This is the assertion that dies in that case.
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null,
+    );
+    const created = await manager.createBackup();
+    expect(created.manifest.encrypted).toBe(false);
+    // Corrupt the copy in the archive, keeping its size so only an integrity check notices.
+    const dbPath = join(created.path, 'history.db');
+    const size = statSync(dbPath).size;
+    writeFileSync(dbPath, Buffer.alloc(size, 0x41));
+
+    const verdict = manager.verifyBackup(created.path);
+
+    expect(verdict.valid).toBe(false);
+    expect(verdict.errors.join(' ')).toContain('history.db');
   });
 
   it('says nothing about a skip when there is no uploader at all', async () => {
     // The discriminator for the message above: it must be tied to a REFUSAL, not printed on
-    // every unencrypted backup. Self-host without Google connected is the common case and must
+    // every unencrypted backup. An instance with no uploader attached is the common case and must
     // stay quiet — otherwise the line trains its readers to ignore it.
+    //
+    // ⚠ Note what this does NOT say. An earlier version claimed "self-host without Google
+    // connected is the common case", which is false: the engine attaches the uploader on tier
+    // alone, with no auth term (deliberately — a brokered credential is built later), so a
+    // self-host instance without Google connected DOES get an uploader. What keeps it quiet is
+    // the absence of an uploader, and at the engine level the absence of consent.
     const manager = new BackupManager(
       lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null,
     );

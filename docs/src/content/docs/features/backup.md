@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-lynox can back up your data automatically — encrypted and optionally uploaded to Google Drive.
+lynox can back up your data automatically — encrypted when you set a vault key, and optionally uploaded to Google Drive.
 
 ## What's Backed Up
 
@@ -18,7 +18,7 @@ lynox can back up your data automatically — encrypted and optionally uploaded 
 - **Sessions** — Active session state
 - **Configuration** — Settings and preferences
 
-Backups are stored as encrypted SQLite snapshots.
+Backups are stored as SQLite snapshots, encrypted whenever `LYNOX_VAULT_KEY` holds a non-empty value.
 
 ## Manual Backup
 
@@ -34,11 +34,15 @@ curl -X POST http://localhost:3000/api/backups
 
 ## Scheduled Backups
 
-Configure automatic backups in your config:
+⚠ `backup_schedule` is **not read by anything** — it is declared and documented, and no code
+consults it. Automatic backups run as a **task**, not from this key: a trigger with the `backup`
+effect and a cron condition, which you create under Settings → Tasks. Setting `backup_schedule` in
+your config has no effect at all.
+
+The other keys below do work:
 
 ```json
 {
-  "backup_schedule": "0 3 * * *",
   "backup_retention_days": 30,
   "backup_encrypt": true
 }
@@ -46,16 +50,15 @@ Configure automatic backups in your config:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `backup_schedule` | — | Cron expression (e.g., `0 3 * * *` = daily at 3 AM) |
 | `backup_retention_days` | 30 | Auto-delete backups older than this |
-| `backup_encrypt` | on when `LYNOX_VAULT_KEY` is set | Encrypt backups with your vault key |
-| `backup_dir` | `~/.lynox/backups/` | Where to store backup files |
-| `backup_gdrive` | `false` | Upload backups to Google Drive — needs `LYNOX_VAULT_KEY` |
+| `backup_encrypt` | on when `LYNOX_VAULT_KEY` is non-empty | Encrypt backups with your vault key |
+| `backup_dir` | `<data dir>/backups/` (`~/.lynox/backups/` by default) | Where to store backup files |
+| `backup_gdrive` | `false` | Upload backups to Google Drive — see below |
 
 ## Google Drive Upload
 
-Off by default, and separate from connecting Google: sending a copy of your data directory to a
-third party is its own decision, and `backup_gdrive` is where you make it.
+Backups can be uploaded to Google Drive. This is off by default: sending a copy of your data
+directory to a third party is its own decision, and `backup_gdrive` is where you make it.
 
 ```json
 {
@@ -63,25 +66,43 @@ third party is its own decision, and `backup_gdrive` is where you make it.
 }
 ```
 
-Two things must be true for a backup to be uploaded:
+**Three things must be true for a backup to be uploaded**, and the instance must not be a managed
+or hosted one (those never upload to your Drive — the control plane runs their backups):
 
-1. **You opted in** — `backup_gdrive` is `true` in `~/.lynox/config.json`. The default is off, and
-   a project-local `.lynox/config.json` cannot turn it on; this setting is read from your user
-   config only.
-2. **The archive is encrypted** — which means `LYNOX_VAULT_KEY` is set and you have not set
-   `backup_encrypt` to `false`.
+1. **Google Workspace is connected with Drive access** (the `drive.file` scope). Without it the
+   upload reports a missing scope and nothing is sent.
+2. **You opted in** — `backup_gdrive` is `true` in your user config (`~/.lynox/config.json`). The
+   default is off. A project-local `.lynox/config.json` cannot set it: the project-config allowlist
+   deliberately excludes it, and no environment variable overrides it. It can also be set through
+   `PUT /api/config`, so treat API access to the instance as equivalent to config access.
+3. **The archive is encrypted** — `LYNOX_VAULT_KEY` is set to a **non-empty** value and you have
+   not set `backup_encrypt` to `false`. An empty `LYNOX_VAULT_KEY=` does not count as a key, and
+   turning `backup_encrypt` off disables the upload too, even with a key present.
 
-If you opt in without a vault key, the local backup still runs and the upload is skipped, with a
-line on stderr saying so.
+If you opt in without a usable vault key, the local backup still runs and the upload is skipped,
+with a line on stderr saying so.
+
+**Changing `backup_gdrive` takes effect immediately** — no restart needed, in either direction.
+
+### Turning it off again
+
+Set `backup_gdrive` to `false` (or remove the line). New backups are no longer uploaded.
+
+This does **not** remove copies already in Drive, and lynox has no remote-delete surface, so
+delete the `lynox-backups` folder in your Drive yourself if you want them gone.
 
 ### What Drive can see
 
 The **contents** of every file in the archive are encrypted with AES-256-GCM under a key derived
-from your vault key, so Drive cannot read them. The **structure** is not encrypted: each file is
-uploaded under its path inside the backup, and the archive's `manifest.json` lists those paths
-with sizes and checksums plus the data directory it came from. Drive therefore sees how your
-data directory is laid out — including the names of your memory scopes — even though it cannot
-read what is in it. If those names are themselves sensitive, keep the upload off.
+from your vault key (HKDF-SHA256, a fresh random IV per file), so Drive cannot read them.
+
+The **structure** is not encrypted. Each file is uploaded under its path inside the backup, and the
+archive's `manifest.json` is written after the encryption pass and therefore goes up in the clear.
+Drive therefore sees the full file list of your data directory — every name under `memory/`,
+`artifacts/`, `apis/`, `workspace/` and `sweeps/`, including your memory scope names — along with
+each file's size, the lynox version, and the absolute path of the data directory, which usually
+contains your username. It cannot read what is inside any of them. If those names are themselves
+sensitive, leave the upload off.
 
 ## Restore
 
@@ -105,6 +126,8 @@ Restoring a backup replaces your current data. Make sure to create a fresh backu
 
 ## Encryption
 
-When `backup_encrypt` is enabled (default), backups are encrypted with AES-256-GCM using your vault key. Without the vault key, backup files cannot be read.
+When `backup_encrypt` is on — which it is whenever `LYNOX_VAULT_KEY` holds a non-empty value —
+backups are encrypted with AES-256-GCM using a key derived from your vault key. Without the vault
+key, backup files cannot be read.
 
 Store your vault key separately from your backups — if both are lost, the data is unrecoverable.

@@ -335,6 +335,18 @@ export class Engine {
   private _notificationRouter = new NotificationRouter();
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
+  /**
+   * The two pure gate functions, cached when `init()` loads the Drive module.
+   *
+   * `null` until then, and `null` forever if that module fails to load — which is why
+   * `_driveUploadAllowed` fails CLOSED on it. It exists because the decision has to be
+   * available SYNCHRONOUSLY at upload time, while the module must stay a dynamic import so
+   * a load failure in an optional feature cannot make `init()` throw.
+   */
+  private _driveGate: {
+    driveBackupAllowed: () => boolean;
+    driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
+  } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
@@ -1969,6 +1981,11 @@ export class Engine {
         backupDir,
         retentionDays: this.userConfig.backup_retention_days ?? 30,
         encrypt: this.userConfig.backup_encrypt ?? (!!process.env['LYNOX_VAULT_KEY']),
+        // Asked at every upload, over `this.userConfig` — which `reloadUserConfig` REASSIGNS, so
+        // a revoked opt-in takes effect in this process instead of at the next restart. A gate
+        // at the wiring below alone would enforce "true at the last boot"; this enforces
+        // "true now".
+        uploadAllowed: () => this._driveUploadAllowed(),
       }, process.env['LYNOX_VAULT_KEY'] ?? null);
     } catch {
       this._backupManager = null;
@@ -2034,14 +2051,18 @@ export class Engine {
         // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
         // been fatal to boot on every tier. A gate is not worth a crash.
         const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
-        // TWO conditions, because they answer two different questions: may this DEPLOYMENT
-        // upload (tier), and does this USER want it to (setting). Tier alone is not consent — on
-        // self-host `driveBackupAllowed()` is `true` by design, which is a statement about the
-        // deployment, not about its owner's wishes. `backup_gdrive` has been declared in the
-        // schema and documented with a default of `false`; this is the line that reads it.
-        // `backup.ts` step 10 carries the third condition, an encrypted archive, which holds for
-        // every way an uploader reaches the manager.
-        if (driveBackupAllowed() && driveUploadOptedIn(this.userConfig)) {
+        // Cache the two pure decisions so the upload itself can ask them synchronously.
+        // This is what makes a revoked opt-in take effect without a restart.
+        this._driveGate = { driveBackupAllowed, driveUploadOptedIn };
+        // TIER only, and deliberately: this condition is derived from the environment, which
+        // cannot change inside a running process, so boot is the right place to ask it — and
+        // provisioned instances then never build a credential shim they will not use.
+        //
+        // The user's opt-in is NOT asked here. It can change at runtime, so it is asked where the
+        // upload happens (`uploadAllowed` above → `backup.ts` step 10), which is the only place
+        // an answer can be current. One condition, one place, each where it can change: asking
+        // consent in both would give two mechanisms that no single test can tell apart.
+        if (driveBackupAllowed()) {
           // A resolving shim, not the instance: `BackupAuthProvider` is the two
           // methods the uploader calls, so a late-built credential is picked up
           // without threading the resolver through that module's public shape.
@@ -2440,6 +2461,21 @@ export class Engine {
   getSearchProvider(): import('../integrations/search/index.js').SearchProvider | null { return this._searchProvider; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
+  /**
+   * May a backup be uploaded to Drive right now?
+   *
+   * Two conditions, two questions: may this DEPLOYMENT upload (tier), and does this USER want it
+   * to (`backup_gdrive`). Read at the moment of the upload, so a config reload changes the answer
+   * in both directions without a restart.
+   *
+   * Fails closed when the Drive module never loaded — no gate, no upload.
+   */
+  private _driveUploadAllowed(): boolean {
+    const gate = this._driveGate;
+    if (!gate) return false;
+    return gate.driveBackupAllowed() && gate.driveUploadOptedIn(this.userConfig);
+  }
+
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }
