@@ -38,8 +38,10 @@ const reasons = (targets: PlannedTarget[]): (string | null)[] => targets.map((t)
 
 describe('source parsing', () => {
   it('stops a CSV at the target cap instead of parsing the whole source', () => {
-    // The tail is malformed: a parser that read to the end would report the unterminated
-    // quote, one that stops at the cap never reaches it.
+    // The tail is malformed: a parser that read to the end and checked the quote first would
+    // report it, one that stops at the cap never reaches it. Limit: a parser that read to
+    // the end and checked the cap before the quote passes too — the memory it spent is not
+    // observable from here.
     const csv = 'target,after\n' + 'a,b\n'.repeat(BULK_MAX_TARGETS + 1) + '"unterminated';
     expect(() => parseCsv(csv)).toThrow(`more than ${String(BULK_MAX_TARGETS)} targets`);
     expect(() => parseCsv('target,after\n' + 'a,b\n'.repeat(BULK_MAX_TARGETS))).not.toThrow();
@@ -184,6 +186,15 @@ describe('planDataStore', () => {
     products(1);
     const [t] = planDataStore([{ target: 'S0', after: { price: '' } }], store, 'products');
     expect(t).toMatchObject({ after: { sku: 'S0', price: null } });
+  });
+
+  it('counts target keys against the total cap', () => {
+    // A number key the column cannot hold stays invalid with the source's text as its key,
+    // so only the keys are charged: 40 keys of 1 MB. (For a valid target the key is also
+    // inside its after-row, so keys alone cannot be isolated there.)
+    store.createCollection({ name: 'nums', scope, uniqueKey: ['n'], columns: [{ name: 'n', type: 'number' }] });
+    const source = Array.from({ length: 40 }, (_, i) => ({ target: `${'x'.repeat(1024 * 1024)}${String(i)}`, after: {} }));
+    expect(() => planDataStore(source, store, 'nums')).toThrow('in total');
   });
 
   it('refuses a missing collection and a subject-keyed one', () => {

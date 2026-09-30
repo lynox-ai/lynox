@@ -299,10 +299,12 @@ describe('bulk_plan over data-store rows', () => {
   it('holds a collection source to the same byte cap as a file', async () => {
     seed();
     store.createCollection({ name: 'fat', scope, columns: [{ name: 'target', type: 'string' }, { name: 'note', type: 'string' }] });
-    for (let i = 0; i < 60; i += 10) {
+    // 600 rows of ~9 KB: under the cap on the first page of 500, over it on the second —
+    // so a cap counted per page, or checked only after the loop, fails here.
+    for (let i = 0; i < 600; i += 100) {
       store.insertRecords({
         collection: 'fat',
-        records: Array.from({ length: 10 }, (_, j) => ({ target: `F${String(i + j)}`, note: 'n'.repeat(100 * 1024) })),
+        records: Array.from({ length: 100 }, (_, j) => ({ target: `F${String(i + j)}`, note: 'n'.repeat(9 * 1024) })),
       });
     }
     expect(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'products', source_collection: 'fat' }, agent()))

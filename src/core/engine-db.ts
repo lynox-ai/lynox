@@ -977,7 +977,8 @@ export class EngineDb {
   }
 
   /**
-   * A digest of `parts` that cannot be dictionary-attacked from a copy of the file:
+   * A digest of `parts` that, with a vault key, cannot be dictionary-attacked from a copy
+   * of the file:
    * HMAC-SHA256 under a subkey derived from the same vault key as `enc()`'s (own HKDF
    * label), so recomputing it needs that vault key. Without a key it falls back to plain SHA-256 — the same mixed mode as `enc()`,
    * which stores plaintext then. Parts are fed one at a time, length-prefixed, so a
