@@ -5902,7 +5902,7 @@ describe('LynoxHTTPApi', () => {
     it('rejects a maxTargets that is not a number in range', async () => {
       const id = planRun();
       const checksum = bulkLedger.computeChecksum(id)!;
-      for (const maxTargets of ['2', 3, 0, 1.5]) {
+      for (const maxTargets of ['2', null, true, {}, [], 3, 0, 1.5]) {
         const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets }) });
         expect(res.status, String(maxTargets)).toBe(400);
       }

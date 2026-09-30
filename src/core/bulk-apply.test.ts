@@ -834,6 +834,17 @@ describe('workspace writes stay in the file area (A-review obligation)', () => {
       await expect(workspaceWriter(refuses).write(join(ws, 'keep.txt'), { absent: true })).rejects.toThrow();
       expect(existsSync(join(ws, 'keep.txt'))).toBe(true);
     });
+
+    it('directories mkdir created are checked again before the file goes in', async () => {
+      // Vouches once (the check before mkdir), refuses after: a directory made on the way
+      // that no longer resolves inside the area stops the write.
+      let calls = 0;
+      const flips = (t: string): string | null => (++calls === 1 ? t : null);
+      const key = join(ws, 'made', 'here.txt');
+      await expect(workspaceWriter(flips).write(key, { absent: false, value: 'x' })).rejects.toThrow();
+      expect(existsSync(key)).toBe(false);
+      expect(calls).toBe(2);
+    });
   });
 
   it('creates missing directories inside the area and keeps an existing file\'s mode', async () => {
