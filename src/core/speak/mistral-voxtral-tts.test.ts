@@ -435,59 +435,180 @@ describe('what was already collected is not thrown away', () => {
   });
 });
 
-describe('a tripwire against the likely bypass, and it says what it is not', () => {
-  it('finds no output channel inside listMistralVoices outside `report`', () => {
-    // ⚠ This is a TRIPWIRE, not a proof, and the distinction is the whole point.
-    // Its first version grepped the FILE for `console.warn(` and called the result
-    // "by construction". Both halves were wrong: the property is about this
-    // function, not the file — so it was red for a `console.warn` in a comment and
-    // for one in an unrelated code path — and it was blind to the idiom this file
-    // actually uses six times, `process.stderr.write`, through which a fourth
-    // diagnostic warned without setting the flag with every test green.
-    //
-    // It now scopes to the function body and enumerates the channels. It still only
-    // catches what it enumerates. That limit is stated rather than papered over,
-    // because the previous two versions of this claim were each defeated by exactly
-    // the thing the claim had not thought of.
-    const src = readFileSync(
-      resolve(fileURLToPath(import.meta.url), '../mistral-voxtral-tts.ts'),
-      'utf8',
-    );
-    const start = src.indexOf('export async function listMistralVoices');
-    expect(start, 'listMistralVoices not found — this test is measuring nothing').toBeGreaterThan(0);
-    const after = src.indexOf('\nexport ', start + 1);
-    const body = src.slice(start, after === -1 ? undefined : after);
+/**
+ * A code-only view of a TypeScript source slice: comments removed, string and
+ * template literal CONTENT blanked, every other byte left where it was. A
+ * substitution inside a template (`${…}`) is code again, so a call cannot hide in
+ * one. Lengths are preserved, which is asserted below.
+ *
+ * It exists because the two previous versions of the check underneath read the
+ * source as TEXT, and both were measured wrong in the same direction:
+ *   - a TRAILING `// … console.warn( …` comment in the function made it red — the
+ *     strip only removed full-line comments;
+ *   - moving an object literal into `report` made it red, tsc-clean and
+ *     behaviour-identical, because the exemption ended at the first `};`.
+ * `};` is a correlate of "end of `report`", and a line-leading slash-slash pattern
+ * is a correlate of "comment". The
+ * repair is to read the thing, not to judge more strictly — and a false red is
+ * the direction that matters, because it gets fixed by loosening the check until
+ * the check is a no-op.
+ *
+ * ⚠ Known limit, written down now rather than discovered later: REGEX LITERALS
+ * are not modelled. A regex holding a quote (`/['"]/`) puts this into string mode
+ * and blanks to the next matching quote, which could hide a call. The subject has
+ * none today. If one appears, this wants a tokenizer, not another special case.
+ */
+function codeOnly(src: string): string {
+  const blank = (c: string): string => (c === '\n' ? '\n' : ' ');
+  const modes: Array<{ kind: 'code' | "'" | '"' | '`'; depth: number }> = [{ kind: 'code', depth: 0 }];
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const mode = modes[modes.length - 1]!;
+    const c = src[i]!;
+    if (mode.kind === 'code') {
+      if (src.startsWith('//', i)) {
+        while (i < src.length && src[i] !== '\n') { out += ' '; i++; }
+        continue;
+      }
+      if (src.startsWith('/*', i)) {
+        const end = src.indexOf('*/', i + 2);
+        const stop = end === -1 ? src.length : end + 2;
+        for (; i < stop; i++) out += blank(src[i]!);
+        continue;
+      }
+      if (c === "'" || c === '"' || c === '`') {
+        modes.push({ kind: c, depth: 0 });
+        out += c;
+        i++;
+        continue;
+      }
+      if (c === '{') mode.depth++;
+      if (c === '}') {
+        // Depth 0 inside a `${…}` hole means the hole closes and the template resumes.
+        if (mode.depth === 0 && modes.length > 1) { modes.pop(); out += c; i++; continue; }
+        mode.depth--;
+      }
+      out += c;
+      i++;
+      continue;
+    }
+    if (c === '\\') {
+      if (i + 1 >= src.length) { out += ' '; i++; continue; }
+      out += ' ' + blank(src[i + 1]!);
+      i += 2;
+      continue;
+    }
+    if (c === mode.kind) { modes.pop(); out += c; i++; continue; }
+    if (mode.kind === '`' && src.startsWith('${', i)) {
+      modes.push({ kind: 'code', depth: 0 });
+      out += '${';
+      i += 2;
+      continue;
+    }
+    out += blank(c);
+    i++;
+  }
+  return out;
+}
 
-    // Comments stripped first, so prose about `console.warn` is not a failure — and
-    // then `report`'s own body, which is the ONE place that is allowed to write. It
-    // is a closure declared inside this function, so a body-scoped scan finds it;
-    // the check immediately did, which is how I know it looks in the right place.
-    const withoutComments = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-    const reportStart = withoutComments.indexOf('const report =');
-    expect(reportStart, '`report` not found — the exemption below would hide everything').toBeGreaterThan(0);
-    // The first `};` after the declaration, not a newline-and-indent pattern: the
-    // first version pinned `\n  };` and therefore failed on a behaviour-identical
-    // one-line `report`. A false red gets "fixed" by loosening the channel list, and
-    // then the guard is a no-op — so the brittleness matters more than it looks.
-    const reportEnd = withoutComments.indexOf('};', reportStart);
-    expect(reportEnd, '`report` body end not found').toBeGreaterThan(reportStart);
-    const code = withoutComments.slice(0, reportStart) + withoutComments.slice(reportEnd);
+/**
+ * The brace-matched `{…}` block that opens at or shortly after `from`. `within`
+ * bounds the search on purpose: if the block does not start where the caller
+ * expects (an expression-bodied arrow, say), this throws instead of silently
+ * scoping to a later block — an instrument that cannot measure has to say so
+ * rather than return a plausible answer.
+ */
+function blockAfter(code: string, from: number, within: number): { open: number; close: number } {
+  const open = code.indexOf('{', from);
+  if (open === -1 || open - from > within) {
+    throw new Error(`no block within ${String(within)} chars of offset ${String(from)} — cannot scope`);
+  }
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '{') depth++;
+    else if (code[i] === '}') {
+      depth--;
+      if (depth === 0) return { open, close: i + 1 };
+    }
+  }
+  throw new Error(`unbalanced braces from offset ${String(open)}`);
+}
+
+describe('a tripwire against the likely bypass, and it says what it is not', () => {
+  const SRC = readFileSync(resolve(fileURLToPath(import.meta.url), '../mistral-voxtral-tts.ts'), 'utf8');
+
+  it('blanks comments and string content, and keeps code inside a template hole', () => {
+    // The scanner carries the check below, so it is measured against a FIXTURE.
+    // It must not take its expectation from the subject: the subject is what the
+    // next test judges, and a control that borrows its reference from the thing
+    // under test is a tautology with ceremony.
+    const sample = [
+      "const u = 'https://x'; // console.warn(commented)",
+      'const t = `a ${process.stderr.write(live)} b`;',
+      "const s = 'console.warn(quoted)';",
+      '/* console.warn(blocked) */ console.warn(real);',
+    ].join('\n');
+    const code = codeOnly(sample);
+    expect(code).not.toContain('console.warn(commented');
+    expect(code).not.toContain('console.warn(blocked');
+    expect(code).not.toContain('console.warn(quoted');
+    // The `//` inside the URL must not have opened a comment.
+    expect(code).toContain("const u = '");
+    // ⚠ The fail-open control, and the reason the scanner models `${…}` at all: a
+    // channel inside a template hole is CODE and must survive.
+    expect(code).toContain('${process.stderr.write(live)}');
+    expect(code).toContain('console.warn(real');
+    // Offsets preserved, so a match's position still means something.
+    expect(code).toHaveLength(sample.length);
+  });
+
+  it('finds no output channel inside listMistralVoices outside `report`', () => {
+    // ⚠ A TRIPWIRE, not a proof — and this is the third time that sentence has had
+    // to be rewritten. Version 1 said "by construction" over three hand-written
+    // assignments. Version 2 said a grep made it unbreakable while the grep
+    // matched a substring of the FILE. Version 3 scoped to the right place and
+    // then went red on a comment and on a refactor. What is held here is that the
+    // LIKELY accident cannot land; the misses are named at the bottom.
+    const code = codeOnly(SRC);
+    const fnAt = code.indexOf('export async function listMistralVoices');
+    expect(fnAt, 'listMistralVoices not found — this test would be measuring nothing').toBeGreaterThan(0);
+    const fn = blockAfter(code, fnAt, 200);
+    const body = code.slice(fn.open, fn.close);
+
+    // `report` is the one sanctioned writer, so its body is cut out — brace-matched,
+    // not "up to the first `};`".
+    const reportAt = body.indexOf('const report =');
+    expect(reportAt, '`report` not found — the exemption below would hide everything').toBeGreaterThan(0);
+    const rep = blockAfter(body, reportAt, 80);
+    const outside = body.slice(0, rep.open) + body.slice(rep.close);
+
     const channels = [
       /console\s*\.\s*(warn|error|log|info|debug)\s*\(/g,
-      /console\s*\[\s*['"`]/g,
+      /console\s*\[/g,
       /process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/g,
     ];
-    const found = channels.flatMap((re) => [...code.matchAll(re)].map((m) => m[0]));
+    const found = channels.flatMap((re) => [...outside.matchAll(re)].map((m) => m[0]));
     expect(found, `output outside \`report\` in listMistralVoices: ${found.join(', ')}`).toHaveLength(0);
 
-    // Positive control on the scoping: the enumeration must actually match this
-    // file's own idiom, or the check is green because it looks for nothing.
-    expect(/process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/.test(src)).toBe(true);
-    // And `report` itself is the one place that pairs them.
-    expect(src).toMatch(/const report\s*=[\s\S]{0,120}doubtful\s*=\s*true;[\s\S]{0,60}console\.warn\(message\)/);
-    // ⚠ A known miss, measured rather than assumed: `const w = console.warn; w(…)`
-    // slips through, because an alias cannot be caught by enumerating channels. That
-    // is what "tripwire, not proof" means concretely, and naming the case is worth
-    // more than pretending the list is closed.
+    // Positive control on the ENUMERATION: it has to match this file's own idiom —
+    // `process.stderr.write`, six call sites today, all outside this function — or
+    // the check is green because it is looking for nothing. Not pinned to six: an
+    // exact count would go red the next time somebody adds a legitimate log line,
+    // and that is how a guard earns its reputation for crying wolf.
+    const idiom = [...code.matchAll(/process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/g)];
+    expect(idiom.length, "the file's own output idiom no longer matches — recheck the channel list").toBeGreaterThan(0);
+
+    // And `report` itself pairs the flag with the warning. Text-shaped deliberately:
+    // the behavioural half is the TTL cases above, and a rewrite of this shape
+    // should have to re-attest the pairing rather than inherit it.
+    expect(body.slice(rep.open, rep.close)).toMatch(/doubtful\s*=\s*true[\s\S]*console\s*\.\s*warn\s*\(\s*message\s*\)/);
+
+    // ⚠ Two named misses, measured rather than assumed:
+    //  - an ALIAS: `const w = console.warn; w(…)` passes, because enumerating
+    //    channels cannot see one that has been renamed;
+    //  - the OTHER DIRECTION: `doubtful = true` written outside `report` shortens
+    //    the cache to a minute without telling anyone. Nothing here holds that,
+    //    and it is filed as a register row rather than fixed in this PR.
   });
 });

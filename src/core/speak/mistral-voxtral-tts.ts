@@ -204,21 +204,32 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // flag removed. An over-claiming comment is worse than none, because it removes
   // the pressure to build the thing it describes.
   //
-  // So the three diagnostics in this function go through `report`, which sets the
+  // So all FOUR diagnostics in this function go through `report`, which sets the
   // flag and warns in one statement. That removes the ordinary way to get it wrong.
+  // (Four, not three: the three in the walk plus the one in the catch. "Three" was
+  // the count of the `doubtful = true` assignments an earlier draft had, and it
+  // survived into a sentence about `report` call sites — a number that stayed
+  // correct about the set it no longer named.)
   //
   // ⚠⚠ It is NOT a guarantee, and the first version of this comment said it was —
   // the third over-claim in a row about this same four-line coupling. It read "a
   // fourth branch cannot write one without the other, because there is only one way
   // to say it". A review refuted that from inside this very file: six of its
   // diagnostics are written as `process.stderr.write`, and a fourth branch in that
-  // idiom warns without setting the flag, with the whole suite green.
+  // idiom warns without setting the flag, with the whole suite green. (Six call
+  // sites in THIS FILE, none of them inside this function — that is the idiom a
+  // fourth diagnostic would be written in.)
   //
-  // What exists is a TRIPWIRE, not a proof: the test beside this file greps the body
-  // of this function for an output channel outside `report`. It catches the likely
-  // accidents and it is defeated by anything it does not enumerate. Calling that
+  // What exists is a TRIPWIRE, not a proof: the test beside this file scans the body
+  // of this function — comments removed and string content blanked, `report` cut out
+  // by brace matching — for an output channel. It catches the likely accidents and
+  // is defeated by anything it does not enumerate, an alias above all. Calling that
   // "by construction" is what removed the pressure to think about the idiom the file
   // actually uses — twice. So it is named for what it is.
+  //
+  // ⚠ And the tripwire is one-sided: it watches for a WARNING without the flag, not
+  // for the flag without a warning. A stray `doubtful = true` would cut the cache to
+  // a minute silently. Filed, not fixed here.
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;
@@ -363,10 +374,16 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
     // discarded every voice already in hand and returned the five-entry EN-only
     // fallback with no log line at all — the silent truncation this whole change
     // exists to prevent, worse on the failure path than on the success one.
-    // Through `report` as well, so the file has exactly ONE `console.warn` and the
-    // claim above is literally true. Setting the flag here is inert — both writes on
-    // this path are hard 60 s — but "every diagnostic goes through report" must not
-    // be a sentence with an exception, or it is the same over-claim again.
+    // Through `report` as well. Setting the flag here is inert — both writes on this
+    // path are hard 60 s — but "every diagnostic goes through report" must not be a
+    // sentence with an exception, or it is the same over-claim again.
+    //
+    // ⚠ This used to add "so the file has exactly ONE `console.warn` and the claim
+    // above is literally true". That was a pointer to a claim I then rewrote: the
+    // check no longer counts `console.warn` across the FILE, so nothing held the
+    // sentence, and the claim it vouched for had stopped existing. The correction of
+    // a claim has to sweep every place that repeats it — this file had the claim in
+    // two rooms and I only repainted one.
     report(`[speak] Mistral voice catalogue: fetch ended early — ${String(err)}`);
     if (partial.length > 0) {
       _voicesCache = { voices: partial, expiresAt: now + 60_000 };
