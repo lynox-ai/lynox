@@ -278,12 +278,12 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
  *  targets (PRD bulk-changes-reversible §3.4/§3.5) and mint no Run. Only the bulk
  *  approval route creates them — `deriveSourceEffect` never yields them, so no
  *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them.
- *  `bulk_preview` reads an external run's targets and mints no Run either; the ledger's
- *  external plan and the owner's resume of a halted preview are what arm it. */
+ *  `bulk_preview` reads an external run's targets and mints no Run either; only the
+ *  owner starting or resuming the read arms it. */
 export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo' | 'bulk_preview';
 /** The bulk-run effects. `bulk_preview` reads an external run's targets into its ledger
- *  (build plan B §3) and writes nothing to them; an external `bulk_plan` arms it, and the
- *  owner's resume re-arms it after a halt. */
+ *  (build plan B §3) and writes nothing to them; only the owner's start or resume of the
+ *  read arms it. */
 export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo' | 'bulk_preview'>;
 /** The bulk effects that write targets. */
 export type BulkWriteEffect = Exclude<BulkTriggerEffect, 'bulk_preview'>;

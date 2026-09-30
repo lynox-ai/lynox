@@ -2,8 +2,8 @@
  * The dry run of an external bulk run as a worker effect, `bulk_preview` (build plan B
  * §3): read each target of a `planned` run with one GET and record its before-image
  * over F, then move the run to `previewed` for the owner to review. Deterministic, no
- * model run. Its trigger is armed by `BulkLedger.recordExternalPlan` and, after a halt,
- * by the owner's resume (`BulkLedger.resumePreview`) — never by a task path.
+ * model run. Its trigger is armed only by the owner's start or resume
+ * (`BulkLedger.resumePreview`) — never by the plan, never by a task path.
  *
  * It writes only the ledger. What bounds it is the engine's host budget, consumed
  * before every request; the profile's own rate limit and a host's 429 are waited out,

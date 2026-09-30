@@ -6308,6 +6308,7 @@ export class LynoxHTTPApi {
       not_undoable: [409, 'Only a finished, aborted or halted bulk run can be undone.'],
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
+      external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
       external_not_writable: [409, 'Writing to an external system is not available yet. This run can be reviewed, not applied.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether

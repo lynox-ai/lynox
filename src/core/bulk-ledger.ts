@@ -840,19 +840,27 @@ export class BulkLedger {
    * once. Targets already read stay read.
    */
   resumePreview(runId: string, now: number = Date.now()):
-    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' } {
+    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false, reason: 'wrong_phase' };
     const db = this.engineDb.getDb();
     let triggerId = '';
-    const moved = db.transaction((): boolean => {
+    const moved = db.transaction((): 'moved' | 'busy' | 'gone' => {
+      // The ordering rule is decided here, where a read starts — plans land halted, so
+      // at plan time nothing is reading yet.
+      const reading = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL
+           AND target_system LIKE 'http:%' AND id != ?`,
+      ).get(runId) as { n: number };
+      if (reading.n > 0) return 'busy';
       const res = db.prepare(`UPDATE bulk_runs SET halt_reason = NULL WHERE id = ? AND phase = 'planned' AND halt_reason IS NOT NULL`).run(runId);
-      if (res.changes !== 1) return false;
+      if (res.changes !== 1) return 'gone';
       triggerId = this.armPreviewTrigger(runId, now);
-      return true;
+      return 'moved';
     })();
-    if (!moved) return { ok: false, reason: 'wrong_phase' };
+    if (moved === 'busy') return { ok: false, reason: 'external_in_progress' };
+    if (moved !== 'moved') return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
   }
 

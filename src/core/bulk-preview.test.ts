@@ -176,11 +176,14 @@ describe('planning an external run', () => {
       expect(triggers.getById(bulkPreviewTriggerId(runId))).toBeUndefined();
       expect(triggers.getDue()).toEqual([]);
       // Waiting for its start, it does not hold the one-external-run slot.
-      expect(planRun([{ target: url(1), after: { price: '1' } }], false)).toBeTruthy();
+      const other = planRun([{ target: url(1), after: { price: '1' } }], false);
       // The owner's start arms the preview trigger, due at once.
       expect(ledger.resumePreview(runId).ok).toBe(true);
       expect(ledger.getStatus(runId)!.haltReason).toBeNull();
       expect(triggers.getDue().map((t) => [t.id, t.effect, t.bulk_run_id])).toEqual([[bulkPreviewTriggerId(runId), 'bulk_preview', runId]]);
+      // Started, it holds the slot: the owner cannot start a second read beside it.
+      expect(ledger.resumePreview(other)).toEqual({ ok: false, reason: 'external_in_progress' });
+      expect(ledger.getStatus(other)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
       expect(s.requests).toEqual([]);
       // Nothing is approvable before the preview: no checksum is offered for a planned run.
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! })).toEqual({ ok: false, reason: 'wrong_phase' });

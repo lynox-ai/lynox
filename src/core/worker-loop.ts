@@ -537,8 +537,8 @@ export class WorkerLoop {
             break;
           case 'bulk_preview':
             // Deterministic: reads a planned external run's targets into its ledger and
-            // writes none of them. Its trigger is armed by an external bulk plan or the
-            // owner's resume; the handler refuses any run that is not planned and unhalted.
+            // writes none of them. Its trigger is armed only by the owner starting or
+            // resuming the read; the handler refuses any run that is not planned and unhalted.
             await this.executeBulkPreview(task, controller.signal);
             break;
           default:
