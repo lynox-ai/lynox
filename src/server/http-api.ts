@@ -6322,8 +6322,10 @@ export class LynoxHTTPApi {
       const checksum = checksumOf(body);
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum" — approve what you were shown.'); return; }
       const rawMax = (body as Record<string, unknown>)['maxTargets'];
-      if (rawMax !== undefined && typeof rawMax !== 'number') { refuse(res, 'bad_max_targets'); return; }
-      const out = ledger.approve(params['id']!, { checksum, maxTargets: rawMax });
+      // Anything but a number goes to the ledger as NaN, which its range check refuses —
+      // one check for every shape, not a second one here.
+      const maxTargets = rawMax === undefined ? undefined : typeof rawMax === 'number' ? rawMax : Number.NaN;
+      const out = ledger.approve(params['id']!, { checksum, maxTargets });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, out.status);
     }));

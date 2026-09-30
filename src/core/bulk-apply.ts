@@ -215,8 +215,13 @@ async function rollBack(ledger: BulkLedger, writer: TargetWriter, run: BulkRunFo
  * are renamed over it, so a crash mid-write leaves the old content, never half of it,
  * and a symlink planted at the leaf is replaced rather than followed.
  */
-export function workspaceWriter(): TargetWriter {
-  const confined = (key: string): boolean => resolveBulkFilePath(key) === key;
+export function workspaceWriter(
+  /** The confinement resolver. Injected so a test can stand in for the moment a path is
+   *  swapped between this check and the file operation after it — a race no static
+   *  setup reproduces, and the only case the leaf guards below exist for. */
+  resolve: (target: string) => string | null = resolveBulkFilePath,
+): TargetWriter {
+  const confined = (key: string): boolean => resolve(key) === key;
   return {
     async read(key) {
       if (!confined(key)) return 'path_changed';

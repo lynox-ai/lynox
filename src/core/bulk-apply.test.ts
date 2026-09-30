@@ -802,6 +802,40 @@ describe('workspace writes stay in the file area (A-review obligation)', () => {
     expect(statSync(secret).mode & 0o777).toBe(0o600);
   });
 
+  // The leaf guards behind the confinement check only matter when a path is swapped AFTER
+  // that check. A resolver that vouches for the key stands in for that moment.
+  describe('each guard on its own, with the confinement check outrun', () => {
+    const vouches = (t: string): string => t;
+
+    it('the read does not follow a symlink at the leaf', async () => {
+      writeFileSync(join(dir, 'same.txt'), 'before');
+      const key = join(ws, 'leaf-r.txt');
+      symlinkSync(join(dir, 'same.txt'), key);
+      expect(await workspaceWriter(vouches).read(key)).toBe('foreign');
+    });
+
+    it('the write refuses a symlink at the leaf and copies no mode from it', async () => {
+      const secret = join(dir, 'secret-w.txt');
+      writeFileSync(secret, 'secret', { mode: 0o600 });
+      const key = join(ws, 'leaf-w.txt');
+      symlinkSync(secret, key);
+      await expect(workspaceWriter(vouches).write(key, { absent: false, value: 'x' })).rejects.toThrow();
+      const { lstatSync, statSync } = await import('node:fs');
+      expect(lstatSync(key).isSymbolicLink()).toBe(true);
+      expect([readFileSync(secret, 'utf-8'), statSync(secret).mode & 0o777]).toEqual(['secret', 0o600]);
+    });
+
+    it('a key that no longer resolves to itself is refused before mkdir and before unlink', async () => {
+      const refuses = (): null => null;
+      const fresh = join(ws, 'never', 'made.txt');
+      await expect(workspaceWriter(refuses).write(fresh, { absent: false, value: 'x' })).rejects.toThrow();
+      expect(existsSync(join(ws, 'never'))).toBe(false);
+      writeFileSync(join(ws, 'keep.txt'), 'k');
+      await expect(workspaceWriter(refuses).write(join(ws, 'keep.txt'), { absent: true })).rejects.toThrow();
+      expect(existsSync(join(ws, 'keep.txt'))).toBe(true);
+    });
+  });
+
   it('creates missing directories inside the area and keeps an existing file\'s mode', async () => {
     writeFileSync(join(ws, 'x.sh'), 'old', { mode: 0o750 });
     const runId = await planFiles([{ target: 'x.sh', after: 'new' }, { target: 'deep/er/n.txt', after: 'n' }]);
