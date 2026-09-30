@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError } from './task-manager.js';
+import { TriggerStore } from './trigger-store.js';
+import { taskUpdateTool } from '../tools/builtin/task.js';
+import type { IAgent } from '../types/index.js';
 import type { TriggerRecord } from '../types/index.js';
 
 describe('deriveSourceEffect (create-path → clean axes; migration-remap twin)', () => {
@@ -815,5 +818,64 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
     expect(tm.getTrigger(t.id)?.confirmed_at).toBeUndefined();
     // Right scope → confirmed.
     expect(tm.confirmTrigger(t.id, [{ type: 'client', id: 'acme' }])?.confirmed_at).toBeTruthy();
+  });
+});
+
+describe('a bulk run\'s trigger', () => {
+  let dir: string;
+  let history: RunHistory;
+  let engine: EngineDb;
+  let tm: TaskManager;
+  const id = 'bulk-run-1';
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-task-bulk-'));
+    history = new RunHistory(join(dir, 'test.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine);
+    tm = new TaskManager(history);
+    new TriggerStore(engine).armBulkEffect({ runId: 'run-1', effect: 'bulk_apply', title: 'Bulk run', nextRunAt: '2026-09-30T10:00:00.000Z' });
+  });
+
+  afterEach(() => {
+    try { engine.close(); } catch { /* already closed */ }
+    history.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const row = (): Pick<TriggerRecord, 'status' | 'schedule_cron' | 'next_run_at' | 'enabled' | 'confirmed_at' | 'effect'> => {
+    const t = tm.getTrigger(id)!;
+    return { status: t.status, schedule_cron: t.schedule_cron, next_run_at: t.next_run_at, enabled: t.enabled, confirmed_at: t.confirmed_at, effect: t.effect };
+  };
+
+  it('cannot be edited, completed, reopened, disabled or confirmed through task paths', () => {
+    const before = row();
+    expect(before.effect).toBe('bulk_apply');
+    expect(() => tm.update(id, { scheduleCron: '1h' })).toThrow(BulkTriggerLockedError);
+    expect(() => tm.update(id, { status: 'completed' })).toThrow(BulkTriggerLockedError);
+    expect(() => tm.update(id, { nextRunAt: '2030-01-01T00:00:00Z' })).toThrow(BulkTriggerLockedError);
+    expect(() => tm.complete(id)).toThrow(BulkTriggerLockedError);
+    expect(() => tm.reopen(id)).toThrow(BulkTriggerLockedError);
+    expect(() => tm.setEnabled(id, false)).toThrow(BulkTriggerLockedError);
+    expect(() => tm.confirmTrigger(id)).toThrow(BulkTriggerLockedError);
+    expect(row()).toEqual(before);
+  });
+
+  it('is refused to the model\'s task_update, which says why', async () => {
+    const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
+    const before = row();
+    for (const input of [{ task_id: id, schedule: '1h' }, { task_id: id, status: 'completed' }, { task_id: id, run_at: '2030-01-01T00:00:00Z' }]) {
+      expect(await taskUpdateTool.handler(input, agent)).toBe(`Error: ${new BulkTriggerLockedError().message}`);
+    }
+    expect(row()).toEqual(before);
+  });
+
+  it('leaves every other trigger editable', () => {
+    const other = tm.create({ title: 'Report', assignee: 'lynox', scheduleCron: '1d' });
+    expect(tm.update(other.id, { scheduleCron: '1h' })).toBeDefined();
+    expect(tm.setEnabled(other.id, false)).toBe(true);
+    expect(tm.complete(other.id)?.status).toBe('completed');
+    expect(tm.reopen(other.id)?.status).toBe('open');
+    expect(tm.confirmTrigger(other.id)?.confirmed_at).toBeTruthy();
   });
 });

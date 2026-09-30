@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
+import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 
@@ -23,6 +24,24 @@ import { compose, renderFence } from '../core/data-boundary.js';
  *   or directly-invoked trigger). Precedence (schedule_cron before watch_config)
  *   MATCHES the migration's condition-derived CASE so the two never disagree.
  */
+/** Exhaustive over {@link BulkTriggerEffect}: a new bulk effect has to be listed here
+ *  before it compiles, so it cannot slip past {@link BulkTriggerLockedError}. */
+const BULK_EFFECTS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true };
+
+/** Thrown when a task path would edit a bulk run's trigger. That trigger is armed,
+ *  re-armed and ended only by the bulk run's own approval and effect; a status or
+ *  schedule set from a task tool would stall an approved run or re-fire a finished one. */
+export class BulkTriggerLockedError extends Error {
+  constructor() {
+    super('This trigger belongs to a bulk run. It is started, resumed and ended only through the bulk run itself, not through task tools.');
+    this.name = 'BulkTriggerLockedError';
+  }
+}
+
+function refuseBulkTrigger(trigger: TriggerRecord): void {
+  if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
+}
+
 export function deriveSourceEffect(intent: {
   taskType?: string | undefined;
   scheduleCron?: string | undefined;
@@ -243,6 +262,7 @@ export class TaskManager {
     // land on a now-out-of-scope row.
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
+      refuseBulkTrigger(trigger);
       const ok = this.history.updateTrigger(trigger.id, { status: 'completed' }, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -279,6 +299,7 @@ export class TaskManager {
     // the write can't land on a row re-scoped out from under the read.
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
+      refuseBulkTrigger(trigger);
       this.history.updateTrigger(trigger.id, { status: 'open' }, scopeOpts);
       return this.history.getTrigger(trigger.id, scopeOpts);
     }
@@ -323,6 +344,7 @@ export class TaskManager {
     // next_run_at / schedule_cron columns.
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
+      refuseBulkTrigger(trigger);
       const triggerUpdate: {
         title?: string | undefined;
         description?: string | undefined;
@@ -590,6 +612,8 @@ export class TaskManager {
    *  deleting it (so its schedule + stored params survive). Returns false if no
    *  trigger matched. */
   setEnabled(id: string, enabled: boolean): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (trigger) refuseBulkTrigger(trigger);
     return this.history.setTriggerEnabled(id, enabled);
   }
 
@@ -607,6 +631,7 @@ export class TaskManager {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (!trigger) return undefined;
+    refuseBulkTrigger(trigger);
     this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString());
     return this.history.getTrigger(trigger.id, scopeOpts);
   }

@@ -128,7 +128,10 @@ export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
 
 /** Dry runs kept that were never approved. Recording another drops the oldest beyond
  *  this: a preview holds nothing to undo, and without a cap repeated calls would grow
- *  engine.db without bound. Approved runs are not touched — their retention is §3.1's. */
+ *  engine.db without bound. Approved runs are not touched — their retention is §3.1's.
+ *  Undo previews are not touched either: only the owner's route plans one, and the
+ *  model's `bulk_plan` calls must not be able to drop the undo the owner is about to
+ *  approve. */
 export const BULK_MAX_PREVIEWED_RUNS = 10;
 
 export type TargetDiff =
@@ -288,8 +291,8 @@ export class BulkLedger {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const prune = db.prepare(
-      `DELETE FROM bulk_runs WHERE phase = 'previewed' AND id NOT IN (
-         SELECT id FROM bulk_runs WHERE phase = 'previewed' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+      `DELETE FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' AND id NOT IN (
+         SELECT id FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
     );
     db.transaction(() => {
       insertRun.run(
@@ -577,8 +580,8 @@ export class BulkLedger {
         );
       });
       db.prepare(
-        `DELETE FROM bulk_runs WHERE phase = 'previewed' AND id NOT IN (
-           SELECT id FROM bulk_runs WHERE phase = 'previewed' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+        `DELETE FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' AND id NOT IN (
+           SELECT id FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
       ).run(BULK_MAX_PREVIEWED_RUNS);
     })();
     return { ok: true, status: this.getStatus(id)! };

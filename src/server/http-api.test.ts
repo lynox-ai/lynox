@@ -18,6 +18,7 @@ import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { BulkLedger, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BulkTriggerLockedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 
 // === Mock dependencies ===
@@ -5804,6 +5805,25 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ title: 'X' }),
       });
       expect(res.status).toBe(404);
+    });
+
+    it('answers 409 with the reason on every task route a bulk run\'s trigger refuses', async () => {
+      const locked = (): never => { throw new BulkTriggerLockedError(); };
+      mockTaskUpdate.mockImplementationOnce(locked);
+      mockTaskComplete.mockImplementationOnce(locked);
+      mockTaskSetEnabled.mockImplementationOnce(locked);
+      mockConfirmTrigger.mockImplementationOnce(locked);
+      const calls: [string, string, string?][] = [
+        ['/api/tasks/bulk-r/', 'PATCH', JSON.stringify({ schedule_cron: '1h' })],
+        ['/api/tasks/bulk-r/complete', 'POST'],
+        ['/api/tasks/bulk-r', 'PATCH', JSON.stringify({ enabled: false })],
+        ['/api/tasks/bulk-r/confirm', 'POST'],
+      ];
+      for (const [path, method, body] of calls) {
+        const res = await jsonFetch(path.replace(/\/$/, ''), { method, ...(body ? { body } : {}) });
+        expect(res.status, `${method} ${path}`).toBe(409);
+        expect(((await res.json()) as { error: string }).error, path).toBe(new BulkTriggerLockedError().message);
+      }
     });
 
     it('POST /api/tasks/:id/complete completes a task', async () => {
