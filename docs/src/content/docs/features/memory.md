@@ -82,4 +82,9 @@ The memory system works across languages. You can discuss topics in German, Engl
 
 ## Local Storage
 
-All memory is stored locally in `~/.lynox/agent-memory.db` (SQLite).
+Memory is stored locally in `~/.lynox/agent-memory.db` (SQLite).
+
+The database file is part of the backup set, so a backup you send somewhere takes it along —
+that is the [Google Drive upload](/features/backup/#google-drive-upload), which is off by default
+and encrypts the file's contents before sending it. Leave it off and the file stays on the
+machine it was written on.

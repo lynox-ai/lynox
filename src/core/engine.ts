@@ -2033,8 +2033,15 @@ export class Engine {
         // second `await import` above this block to reach the gate — outside the catch, in an
         // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
         // been fatal to boot on every tier. A gate is not worth a crash.
-        const { GDriveBackupUploader, driveBackupAllowed } = await import('./backup-upload-gdrive.js');
-        if (driveBackupAllowed()) {
+        const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
+        // TWO conditions, because they answer two different questions: may this DEPLOYMENT
+        // upload (tier), and does this USER want it to (setting). Tier alone is not consent — on
+        // self-host `driveBackupAllowed()` is `true` by design, which is a statement about the
+        // deployment, not about its owner's wishes. `backup_gdrive` has been declared in the
+        // schema and documented with a default of `false`; this is the line that reads it.
+        // `backup.ts` step 10 carries the third condition, an encrypted archive, which holds for
+        // every way an uploader reaches the manager.
+        if (driveBackupAllowed() && driveUploadOptedIn(this.userConfig)) {
           // A resolving shim, not the instance: `BackupAuthProvider` is the two
           // methods the uploader calls, so a late-built credential is picked up
           // without threading the resolver through that module's public shape.

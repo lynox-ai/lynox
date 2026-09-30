@@ -48,13 +48,14 @@ Configure automatic backups in your config:
 |---------|---------|-------------|
 | `backup_schedule` | — | Cron expression (e.g., `0 3 * * *` = daily at 3 AM) |
 | `backup_retention_days` | 30 | Auto-delete backups older than this |
-| `backup_encrypt` | `true` | Encrypt backups with your vault key |
+| `backup_encrypt` | on when `LYNOX_VAULT_KEY` is set | Encrypt backups with your vault key |
 | `backup_dir` | `~/.lynox/backups/` | Where to store backup files |
-| `backup_gdrive` | `false` | Upload backups to Google Drive |
+| `backup_gdrive` | `false` | Upload backups to Google Drive — needs `LYNOX_VAULT_KEY` |
 
 ## Google Drive Upload
 
-If you've connected Google Workspace with Drive access, backups can be automatically uploaded:
+Off by default, and separate from connecting Google: sending a copy of your data directory to a
+third party is its own decision, and `backup_gdrive` is where you make it.
 
 ```json
 {
@@ -62,7 +63,25 @@ If you've connected Google Workspace with Drive access, backups can be automatic
 }
 ```
 
-Backups are uploaded after creation. This gives you an off-site copy without any additional setup.
+Two things must be true for a backup to be uploaded:
+
+1. **You opted in** — `backup_gdrive` is `true` in `~/.lynox/config.json`. The default is off, and
+   a project-local `.lynox/config.json` cannot turn it on; this setting is read from your user
+   config only.
+2. **The archive is encrypted** — which means `LYNOX_VAULT_KEY` is set and you have not set
+   `backup_encrypt` to `false`.
+
+If you opt in without a vault key, the local backup still runs and the upload is skipped, with a
+line on stderr saying so.
+
+### What Drive can see
+
+The **contents** of every file in the archive are encrypted with AES-256-GCM under a key derived
+from your vault key, so Drive cannot read them. The **structure** is not encrypted: each file is
+uploaded under its path inside the backup, and the archive's `manifest.json` lists those paths
+with sizes and checksums plus the data directory it came from. Drive therefore sees how your
+data directory is laid out — including the names of your memory scopes — even though it cannot
+read what is in it. If those names are themselves sensitive, keep the upload off.
 
 ## Restore
 

@@ -197,12 +197,42 @@ export class BackupManager {
       }
 
       // 10. Upload to Google Drive (best-effort — local backup is the primary)
+      //
+      // `manifest.encrypted` is the second condition and it is the PROPERTY, not a correlate of
+      // it: the manifest field is written from `this.encrypt`, which the constructor derives as
+      // `config.encrypt && vaultKey !== null`, and step 5 above pushes every non-directory entry
+      // through `encryptFile` under exactly that flag, recomputing checksum and size. So
+      // `encrypted === true` means each file in `finalDir` is ciphertext. Reading the environment
+      // variable here instead would be the proxy — that answers whether a key exists somewhere,
+      // not whether THIS archive was encrypted.
+      //
+      // Why this gate lives here and not only at the engine's wiring: an uploader reaches this
+      // manager three ways — `BackupConfig.gdriveUploader`, the public `setGDriveUploader()`, and
+      // the engine block. The consent gate covers the third one only; this one covers all three.
+      //
+      // Stricter than "no upload without a vault key" in one case, deliberately:
+      // `backup_encrypt: false` WITH a key present yields `encrypted: false` and no upload. The
+      // reason for the rule is that unencrypted on your own machine is not the same as
+      // unencrypted at a third party, and an archive deliberately left in the clear is precisely
+      // that case.
+      //
+      // The refusal is WRITTEN, not silent. A setting whose effect quietly disappears is the
+      // failure this whole change repairs, so opting in without a key must say so rather than
+      // look like it worked.
       if (this._gdriveUploader) {
-        try {
-          await this._gdriveUploader.upload(finalDir, manifest);
-        } catch {
-          // GDrive upload failure does not fail the backup
-          process.stderr.write('[lynox:backup] Google Drive upload failed — local backup is intact\n');
+        if (!manifest.encrypted) {
+          process.stderr.write(
+            '[lynox:backup] Google Drive upload skipped — this backup is not encrypted. '
+            + 'Set LYNOX_VAULT_KEY (and do not set backup_encrypt to false) to upload. '
+            + 'The local backup is intact.\n',
+          );
+        } else {
+          try {
+            await this._gdriveUploader.upload(finalDir, manifest);
+          } catch {
+            // GDrive upload failure does not fail the backup
+            process.stderr.write('[lynox:backup] Google Drive upload failed — local backup is intact\n');
+          }
         }
       }
 
