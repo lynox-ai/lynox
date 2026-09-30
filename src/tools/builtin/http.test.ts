@@ -2841,6 +2841,67 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // A connected service keeps working whatever key formats the outbound scan
+  // knows: the engine attaches the profile's own credential, and that slot is
+  // not scanned. Pinned with key shapes from several families, so widening the
+  // scan cannot break a configured profile without failing here.
+  describe('egress scan never blocks a configured profile\'s own credential', () => {
+    const STRIPE_KEY = 'sk_' + 'live_' + 'A1b2C3d4E5f6G7h8I9j0';
+    const OPENAI_PROJECT_KEY = 'sk-' + 'proj-' + 'Ab12_Cd34-' + 'B'.repeat(20);
+
+    async function storeFor(host: string, auth: Record<string, unknown>): Promise<unknown> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'svc', name: 'Service', base_url: `https://${host}`, description: 'svc',
+        auth: auth as never,
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' } as never,
+      });
+      return store;
+    }
+
+    function agentWith(store: unknown, secrets: Record<string, string>): never {
+      return {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => secrets[k] ?? null },
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    it('a bearer profile attaches its key and the request goes out', async () => {
+      const store = await storeFor('api.stripe.com', { type: 'bearer', vault_keys: ['STRIPE_KEY'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler({ url: 'https://api.stripe.com/v1/balance' }, agentWith(store, { STRIPE_KEY }));
+      expect(result).toContain('HTTP 200');
+      expect(result).not.toContain('Blocked');
+    });
+
+    it('a bearer profile replaces a model-set auth header holding the key, instead of refusing', async () => {
+      const store = await storeFor('api.stripe.com', { type: 'bearer', vault_keys: ['STRIPE_KEY'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://api.stripe.com/v1/balance', headers: { Authorization: `Bearer ${STRIPE_KEY}` } },
+        agentWith(store, { STRIPE_KEY }),
+      );
+      expect(result).toContain('HTTP 200');
+      expect(result).not.toContain('Blocked');
+    });
+
+    it('a query-auth profile host may carry its key in the URL', async () => {
+      const store = await storeFor('maps.example.com', { type: 'query', query_param: 'key', vault_keys: ['MAPS_KEY'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: `https://maps.example.com/api/geocode?key=${OPENAI_PROJECT_KEY}&q=Zurich` },
+        agentWith(store, { MAPS_KEY: OPENAI_PROJECT_KEY }),
+      );
+      expect(result).toContain('HTTP 200');
+      expect(result).not.toContain('Blocked');
+    });
+  });
+
   // Staging 2026-05-18 (lynox-chat-2026-05-18 (2).md):
   // fetch_token successfully minted a fresh token and wrote it to
   // SHOPIFY_SEO_ACCESS_TOKEN, but the agent's subsequent http_request kept
