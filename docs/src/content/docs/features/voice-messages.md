@@ -80,7 +80,7 @@ Both passes run in single-digit milliseconds. The glossary never leaves the lyno
 
 ## Privacy
 
-- Mistral-hosted audio: sent to Paris, not retained for training, not stored post-transcription per Mistral's terms.
+- Mistral-hosted audio: sent to Paris (EU) — no training, kept 30 rolling days to monitor abuse.
 - whisper.cpp: audio never leaves the server; transient `/tmp` files are deleted after each transcription.
 - The Web UI shows a short privacy hint under the voice button indicating which provider is in use.
 - No audio is retained by lynox — only the final text goes into the thread history.

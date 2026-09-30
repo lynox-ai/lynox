@@ -82,4 +82,4 @@ The memory system works across languages. You can discuss topics in German, Engl
 
 ## Local Storage
 
-All memory is stored locally in `~/.lynox/agent-memory.db` (SQLite). Nothing leaves your machine unless you explicitly configure cloud backups.
+All memory is stored locally in `~/.lynox/agent-memory.db` (SQLite).
