@@ -21,7 +21,7 @@ import type { BulkWriteEffect } from '../types/index.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, canonicalJson,
-  type ApplyTarget, type BeforeImage, type BulkLedger, type BulkRunForApply, type BulkTargetError,
+  type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, resolveBulkFilePath } from './bulk-plan.js';
 
@@ -30,13 +30,45 @@ export type BulkEffect = BulkWriteEffect;
 /**
  * How the loop reaches a target system. `read` returns the target's current state;
  * `path_changed` when the key no longer names the same confined target, `foreign` when
- * it exists as something the run cannot compare (not a text file, too large). `write`
- * produces `after` — removing the target when `after` is absent — and returns a short
- * ENGINE-authored result.
+ * it exists as something the run cannot compare (not a text file, too large). `fields`
+ * are the fields the run writes, for a system that compares over them (an external
+ * target); a local writer reads the whole target. `write` produces `after` — removing
+ * the target when `after` is absent — and returns a short ENGINE-authored result, or
+ * that result with what the target held right after ({@link ActualImage}).
  */
 export interface TargetWriter {
-  read(key: string): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage): Promise<string>;
+  /** The target may hold something other than what was sent (an external host
+   *  normalises). A write reports what it read back through its return value; this flag
+   *  makes a target found already holding the planned state record what it holds, too. */
+  readonly readsBack?: boolean | undefined;
+  read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
+  write(key: string, after: BeforeImage): Promise<string | { result: string; actual: ActualImage }>;
+}
+
+/**
+ * Thrown by a writer when nothing past this target would be sent any differently — the
+ * credential cannot be attached, the host refused it, the policy blocks the host. The run
+ * halts with the reason instead of collecting a failure per target.
+ */
+export class BulkWriterHalt extends Error {
+  constructor(readonly reason: BulkHaltReason) {
+    super(reason);
+    this.name = 'BulkWriterHalt';
+  }
+}
+
+/** Thrown by a writer for a target that answered with a redirect. */
+export class BulkRedirectError extends Error {
+  constructor() {
+    super('redirect');
+    this.name = 'BulkRedirectError';
+  }
+}
+
+/** The fields a target's write names, when its after-state is an object. */
+function fieldsOf(t: ApplyTarget): readonly string[] | null {
+  const v = t.after.absent ? null : t.after.value;
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? Object.keys(v) : null;
 }
 
 export interface BulkEffectOutcome {
@@ -135,8 +167,14 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     if (!target) continue;
 
     const outcome = await writeOne(writer, target);
+    if (outcome.kind === 'halt') {
+      // The target is released unwritten; a resume takes it again.
+      ledger.releaseClaim(runId, seq);
+      ledger.halt(runId, outcome.reason);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${outcome.reason}.`) };
+    }
     if (outcome.kind === 'applied') {
-      ledger.recordApplied(run, seq, outcome.result, now());
+      ledger.recordApplied(run, seq, outcome.result, now(), outcome.actual);
       consecutive = 0;
       continue;
     }
@@ -167,14 +205,21 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
 
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget):
-    Promise<{ kind: 'applied'; result: string } | { kind: BulkTargetError }> {
+    Promise<{ kind: 'applied'; result: string; actual: ActualImage | null } | { kind: BulkTargetError } | { kind: 'halt'; reason: BulkHaltReason }> {
     try {
-      const cur = await w.read(t.key);
+      const cur = await w.read(t.key, fieldsOf(t));
       if (cur === 'path_changed') return { kind: 'path_changed' };
-      if (cur !== 'foreign' && sameImage(cur, t.after)) return { kind: 'applied', result: 'already' };
+      if (cur !== 'foreign' && sameImage(cur, t.after)) {
+        // Found as planned — the loop that wrote it died before recording it. What is
+        // there is also what an undo must expect.
+        return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
+      }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
-      return { kind: 'applied', result: await w.write(t.key, t.after) };
-    } catch {
+      const out = await w.write(t.key, t.after);
+      return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
+    } catch (err: unknown) {
+      if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
+      if (err instanceof BulkRedirectError) return { kind: 'redirect' };
       return { kind: 'write_failed' };
     }
   }
@@ -189,7 +234,8 @@ async function rollBack(ledger: BulkLedger, writer: TargetWriter, run: BulkRunFo
   let complete = true;
   for (const t of ledger.listAppliedDesc(run.id)) {
     try {
-      const cur = await writer.read(t.key);
+      // Local only (an external run is never atomic), so there are no fields to project on.
+      const cur = await writer.read(t.key, null);
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
       ledger.recordRolledBack(run, t.seq, now());
@@ -332,8 +378,12 @@ export function dataStoreWriter(store: DataStore, collection: string): TargetWri
   };
 }
 
-/** The writer for a run's target system, or null when it cannot be reached. */
-export function bulkWriterFor(run: BulkRunForApply, store: DataStore | null): TargetWriter | null {
+/** The writer for a run's target system, or null when it cannot be reached. An external
+ *  run's writer comes from `external`, which the worker builds from the engine's stores. */
+export function bulkWriterFor(
+  run: BulkRunForApply, store: DataStore | null, external: ((run: BulkRunForApply) => TargetWriter | null) | null = null,
+): TargetWriter | null {
+  if (run.targetSystem.startsWith('http:')) return external ? external(run) : null;
   if (run.targetSystem === 'workspace') return workspaceWriter();
   if (run.targetSystem === 'data_store') {
     if (!store || run.targetCollection === null) return null;

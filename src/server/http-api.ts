@@ -1374,6 +1374,14 @@ export class LynoxHTTPApi {
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
 
+  /**
+   * How each request authenticated, for the records that must say where an approval came
+   * from (a bulk run's `approved_by`): `local` (no secret configured), `bearer`,
+   * `bearer:admin`, `bearer:user`, or `cookie:<tag>` — the tag a SHA-256 prefix of the
+   * session cookie, so a session is recognisable without its value being stored.
+   */
+  private readonly _authOrigin = new WeakMap<IncomingMessage, string>();
+
   /** Returns the cookie's issued-at unix-sec on success, null on any failure.
    *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
   private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
@@ -2094,6 +2102,7 @@ export class LynoxHTTPApi {
     // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
     // Migration endpoints accept X-Migration-Token as alternative auth (admin scope).
     let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
+    this._authOrigin.set(req, 'local');
     if (secret) {
       // Migration token auth — grants admin scope for /api/migration/* endpoints only
       const migrationToken = req.headers['x-migration-token'];
@@ -2133,8 +2142,10 @@ export class LynoxHTTPApi {
           const isUser = constantTimeEqual(tokenBuf, secretBuf);
           if (isAdmin) {
             authScope = 'admin';
+            this._authOrigin.set(req, 'bearer:admin');
           } else if (isUser) {
             authScope = 'user';
+            this._authOrigin.set(req, 'bearer:user');
           } else {
             errorResponse(res, 401, 'Unauthorized');
             return;
@@ -2146,12 +2157,15 @@ export class LynoxHTTPApi {
             return;
           }
           authScope = 'admin';
+          this._authOrigin.set(req, 'bearer');
         }
       } else {
         const cookieIssuedAt = this._verifySessionCookie(req, secret);
         if (cookieIssuedAt !== null) {
           // Session cookie auth (same-origin Web UI requests)
           authScope = adminSecret ? 'user' : 'admin';
+          const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
+          this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
           this._maybeRefreshSessionCookie(req, res, secret, cookieIssuedAt, trustProxy);
         } else {
           errorResponse(res, 401, 'Unauthorized');
@@ -6309,12 +6323,35 @@ export class LynoxHTTPApi {
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
-      external_not_writable: [409, 'Writing to an external system is not available yet. This run can be reviewed, not applied.'],
+      probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
+      not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
     const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed' }>(status: T): T & { checksumNote?: string } =>
       status.checksumBinding === 'unkeyed' ? { ...status, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : status;
+    /** Why an external run could not reach its host now, or null (a local run, or one it can). */
+    const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
+      const status = ledger.getStatus(runId);
+      if (!status || !status.targetSystem.startsWith('http:')) return null;
+      const key = ledger.firstWritingKey(runId);
+      if (key === null) return null;
+      const { attachStoredCredential } = await import('../tools/builtin/http.js');
+      const { resolveGuardedAckHosts } = await import('../core/tool-context.js');
+      const { assertHostPolicy } = await import('../core/network-guard.js');
+      const ctx = engine.getToolContext();
+      try {
+        assertHostPolicy(key, { surface: 'full-control', ackHosts: resolveGuardedAckHosts(ctx) }, ctx);
+      } catch {
+        return 'The network policy does not allow this run\'s host.';
+      }
+      const apiStore = engine.getApiStore();
+      const secretStore = engine.getSecretStore();
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, { apiStore, secretStore }))) {
+        return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
+      }
+      return null;
+    };
     const refuse = (res: import('node:http').ServerResponse, reason: string): void => {
       const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
       errorResponse(res, code, msg);
@@ -6349,7 +6386,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
     }));
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (_req, res, params, body) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const checksum = checksumOf(body);
@@ -6358,7 +6395,14 @@ export class LynoxHTTPApi {
       // Anything but a number goes to the ledger as NaN, which its range check refuses —
       // one check for every shape, not a second one here.
       const maxTargets = rawMax === undefined ? undefined : typeof rawMax === 'number' ? rawMax : Number.NaN;
-      const out = ledger.approve(params['id']!, { checksum, maxTargets });
+      // An external run is approved only when its first write would carry the credential
+      // and reach the host — decided here, sending nothing. Otherwise the approval would
+      // start a run that only collects refusals (build plan B §4 F5).
+      const reach = await bulkExternalReach(params['id']!, ledger);
+      if (reach !== null) { errorResponse(res, 409, reach); return; }
+      const out = ledger.approve(params['id']!, {
+        checksum, maxTargets, approvedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown' }),
+      });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
     }));
@@ -6375,9 +6419,25 @@ export class LynoxHTTPApi {
         return;
       }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
-      const out = ledger.resume(params['id']!, { checksum });
+      const rawResumeMax = (body as Record<string, unknown>)['maxTargets'];
+      const resumeMax = rawResumeMax === undefined ? undefined : typeof rawResumeMax === 'number' ? rawResumeMax : Number.NaN;
+      // The same check as approving: resuming an external run that halted because it could
+      // not reach its host would only halt again on its first target.
+      const reach = await bulkExternalReach(params['id']!, ledger);
+      if (reach !== null) { errorResponse(res, 409, reach); return; }
+      const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
+    }));
+
+    // The owner's statement that the one target an external run wrote kept every field the
+    // write did not send. It is what lets runs to that host with that verb go wider.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/confirm-probe', async (req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const out = ledger.confirmProbe(params['id']!, { confirmedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown' }) });
+      if (!out.ok) { refuse(res, out.reason); return; }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(params['id']!)!));
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/undo', async (_req, res, params) => {

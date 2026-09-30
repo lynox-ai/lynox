@@ -9,13 +9,21 @@
  * could set: a larger F only turns more targets into conflicts, a smaller one also
  * writes less.
  *
- * This module plans and reads. Nothing here sends a PATCH.
+ * Reading is `externalClient`; writing is `externalWriter`, the target writer of an
+ * approved run. Every request passes the run's contract with its real method, and none
+ * follows a redirect. There is no DELETE. The write verb is the run's own, fixed in its
+ * contract at plan time: PATCH, PUT, or POST to the resource's URL (an edit of an
+ * existing target, as bexio does it — never a create). Whether a provider keeps the
+ * fields a write does not send is documented by none of them; that is what the one-target
+ * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
+import { BulkRedirectError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
+import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
 export type ExternalImage = Record<string, string | number | boolean | null>;
@@ -52,6 +60,8 @@ export type ExternalRead =
 
 /** Longest a `Retry-After` is honoured for within one tick (plan §6 Q3(c)). */
 export const BULK_RETRY_AFTER_CAP_MS = 60_000;
+/** How long an external write waits on a spent profile rate limit before failing the target. */
+const PROFILE_LIMIT_WAIT_MS = 1_000;
 /** One request's own deadline. */
 export const BULK_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -113,10 +123,10 @@ export function project(value: Record<string, unknown>, fields: readonly string[
  * object holding every field of F, each a scalar (plan §6 P2, P3). Presence is
  * `Object.hasOwn`, not a serialised form, in which a missing field and `null` look alike.
  */
-export function beforeOverFields(value: unknown, after: ExternalImage):
+export function beforeOverFields(value: unknown, after: ExternalImage | readonly string[]):
   { before: ExternalImage } | { invalid: BulkInvalidReason } {
   if (!isPlainObject(value)) return { invalid: 'before_not_object' };
-  const fields = Object.keys(after);
+  const fields = Array.isArray(after) ? after as readonly string[] : Object.keys(after);
   for (const f of fields) {
     // A field PATCH cannot remove, the undo could not restore to missing.
     if (!Object.hasOwn(value, f)) return { invalid: 'field_missing' };
@@ -166,17 +176,28 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
  * target paths. `origin: 'reviewed'` because nothing acts on it before a human approved
  * the run it belongs to. Every request the run sends is checked against it.
  */
-export function mintBulkContract(host: string, keys: readonly string[]): CapabilityContract {
+/** The verbs an external run may write with. Each targets an existing resource's URL. */
+export const BULK_WRITE_METHODS = ['PATCH', 'PUT', 'POST'] as const;
+export type BulkWriteMethod = (typeof BULK_WRITE_METHODS)[number];
+
+export function mintBulkContract(host: string, keys: readonly string[], method: BulkWriteMethod = 'PATCH'): CapabilityContract {
   const paths = [...new Set(keys.map((k) => new URL(k).pathname))].sort();
   return {
     version: 1,
     origin: 'reviewed',
     grantedTools: ['http_request'],
-    httpMethods: ['GET', 'PATCH'],
+    httpMethods: ['GET', method],
     hostPatterns: [host],
     pathPatterns: paths,
     paramConstraints: {},
   };
+}
+
+/** A run's write verb: the one method its contract grants besides GET, or null. */
+export function writeMethodOf(contract: CapabilityContract): BulkWriteMethod | null {
+  const writes = contract.httpMethods.filter((m) => m !== 'GET');
+  const [only] = writes;
+  return writes.length === 1 && (BULK_WRITE_METHODS as readonly string[]).includes(only!) ? only as BulkWriteMethod : null;
 }
 
 /** A stored contract read back; `null` unless it has the shape {@link mintBulkContract} writes. */
@@ -251,6 +272,9 @@ export interface ExternalClientDeps {
 
 export interface ExternalClient {
   get(url: string, signal?: AbortSignal): Promise<ExternalRead>;
+  /** PATCH `body` as JSON. `ok` carries no value: success is the status alone. */
+  /** Write `body` as JSON with the run's verb. `ok` carries no value: success is the status alone. */
+  write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal): Promise<ExternalRead>;
   /** Requests that went out — each is one billable call on a per-call profile. */
   readonly sent: number;
 }
@@ -263,40 +287,46 @@ export interface ExternalClient {
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const now = deps.now ?? Date.now;
   let sent = 0;
+  const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined): Promise<ExternalRead> => {
+    if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
+    const hostname = new URL(url).hostname;
+    try {
+      assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
+    } catch {
+      return { kind: 'blocked' };
+    }
+    const headers: Record<string, string> = { accept: 'application/json' };
+    if (method !== 'GET') headers['content-type'] = 'application/json';
+    if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
+    if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
+    const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
+    let res: Response;
+    sent++;
+    try {
+      res = await fetchPinned(url, {
+        method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        ...(method !== 'GET' ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
+      return { kind: 'failed' };
+    }
+    // The body streams after the headers: a reset or a timeout there is a failed read
+    // like one before them, never an exception out of the effect.
+    try {
+      return await readResponse(res, now(), method === 'GET');
+    } catch {
+      return { kind: 'failed' };
+    }
+  };
   return {
     get sent() { return sent; },
-    async get(url, signal) {
-      if (!contractGrants('http_request', { url, method: 'GET' }, deps.contract)) return { kind: 'not_granted' };
-      const hostname = new URL(url).hostname;
-      try {
-        assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
-      } catch {
-        return { kind: 'blocked' };
-      }
-      const headers: Record<string, string> = { accept: 'application/json' };
-      if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
-      if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
-      const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
-      let res: Response;
-      sent++;
-      try {
-        res = await fetchPinned(url, { method: 'GET', headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
-      } catch (err: unknown) {
-        if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
-        return { kind: 'failed' };
-      }
-      // The body streams after the headers: a reset or a timeout there is a failed read
-      // like one before them, never an exception out of the effect.
-      try {
-        return await readResponse(res, now());
-      } catch {
-        return { kind: 'failed' };
-      }
-    },
+    get: (url, signal) => send('GET', url, undefined, signal),
+    write: (url, method, body, signal) => send(method, url, body, signal),
   };
 }
 
-async function readResponse(res: Response, now: number): Promise<ExternalRead> {
+async function readResponse(res: Response, now: number, parse: boolean): Promise<ExternalRead> {
   const status = res.status;
   const answer = ((): ExternalRead | null => {
     if (status >= 300 && status < 400) return { kind: 'redirect' };
@@ -307,9 +337,9 @@ async function readResponse(res: Response, now: number): Promise<ExternalRead> {
     if (status < 200 || status >= 300) return { kind: 'failed' };
     return null;
   })();
-  if (answer !== null) {
+  if (answer !== null || !parse) {
     await res.body?.cancel().catch(() => {});
-    return answer;
+    return answer ?? { kind: 'ok', value: undefined };
   }
   const body = await readCapped(res, BULK_MAX_TARGET_BYTES);
   if (body === null) return { kind: 'too_large' };
@@ -339,4 +369,70 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * The target writer of an approved external run (build plan B §1.4, §2.3). `read` GETs the
+ * target and projects it onto the fields the run writes; a target that no longer has that
+ * shape, or is gone, is `foreign` — a conflict, never overwritten. `write` sends exactly
+ * the after-state's fields with the run's verb, then reads the target back: what the host
+ * kept is what an undo must expect. Never a DELETE: an external target this run did not create is not removed.
+ *
+ * A missing credential, a refused one, a blocked host or a call outside the contract halts
+ * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`). One wait
+ * per request: a 429 for its `Retry-After` (capped), a spent profile rate limit for a
+ * second. Anything else that is not a success fails the target.
+ */
+export function externalWriter(client: ExternalClient, opts: {
+  method?: BulkWriteMethod;
+  sleep?: (ms: number) => Promise<void>;
+} = {}): TargetWriter {
+  const method = opts.method ?? 'PATCH';
+  const sleep = opts.sleep ?? (async (ms: number): Promise<void> => { await new Promise((r) => setTimeout(r, ms)); });
+  const call = async (once: () => Promise<ExternalRead>): Promise<ExternalRead> => {
+    let got = await once();
+    if (got.kind === 'retry_after' || got.kind === 'rate_limited') {
+      // A profile limit says nothing about when it frees up: a short wait, then the target
+      // fails and the run's failure rules decide, rather than a minute per request.
+      await sleep(got.kind === 'retry_after' ? got.ms : PROFILE_LIMIT_WAIT_MS);
+      got = await once();
+    }
+    switch (got.kind) {
+      case 'no_credential': throw new BulkWriterHalt(BULK_HALT_REASONS.credential);
+      case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
+      case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
+      case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
+      case 'redirect': throw new BulkRedirectError();
+      default: return got;
+    }
+  };
+  const readOver = async (key: string, fields: readonly string[]): Promise<ExternalImage | 'foreign'> => {
+    const got = await call(() => client.get(key));
+    if (got.kind === 'not_found') return 'foreign';
+    if (got.kind !== 'ok') throw new Error('read failed');
+    const over = beforeOverFields(got.value, fields);
+    return 'before' in over ? over.before : 'foreign';
+  };
+  return {
+    readsBack: true,
+    async read(key, fields) {
+      if (fields === null) return 'foreign';
+      const image = await readOver(key, fields);
+      return image === 'foreign' ? 'foreign' : { absent: false, value: image };
+    },
+    async write(key, after) {
+      if (after.absent || !isPlainObject(after.value)) throw new Error('an external target is only ever edited, never removed');
+      const fields = Object.keys(after.value);
+      const got = await call(() => client.write(key, method, after.value));
+      if (got.kind !== 'ok') throw new Error('write failed');
+      // Read back once. When that fails the write stands; the undo then expects what was
+      // sent, and a host that changed it answers as a conflict.
+      // Even a halt here does not unwrite the target: it is recorded, and the next one halts.
+      try {
+        const back = await readOver(key, fields);
+        if (back !== 'foreign') return { result: 'written', actual: { value: back, estimated: false } };
+      } catch { /* estimated below */ }
+      return { result: 'written', actual: { value: after.value, estimated: true } };
+    },
+  };
 }
