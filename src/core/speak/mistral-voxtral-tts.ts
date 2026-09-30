@@ -216,9 +216,14 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // fourth branch cannot write one without the other, because there is only one way
   // to say it". A review refuted that from inside this very file: six of its
   // diagnostics are written as `process.stderr.write`, and a fourth branch in that
-  // idiom warns without setting the flag, with the whole suite green. (Six call
-  // sites in THIS FILE, none of them inside this function — that is the idiom a
-  // fourth diagnostic would be written in.)
+  // idiom warns without setting the flag, with the whole suite green.
+  //
+  // Six `process.stderr.write` CALL SITES in this file, none inside this function —
+  // that is the idiom a fourth diagnostic would be written in. Six counts call sites,
+  // not diagnostics: `logRequest` is a latency line, so five of the six are
+  // diagnostics. The first version of this sentence said "six of its diagnostics",
+  // a right number quoted about a set one member wider — the same category slip as a
+  // mutation count that is correct for one design and cited for another.
   //
   // What exists is a TRIPWIRE, not a proof: the test beside this file scans the body
   // of this function — comments removed and string content blanked, `report` cut out

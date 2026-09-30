@@ -548,6 +548,12 @@ describe('a tripwire against the likely bypass, and it says what it is not', () 
       'const t = `a ${process.stderr.write(live)} b`;',
       "const s = 'console.warn(quoted)';",
       '/* console.warn(blocked) */ console.warn(real);',
+      // ⚠ These two exist because a mutation score over `codeOnly` showed the fixture
+      // covered 5 of 8 of its branches: the escape handling and the multi-line literal
+      // were never exercised, and those are exactly the branches that can drift the
+      // offsets the length assertion below claims to hold.
+      "const e = 'a\\'b \\\\ console.warn(escaped)';",
+      'const m = `line one console.warn(spanning)\nline two`;',
     ].join('\n');
     const code = codeOnly(sample);
     expect(code).not.toContain('console.warn(commented');
@@ -559,8 +565,14 @@ describe('a tripwire against the likely bypass, and it says what it is not', () 
     // channel inside a template hole is CODE and must survive.
     expect(code).toContain('${process.stderr.write(live)}');
     expect(code).toContain('console.warn(real');
-    // Offsets preserved, so a match's position still means something.
+    expect(code).not.toContain('console.warn(escaped');
+    expect(code).not.toContain('console.warn(spanning');
+    // Offsets preserved, so a match's position still means something — and that means
+    // LINE structure too, which a mutation score caught having no witness: making
+    // `blank()` return a space for every character, newlines included, survived the
+    // whole suite while the comment above claimed every byte keeps its offset.
     expect(code).toHaveLength(sample.length);
+    expect(code.split('\n')).toHaveLength(sample.split('\n').length);
   });
 
   it('finds no output channel inside listMistralVoices outside `report`', () => {
@@ -576,39 +588,133 @@ describe('a tripwire against the likely bypass, and it says what it is not', () 
     const fn = blockAfter(code, fnAt, 200);
     const body = code.slice(fn.open, fn.close);
 
-    // `report` is the one sanctioned writer, so its body is cut out — brace-matched,
-    // not "up to the first `};`".
+    // ⚠⚠ THE SCOPE NEEDS ITS OWN WITNESS, and its absence was a measured fail-open.
+    // Everything below is a NEGATIVE assertion over `body`, and a negative is satisfied
+    // by an empty region — so a scope that silently shrinks makes this test green.
+    // Measured: ONE regex literal holding `}` (`/\}$/`) mis-tracks the brace counter,
+    // `body` drops from 12481 to 10958 and ends at `catch (err) {`, the whole catch
+    // handler goes unscanned, and a `console.warn` planted there passes. The regex is
+    // the trigger; the defect is that nothing said the region was wrong.
+    //
+    // Two anchors, both DERIVED — no hardcoded neighbour name, no pinned count:
+    expect(body, 'the scoped block is not the whole function — everything past the cut is unscanned')
+      .toContain('_voicesCache = { voices: [...FALLBACK_VOICES], expiresAt: now + 60_000 };');
+    // Every `report` call site in this file is inside this function, so the two counts
+    // must agree. This catches a cut that lands before the last diagnostic even when the
+    // closing statement above happens to survive.
+    const reportSites = (where: string): number => [...where.matchAll(/\breport\(/g)].length;
+    expect(reportSites(body), 'report call sites fell outside the scope — the scope is wrong')
+      .toBe(reportSites(code));
+
+    // `report` is the one sanctioned writer, so its body is cut out — brace-matched.
     const reportAt = body.indexOf('const report =');
     expect(reportAt, '`report` not found — the exemption below would hide everything').toBeGreaterThan(0);
-    const rep = blockAfter(body, reportAt, 80);
+    // ⚠ Keyed on the ARROW, not on a character budget from `const report =`. The budget
+    // version was 80 with 42 chars used, and comments blank to SPACES — so a 47-char
+    // comment between the declaration and its brace false-reds. That is version 3's
+    // failure mode re-created one layer down, and a false red is the direction that gets
+    // "fixed" by loosening. Anchoring on `=>` removes the class instead of raising the
+    // number; 8 leaves room for a line break and still excludes any comment.
+    const arrowAt = body.indexOf('=>', reportAt);
+    expect(arrowAt, '`report` is not an arrow function — the exemption cannot be scoped').toBeGreaterThan(reportAt);
+    const rep = blockAfter(body, arrowAt, 8);
     const outside = body.slice(0, rep.open) + body.slice(rep.close);
 
+    // ANY console member and ANY access shape. The previous list named five methods
+    // while the comment above it said `console.<method>`, so `console.trace(` and its
+    // siblings walked through.
+    //
+    // ⚠⚠ But the first version of THIS comment then listed eleven "measured bypasses"
+    // as if all eleven were live holes, and that over-states the danger — the mirror
+    // image of the over-claims this file keeps correcting. `eslint`'s `no-console` is a
+    // required CI check here and it is configured `allow: ['warn', 'error']`, so it
+    // already blocks every other method. MEASURED, one lint run per shape:
+    //
+    //   blocked by lint       `console.trace(`  `console['trace'](`  `console[k](`
+    //                        (…and every non-warn/error member, in any access shape)
+    //   NOT blocked by lint   `console.warn(`  `console.error(`  `console['warn'](`
+    //                        `console?.warn(`  `process.stderr.write(`
+    //
+    // So what this check exclusively holds is the second row: warn/error in any shape,
+    // and `process.std*.write`, which `no-console` does not see at all. Seven of the
+    // eleven I first listed were already gated. The enumeration stays WIDE anyway —
+    // width costs nothing, and it keeps holding if that lint config is ever relaxed.
+    //
+    // The `process` bracket form is the one that matters most: it is THIS FILE'S OWN
+    // IDIOM in bracket clothing, ungated by lint, and `codeOnly` blanks string content —
+    // `process['stderr']` becomes `process[' ']` — so on that one axis the scanner was
+    // strictly WEAKER than the substring grep it replaced, which would at least have
+    // seen the word.
+    //
+    // ⚠ The price, named so nobody pays it by deleting the channel: a legitimate
+    // bracket access on `process` (`process['env']`) cannot be told from
+    // `process['stderr']`, because the blanking removed the only distinguishing text.
+    // If that ever fires, narrow the EXEMPTION, do not widen the hole.
     const channels = [
-      /console\s*\.\s*(warn|error|log|info|debug)\s*\(/g,
-      /console\s*\[/g,
-      /process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/g,
+      /console\s*(?:\??\s*\.\s*\w+|\[)/g,
+      /process\s*(?:\??\s*\.\s*std(?:out|err)\s*(?:\??\s*\.\s*\w+|\[)|\[)/g,
     ];
     const found = channels.flatMap((re) => [...outside.matchAll(re)].map((m) => m[0]));
     expect(found, `output outside \`report\` in listMistralVoices: ${found.join(', ')}`).toHaveLength(0);
 
-    // Positive control on the ENUMERATION: it has to match this file's own idiom —
-    // `process.stderr.write`, six call sites today, all outside this function — or
-    // the check is green because it is looking for nothing. Not pinned to six: an
-    // exact count would go red the next time somebody adds a legitimate log line,
-    // and that is how a guard earns its reputation for crying wolf.
-    const idiom = [...code.matchAll(/process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/g)];
-    expect(idiom.length, "the file's own output idiom no longer matches — recheck the channel list").toBeGreaterThan(0);
+    // ⚠⚠ The control is DERIVED from `channels`, and the version before it was not —
+    // it was a FOURTH literal copy of one of the patterns, matched against the file.
+    // It therefore witnessed that `codeOnly` had not blanked everything, and nothing
+    // at all about the list the check uses. Measured: with `channels = []`, with three
+    // patterns that match nothing, with the console pattern dropped, and with a
+    // capital-I typo in `console`, the test stayed GREEN every time. A control that
+    // cannot fail when the subject is emptied is a tautology with ceremony.
+    //
+    // Not pinned to a count: an exact number would go red the next time somebody adds
+    // a legitimate log line, and that is how a guard earns a reputation for crying wolf.
+    const witnesses = channels.map((re) => [...code.matchAll(re)].length);
+    expect(witnesses, 'the channel list is empty — the scan above measured nothing').toHaveLength(channels.length);
+    expect(witnesses[0] ?? 0, 'the console channel pattern matches nothing in this file').toBeGreaterThan(0);
+    expect(witnesses[1] ?? 0, "the file's own stderr idiom no longer matches").toBeGreaterThan(0);
+
+    // And the shapes that have NO witness in this file (bracket and optional-chained
+    // access: measured 0 occurrences) are witnessed against fixtures, so "no witness in
+    // the source" does not quietly become "unchecked".
+    // ⚠ A FRESH RegExp per shape: these are `/g` objects and `.test` advances their
+    // lastIndex, which produced three false negatives out of seven when they were reused.
+    for (const shape of ["console['warn'](x)", 'console?.warn(x)', 'console.trace(x)',
+                         "process['stderr'].write(x)", "process.stderr['write'](x)",
+                         'process?.stderr?.write(x)']) {
+      expect(channels.some((re) => new RegExp(re.source).test(codeOnly(shape))),
+        `the channel list no longer matches ${shape}`).toBe(true);
+    }
+
+    // ⚠ And `report` writes EXACTLY ONCE. This restores a property the previous version
+    // held by accident and this one dropped: the old check counted `console.warn` across
+    // the whole FILE and required one, which also meant one inside `report`. Measured
+    // loss — a second `console.warn(message)` added inside `report` survived all 18
+    // cases, because the exemption cuts the whole closure out. The cost is only a
+    // duplicate log line, but a property held before and lost is restored, not filed —
+    // scoped to `report` this time instead of to the file, which is what made the old
+    // check brittle.
+    const inReport = channels.flatMap((re) => [...body.slice(rep.open, rep.close).matchAll(re)].map((m) => m[0]));
+    expect(inReport, `\`report\` must write exactly once, found: ${inReport.join(', ')}`).toHaveLength(1);
 
     // And `report` itself pairs the flag with the warning. Text-shaped deliberately:
     // the behavioural half is the TTL cases above, and a rewrite of this shape
     // should have to re-attest the pairing rather than inherit it.
     expect(body.slice(rep.open, rep.close)).toMatch(/doubtful\s*=\s*true[\s\S]*console\s*\.\s*warn\s*\(\s*message\s*\)/);
 
-    // ⚠ Two named misses, measured rather than assumed:
-    //  - an ALIAS: `const w = console.warn; w(…)` passes, because enumerating
-    //    channels cannot see one that has been renamed;
-    //  - the OTHER DIRECTION: `doubtful = true` written outside `report` shortens
-    //    the cache to a minute without telling anyone. Nothing here holds that,
-    //    and it is filed as a register row rather than fixed in this PR.
+    // ⚠ The misses that remain, measured rather than assumed:
+    //  - an ALIAS: `const w = console.warn; w(…)` passes. Enumerating access shapes
+    //    cannot see a channel that has been renamed, and no widening fixes that.
+    //    Measured: lint does not catch it either — `console[k](…)` IS flagged, but the
+    //    alias is not a console member expression at the call site. So this one is
+    //    genuinely open on both mechanisms, which is why it is the miss worth naming.
+    //  - the OTHER DIRECTION: `doubtful = true` written outside `report` shortens the
+    //    cache to a minute without telling anyone. Filed as a register row; it costs
+    //    provider requests, not correctness.
+    //  - REGEX LITERALS, which `codeOnly` does not model. One holding a QUOTE hides
+    //    text locally; one holding `}` shifts the brace count, and that direction is
+    //    now caught by the scope anchors above rather than being silent.
+    //  - the pairing regex below allows code BETWEEN the flag and the warning, which
+    //    the old adjacency check forbade. Deliberately not tightened: both mutants it
+    //    admits are killed by the behavioural TTL cases above, so tightening would add
+    //    a red that no property needs.
   });
 });
