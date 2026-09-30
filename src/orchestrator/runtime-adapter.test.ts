@@ -367,8 +367,9 @@ describe('spawnInline with role', () => {
   it('does NOT refuse an inline readOnly step that declared no tools at all', async () => {
     // The gate the refusal hangs on: `removedByRole` is empty for a step that declared
     // nothing, so nothing throws. Drop that term from the empty-grant throw and this
-    // test fires — which is what it is here to kill, and the reason a redundant outer
-    // clause had to go: while it stood, this test killed nothing.
+    // test fires — that is the mutant it exists to kill, and it can only kill it while
+    // that term is the single thing standing between an empty grant and a throw.
+    //
     // Reaching the branch needs an empty grant with no declaration, and the parent set
     // below is built so the SURFACE
     // is what empties it — `http_request` is in the inline pool and in no role's

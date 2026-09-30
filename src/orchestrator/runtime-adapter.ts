@@ -952,10 +952,11 @@ export async function spawnInline(
     // when the pool DID admit the name and the role's own grant then removed it —
     // either because its ceiling does not hold it or because its denylist names it.
     //
-    // This set carries the whole condition. An outer `declaredToolNames.length > 0`
-    // stood here and was redundant: a filter over that list cannot be non-empty when it
-    // is, and both throws below require it. Redundant is not free — it made the test
-    // written for that clause stop killing anything.
+    // This set carries the whole condition, and deliberately alone. A filter over
+    // `declaredToolNames` cannot be non-empty when that list is empty, and both throws
+    // below require it — so an outer length check would be a term no test could
+    // distinguish from its own removal, and a term like that absorbs the coverage the
+    // condition beside it was supposed to carry.
     const removedByRole = declaredToolNames.filter(
       n => stepToolNames.has(n) && (!ceilingNames.has(n) || deniedNames.has(n)),
     );
