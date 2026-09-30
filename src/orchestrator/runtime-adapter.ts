@@ -941,31 +941,38 @@ export async function spawnInline(
     ...(step.tools ?? []),
     ...(step.tool !== undefined ? [step.tool] : []),
   ];
-  if (resolved?.readOnly === true && declaredToolNames.length > 0) {
+  if (resolved?.readOnly === true) {
     const roleName = step.role ?? '';
     const ceilingNames = new Set(roleProfile?.allowedTools ?? []);
+    const deniedNames = new Set(roleProfile?.deniedTools ?? []);
     // Name the ROLE only for what the role did, or the message sends the author to the
     // wrong fix. A declared name the inline pool never admits (`INLINE_CORE_TOOLS`) is
     // absent whatever role is on the step, and so is one the parent set does not carry;
-    // both are role-independent and both predate this. The cause is the ceiling exactly
-    // when the pool DID admit the name and the ceiling does not hold it.
-    const removedByCeiling = declaredToolNames.filter(
-      n => stepToolNames.has(n) && !ceilingNames.has(n),
+    // both are role-independent and both predate this. The role is the cause exactly
+    // when the pool DID admit the name and the role's own grant then removed it —
+    // either because its ceiling does not hold it or because its denylist names it.
+    //
+    // This set carries the whole condition. An outer `declaredToolNames.length > 0`
+    // stood here and was redundant: a filter over that list cannot be non-empty when it
+    // is, and both throws below require it. Redundant is not free — it made the test
+    // written for that clause stop killing anything.
+    const removedByRole = declaredToolNames.filter(
+      n => stepToolNames.has(n) && (!ceilingNames.has(n) || deniedNames.has(n)),
     );
-    if (removedByCeiling.length > 0 && tools.length === 0) {
+    if (removedByRole.length > 0 && tools.length === 0) {
       throw new Error(
         `Step "${step.id}" declares the read-only role "${roleName}" together with `
-        + `[${declaredToolNames.join(', ')}]. A read-only role does not hold `
-        + `[${removedByCeiling.join(', ')}], so the step would run with no tools at all. `
-        + `Name tools a read-only role can hold, or drop the role from this step.`,
+        + `[${[...new Set(declaredToolNames)].join(', ')}]. That role's grant does not hold `
+        + `[${[...new Set(removedByRole)].join(', ')}], so the step would run with no tools `
+        + `at all. Name tools the role can hold, or drop the role from this step.`,
       );
     }
-    if (step.tool !== undefined && removedByCeiling.includes(step.tool)) {
+    if (step.tool !== undefined && removedByRole.includes(step.tool)) {
       throw new Error(
         `Step "${step.id}" replays "${step.tool}" and declares the read-only role `
-        + `"${roleName}", which does not hold that tool — the step would run without the `
-        + `one call it exists to make. Drop the role from this step, or replay a tool a `
-        + `read-only role can hold.`,
+        + `"${roleName}", whose grant does not hold that tool — the step would run without `
+        + `the one call it exists to make. Drop the role from this step, or replay a tool `
+        + `the role can hold.`,
       );
     }
   }

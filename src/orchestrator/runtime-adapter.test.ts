@@ -365,9 +365,12 @@ describe('spawnInline with role', () => {
   });
 
   it('does NOT refuse an inline readOnly step that declared no tools at all', async () => {
-    // The clause the refusal hangs on: without it the guard fires for a step that
-    // declared nothing and drew from the default pool. Reaching that branch needs an
-    // empty grant with no declaration, and the parent set below is built so the SURFACE
+    // The gate the refusal hangs on: `removedByRole` is empty for a step that declared
+    // nothing, so nothing throws. Drop that term from the empty-grant throw and this
+    // test fires — which is what it is here to kill, and the reason a redundant outer
+    // clause had to go: while it stood, this test killed nothing.
+    // Reaching the branch needs an empty grant with no declaration, and the parent set
+    // below is built so the SURFACE
     // is what empties it — `http_request` is in the inline pool and in no role's
     // denyTools, so neither the pool nor the denylist can be the cause. (A denylist
     // covering everything the pool admits would empty it too; this fixture keeps that
@@ -498,6 +501,23 @@ describe('spawnInline with role', () => {
     };
     await expect(spawnInline(step, {}, mockConfig, parentOf(['http_request'])))
       .resolves.toBeDefined();
+  });
+
+  it('names the role when its own denylist, not the ceiling, removed the declared tool', async () => {
+    // The second half of "the role is the cause". A role may hold a surface member in
+    // its ceiling and deny it in the same breath; the grant is then empty for a reason
+    // that is still entirely the role's. No built-in role has that shape — which is why
+    // the term needs a test of its own, or nothing would ever exercise it.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['read_file'], description: 'Denies what it allows. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'self-denying-step', agent: 'self-denying-step', runtime: 'inline', role: 'operator',
+      tools: ['read_file'],
+    };
+    await expect(spawnInline(step, {}, mockConfig, parentOf(['read_file'])))
+      .rejects.toThrow(/does not hold \[read_file\]/);
   });
 
   it('role defaults to maxIterations 10', async () => {
