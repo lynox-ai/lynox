@@ -597,11 +597,16 @@ describe('the write verb and the one-target probe', () => {
     const restore = serve(s);
     try {
       const c = client({ contract: mintBulkContract(HOST, [url(0), url(1), `https://${HOST}/contacts/1`], 'PUT') });
-      seedProbe('PUT', '/products/');
+      // Contacts only: the products the run also writes are not vouched for.
+      seedProbe('PUT', '/contacts/');
       const mixed = await previewedRun([
         { target: url(0), after: { price: '1' } }, { target: url(1), after: { price: '1' } },
         { target: `https://${HOST}/contacts/1`, after: { note: 'y' } },
       ], c, 'PUT');
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
+      // Products only is not enough either.
+      engineDb.getDb().prepare('DELETE FROM bulk_host_probes').run();
+      seedProbe('PUT', '/products/');
       expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
       seedProbe('PUT', '/contacts/');
       expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! }).ok).toBe(true);
@@ -620,6 +625,13 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
       // Approved, not yet written: nothing to vouch for.
       expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      // One target written but the run still writing (not halted, not done): not yet.
+      ledger.setPhase(runId, ['approved'], 'writing');
+      expect(ledger.claimTarget(runId, 0)).toBe(true);
+      ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, 0, 'written');
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      engineDb.getDb().prepare('UPDATE bulk_targets SET applied_at = NULL, result = NULL, claimed_at = NULL WHERE run_id = ?').run(runId);
+      engineDb.getDb().prepare('UPDATE bulk_runs SET targets_applied = 0 WHERE id = ?').run(runId);
       const putWriter = (run: BulkRunForApply) => bulkWriterFor(run, null, () => externalWriter(c, { method: 'PUT', sleep: noSleep }));
       await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: putWriter });
       // Stopped at its cap with one target written: this one is a probe, and it records PUT.
