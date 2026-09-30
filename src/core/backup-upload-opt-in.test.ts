@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { BackupManager } from './backup.js';
 import type { BackupManifest } from './backup.js';
 import { driveUploadOptedIn } from './backup-upload-gdrive.js';
+import { isEncryptedBackupFile } from './backup-crypto.js';
 import type { GDriveBackupUploader, UploadResult } from './backup-upload-gdrive.js';
 
 /**
@@ -172,6 +173,35 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
 
     expect(result.success).toBe(true);
     expect(result.manifest.encrypted).toBe(false);
+    expect(localArchiveIsReadable(result.path)).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('an EMPTY vault key does not count as a key — no upload, and the manifest does not lie', async () => {
+    // The divergence that defeats the whole gate if `manifest.encrypted` is a declaration of
+    // INTENT rather than a record of what HAPPENED. Two conditions were written for the same
+    // question and differ on exactly one value:
+    //
+    //   constructor:  config.encrypt && vaultKey !== null   → '' passes ('' is not null)
+    //   step 5:       this.encrypt && this.vaultKey         → '' fails  ('' is falsy)
+    //
+    // Reachable from the outside: `LYNOX_VAULT_KEY=` (set, empty) makes `process.env[…] ?? null`
+    // yield `''`, and an explicit `backup_encrypt: true` supplies the other half. Nothing would
+    // be encrypted, the manifest would say `encrypted: true`, and an upload gate reading that
+    // field would send a plaintext archive to a third party while believing the opposite.
+    const { calls, uploader } = spyUploader();
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: uploader }, '',
+    );
+
+    const result = await manager.createBackup();
+
+    expect(result.success).toBe(true);
+    // The manifest must record what happened, not what was asked for.
+    expect(result.manifest.encrypted).toBe(false);
+    // And the files must actually be what the manifest says they are.
+    expect(isEncryptedBackupFile(join(result.path, 'history.db'))).toBe(false);
+    // Both witnesses, as everywhere in this block.
     expect(localArchiveIsReadable(result.path)).toBe(true);
     expect(calls).toHaveLength(0);
   });
