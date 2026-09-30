@@ -10,9 +10,9 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { compose, wrapUntrustedData, renderFence } from './data-boundary.js';
+import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
@@ -1233,52 +1233,30 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
   }
 
   /**
-   * Format the curated "suggested APIs" catalog as a compact system-prompt block.
+   * Format the curated "suggested APIs" catalogue as a compact system-prompt block.
    *
-   * The catalog (`data/suggested-apis.json` at the package root) is NOT a set
-   * of pre-loaded profiles — it's a list of free public APIs the agent can
-   * offer to bootstrap on demand via `api_setup` action=bootstrap. The block
-   * also encodes the auth-flow constraints the agent must respect (e.g. no
-   * oauth2 authorization-code redirect flow today) and a do-not-suggest list
-   * (payment providers, infra providers) so the agent doesn't proactively
-   * propose risky setups.
+   * The catalogue ({@link SUGGESTED_API_CATALOG}) is NOT a set of pre-loaded
+   * profiles — it's a list of APIs the agent can offer to bootstrap on demand
+   * via `api_setup` action=bootstrap. The block also encodes the auth-flow
+   * constraints the agent must respect (e.g. no oauth2 authorization-code
+   * redirect flow today) and a do-not-suggest list (payment providers, infra
+   * providers) so the agent doesn't proactively propose risky setups.
    *
-   * Returns an empty string when:
-   * - LYNOX_SKIP_SUGGESTED_APIS=1 is set (opt-out)
-   * - the catalog file is missing (silent — e.g. dev tree without data/)
-   * - the catalog JSON is malformed (silent — never throw at boot)
+   * Returns an empty string ONLY when `LYNOX_SKIP_SUGGESTED_APIS=1` is set.
+   *
+   * ⚠ It used to have two more ways to return `''` — catalogue file missing,
+   * catalogue file malformed — each swallowed without a word. The first of
+   * those was not the dev-tree edge case the comment claimed: it was every
+   * container we ship, for a year, because the image never carried `data/`.
+   * A silent fallback on a briefing text cannot be told apart from an empty
+   * briefing, so there is no fallback here any more. See
+   * {@link ./suggested-apis.ts} for the measurement.
    */
   formatSuggestedApisForSystemPrompt(): string {
     if (process.env['LYNOX_SKIP_SUGGESTED_APIS'] === '1') return '';
 
-    // From src/core/api-store.ts (dev) or dist/core/api-store.js (built),
-    // `../../data/suggested-apis.json` resolves to the package root where
-    // `data/` is shipped via package.json `files`.
-    const thisDir = dirname(fileURLToPath(import.meta.url));
-    const catalogPath = join(thisDir, '..', '..', 'data', 'suggested-apis.json');
-
-    let raw: string;
-    try {
-      raw = readFileSync(catalogPath, 'utf-8');
-    } catch {
-      return '';
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return '';
-    }
-
-    if (!parsed || typeof parsed !== 'object') return '';
-    const cat = parsed as Record<string, unknown>;
-    const apis = Array.isArray(cat['suggested_apis']) ? cat['suggested_apis'] : [];
-    if (apis.length === 0) return '';
-
-    const supported = Array.isArray(cat['supported_auth_flows']) ? cat['supported_auth_flows'] as unknown[] : [];
-    const notSupported = Array.isArray(cat['not_supported_auth_flows']) ? cat['not_supported_auth_flows'] as unknown[] : [];
-    const doNot = Array.isArray(cat['do_not_proactively_suggest']) ? cat['do_not_proactively_suggest'] as unknown[] : [];
+    const cat = SUGGESTED_API_CATALOG;
+    if (cat.suggested_apis.length === 0) return '';
 
     // Was assembled with the tag as the first array element and the close tag
     // pushed at the end — a frame built in pieces, which a rule about template
@@ -1291,33 +1269,25 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap.');
     lines.push('');
 
-    if (supported.length > 0) {
+    if (cat.supported_auth_flows.length > 0) {
       lines.push('Supported auth flows:');
-      for (const s of supported) lines.push(`- ${String(s)}`);
+      for (const s of cat.supported_auth_flows) lines.push(`- ${s}`);
       lines.push('');
     }
-    if (notSupported.length > 0) {
+    if (cat.not_supported_auth_flows.length > 0) {
       lines.push('NOT supported (cannot be bootstrapped today — do not offer):');
-      for (const s of notSupported) lines.push(`- ${String(s)}`);
+      for (const s of cat.not_supported_auth_flows) lines.push(`- ${s}`);
       lines.push('');
     }
-    if (doNot.length > 0) {
+    if (cat.do_not_proactively_suggest.length > 0) {
       lines.push('Do NOT proactively suggest bootstrapping:');
-      for (const s of doNot) lines.push(`- ${String(s)}`);
+      for (const s of cat.do_not_proactively_suggest) lines.push(`- ${s}`);
       lines.push('');
     }
 
     lines.push('Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):');
-    for (const api of apis) {
-      if (!api || typeof api !== 'object') continue;
-      const a = api as Record<string, unknown>;
-      const name = typeof a['name'] === 'string' ? a['name'] : '';
-      const category = typeof a['category'] === 'string' ? a['category'] : '';
-      const auth = typeof a['auth_type'] === 'string' ? a['auth_type'] : '';
-      const valueProp = typeof a['value_prop'] === 'string' ? a['value_prop'] : '';
-      const docsUrl = typeof a['docs_url'] === 'string' ? a['docs_url'] : '';
-      if (!name || !docsUrl) continue;
-      lines.push(`- ${name} (${category}, auth=${auth}) — ${valueProp} Docs: ${docsUrl}`);
+    for (const api of cat.suggested_apis) {
+      lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
     }
     return compose([renderFence('api_bootstrap_hints', lines.join('\n'))]);
   }

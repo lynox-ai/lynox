@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey } from './api-store.js';
 import type { ApiProfile } from './api-store.js';
+import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-api-store-test-'));
@@ -534,7 +535,34 @@ describe('ApiStore', () => {
   describe('formatSuggestedApisForSystemPrompt', () => {
     beforeEach(() => { store = new ApiStore(); });
 
-    it('renders the shipped data/suggested-apis.json catalog with auth-constraint sections', () => {
+    /**
+     * Split the rendered block into its headed sections.
+     *
+     * Exists because the assertion it replaces was `toContain('authorization_code')`
+     * over the WHOLE block — which stays green if that flow moves from "NOT
+     * supported" to "Supported", i.e. if the statement to the model inverts.
+     * A guard that counts a string cannot see the heading it lives under, and
+     * the heading is the entire meaning here.
+     */
+    function sectionsOf(block: string): Map<string, string[]> {
+      const headings = new Map<string, string>([
+        ['Supported auth flows:', 'supported'],
+        ['NOT supported (cannot be bootstrapped today — do not offer):', 'not-supported'],
+        ['Do NOT proactively suggest bootstrapping:', 'do-not-suggest'],
+      ]);
+      const out = new Map<string, string[]>();
+      let current: string | null = null;
+      for (const line of block.split('\n')) {
+        const key = headings.get(line.trim());
+        if (key !== undefined) { current = key; out.set(key, []); continue; }
+        // A section runs until the blank line the renderer pushes after it.
+        if (line.trim() === '') { current = null; continue; }
+        if (current !== null && line.startsWith('- ')) out.get(current)!.push(line.slice(2));
+      }
+      return out;
+    }
+
+    it('renders the compiled catalogue with auth-constraint sections', () => {
       const out = store.formatSuggestedApisForSystemPrompt();
 
       // Wrapper tags so the agent can locate the block.
@@ -547,18 +575,36 @@ describe('ApiStore', () => {
       expect(out).toContain('NOT supported');
       expect(out).toContain('Do NOT proactively suggest');
 
-      // Concrete auth constraints derived from api-store.ts ApiAuth.type:
-      // oauth2 authorization_code is NOT in the union, so the agent must
-      // know it cannot bootstrap browser-redirect-callback OAuth APIs.
-      expect(out.toLowerCase()).toContain('authorization_code');
-
-      // Don't-suggest list must include payment + infra providers.
-      expect(out.toLowerCase()).toContain('payment');
-      expect(out.toLowerCase()).toContain('hosting');
-
       // At least one curated API entry renders with its docs URL.
       expect(out).toContain('Open-Meteo');
       expect(out).toContain('https://open-meteo.com/en/docs');
+    });
+
+    it('places authorization_code under NOT-supported, and an inversion fails the test', () => {
+      const sections = sectionsOf(store.formatSuggestedApisForSystemPrompt());
+
+      const notSupported = sections.get('not-supported') ?? [];
+      const supported = sections.get('supported') ?? [];
+      expect(notSupported.length).toBeGreaterThan(0);
+      expect(supported.length).toBeGreaterThan(0);
+
+      // The claim, tied to its heading: oauth2 authorization_code is NOT in
+      // ApiAuth.type, so the agent must be told it cannot bootstrap
+      // browser-redirect-callback OAuth APIs.
+      expect(notSupported.some((l) => l.toLowerCase().includes('authorization_code'))).toBe(true);
+      expect(supported.some((l) => l.toLowerCase().includes('authorization_code'))).toBe(false);
+
+      // Mutation witness for the splitter itself: were `sectionsOf` to return
+      // every line under every key, the two asserts above would contradict each
+      // other and could not both hold. This pins that the sections are disjoint.
+      for (const line of notSupported) expect(supported).not.toContain(line);
+    });
+
+    it('names payment and hosting in the do-not-suggest section specifically', () => {
+      const doNot = sectionsOf(store.formatSuggestedApisForSystemPrompt()).get('do-not-suggest') ?? [];
+      expect(doNot.length).toBeGreaterThan(0);
+      expect(doNot.some((l) => l.toLowerCase().includes('payment'))).toBe(true);
+      expect(doNot.some((l) => l.toLowerCase().includes('hosting'))).toBe(true);
     });
 
     it('returns empty string when LYNOX_SKIP_SUGGESTED_APIS=1', () => {
@@ -572,28 +618,13 @@ describe('ApiStore', () => {
       }
     });
 
-    it('catalog JSON validates: every suggested_apis entry has id + name + docs_url + auth_type + value_prop', () => {
-      const here = dirname(fileURLToPath(import.meta.url));
-      const catalogPath = resolve(here, '../../data/suggested-apis.json');
-      const raw = readFileSync(catalogPath, 'utf-8');
-      const parsed = JSON.parse(raw) as {
-        schema_version: number;
-        supported_auth_flows: string[];
-        not_supported_auth_flows: string[];
-        do_not_proactively_suggest: string[];
-        suggested_apis: Array<{
-          id: string; name: string; category: string;
-          docs_url: string; auth_type: string; value_prop: string;
-        }>;
-      };
-
-      expect(parsed.schema_version).toBe(1);
-      expect(parsed.supported_auth_flows.length).toBeGreaterThan(0);
-      expect(parsed.do_not_proactively_suggest.length).toBeGreaterThan(0);
-      expect(parsed.suggested_apis.length).toBeGreaterThan(0);
+    it('catalogue validates: every entry has id + name + category + docs_url + auth_type + value_prop', () => {
+      expect(SUGGESTED_API_CATALOG.supported_auth_flows.length).toBeGreaterThan(0);
+      expect(SUGGESTED_API_CATALOG.do_not_proactively_suggest.length).toBeGreaterThan(0);
+      expect(SUGGESTED_API_CATALOG.suggested_apis.length).toBeGreaterThan(0);
 
       const ids = new Set<string>();
-      for (const api of parsed.suggested_apis) {
+      for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
         expect(api.id).toMatch(/^[a-z0-9][a-z0-9_-]{0,63}$/);
         expect(api.name).toBeTruthy();
         expect(api.category).toBeTruthy();
@@ -603,6 +634,62 @@ describe('ApiStore', () => {
         expect(ids.has(api.id)).toBe(false);
         ids.add(api.id);
       }
+    });
+
+    it('renders every catalogue entry and nothing else', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+      const rendered = out.split('\n').filter((l) => l.includes(', auth=') && l.startsWith('- '));
+      expect(rendered.length).toBe(SUGGESTED_API_CATALOG.suggested_apis.length);
+      for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
+        expect(out).toContain(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
+    });
+
+    /**
+     * The point of moving the catalogue into code, as a behaviour rather than
+     * a claim: a file at the path the old reader used must not reach the
+     * briefing. Without this, "it comes from the constant now" is only true
+     * until someone reinstates a fallback, and a fallback is exactly what hid
+     * the shipping gap for a year.
+     */
+    it('ignores a catalogue file planted at the old path', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const oldPath = resolve(here, '../../data/suggested-apis.json');
+      // Loud rather than skipped: if this exists, the deletion was undone and
+      // the test below would be measuring the wrong thing.
+      expect(existsSync(oldPath)).toBe(false);
+
+      const before = store.formatSuggestedApisForSystemPrompt();
+      mkdirSync(dirname(oldPath), { recursive: true });
+      try {
+        writeFileSync(oldPath, JSON.stringify({
+          supported_auth_flows: ['planted flow'],
+          not_supported_auth_flows: [],
+          do_not_proactively_suggest: ['planted restriction'],
+          suggested_apis: [{
+            id: 'planted', name: 'Planted API', category: 'planted',
+            docs_url: 'https://planted.example/docs', auth_type: 'bearer',
+            value_prop: 'Should never reach the briefing.',
+          }],
+        }), 'utf-8');
+
+        const after = new ApiStore().formatSuggestedApisForSystemPrompt();
+        expect(after).toBe(before);
+        expect(after).not.toContain('Planted API');
+        expect(after).not.toContain('planted flow');
+      } finally {
+        rmSync(oldPath, { force: true });
+        rmSync(dirname(oldPath), { force: true, recursive: true });
+      }
+    });
+
+    it('the catalogue constant cannot be rewritten at runtime', () => {
+      expect(() => {
+        (SUGGESTED_API_CATALOG as { suggested_apis: unknown }).suggested_apis = [];
+      }).toThrow();
+      expect(() => {
+        (SUGGESTED_API_CATALOG.suggested_apis as unknown as unknown[]).push({ id: 'x' });
+      }).toThrow();
     });
   });
 });
