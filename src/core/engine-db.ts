@@ -796,6 +796,46 @@ const MIGRATIONS: string[] = [
      undone_at TEXT,
      PRIMARY KEY (run_id, seq)
    );`,
+
+  // v14 (bulk changes, reversible — apply and undo, PRD §3.4/§3.5): what applying a run
+  // and taking it back need on top of the dry-run ledger.
+  // - `atomic` (§3.1, decided 30.9. with §9 question 1): 1 = the run is written whole
+  //   or rolled back, and only a fully applied run can be undone; 0 = independent
+  //   targets, an undo takes back the applied ones.
+  // - `kind` + `source_run_id`: an undo is its own run over the applied targets of
+  //   another (a second approval, §3.5), not a mode of the first.
+  // - `target_collection`: the data-store collection a run writes; the dry run only
+  //   hashed it into `rule_hash`, and applying has to know it.
+  // `bulk_targets` is rebuilt rather than altered because its `change` CHECK needs
+  // `delete` — an undo of a created target removes it — and SQLite cannot alter a
+  // CHECK. `claimed_at` is the per-target claim a concurrent or restarted effect loop
+  // tests before writing (§3.4); `source_seq` ties an undo target to the target it
+  // takes back. The rebuild copies every row: the table so far only holds dry runs.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (14);
+   ALTER TABLE bulk_runs ADD COLUMN atomic INTEGER NOT NULL DEFAULT 0 CHECK (atomic IN (0,1));
+   ALTER TABLE bulk_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'apply' CHECK (kind IN ('apply','undo'));
+   ALTER TABLE bulk_runs ADD COLUMN source_run_id TEXT REFERENCES bulk_runs(id) ON DELETE SET NULL;
+   ALTER TABLE bulk_runs ADD COLUMN target_collection TEXT;
+   CREATE TABLE bulk_targets_v14 (
+     run_id TEXT NOT NULL REFERENCES bulk_runs(id) ON DELETE CASCADE,
+     seq INTEGER NOT NULL,
+     target_key TEXT NOT NULL,
+     change TEXT NOT NULL CHECK (change IN ('update','create','delete','unchanged','invalid')),
+     undo TEXT CHECK (undo IN ('restorable','compensatable','none')),
+     before TEXT,
+     after_planned TEXT,
+     claimed_at TEXT,
+     applied_at TEXT,
+     result TEXT,
+     error TEXT,
+     undone_at TEXT,
+     source_seq INTEGER,
+     PRIMARY KEY (run_id, seq)
+   );
+   INSERT INTO bulk_targets_v14 (run_id, seq, target_key, change, undo, before, after_planned, applied_at, result, error, undone_at)
+     SELECT run_id, seq, target_key, change, undo, before, after_planned, applied_at, result, error, undone_at FROM bulk_targets;
+   DROP TABLE bulk_targets;
+   ALTER TABLE bulk_targets_v14 RENAME TO bulk_targets;`,
 ];
 
 /**

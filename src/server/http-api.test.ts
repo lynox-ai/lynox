@@ -16,6 +16,9 @@ import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug } from './http-api.js';
+import { EngineDb } from '../core/engine-db.js';
+import { BulkLedger } from '../core/bulk-ledger.js';
+import { TriggerStore } from '../core/trigger-store.js';
 
 // === Mock dependencies ===
 
@@ -176,6 +179,8 @@ const mockSessionInstance = {
 const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionGet = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionStoreReset = vi.fn();
+/** The bulk-run routes read a REAL ledger (a temp engine.db) — null = flag off. */
+const bulkHolder: { ledger: BulkLedger | null } = { ledger: null };
 
 vi.mock('../core/engine.js', () => ({
   Engine: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
@@ -222,6 +227,7 @@ vi.mock('../core/engine.js', () => ({
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
     });
+    this.getBulkLedger = vi.fn(() => bulkHolder.ledger);
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,
       create: mockTaskCreate,
@@ -5823,6 +5829,111 @@ describe('LynoxHTTPApi', () => {
       await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Immediate', assignee: 'lynox' }) });
       // the human HTTP create route supplies confirmedAt; the agent task_create tool never does.
       expect(mockTaskCreate).toHaveBeenCalledWith(expect.objectContaining({ confirmedAt: expect.any(String) }));
+    });
+  });
+
+  // PRD bulk-changes-reversible §3.4/§3.5 — the human side of a bulk run.
+  describe('bulk runs', () => {
+    let bulkDir: string;
+    let bulkDb: EngineDb;
+    let bulkLedger: BulkLedger;
+    const planRun = (): string => bulkLedger.recordDryRun({
+      createdBy: 't', targetSystem: 'workspace', scope: 'mem',
+      targets: [
+        { key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' },
+        { key: 'k1', before: { absent: true }, after: 'w1' },
+      ],
+    }).id;
+    beforeEach(() => {
+      bulkDir = mkdtempSync(join(tmpdir(), 'lynox-bulk-route-'));
+      bulkDb = new EngineDb(join(bulkDir, 'engine.db'), 'route-key');
+      bulkLedger = new BulkLedger(bulkDb);
+      bulkHolder.ledger = bulkLedger;
+    });
+    afterEach(() => {
+      bulkHolder.ledger = null;
+      bulkDb.close();
+      rmSync(bulkDir, { recursive: true, force: true });
+    });
+
+    it('answers 404 on every bulk route when bulk runs are off', async () => {
+      bulkHolder.ledger = null;
+      for (const [path, method] of [['/api/bulk/runs', 'GET'], ['/api/bulk/runs/x', 'GET'], ['/api/bulk/runs/x/approve', 'POST']] as const) {
+        const res = await jsonFetch(path, { method, ...(method === 'POST' ? { body: '{}' } : {}) });
+        expect(res.status, path).toBe(404);
+      }
+    });
+
+    it('needs a logged-in session', async () => {
+      const id = planRun();
+      const res = await fetch(`${baseUrl}/api/bulk/runs/${id}/approve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }),
+      });
+      expect(res.status).toBe(401);
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
+    it('shows the run with its checksum and the owner view of its targets', async () => {
+      const id = planRun();
+      const run = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as { phase: string; checksum: string };
+      expect([run.phase, run.checksum]).toEqual(['previewed', bulkLedger.computeChecksum(id)]);
+      const t = await (await jsonFetch(`/api/bulk/runs/${id}/targets?limit=1&offset=1`)).json() as { targets: { key: string }[] };
+      expect(t.targets.map((x) => x.key)).toEqual(['k1']);
+      expect((await jsonFetch('/api/bulk/runs/nope')).status).toBe(404);
+    });
+
+    it('approves only with the current checksum, once, and arms the bulk_apply trigger', async () => {
+      const id = planRun();
+      expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: '{}' })).status).toBe(400);
+      expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: 'stale' }) })).status).toBe(409);
+      expect(new TriggerStore(bulkDb).getDue()).toEqual([]);
+
+      const checksum = bulkLedger.computeChecksum(id)!;
+      const ok = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
+      expect(ok.status).toBe(200);
+      expect(((await ok.json()) as { phase: string }).phase).toBe('approved');
+      const due = new TriggerStore(bulkDb).getDue();
+      expect(due.map((d) => [d.id, d.effect, d.bulk_run_id])).toEqual([[`bulk-${id}`, 'bulk_apply', id]]);
+
+      expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
+    });
+
+    it('rejects a maxTargets that is not a number in range', async () => {
+      const id = planRun();
+      const checksum = bulkLedger.computeChecksum(id)!;
+      for (const maxTargets of ['2', 3, 0, 1.5]) {
+        const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets }) });
+        expect(res.status, String(maxTargets)).toBe(400);
+      }
+    });
+
+    it('refuses to undo a run that is still writing and to resume with a stale checksum', async () => {
+      const id = planRun();
+      bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)! });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/undo`, { method: 'POST' })).status).toBe(409);
+      expect((await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: 'stale' }) })).status).toBe(409);
+      const ok = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      expect(ok.status).toBe(200);
+    });
+
+    it('plans an undo of a finished run as a previewed run with its own checksum', async () => {
+      const id = planRun();
+      bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)! });
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      for (const seq of [0, 1]) {
+        expect(bulkLedger.claimTarget(id, seq)).toBe(true);
+        bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, seq, 'ok');
+      }
+      bulkLedger.finish({ id, kind: 'apply', sourceRunId: null });
+      const res = await jsonFetch(`/api/bulk/runs/${id}/undo`, { method: 'POST' });
+      expect(res.status).toBe(201);
+      const undo = await res.json() as { id: string; kind: string; phase: string; checksum: string; sourceRunId: string };
+      expect([undo.kind, undo.phase, undo.sourceRunId]).toEqual(['undo', 'previewed', id]);
+      expect(undo.checksum).toBe(bulkLedger.computeChecksum(undo.id));
+      // Approving the undo is the second approval: it arms bulk_undo.
+      await jsonFetch(`/api/bulk/runs/${undo.id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: undo.checksum }) });
+      expect(new TriggerStore(bulkDb).getById(`bulk-${undo.id}`)?.effect).toBe('bulk_undo');
     });
   });
 

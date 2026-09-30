@@ -6255,6 +6255,95 @@ export class LynoxHTTPApi {
       jsonResponse(res, 202, { started: true });
     }));
 
+    // ── Bulk runs (PRD bulk-changes-reversible §3.4/§3.5) ──
+    // The human side of a bulk run: see what a dry run would do, approve it, resume a
+    // halted run, and plan its undo. Approving and resuming take the checksum the
+    // owner's view showed — the effect only ever writes what was approved. Any
+    // logged-in session may act: the instance has one owner today, and §5 narrows
+    // these to the owner once a principal exists. The model reaches none of this —
+    // `bulk_plan`/`bulk_status` see counters only.
+    const bulkLedger = (res: import('node:http').ServerResponse) => {
+      const ledger = engine.getBulkLedger();
+      if (!ledger) { errorResponse(res, 404, 'Bulk runs are not enabled.'); return null; }
+      return ledger;
+    };
+    const checksumOf = (body: unknown): string | null => {
+      if (!body || typeof body !== 'object') return null;
+      const c = (body as Record<string, unknown>)['checksum'];
+      return typeof c === 'string' && c.length > 0 ? c : null;
+    };
+    const BULK_REFUSALS: Record<string, [number, string]> = {
+      not_found: [404, 'Bulk run not found.'],
+      wrong_phase: [409, 'The bulk run is not in a phase that allows this.'],
+      checksum: [409, 'The bulk run changed since it was shown — reload it and check again.'],
+      nothing_to_apply: [409, 'The bulk run has no target to write.'],
+      bad_max_targets: [400, 'maxTargets must be a whole number between 1 and the number of targets to write.'],
+      not_undoable: [409, 'Only a finished, aborted or halted bulk run can be undone.'],
+      nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
+      atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
+    };
+    const refuse = (res: import('node:http').ServerResponse, reason: string): void => {
+      const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
+      errorResponse(res, code, msg);
+    };
+
+    this.addStatic('user', 'GET /api/bulk/runs', async (_req, res) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      jsonResponse(res, 200, { runs: ledger.listRuns(50) });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const status = ledger.getStatus(params['id']!);
+      if (!status) { errorResponse(res, 404, 'Bulk run not found.'); return; }
+      jsonResponse(res, 200, { ...status, checksum: ledger.computeChecksum(params['id']!) });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id/targets', async (req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      if (!ledger.getStatus(params['id']!)) { errorResponse(res, 404, 'Bulk run not found.'); return; }
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const num = (name: string): number | undefined => {
+        const v = Number(url.searchParams.get(name));
+        return url.searchParams.has(name) && Number.isInteger(v) && v >= 0 ? v : undefined;
+      };
+      jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (_req, res, params, body) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const checksum = checksumOf(body);
+      if (!checksum) { errorResponse(res, 400, 'Missing "checksum" — approve what you were shown.'); return; }
+      const rawMax = (body as Record<string, unknown>)['maxTargets'];
+      if (rawMax !== undefined && typeof rawMax !== 'number') { refuse(res, 'bad_max_targets'); return; }
+      const out = ledger.approve(params['id']!, { checksum, maxTargets: rawMax });
+      if (!out.ok) { refuse(res, out.reason); return; }
+      jsonResponse(res, 200, out.status);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const checksum = checksumOf(body);
+      if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
+      const out = ledger.resume(params['id']!, { checksum });
+      if (!out.ok) { refuse(res, out.reason); return; }
+      jsonResponse(res, 200, out.status);
+    }));
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/undo', async (_req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const out = ledger.planUndo(params['id']!);
+      if (!out.ok) { refuse(res, out.reason); return; }
+      // A previewed undo run: approving it is the second approval (§3.5).
+      jsonResponse(res, 201, { ...out.status, checksum: ledger.computeChecksum(out.status.id) });
+    }));
+
     // ── Artifacts ──
     this.addStatic('user', 'GET /api/artifacts', async (_req, res) => {
       const store = engine.getArtifactStore();

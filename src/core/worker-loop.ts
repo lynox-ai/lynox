@@ -527,6 +527,14 @@ export class WorkerLoop {
               await this.executeStandard(task);
             }
             break;
+          case 'bulk_apply':
+          case 'bulk_undo':
+            // Deterministic: writes an APPROVED bulk run's targets, mints no Run. The
+            // consent is the approval route that armed this trigger (PRD
+            // bulk-changes-reversible §3.4); the handler refuses any run that is not
+            // approved, inside its window and matching the approved checksum.
+            await this.executeBulk(task, effect);
+            break;
           default:
             // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
             // money-spending run. Record + stop, so it stops re-firing every tick.
@@ -609,6 +617,34 @@ export class WorkerLoop {
       this.activeTasks.get(task.id)?.pauseDeadline();
       this.activeTasks.delete(task.id);
     }
+  }
+
+  /**
+   * Write a bulk run off its trigger. A run left `pending` (targets another loop holds,
+   * or claims of a loop that died) is re-armed shortly; every other outcome ends the
+   * trigger — a halt waits for a human to resume it through the approval route.
+   */
+  private async executeBulk(task: TriggerRecord, effect: 'bulk_apply' | 'bulk_undo'): Promise<void> {
+    const ledger = this.engine.getBulkLedger();
+    if (!ledger || task.bulk_run_id === undefined) {
+      this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
+      return;
+    }
+    const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
+    const dataStore = this.engine.getDataStore();
+    const outcome = await runBulkEffect(task.bulk_run_id, effect, {
+      ledger,
+      writerFor: (run) => bulkWriterFor(run, dataStore),
+    });
+    if (outcome.status === 'pending') {
+      this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
+      this.engine.getRunHistory()?.updateTrigger(task.id, {
+        status: 'open',
+        nextRunAt: new Date(Date.now() + BULK_RETRY_DELAY_MS).toISOString(),
+      });
+      return;
+    }
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
   }
 
   /** Execute a backup task — no LLM needed, direct BackupManager call. */

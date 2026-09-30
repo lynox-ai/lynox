@@ -21,6 +21,7 @@ interface BulkPlanInput {
   source_format?: 'json' | 'csv' | undefined;
   source_collection?: string | undefined;
   source_filter?: Record<string, unknown> | undefined;
+  atomic?: boolean | undefined;
 }
 
 interface BulkStatusInput {
@@ -30,12 +31,16 @@ interface BulkStatusInput {
 function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
-    `Bulk run ${s.id} (${s.targetSystem}, phase ${s.phase}, created ${s.createdAt}).`,
+    `Bulk ${s.kind === 'undo' ? `undo run ${s.id} of run ${s.sourceRunId ?? '(deleted)'}` : `run ${s.id}`} ` +
+      `(${s.targetSystem}${s.atomic ? ', atomic' : ''}, phase ${s.phase}, created ${s.createdAt}).`,
     `Targets: ${String(s.total)} — update ${String(s.changes.update)}, create ${String(s.changes.create)}, ` +
+      `${s.changes.delete > 0 ? `delete ${String(s.changes.delete)}, ` : ''}` +
       `unchanged ${String(s.changes.unchanged)}, invalid ${String(s.changes.invalid)}${invalid ? ` (${invalid})` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
-  if (s.applied > 0 || s.failed > 0) lines.push(`Applied ${String(s.applied)}, failed ${String(s.failed)}.`);
+  if (s.applied > 0 || s.failed > 0 || s.conflicts > 0 || s.undone > 0) {
+    lines.push(`Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
+  }
   if (s.haltReason) lines.push(`Halted: ${s.haltReason}.`);
   return lines.join('\n');
 }
@@ -70,7 +75,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'Dry-run a change to many targets at once: record, per target, its current state and the state the change would produce — without writing anything. ' +
       'Targets and new states come from a source you prepared: a JSON or CSV file in the workspace (rows with a "target" field and either an "after" field or the new column values), or a data-store collection holding such rows. ' +
       'target_system "workspace": each target is a file path, "after" its full new text. target_system "data_store": each target is a key value of target_collection\'s unique key, the other fields the new column values. ' +
-      'You get back counts only; the user reviews the per-target before/after. Nothing is applied.',
+      'You get back counts only; the user reviews the per-target before/after and approves the run — you cannot apply it. ' +
+      'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -80,6 +86,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         source_format: { type: 'string', enum: ['json', 'csv'], description: 'Format of source_file. Default: csv for a .csv path, json otherwise.' },
         source_collection: { type: 'string', description: 'Data-store collection holding the source rows. Give this or source_file.' },
         source_filter: { type: 'object', description: 'Optional filter for source_collection, same syntax as data_store_query.' },
+        atomic: { type: 'boolean', description: 'Write all targets or none (default false: targets are independent).' },
       },
       required: ['target_system'],
     },
@@ -129,11 +136,16 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         throw new BulkSourceError('target_system must be "workspace" or "data_store".');
       }
 
-      const status = ledger.recordDryRun({ createdBy: agent.currentThreadId, targetSystem: input.target_system, scope, targets });
+      const status = ledger.recordDryRun({
+        createdBy: agent.currentThreadId, targetSystem: input.target_system, scope, targets,
+        targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
+        atomic: input.atomic === true,
+      });
       return [
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
-        'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. Applying a run is not available yet.',
+        'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
+          'Only the user can approve and apply it; bulk_status shows how far it got.',
       ].join('\n');
     } catch (err: unknown) {
       if (err instanceof BulkSourceError) return `Error: ${err.message}`;

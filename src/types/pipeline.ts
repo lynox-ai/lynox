@@ -273,8 +273,12 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
  *  `notify` are deterministic side-effects that mint NO Run. This axis IS the
  *  money-vs-deterministic boundary, made legible in the schema. `backup`/`notify`
  *  are BUILT-IN effects (fixed capabilities, not user-formable) — distinct in kind
- *  from the user-formable `run_*`, but co-located here as the single dispatch axis. */
-export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify';
+ *  from the user-formable `run_*`, but co-located here as the single dispatch axis.
+ *  `bulk_apply` / `bulk_undo` are deterministic too: they write an APPROVED bulk run's
+ *  targets (PRD bulk-changes-reversible §3.4/§3.5) and mint no Run. Only the bulk
+ *  approval route creates them — `deriveSourceEffect` never yields them, so no
+ *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them. */
+export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo';
 
 /** An AGENT-TRIGGER — a rule the WorkerLoop fires to DO work for the user (the
  *  "act" side of the agent loop). Lives in the `triggers` table. Split from
@@ -329,4 +333,7 @@ export interface TriggerRecord {
    *  exempt). Fail-closed: a trigger created by anything other than an explicit
    *  human action lands unconfirmed. */
   confirmed_at?: string | undefined;
+  /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes, from
+   *  `condition_json.run_id`. Set only by the bulk approval route. */
+  bulk_run_id?: string | undefined;
 }
