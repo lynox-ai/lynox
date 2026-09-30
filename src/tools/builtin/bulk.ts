@@ -86,7 +86,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'Dry-run a change to many targets at once: record, per target, its current state and the state the change would produce — without writing anything. ' +
       'Targets and new states come from a source you prepared: a JSON or CSV file in the workspace (rows with a "target" field and either an "after" field or the new column values), or a data-store collection holding such rows. ' +
       'target_system "workspace": each target is a file path, "after" its full new text. target_system "data_store": each target is a key value of target_collection\'s unique key, the other fields the new column values. ' +
-      'target_system "http": each target is the https URL of one JSON resource on target_host, "after" a JSON object of the fields to set (text, number, true/false or null — no lists or nested objects); the engine then reads every target in the background with the host\'s stored API credential, so the counts are final only once bulk_status shows phase previewed. One external dry run at a time. ' +
+      'target_system "http": each target is the https URL of one JSON resource on target_host, "after" a JSON object of the fields to set (text, number, true/false or null — no lists or nested objects); once the user starts it, the engine reads every target in the background with the host\'s stored API credential, so the counts are final only once bulk_status shows phase previewed. One external dry run at a time. ' +
       'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it, and there is no screen or button for it you could point them to. ' +
       'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole.',
     input_schema: {
@@ -158,11 +158,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         }
         return [
           out.status.phase === 'planned'
-            ? 'External dry run queued — nothing was written. The engine now reads each target in the background.'
+            ? 'External dry run recorded — nothing was sent or written. Nothing is read either until the user starts it outside this chat.'
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
-          'Poll bulk_status with the run id until the phase is previewed. The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
-            'Only the user can approve it, outside this chat.',
+          'Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
+            'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
+            'Only the user can start and approve it, outside this chat.',
         ].join('\n');
       } else {
         throw new BulkSourceError('target_system must be "workspace", "data_store" or "http".');

@@ -95,11 +95,13 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
   });
 }
 
-function planRun(rows: { target: string; after: unknown }[]): string {
+/** Plan an external run and, unless `start` is false, start its read as the owner does. */
+function planRun(rows: { target: string; after: unknown }[], start = true): string {
   const targets = planExternal(rows, HOST, detectSecretInContent);
   const keys = targets.filter((t) => !('invalid' in t)).map((t) => t.key);
   const out = ledger.recordExternalPlan({ createdBy: 't', host: HOST, targets, contract: contractFor(keys) });
   if (!out.ok) throw new Error(out.reason);
+  if (start && out.status.phase === 'planned' && !ledger.resumePreview(out.status.id).ok) throw new Error('not started');
   return out.status.id;
 }
 
@@ -161,15 +163,24 @@ describe('planning an external run', () => {
     expect(parseBulkContract('{"grantedTools":[]}')).toBeNull();
   });
 
-  it('records the run as planned with its preview trigger, and sends nothing', async () => {
+  it('records the run as planned and waiting for the owner, arms nothing, and sends nothing (the start gate)', async () => {
     const s = shop();
     const restore = serve(s);
     try {
-      const runId = planRun([{ target: url(0), after: { price: '15.00' } }, { target: url(9), after: [] }]);
+      const runId = planRun([{ target: url(0), after: { price: '15.00' } }, { target: url(9), after: [] }], false);
       const st = ledger.getStatus(runId)!;
       expect([st.phase, st.targetSystem, st.unread, st.changes.invalid]).toEqual(['planned', `http:${HOST}`, 1, 1]);
-      const due = new TriggerStore(engineDb).getDue();
-      expect(due.map((t) => [t.id, t.effect, t.bulk_run_id])).toEqual([[bulkPreviewTriggerId(runId), 'bulk_preview', runId]]);
+      // The gate itself, asserted as state: halted with its fixed reason, no trigger at all.
+      expect(st.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+      const triggers = new TriggerStore(engineDb);
+      expect(triggers.getById(bulkPreviewTriggerId(runId))).toBeUndefined();
+      expect(triggers.getDue()).toEqual([]);
+      // Waiting for its start, it does not hold the one-external-run slot.
+      expect(planRun([{ target: url(1), after: { price: '1' } }], false)).toBeTruthy();
+      // The owner's start arms the preview trigger, due at once.
+      expect(ledger.resumePreview(runId).ok).toBe(true);
+      expect(ledger.getStatus(runId)!.haltReason).toBeNull();
+      expect(triggers.getDue().map((t) => [t.id, t.effect, t.bulk_run_id])).toEqual([[bulkPreviewTriggerId(runId), 'bulk_preview', runId]]);
       expect(s.requests).toEqual([]);
       // Nothing is approvable before the preview: no checksum is offered for a planned run.
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! })).toEqual({ ok: false, reason: 'wrong_phase' });
@@ -745,12 +756,14 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
       ]));
       const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1' } as unknown as IAgent;
       const planned = await bulkPlanTool.handler({ target_system: 'http', target_host: 'SHOP.example.com.', source_file: 'src.json' }, agent);
-      expect(planned).toContain('External dry run queued');
+      expect(planned).toContain('Nothing is read either until the user starts it outside this chat.');
       expect(planned).toContain('phase planned');
+      expect(planned).toContain(`Halted: ${BULK_HALT_REASONS.awaitingStart}.`);
       expect(planned).not.toContain(MARK);
       expect(s.requests).toEqual([]);
       const runId = /Bulk run ([0-9a-f-]{36})/.exec(planned)![1]!;
-      // A second external plan meanwhile is refused.
+      // The owner starts it; while it reads, a second external plan is refused.
+      expect(ledger.resumePreview(runId).ok).toBe(true);
       expect(await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent)).toMatch(/another external dry run/);
 
       const apiStore = new ApiStore();

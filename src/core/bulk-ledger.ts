@@ -129,6 +129,7 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
  * — would carry a target's strings into the model's context.
  */
 export const BULK_HALT_REASONS = {
+  awaitingStart: 'waiting for the owner to start reading the targets',
   failureRate: 'more than 5 % of the targets failed',
   consecutiveFailures: 'three targets in a row failed',
   timeBudget: 'the run used up its time budget',
@@ -386,18 +387,19 @@ export class BulkLedger {
 
   /**
    * Record an external plan (`http:<host>`, plan B §3): the run in phase `planned`, its
-   * contract, every target with its after-state and no before-image, and the trigger of
-   * the preview effect that reads them — in one transaction (plan §6 Q3(a)). Sends
-   * nothing. While another external run of this instance is still reading, a second one
-   * is refused: an ordering rule, so plans against one host do not interleave. It is not
-   * what caps the requests — {@link BulkHostBudget} is.
+   * contract, every target with its after-state and no before-image — in one transaction
+   * (plan §6 Q3(a)). Sends nothing, and arms nothing: the run is halted with
+   * {@link BULK_HALT_REASONS.awaitingStart} until the owner starts the read through
+   * {@link resumePreview}. Every read carries the host's stored credential and may cost
+   * money on a per-call profile, so its start is a human step, like an approval — the
+   * host budget stays as a second line. While another external run is reading, a second
+   * plan is refused: an ordering rule, not a cap.
    */
   recordExternalPlan(params: {
     createdBy: string | undefined;
     host: string;
     targets: readonly ExternalPlanned[];
     contract: CapabilityContract;
-    now?: number | undefined;
   }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
     const seen = new Set<string>();
     for (const t of params.targets) {
@@ -408,7 +410,6 @@ export class BulkLedger {
     const id = randomUUID();
     const targetSystem = `http:${params.host}`;
     const valid = params.targets.some((t) => !('invalid' in t));
-    const now = params.now ?? Date.now();
     const insertTarget = db.prepare(
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
        VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
@@ -419,14 +420,17 @@ export class BulkLedger {
       ).get() as { n: number };
       if (reading.n > 0) return false;
       db.prepare(
-        `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+        `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       ).run(
         id, params.createdBy ?? null,
         this.engineDb.keyedHash(rulePairs(targetSystem, params.host, params.targets)),
         // Nothing valid to read: the run is complete as planned.
         targetSystem, valid ? 'restorable' : 'none', valid ? 'planned' : 'previewed', params.targets.length,
         JSON.stringify(params.contract),
+        // The start gate: nothing is read until the owner starts it (resumePreview). A plan
+        // is what the model can make; a request with the host's credential is not.
+        valid ? BULK_HALT_REASONS.awaitingStart : null,
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -437,7 +441,6 @@ export class BulkLedger {
         // `update` until the preview reads the target; `unread` in the status says so.
         insertTarget.run(id, seq, key, 'update', 'restorable', this.engineDb.enc(JSON.stringify(t.after)), null);
       });
-      if (valid) this.armPreviewTrigger(id, now);
       this.pruneUnapproved();
       return true;
     })();
@@ -832,8 +835,9 @@ export class BulkLedger {
   }
 
   /**
-   * Start a halted preview again (plan §6 Q5): the human route clears the halt and the
-   * preview trigger is due at once. Targets already read stay read.
+   * Start a planned run's read, or start it again after a halt (plan §6 Q5): the owner's
+   * route clears the halt — the start gate included — and the preview trigger is due at
+   * once. Targets already read stay read.
    */
   resumePreview(runId: string, now: number = Date.now()):
     { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' } {
