@@ -351,6 +351,17 @@ describe('mail_send tool', () => {
     expect(out).toContain('JWT token');
     expect(provider.send).not.toHaveBeenCalled();
   });
+
+  it('blocks a provider key the scan did not list by name, and says how to phrase example text', async () => {
+    const tool = createMailSendTool(registry);
+    const fakeStripe = 'sk_' + 'live_' + 'A1b2C3d4E5f6G7h8I9j0';
+    const out = await tool.handler({ to: 'a@x.com', subject: 'setup', body: `Use this key: ${fakeStripe}` }, yesAgent);
+    expect(out).toBe(
+      'mail_send blocked: the message appears to contain a Stripe API key. A real key is never sent by email. '
+      + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>) and send again.',
+    );
+    expect(provider.send).not.toHaveBeenCalled();
+  });
 });
 
 // ── mail_reply ─────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js'
 import { contractGrants } from '../permission-guard.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
-import type { SecretShape } from '../../core/secret-store.js';
+import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import {
   extractHtmlText,
@@ -347,18 +347,39 @@ export { HTTP_TOOL_HOURLY_LIMIT as DEFAULT_HOURLY_LIMIT, HTTP_TOOL_DAILY_LIMIT a
 
 // === Egress control: detect data exfiltration attempts ===
 
-// Credential shapes that must never appear in an outbound request, taken from the
-// shared list rather than a copy of it: the families this scan has covered, in
-// both their shared and their wider `egress-wide` spellings. `contextual` (URL
-// userinfo, `Bearer …`) and `generic` (any long token) stay out on purpose:
-// outbound bodies and headers legitimately carry long IDs and auth headers, and
-// blocking those would refuse ordinary API calls.
-const EGRESS_SHAPE_LABELS: ReadonlySet<string> = new Set([
-  'Anthropic API key', 'OpenAI-style API key', 'GitHub token', 'AWS access key',
-  'Google API key', 'private key', 'JWT token',
-]);
+// Credential shapes that must never appear in an outbound request, chosen by
+// KIND from the shared list: every provider key format (`vendor`), private-key
+// blocks, JWTs, and this scan's own wider spellings (`egress-wide`). A format
+// added to the shared list is scanned here without an edit in this file.
+// `contextual` (URL userinfo, `Bearer …`) and `generic` (any long token) stay
+// out on purpose: outbound bodies and headers legitimately carry long IDs and
+// auth headers, and blocking those would refuse ordinary API calls.
+const EGRESS_SHAPE_KINDS: ReadonlySet<SecretShapeKind> = new Set(['vendor', 'key-block', 'jwt', 'egress-wide']);
 const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
-  SECRET_SHAPES.filter((s) => EGRESS_SHAPE_LABELS.has(s.label));
+  SECRET_SHAPES.filter((s) => EGRESS_SHAPE_KINDS.has(s.kind));
+
+/**
+ * What the model reads when a request is refused for carrying a credential.
+ * The scanner cannot tell a real key from a placeholder written in the same
+ * format, so the text names the way out for each: a real key goes through a
+ * connected service (the engine attaches it, and that slot is not scanned);
+ * example text is rewritten without the key's format.
+ */
+export function egressSecretRefusal(where: string, label: string): string {
+  return `Blocked: ${where} appears to contain a ${label}. A key is never sent to an external server from a request you compose. `
+    + `If this is a real key for the service you are calling, connect that service once with api_setup — the engine then attaches the key itself, in the header or query parameter the service expects, and the request goes through without it in your input. `
+    + `If it is example or placeholder text, write it without the key's format (for example <your token>).`;
+}
+
+/**
+ * The same refusal for outgoing mail. There is no connected-service route for a
+ * key in a mail — a real key is never sent by email — so the only way out named
+ * is the one for example text.
+ */
+export function mailSecretRefusal(tool: 'mail_send' | 'mail_reply', label: string): string {
+  return `${tool} blocked: the message appears to contain a ${label}. A real key is never sent by email. `
+    + `If it is example or placeholder text, write it without the key's format (for example <your token>) and send again.`;
+}
 
 /**
  * Scan a string for embedded secrets/credentials.
@@ -1063,7 +1084,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (attachedAuthSlot !== undefined && headerName.toLowerCase() === attachedAuthSlot) continue;
       const headerMatch = detectSecretInContent(headerValue);
       if (headerMatch) {
-        blockedVerbatim(`Blocked: request header '${headerName}' appears to contain a ${headerMatch}. Sending secrets to external servers is not allowed.`);
+        blockedVerbatim(egressSecretRefusal(`request header '${headerName}'`, headerMatch));
       }
     }
 
@@ -1087,7 +1108,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
-        blockedVerbatim(`Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`);
+        blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch));
       }
     }
 
@@ -1132,7 +1153,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (input.body && WRITE_METHODS.has(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
-        blockedVerbatim(`Blocked: request body appears to contain a ${secretMatch}. Sending secrets to external servers is not allowed.`);
+        blockedVerbatim(egressSecretRefusal('request body', secretMatch));
       }
     }
 

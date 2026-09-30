@@ -7,7 +7,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, detectSecretInContent, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -785,7 +785,7 @@ describe('httpRequestTool', () => {
       expect(detectSecretInContent('key: sk-ant-api03-abc123def456ghi789jkl012mno345')).toBe('Anthropic API key');
     });
 
-    it('detects GitHub personal access token', () => {
+    it('detects a GitHub token', () => {
       expect(detectSecretInContent('token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij')).toBe('GitHub token');
     });
 
@@ -821,6 +821,23 @@ describe('httpRequestTool', () => {
       expect(detectSecretInContent(`payload=${value}&x=1`)).toBe(label);
     });
 
+    // Every provider key format in the shared list is scanned, chosen by kind —
+    // including formats the scan did not list by name before.
+    it.each([
+      ['OpenAI API key', 'sk-' + 'proj-' + 'Ab12_Cd34-' + 'V'.repeat(16)],
+      ['Stripe API key', 'sk_' + 'live_' + 'W'.repeat(20)],
+      ['Slack token', 'xox' + 'b-' + '1234567890-' + 'X'.repeat(12)],
+      ['Shopify token', 'shp' + 'at_' + '0123456789abcdef'.repeat(2)],
+      ['Google OAuth token', 'ya29.' + 'Y'.repeat(24)],
+    ])('detects a %s in outbound content', (label, value) => {
+      expect(detectSecretInContent(`payload=${value}&x=1`)).toBe(label);
+    });
+
+    it('lets a placeholder written without the key format through', () => {
+      expect(detectSecretInContent('Paste your token here: ghp_<your token>, then save.')).toBeNull();
+      expect(detectSecretInContent('Set STRIPE_KEY=sk_live_<your key> in the dashboard.')).toBeNull();
+    });
+
     it.each([
       // The scan's wider spellings still apply: a key glued to a word
       // character, and a JWT whose payload segment is not `eyJ`.
@@ -839,6 +856,25 @@ describe('httpRequestTool', () => {
       'see https://example.com/docs and http://localhost:8080/health',
     ])('does not flag ordinary outbound content: %s', (value) => {
       expect(detectSecretInContent(value)).toBeNull();
+    });
+  });
+
+  describe('egress refusal text', () => {
+    // What the model reads is prompt surface: it has to name a way out for a
+    // real key AND for example text, because the scan cannot tell them apart.
+    it('names the connected-service route and the placeholder route', () => {
+      expect(egressSecretRefusal('request body', 'Stripe API key')).toBe(
+        'Blocked: request body appears to contain a Stripe API key. A key is never sent to an external server from a request you compose. '
+        + 'If this is a real key for the service you are calling, connect that service once with api_setup — the engine then attaches the key itself, in the header or query parameter the service expects, and the request goes through without it in your input. '
+        + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>).',
+      );
+    });
+
+    it('for mail, names only the placeholder route — a real key is never mailed', () => {
+      expect(mailSecretRefusal('mail_send', 'Slack token')).toBe(
+        'mail_send blocked: the message appears to contain a Slack token. A real key is never sent by email. '
+        + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>) and send again.',
+      );
     });
   });
 
@@ -2887,6 +2923,20 @@ describe('httpRequestTool', () => {
       );
       expect(result).toContain('HTTP 200');
       expect(result).not.toContain('Blocked');
+    });
+
+    it('the same model-set auth header to a host WITHOUT a profile is refused, naming the route', async () => {
+      // The twin that makes the two above mean something: without the profile the
+      // scan does fire on this key.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible(
+        { url: 'https://api.stripe.com/v1/balance', headers: { Authorization: `Bearer ${STRIPE_KEY}` } },
+        makeAgent(),
+      );
+      expect(result).toContain('Blocked');
+      expect(result).toContain('Stripe API key');
+      expect(result).toContain('connect that service once with api_setup');
     });
 
     it('a query-auth profile host may carry its key in the URL', async () => {
