@@ -13,6 +13,9 @@ import { deriveSourceEffect } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
+import { taskListTool } from '../tools/builtin/task.js';
+import { recallToolResultTool } from '../tools/builtin/recall-tool-result.js';
+import { ToolResultBlobStore } from './tool-result-blob-store.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { IAgent, MemoryScopeRef, TriggerRecord } from '../types/index.js';
@@ -915,5 +918,123 @@ describe('data-store runs', () => {
     const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: (run) => bulkWriterFor(run, store) });
     expect(out.status).toBe('refused');
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+  });
+});
+
+// PRD §7(i): before-images reach no model context. Enumerated by CHANNEL — every place a
+// bulk run produces text the model reads — rather than by grepping consumers: the tool
+// results of bulk_plan/bulk_status (which a session stores as thread messages and a
+// compaction parks for recall_tool_result), the bulk trigger as task_list shows it (its
+// title and, after a failed run, its last result), and the worker's run record and
+// notification. Content, target keys and after-states each carry their own marker.
+describe('§7(i) before-images reach no model context', () => {
+  const IN_BEFORE = 'ZXQ-BEFORE-IMAGE';
+  const IN_AFTER = 'ZXQ-AFTER-STATE';
+  const IN_KEY = 'zxq-key-name';
+
+  it('none of the channels carries a target\'s content, key or after-state', async () => {
+    mkdirSync(join(ws, 'pages'));
+    const rows: { target: string; after: string }[] = [];
+    for (let i = 0; i < 20; i++) {
+      const name = `pages/${IN_KEY}-${String(i)}.md`;
+      if (i < 15) writeFileSync(join(ws, name), `${IN_BEFORE} ${String(i)}\n`);
+      rows.push({ target: name, after: `${IN_AFTER} ${String(i)}\n` });
+    }
+    // One row the plan refuses, so the `invalid (reason n)` part of the status renders.
+    rows.push({ target: `pages/${IN_KEY}-bad.md`, after: 42 as unknown as string });
+    const seen: string[] = [];
+    writeFileSync(join(ws, 'src.json'), JSON.stringify(rows));
+    const planned = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent());
+    seen.push(planned);
+    const runId = runIdOf(planned);
+    approve(runId);
+
+    // The worker path, with its run record and notification captured.
+    const triggers = new TriggerStore(engineDb);
+    const notify = vi.fn(async (msg: unknown) => { seen.push(JSON.stringify(msg)); });
+    const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+      seen.push(result);
+      triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+      triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+    });
+    const engine = {
+      getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false, recordTaskRun }),
+      getBulkLedger: () => ledger,
+      getDataStore: () => store,
+      getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+      getUserConfig: () => ({}),
+    } as unknown as Engine;
+    // A conflict on one target, so the run's result carries more than a clean count.
+    writeFileSync(join(ws, `pages/${IN_KEY}-0.md`), `changed by someone else ${IN_BEFORE}\n`);
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
+    await loop.tick();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
+
+    // A second run that FAILS at the worker (an expired approval), so task_list renders
+    // the trigger's last result — the failed-run detail line is where a result shows.
+    rmSync(join(ws, 'src.json'));
+    writeFileSync(join(ws, 'src2.json'), JSON.stringify(rows.map((r) => ({ ...r, after: `${r.after}${IN_AFTER}-2` }))));
+    const planned2 = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src2.json' }, agent());
+    seen.push(planned2);
+    const runId2 = runIdOf(planned2);
+    approve(runId2, { now: Date.now() - 2 * 24 * 60 * 60_000 });
+    recordTaskRun.mockClear();
+    await loop.tick();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 25_000 });
+    expect(recordTaskRun.mock.calls[0]![2]).toBe('failed');
+
+    // An undo planned, approved and run, so the undo run's rows are in the ledger too.
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    // The undo is the path that writes before-images BACK — its summary is a channel too.
+    const undone = await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(workspaceWriter()));
+    expect(undone.status).toBe('done');
+    seen.push(undone.summary);
+
+    // Both worker runs notified; the notification is a channel only if it was sent.
+    expect(notify).toHaveBeenCalledTimes(2);
+
+    const statuses = await bulkStatusTool.handler({}, agent());
+    expect(statuses).toContain('after_not_text 1');
+    seen.push(statuses);
+    for (const id of [runId, runId2, undo.status.id]) seen.push(await bulkStatusTool.handler({ run_id: id }, agent()));
+
+    // task_list as the model calls it, over the bulk triggers.
+    const bulkTriggers = [runId, runId2, undo.status.id].map((id) => triggers.getById(`bulk-${id}`)!);
+    const listAgent = {
+      toolContext: { taskManager: { list: () => [], listTriggers: () => bulkTriggers } },
+      activeScopes: [],
+    } as unknown as IAgent;
+    const listed = await taskListTool.handler({}, listAgent);
+    expect(listed).toContain(`Bulk run ${runId2}`);
+    // The failed run's result is rendered — the line that could carry a leak.
+    expect(listed).toContain('last run FAILED');
+    seen.push(listed);
+
+    // The same tool results after a compaction parked them, recalled by handle.
+    const blobs = new ToolResultBlobStore();
+    const messages = seen.slice(0, 4).map((content, i) => [
+      { role: 'assistant' as const, content: [{ type: 'tool_use' as const, id: `tu-${String(i)}`, name: 'bulk_status', input: {} }] },
+      { role: 'user' as const, content: [{ type: 'tool_result' as const, tool_use_id: `tu-${String(i)}`, content }] },
+    ]).flat();
+    const handles = blobs.evictFrom(messages, 0);
+    expect(handles.length).toBeGreaterThan(0);
+    for (const h of handles) {
+      seen.push(await recallToolResultTool.handler({ id: h.id }, { toolResultBlobStore: blobs } as unknown as IAgent));
+    }
+
+    // Positive control: the markers are really there — in the files and, decrypted, in
+    // the ledger — so their absence below is not the absence of anything to leak.
+    const preview = JSON.stringify(ledger.getPreview(runId));
+    expect(preview).toContain(IN_BEFORE);
+    expect(preview).toContain(IN_AFTER);
+    expect(preview).toContain(IN_KEY);
+    expect(readFileSync(join(ws, `pages/${IN_KEY}-0.md`), 'utf-8')).toContain(IN_BEFORE);
+
+    expect(seen.length).toBeGreaterThan(10);
+    for (const text of seen) {
+      for (const mark of [IN_BEFORE, IN_AFTER, IN_KEY]) expect(text, text.slice(0, 200)).not.toContain(mark);
+    }
   });
 });
