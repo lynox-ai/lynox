@@ -25,18 +25,13 @@
  * two, and one that cannot quietly evaporate.
  *
  * ⚠ **What this does NOT buy, because the first draft of this comment claimed
- * it and a review refuted it:** it is not a hardening. The argument was that a
- * file the `bash` tool can rewrite is an entrance into our own briefing, and
- * that a constant closes it. Measured in the published image: `/app/dist` and
- * every file under it are owned `lynox:lynox` mode `-rw-r--r--`, and the
- * process runs as uid 1001 `lynox`. Only `/app` itself is root-owned, which
- * stops a new entry being created beside `dist` and nothing more. So
- * `dist/core/suggested-apis.js` is exactly as writable as the JSON would have
- * been, and on an npm self-host both always sat in one directory with one
- * owner. Worse for the argument: anyone who can write that file can equally
- * write `dist/tools/permission-guard.js`, so this catalogue was never the
- * foothold worth taking. The move relocates the same reachability; it does not
- * remove it.
+ * it and a review refuted it:** it is not a hardening, and nothing here should
+ * be cited as one. The draft argued that keeping the text in a data file made
+ * it an editable input and that a constant closes that. Measured in the
+ * published image, the built module and a data file would sit under the same
+ * owner and the same mode, so the move changes where the text lives and not
+ * what can reach it. If you need that property, it is a separate piece of work
+ * with its own measurement — this is not it.
  *
  * ⚠ Its neighbour {@link ./oauth-presets.ts} argues that the OAuth preset
  * register must not be a file, and names this catalogue as the justified

@@ -17,13 +17,11 @@
  * ⚠ The catalogue used to BE that file, and this paragraph cited it as the
  * contrast. It is a compiled constant now ({@link ./suggested-apis.ts}) — but
  * it moved because the file never reached the container, NOT because anyone
- * showed a file was unsafe for it. Do not read the move as agreement: in the
- * published image `dist/` is owned by the process user, so a constant there is
- * no less reachable than a data file would have been. The ranking this
- * paragraph draws is untouched by that, and it is the ranking that matters
- * here: a preset decides which site a user is sent to and hands consent to,
- * enforced by host validation below; a hint is text the model must ask about
- * before acting on.
+ * showed a file was unsafe for it. So do not read the move as this argument
+ * winning a second case. The ranking here is untouched by it and is the part
+ * that matters: a preset decides which site a user is sent to and hands
+ * consent to, enforced by host validation below; a hint is text the model must
+ * ask about before acting on.
  *
  * Every function here takes the register as a parameter with the constant as
  * its default, so tests can hand in their own. That is a test seam, not an
