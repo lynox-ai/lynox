@@ -56,11 +56,11 @@ describe('resolveTools — the readOnly ceiling', () => {
     expect(names(resolveTools(['bash', 'write_file'], ceiling, BASE))).toEqual([]);
   });
 
-  it('subtracts deniedTools at the exit, which tier 1 never did', () => {
+  it('subtracts deniedTools on every route in, not only through the profile tier', () => {
     const denying: ToolResolutionProfile = {
       readOnly: true, allowedTools: ['read_file', 'task_list'], deniedTools: ['read_file'],
     };
-    // Both entry routes must agree: via an explicit list, and via the profile alone.
+    // Both routes in must agree: via an explicit list, and via the profile alone.
     expect(names(resolveTools(['read_file', 'task_list'], denying, BASE))).toEqual(['task_list']);
     expect(names(resolveTools(undefined, denying, BASE))).toEqual(['task_list']);
   });
@@ -96,8 +96,9 @@ describe('resolveTools — the readOnly ceiling', () => {
         }
       }
     }
-    // Not vacuous: 60 combinations ran, and at least one of them returns something.
-    expect(checked).toBe(explicits.length * denies.length * excludes.length);
+    // The count is written out, not computed from the arrays above: deriving it from
+    // them would let shrinking any array to one element pass unnoticed.
+    expect(checked).toBe(60);
     expect(names(resolveTools(undefined, {
       readOnly: true, allowedTools: ['read_file', 'task_list'],
     }, BASE)).length).toBeGreaterThan(0);

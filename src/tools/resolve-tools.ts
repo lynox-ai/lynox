@@ -47,10 +47,11 @@ export function resolveTools(
   // ceiling, not an absent one.
   if (profile?.readOnly !== true) return selected;
   const ceiling = new Set(profile.allowedTools ?? []);
-  // `deniedTools` is subtracted HERE as well, not only inside tier 2: tier 1 never
-  // applied it, so a name the role denies would otherwise survive an explicit list
-  // that happened to sit inside the ceiling. No current role denies a tool its own
-  // ceiling holds; the exit is where that stays true without anyone checking.
+  // `deniedTools` is subtracted HERE as well, so that for a ceiling role the
+  // subtraction holds on every route into this function rather than on one of them.
+  // Set-filtering is idempotent, so tier 2 applying it first changes nothing. No
+  // current role denies a tool its own ceiling holds; the exit is where that stays
+  // true without anyone checking.
   const denied = new Set(profile.deniedTools ?? []);
   return selected.filter(t => ceiling.has(t.definition.name) && !denied.has(t.definition.name));
 }

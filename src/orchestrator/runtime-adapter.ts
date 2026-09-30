@@ -910,28 +910,56 @@ export async function spawnInline(
   // the inline pool minus bash when it declared nothing (F2/D2).
   const roleProfile = resolved ? roleToolProfile(resolved) : null;
   const stepToolNames = inlineStepToolNames(step);
-  // Deliberately keyed on the DECLARED `allowTools`, not on the profile's derived
-  // allowlist: a `readOnly` role now has one, and switching this predicate to it
-  // would WIDEN an inline step from its declared set to the whole parent set. The
-  // narrowing below happens first and `resolveTools` intersects with the surface
-  // after it, so a readOnly step lands on (declared ∩ surface) — narrower than the
-  // surface, which is the safe side of the asymmetry.
-  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => stepToolNames.has(t.definition.name));
+  // Keyed on the DECLARED `allowTools` and explicitly NOT on the profile's derived
+  // allowlist, which every `readOnly` role has: switching it would widen an inline
+  // step from its declared set to the whole parent set. The `readOnly` term carries
+  // the same rule for the one shape that has both — a role with `readOnly` AND its
+  // own `allowTools` — so such a role narrows to the step's declared set like any
+  // other readOnly role instead of bypassing it. `resolveTools` then intersects with
+  // the surface, so a readOnly step lands on (declared ∩ surface ∩ allowTools), which
+  // is narrower than the surface either way.
+  const roleGrantsFullParent = resolved?.allowTools !== undefined && resolved.readOnly !== true;
+  const filteredParent = roleGrantsFullParent
+    ? parentTools
+    : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
-  // Symmetry with the agent runtime's refusal above, and the reason it is needed
-  // here: a step that NAMES tools and resolves to none runs and does nothing, which
-  // is the one outcome both runtimes should reach loudly or not at all. Only the
-  // role's ceiling can produce it at this point — the filters below (human-in-the-
-  // loop, user-disabled tools) are the operator's own choices and may legitimately
-  // empty a step.
-  if (resolved?.readOnly === true && step.tools !== undefined && step.tools.length > 0
-      && tools.length === 0) {
-    throw new Error(
-      `Step "${step.id}" declares the read-only role "${step.role ?? ''}" together with `
-      + `[${step.tools.join(', ')}] — a read-only role holds none of those, so the step `
-      + `would run with no tools at all. Name tools a read-only role can hold, or drop `
-      + `the role from this step.`,
-    );
+  // Symmetry with the agent runtime's refusal above: a step that NAMES tools and
+  // cannot do the thing it named runs and does nothing, which is the one outcome both
+  // runtimes should reach loudly or not at all.
+  //
+  // Scoped to a `readOnly` role on purpose, and NOT because the ceiling is the only
+  // way to empty a grant — it is not. A declared empty `tools: []` empties it
+  // deliberately (a pure-reasoning step, see `inlineStepToolNames`), and a declared
+  // name outside `INLINE_CORE_TOOLS` empties it with no role involved. Both predate
+  // this and neither is the claim being kept here.
+  //
+  // `step.tool` counts as a declaration alongside `step.tools`: a captured replay step
+  // exists to make exactly that one call, so a non-empty grant that happens to lack it
+  // is the same silent no-op one level down. The filters below (human-in-the-loop,
+  // user-disabled tools) may still empty a step — those are the operator's choices.
+  const declaredToolNames = [
+    ...(step.tools ?? []),
+    ...(step.tool !== undefined ? [step.tool] : []),
+  ];
+  if (resolved?.readOnly === true && declaredToolNames.length > 0) {
+    const grantedNames = new Set(tools.map(t => t.definition.name));
+    const roleName = step.role ?? '';
+    if (tools.length === 0) {
+      throw new Error(
+        `Step "${step.id}" declares the read-only role "${roleName}" together with `
+        + `[${declaredToolNames.join(', ')}] — a read-only role holds none of those, so the `
+        + `step would run with no tools at all. Name tools a read-only role can hold, or `
+        + `drop the role from this step.`,
+      );
+    }
+    if (step.tool !== undefined && !grantedNames.has(step.tool)) {
+      throw new Error(
+        `Step "${step.id}" replays "${step.tool}" and declares the read-only role `
+        + `"${roleName}", which does not hold that tool — the step would run without the `
+        + `one call it exists to make. Drop the role from this step, or replay a tool a `
+        + `read-only role can hold.`,
+      );
+    }
   }
   // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
   // Belt-and-suspenders: validator/scheduler should already block this path,
