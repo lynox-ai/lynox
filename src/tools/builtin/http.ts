@@ -567,9 +567,11 @@ const API_SETUP_TOOL_NAME = 'api_setup';
  * the effect, rather than inferred at runtime from an object's shape.
  */
 export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IAgent): boolean {
-  // Condition 2 first, and deliberately: on a fabricated agent
-  // `getAvailableTools` is not a function, so asking condition 1 first would
-  // throw the very TypeError this is here to avoid.
+  // Condition 2 reads first for legibility only. An earlier comment claimed
+  // that asking condition 1 first would throw a TypeError on a fabricated
+  // agent; it would not, because condition 1 carries its own `typeof` guard
+  // before it calls anything. Both orders are safe, and saying otherwise
+  // invented a correctness reason for a formatting choice.
   const counters: unknown = agent.sessionCounters;
   if (typeof counters !== 'object' || counters === null) return false;
   if (typeof (counters as { httpRequests?: unknown }).httpRequests !== 'number') return false;
@@ -624,13 +626,18 @@ const oauthRenewalsInFlight = new Map<string, Promise<void>>();
  * it calls is the only thing that writes state, and it writes no revocation it
  * has not proven.
  *
- * ⚠ Residue, named rather than left for a reader to discover: there is no
- * back-off after a failure. A profile whose renewal keeps failing is retried on
- * every request that reaches the buffer, at up to the exchange timeout each
- * time, and each attempt that reaches the POST charges the per-session HTTP
- * budget. That is bounded by the budget itself and it does not corrupt state, so
- * it is left as cost rather than answered with a cache that would also refuse a
- * provider that has recovered.
+ * ⚠ Residue, named rather than left for a reader to discover — and LARGER than
+ * a first version of this note said. There is no back-off after a failure, so a
+ * profile whose renewal keeps failing is retried on every request that reaches
+ * the buffer, at up to sixteen seconds each.
+ *
+ * That first note called the cost "bounded by the session budget". It is not.
+ * The budget is charged by the exchange's callback AFTER a response arrives, so
+ * a token endpoint that HANGS is never charged at all: the ceiling of a hundred
+ * requests bounds the triggering calls, not the renewals that time out. State is
+ * still not corrupted, so this stays a cost rather than a cache that would also
+ * refuse a provider that has recovered — but anyone deciding whether to add
+ * back-off should know which of the two numbers actually binds.
  */
 async function renewExpiringOAuthToken(
   profileId: string,
@@ -678,32 +685,74 @@ async function runOAuthRenewal(
     return;
   }
 
-  // The RETURN VALUE is read, and that is a correction rather than an addition.
-  // The first version discarded it and a comment claimed the two catches above
-  // meant a non-transient failure "must not be quiet". Measured: the
-  // `fetch_token` branch throws NOWHERE — every one of its failures is a
-  // `return` of a string, including the one that says the per-session HTTP
-  // budget is exhausted. So the catch below fires for almost nothing, and
-  // discarding the string made every real refusal silent. (The earlier count of
-  // "one throw" came from grepping for the WORD: the only two occurrences are in
-  // comments.)
+  // The RETURN VALUE is read, because almost every failure IS one. Discarding it
+  // made every refusal silent while a comment claimed the two catches above
+  // meant a non-transient failure "must not be quiet".
+  //
+  // ⚠ Two things that comment got wrong, both found by review rather than by a
+  // measurement of mine:
+  //
+  //   · It said the branch "throws nowhere". It does: `secretStore.set` is
+  //     called unguarded for the access token, and again for a rotated refresh
+  //     token, in the `fetch_token` success path. The count behind the wrong
+  //     claim was of `throw` STATEMENTS, which is not the same question as what
+  //     can throw — and a failing vault write after the provider has already
+  //     rotated is the worst outcome this path has, because the presented
+  //     refresh token is spent and the new one was not stored. So the catch
+  //     logs rather than swallowing.
+  //   · It filtered on `Error:`, and nine of this branch's returns do not start
+  //     that way — including every `Token exchange failed with HTTP …`, which is
+  //     the provider rejecting the refresh token and therefore the LIKELIEST
+  //     renewal failure of all. The success shape is the narrow one, so that is
+  //     what gets matched instead.
   try {
     const answer = await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
-    if (typeof answer === 'string' && answer.startsWith('Error:')) {
+    if (typeof answer !== 'string' || !answer.startsWith('Token exchange OK')) {
       // stderr, not a refusal to the model: the stored token is still valid for
-      // at least the buffer, so the request continues. This exists so an
-      // operator reading logs can tell a renewal that was refused from one that
-      // never ran.
-      process.stderr.write(
-        `[lynox:http] oauth token renewal refused for profile "${profileId}": ${answer.slice(0, 300)}\n`,
-      );
+      // at least the buffer, so the request continues. This is what lets an
+      // operator tell a renewal that was refused from one that never ran.
+      writeRenewalFailure(profileId, 'refused', typeof answer === 'string' ? answer : String(answer), agent);
     }
-  } catch {
-    // Reached only if something under `fetch_token` throws rather than returning
-    // — a transport or JSON failure it does not convert. The token in the vault
-    // is still valid for at least the buffer, so failing the request would be
-    // the wrong trade.
+  } catch (err) {
+    // A throw here is a vault write that failed, or something under the exchange
+    // that it does not convert. Either way it must not be silent: the request
+    // continues on the stored token, but the grant may now be broken in a way
+    // only a log will show.
+    writeRenewalFailure(profileId, 'threw', err instanceof Error ? err.message : String(err), agent);
   }
+}
+
+/**
+ * One sink for a failed renewal, so the two shapes cannot drift apart.
+ *
+ * The detail is MASKED and stripped of control characters, and neither is
+ * decoration:
+ *   · `exchangeToken` puts the RAW `token_url` into its failure message, and
+ *     `vetTokenEndpoint` in that same file says why that matters — "the raw
+ *     value can hold anything somebody pasted, including a credential". Nothing
+ *     masks `process.stderr.write`, so masking has to happen at the call.
+ *   · the same string can carry a provider's own text, and a newline in it would
+ *     forge a log line.
+ */
+function writeRenewalFailure(
+  profileId: string,
+  kind: 'refused' | 'threw',
+  detail: string,
+  agent: import('../../types/index.js').IAgent,
+): void {
+  let masked = detail;
+  try {
+    masked = agent.secretStore?.maskAll?.(detail) ?? detail;
+  } catch {
+    // A masker that throws must not turn a log line into a failed request; the
+    // unmasked string is then NOT written, because the whole point of this step
+    // is that the raw value may hold a credential.
+    masked = '<detail withheld: masking failed>';
+  }
+  const oneLine = masked.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ').slice(0, 300);
+  process.stderr.write(
+    `[lynox:http] oauth token renewal ${kind} for profile "${profileId}": ${oneLine}\n`,
+  );
 }
 
 async function attachEngineManagedAuth(
@@ -812,8 +861,16 @@ async function attachEngineManagedAuth(
     // `resolve` is silent and publishes nothing, so the quantity the swap changes
     // was not one the instrument could report. Measured properly, by recording
     // what `resolveSecretRefs` is asked for: in this order a refused request
-    // resolves NOTHING; with the two swapped it resolves client_id, client_secret
-    // and the refresh token.
+    // reads neither the client id nor the client secret; with the two swapped it
+    // reads both.
+    //
+    // ⚠ NOT "resolves nothing", which an earlier wording claimed and this file's
+    // own test contradicts — the revoked-grant check above reads the refresh key
+    // itself, deliberately, to decide whether the recorded revocation still
+    // applies. The property is about the CLIENT SECRET, and it is narrower than
+    // the first wording: inside `fetch_token` several other refusals do come
+    // after those reads, so this order buys the revoked case and not a general
+    // rule.
     //
     // `fetch_token` does short-circuit on a revoked grant before it POSTs and
     // before any secret WRITE (`api-setup.ts`, "posting the very token the

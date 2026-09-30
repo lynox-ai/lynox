@@ -7761,20 +7761,53 @@ export class LynoxHTTPApi {
         if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
           secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
         }
-        const expiry = tokenExpiryFrom(parsed.expires_in);
-        const oauthNext = { ...profile.auth?.oauth };
-        if (expiry === 'unknown') delete oauthNext.token_expires_at;
-        else oauthNext.token_expires_at = expiry;
-        // `apisDir` for the same reason `api_setup` passes it: an engine without
-        // an `engine.db` has no ConnectionStore, and `save` then persists only
-        // when it is told where to. Without it the stamp would live in memory
-        // until the next restart, which is the shape of a fix that works in a
-        // test and not on disk.
-        const { getLynoxDir } = await import('../core/config.js');
-        apiStore.save(
-          { ...profile, auth: { ...profile.auth, oauth: oauthNext } } as typeof profile,
-          join(getLynoxDir(), 'apis'),
-        );
+        // RE-READ, never the snapshot. `profile` was fetched before
+        // `exchangeToken`, which can take fifteen seconds while the user is on
+        // the provider's consent screen — and a `fetch_token` or an
+        // `api_setup update` can complete inside that window. Saving the
+        // pre-exchange copy would write its `oauth_grant` back over the newer
+        // one, and `oauth_grant.written` is the list a later delete uses to
+        // purge tokens: lose it and the delete stops purging what the concurrent
+        // exchange wrote. Worse, if the profile was DELETED meanwhile, `save`
+        // would bring it back, because `_admit` validates shape and says nothing
+        // about existence.
+        //
+        // This is the same reason `persistGrant` re-reads and answers `'gone'`
+        // (`tools/builtin/api-setup.ts › persistGrant`). The first version of
+        // this block spread the stale snapshot and a review caught it.
+        const fresh = apiStore.get(signed.profileId);
+        if (fresh !== undefined) {
+          const expiry = tokenExpiryFrom(parsed.expires_in);
+          const oauthNext = { ...fresh.auth?.oauth };
+          if (expiry === 'unknown') delete oauthNext.token_expires_at;
+          else oauthNext.token_expires_at = expiry;
+          // `apisDir` for the same reason `api_setup` passes it: an engine
+          // without an `engine.db` has no ConnectionStore, and `save` then
+          // persists only when it is told where to.
+          const { getLynoxDir } = await import('../core/config.js');
+          const saved = apiStore.save(
+            { ...fresh, auth: { ...fresh.auth, oauth: oauthNext } } as typeof fresh,
+            join(getLynoxDir(), 'apis'),
+          );
+          // The result is READ. `save` does not throw when `_admit` refuses — it
+          // returns `{ok:false}` — so ignoring it meant the tokens were stored,
+          // the stamp was not, and the page still said Connected. With a stale
+          // stamp left standing that is the every-request renewal latch this
+          // change exists to remove, so it is said out loud instead.
+          if (!saved.ok) {
+            process.stderr.write(
+              `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but its token lifetime could not be recorded: ${saved.reason}\n`,
+            );
+          }
+        } else {
+          // Deleted while the exchange was out. The tokens are already in the
+          // vault with no profile left to remove them — an orphan this route has
+          // always been able to leave, and not one this block should answer by
+          // recreating the profile.
+          process.stderr.write(
+            `[lynox:oauth] api_profile "${signed.profileId}" was deleted while its authorization was in flight; tokens were written and are now orphaned in the vault.\n`,
+          );
+        }
       } catch {
         sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');
         return;

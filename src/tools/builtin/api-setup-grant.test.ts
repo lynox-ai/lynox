@@ -54,6 +54,8 @@ interface MockVault {
   set(name: string, value: string): void;
   deleteSecret?(name: string): boolean;
   peek(name: string): string | undefined;
+  /** Optional, as on the real store — the renewal's log sink calls it if present. */
+  maskAll?(text: string): string;
 }
 
 /**
@@ -70,7 +72,7 @@ interface MockVault {
  */
 function makeVault(
   initial: Record<string, string>,
-  opts: { canDelete?: boolean; reads?: string[] } = {},
+  opts: { canDelete?: boolean; reads?: string[]; mask?: string; failSet?: string } = {},
 ): MockVault {
   const store: Record<string, string> = { ...initial };
   const note = (name: string): void => { opts.reads?.push(name); };
@@ -85,9 +87,19 @@ function makeVault(
       });
       try { return JSON.parse(resolved) as unknown; } catch { return input; }
     },
-    set: (name, value) => { store[name] = value; },
+    set: (name, value) => {
+      // `failSet` models the one failure `fetch_token` cannot convert: the vault
+      // write itself throwing, which happens AFTER the provider has already
+      // rotated the refresh token.
+      if (opts.failSet !== undefined) throw new Error(opts.failSet);
+      store[name] = value;
+    },
     peek: (name) => store[name],
   };
+  if (opts.mask !== undefined) {
+    const mask = opts.mask;
+    vault.maskAll = (text) => text.split(mask).join('[redacted]');
+  }
   if (opts.canDelete !== false) {
     vault.deleteSecret = (name) => {
       const had = name in store;
@@ -1622,19 +1634,30 @@ describe('the two properties the comments claim, which nothing was checking', ()
    * over. It therefore reaches the attach with no tool surface and no session
    * counters.
    *
-   * ⚠ This is the test that catches a revert, and it could not be written until
-   * that entry point landed on main — nothing on its own branch reads the field
-   * the gate is about. It is worth more than the predicate test above because it
-   * asserts the interaction at the seam where the two pieces actually meet.
+   * ⚠ WHAT THIS DOES AND DOES NOT PROVE, because a first version of this
+   * comment called it "the test that catches a revert" and a review measured
+   * that it does not. With the gate replaced by `if (false)` this test STILL
+   * PASSES: the fabricated agent has no `toolContext`, so `fetch_token` returns
+   * "profile not found" before it posts anything — for a reason that has nothing
+   * to do with the gate. Two different mechanisms produce the same green, which
+   * is precisely the shape of evidence that cannot be trusted.
+   *
+   * So this test pins the OUTCOME at the real seam: a bulk run mints no token
+   * and still gets its stored credential. That is worth having, because it is
+   * the behaviour the other track depends on. The GATE itself is pinned by
+   * `spends no exchange for a caller that does not hold api_setup` below, which
+   * was measured to fail when the gate is removed, and by the predicate tests
+   * above.
    *
    * The temptation on the other side is to make the fabricated agent MORE
-   * complete so the renewal works. Each field added there removes one barrier
-   * here, and the ORDER matters: without `sessionCounters` the exchange throws
-   * before its POST, so today the missing field is what stops an unguarded
-   * egress. A fake that gained `sessionCounters` while still carrying a partial
-   * `toolContext` would POST past the egress controls instead of failing. The
-   * durable answer is an authorization recorded when the run is PLANNED, not
-   * inferred at runtime from an object's shape.
+   * complete so the renewal works. Each field added there removes one barrier,
+   * and the ORDER matters: without `sessionCounters` the exchange throws before
+   * its POST, so today the missing field is what stops an unguarded egress. A
+   * fake that gained `sessionCounters` while still carrying a partial
+   * `toolContext` would POST past the egress controls instead of failing —
+   * unverified, since nothing exercises that shape. The durable answer is an
+   * authorization recorded when the run is PLANNED, not inferred at runtime
+   * from an object's shape.
    */
   it('spends no exchange for the bulk worker effect, which has no agent at all', async () => {
     const past = Date.now() - 1000;
@@ -1763,6 +1786,158 @@ describe('the two properties the comments claim, which nothing was checking', ()
     expect(calls.some((u) => u.includes('/oauth/token')), 'the refusal came from the provider rather than from fetch_token').toBe(false);
     expect(written.join(''), 'a refused renewal left no trace at all').toMatch(/oauth token renewal refused for profile "crm-api"/);
     expect(String(out)).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * A PROVIDER refusal reaches stderr too, and this is the case the first
+   * version missed.
+   *
+   * That version matched `Error:`. Nine of this branch's returns do not start
+   * that way, and `Token exchange failed with HTTP …` is among them — the
+   * provider rejecting the refresh token, which is the likeliest renewal failure
+   * there is. So the filter matches the SUCCESS shape instead, which is the
+   * narrow one.
+   */
+  it('writes a provider refusal to stderr, not only the ones prefixed Error', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) {
+        // 502, not 400. A 400 with `invalid_grant` classifies as `grant-revoked`
+        // and returns `revokedGrantMessage`, which DOES begin with "Error:" —
+        // so the first version of this test passed even with the old
+        // Error-prefix filter in place, measured by mutation. A 5xx classifies
+        // as transient and returns the generic `Token exchange failed with
+        // HTTP …`, which is the shape the old filter actually dropped.
+        return new Response('{"error":"temporarily_unavailable"}', { status: 502, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault(SEED)),
+    );
+
+    const log = written.join('');
+    expect(log, 'a provider rejection left no trace, which is the failure the Error-prefix filter caused').toMatch(/oauth token renewal refused for profile "crm-api"/);
+    expect(String(out)).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * The detail is MASKED and flattened before it is written.
+   *
+   * Not hygiene. `exchangeToken` interpolates the RAW `token_url` into its
+   * failure message, and `vetTokenEndpoint` in that same file says why that
+   * matters: "the raw value can hold anything somebody pasted, including a
+   * credential". Nothing masks `process.stderr.write` — it is called directly in
+   * roughly twenty modules — so the masking has to happen at this call or not at
+   * all. The newline is stripped for a second reason: a provider's text in a log
+   * line can forge one.
+   */
+  it('masks the failure detail and keeps it on one line', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    // A transport failure is the path that carries the raw endpoint string.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) throw new Error('connect ECONNREFUSED s3cr3t-v4lue\nforged: log line');
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault(SEED, { mask: 's3cr3t-v4lue' })),
+    );
+
+    const renewalLines = written.filter((w) => w.includes('oauth token renewal'));
+    expect(renewalLines.length, 'the renewal failure was not logged at all, so this proves nothing about masking').toBeGreaterThan(0);
+    const log = renewalLines.join('');
+    expect(log, 'an unmasked value reached stderr').not.toContain('s3cr3t-v4lue');
+    expect(log).toContain('[redacted]');
+    // Exactly one line: the trailing newline and no other.
+    expect(log.split('\n').filter((l) => l !== '').length, 'the detail forged a second log line').toBe(1);
+  });
+
+  /**
+   * The THROWN failure, which is the worst one this path has and was the one
+   * left untested.
+   *
+   * `fetch_token` writes the access token with an unguarded `secretStore.set`,
+   * and again for a rotated refresh token. If that write throws, the provider
+   * has ALREADY rotated: the refresh token just presented is spent and the new
+   * one was not stored, so the grant is dead. An earlier version of this code
+   * swallowed that in an empty catch, under a comment asserting the branch
+   * "throws nowhere" — a claim that came from counting `throw` statements rather
+   * than asking what can throw.
+   *
+   * ⚠ This branch needed its own test because the obvious candidate does not
+   * reach it: a network failure at the token endpoint is CAUGHT by
+   * `exchangeToken` and comes back as a returned string, so the masking test
+   * above exercises the refused path, not this one. Measured — with the catch's
+   * log removed, every test in this file still passed.
+   */
+  it('logs a renewal that THREW rather than swallowing it', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    const seen: { authorization?: string } = {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', refresh_token: 'ROTATED', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      seen.authorization = new Headers(init?.headers).get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const vault = makeVault(SEED, { failSet: 'SQLITE_BUSY: database is locked' });
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault),
+    );
+
+    const log = written.join('');
+    expect(log, 'a thrown renewal was swallowed — the grant may be dead and nothing says so').toMatch(/oauth token renewal threw for profile "crm-api"/);
+    expect(log).toContain('SQLITE_BUSY');
+    // And the request still went out on the token that was there.
+    expect(String(out)).not.toMatch(/^Error:/);
+    expect(seen.authorization).toBe('Bearer OLD_TOKEN');
   });
 
   /**

@@ -9937,6 +9937,39 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
    * `expires_in` must have it recorded, or the renewal this field exists for can
    * never be planned at all. Before this change the callback recorded neither.
    */
+  /**
+   * A profile DELETED while its authorization was in flight must not come back.
+   *
+   * The route reads the profile before `exchangeToken`, which can take fifteen
+   * seconds while the user is on the provider's consent screen. Saving that
+   * pre-exchange snapshot afterwards re-registers whatever it held: `save`
+   * validates shape and says nothing about existence, so a profile the user had
+   * deleted — possibly as an erasure request — would be live again with fresh
+   * tokens. `persistGrant` re-reads for exactly this reason and answers
+   * `'gone'`; the first version of this block did not, and a review caught it.
+   *
+   * The deletion is triggered from inside the exchange, which is the only place
+   * that reproduces the real window.
+   */
+  it('does not resurrect a profile deleted while the exchange was in flight', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      store.remove(PROFILE);
+      return {
+        ok: true, status: 200, responseOk: true,
+        text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+      };
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.get(PROFILE), 'a profile deleted mid-exchange was brought back by the callback save').toBeUndefined();
+    expect(existsSync(join(dataDir, 'apis', `${PROFILE}.json`)), 'the deleted profile was written back to disk').toBe(false);
+  });
+
   it('records the expiry when the provider says how long the token lives', async () => {
     const before = Date.now();
     const { cookie, store } = await arrange({
@@ -9951,5 +9984,16 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     const at = store.get(PROFILE)?.auth?.oauth?.token_expires_at;
     expect(at, 'the provider stated a lifetime and nothing recorded it').toBeGreaterThanOrEqual(before + 3600_000);
     expect(at).toBeLessThanOrEqual(Date.now() + 3600_000);
+
+    // ON DISK, not only in the map. `save` registers in memory before it
+    // persists, so every assertion above passes even with the `apisDir`
+    // argument removed — measured, by removing it: all four callback tests
+    // stayed green. A stamp that lives until the next restart is exactly the
+    // shape of a fix that works in a test and not in production, and this is
+    // the only assertion that can tell the difference.
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'apis', `${PROFILE}.json`), 'utf-8')) as {
+      auth?: { oauth?: { token_expires_at?: number } };
+    };
+    expect(onDisk.auth?.oauth?.token_expires_at, 'the expiry was never persisted, only held in memory').toBe(at);
   });
 });
