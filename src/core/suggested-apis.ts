@@ -4,36 +4,48 @@
  * This is a text the engine writes into the model's briefing — the list of
  * external APIs it may offer to set up, plus the auth flows it must and must
  * not propose. It used to live in `data/suggested-apis.json` and be read at
- * boot. Two measurements moved it here, and neither is a matter of taste:
+ * boot.
  *
- *  • **It never arrived.** The production image copies `node_modules`, `dist`,
- *    `package.json`, the web UI and the entrypoint — not `data/`. So in every
- *    container (managed hosting, and every self-host via Compose) the read
- *    failed, the reader returned `''`, and the model was briefed with no
- *    catalogue at all. Silently: no log, no metric, no failing test, because
- *    the tests run from `src/` and resolve `../../data/` to the copy in the
- *    repository — the one no deployment loads. `dist/` is copied, so a
- *    constant compiled into the engine reaches every install by construction.
+ * **It never arrived.** The production image copies `node_modules`, `dist`,
+ * `package.json`, the web UI and the entrypoint — not `data/`. So in every
+ * container (managed hosting, and every self-host via Compose) the read
+ * failed, the reader returned `''`, and the model was briefed with no
+ * catalogue at all. Silently: no log, no metric, no failing test, because the
+ * tests run from `src/` and resolve `../../data/` to the copy in the
+ * repository — the one no deployment loads. Meanwhile `package.json` `files`
+ * did list `data/`, so the npm path shipped it and the container did not, and
+ * nothing compared the two.
  *
- *  • **Where it did arrive, it was writable.** On an npm self-host the package
- *    directory usually belongs to the same user the engine runs as, and the
- *    `bash` tool takes absolute paths. A file that becomes part of the
- *    briefing and can be rewritten by a tool the briefing describes is an
- *    entrance into our own instructions.
+ * The fix is not "ship the file too". It is that **the catalogue can no longer
+ * go missing on its own.** A file read has a failure mode the code treats as
+ * normal — absent is indistinguishable from deliberately empty — which is
+ * precisely why a year passed without anyone noticing. A constant compiled
+ * into `dist/` cannot be selectively absent: if it is gone the module does not
+ * load, and that breaks far more than a list of hints. One home instead of
+ * two, and one that cannot quietly evaporate.
  *
- * The obvious alternative — one `COPY data/` line in the Dockerfile — fixes
- * the first and worsens the second. The container is closed today for TWO
- * independent reasons: the file is absent, and `/app` belongs to root while
- * the process runs as `lynox`. Copying it in with `--chown=lynox:lynox` would
- * remove both at once. The cheaper fix is the one that opens a hole.
+ * ⚠ **What this does NOT buy, because the first draft of this comment claimed
+ * it and a review refuted it:** it is not a hardening. The argument was that a
+ * file the `bash` tool can rewrite is an entrance into our own briefing, and
+ * that a constant closes it. Measured in the published image: `/app/dist` and
+ * every file under it are owned `lynox:lynox` mode `-rw-r--r--`, and the
+ * process runs as uid 1001 `lynox`. Only `/app` itself is root-owned, which
+ * stops a new entry being created beside `dist` and nothing more. So
+ * `dist/core/suggested-apis.js` is exactly as writable as the JSON would have
+ * been, and on an npm self-host both always sat in one directory with one
+ * owner. Worse for the argument: anyone who can write that file can equally
+ * write `dist/tools/permission-guard.js`, so this catalogue was never the
+ * foothold worth taking. The move relocates the same reachability; it does not
+ * remove it.
  *
- * ⚠ Same reasoning as {@link ./oauth-presets.ts}, and deliberately so — that
- * module's header argues at length why a text with this job must not come from
- * an operator-editable file. It called this catalogue the justified exception
- * ("right for a list of hints the model may read"). It was right about the
- * distinction and wrong about which side this falls on: hints steer which
- * third party a user is asked to hand a token to, and the reader's silent
- * `catch` meant nobody could tell the list apart from no list.
+ * ⚠ Its neighbour {@link ./oauth-presets.ts} argues at length why the OAuth
+ * preset register must not be a file, and names this catalogue as the
+ * justified exception — "right for a list of hints the model may read". That
+ * ranking is correct and stands: a preset decides which site a user is sent to
+ * and hands consent to, enforced by host validation; this is hint text the
+ * model is told to ask about before acting on. This module moved for a
+ * different reason than that one did, and the two should not be read as the
+ * same argument.
  *
  * There is no `schema_version` here. It was a handshake between a file and a
  * parser that could disagree about its format; a constant and its type cannot.
