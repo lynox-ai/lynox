@@ -213,56 +213,60 @@ describe('speak facade — text-prep pipeline', () => {
 
     it('parses Mistral live shape across paginated responses', async () => {
       stubMistralKey(true);
-      // Mistral caps page_size at 10; full catalog (~30 voices today) spans
-      // 3 pages. This fixture has total_pages=3 — the loop must fetch all
-      // three and concatenate uniquely.
-      const page1 = {
-        items: [
-          { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
-          { slug: 'en_alex_neutral', name: 'Alex - Neutral', languages: ['en_us'] },
-        ],
-        total: 6, page: 1, page_size: 10, total_pages: 3,
-      };
-      const page2 = {
-        items: [
-          { slug: 'gb_oliver_neutral', name: 'Oliver - Neutral', languages: ['en_gb'] },
-          { slug: 'gb_jane_sarcasm', name: 'Jane - Sarcasm', languages: ['en_gb'] },
-        ],
-        total: 6, page: 2, page_size: 10, total_pages: 3,
-      };
-      const page3 = {
-        items: [
-          { slug: 'fr_aurelie', name: 'Aurélie', languages: ['fr_fr'] },
-          // Intentional duplicate — parser must dedupe.
-          { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
-        ],
-        total: 6, page: 3, page_size: 10, total_pages: 3,
-      };
-      const pages = [page1, page2, page3];
-      let callIdx = 0;
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-        const body = pages[callIdx] ?? pages[pages.length - 1];
-        callIdx++;
+      // ⚠⚠ This case USED TO PIN THE BUG, and the way it managed to is the lesson.
+      //
+      // Its stub returned `pages[callIdx++]` — the next page on each successive
+      // call, whatever URL was asked for. So it honoured CALL ORDER and not the
+      // pagination parameter, which means it could not tell a working parameter
+      // from an ignored one. It then asserted `page=1`, `page=2`, `page=3`, making
+      // the ignored parameter the contract: `/v1/audio/voices` ignores `page`
+      // entirely (measured 2026-08-02 against the live API), returns the same first
+      // ten entries for any value, and lynox therefore saw 10 of 30 voices — all
+      // six French ones unreachable. The test was green throughout.
+      //
+      // A control that takes its behaviour from the caller's expectation cannot
+      // measure the caller. The stub below slices by `offset`, so an ignored
+      // parameter shows up as a short, duplicate-only result.
+      const all = [
+        { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
+        { slug: 'en_alex_neutral', name: 'Alex - Neutral', languages: ['en_us'] },
+        { slug: 'gb_oliver_neutral', name: 'Oliver - Neutral', languages: ['en_gb'] },
+        { slug: 'gb_jane_sarcasm', name: 'Jane - Sarcasm', languages: ['en_gb'] },
+        { slug: 'fr_aurelie', name: 'Aurélie', languages: ['fr_fr'] },
+        // Intentional duplicate — the parser must dedupe by id.
+        { slug: 'en_paul_neutral', name: 'Paul - Neutral', languages: ['en_us'] },
+      ];
+      const SERVER_PAGE = 2; // what this endpoint hands back per request
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = new URL(String(input));
+        const offset = Number(url.searchParams.get('offset') ?? '0');
+        const body = {
+          items: all.slice(offset, offset + SERVER_PAGE),
+          total: all.length,
+          page: 1, page_size: SERVER_PAGE, total_pages: Math.ceil(all.length / SERVER_PAGE),
+        };
         return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
       });
       try {
         await vi.resetModules();
         const fresh = await import('./index.js');
         const voices = await fresh.listMistralVoices();
-        // 5 unique — the duplicate en_paul_neutral on page 3 is deduped.
+        // 5 unique — the duplicate en_paul_neutral in the last slice is deduped.
         expect(voices.length).toBe(5);
         expect(voices.map(v => v.id)).toEqual([
           'en_paul_neutral', 'en_alex_neutral',
           'gb_oliver_neutral', 'gb_jane_sarcasm',
           'fr_aurelie',
         ]);
-        // Pagination hit all 3 pages.
-        expect(fetchSpy).toHaveBeenCalledTimes(3);
-        // URLs use `page=N` — confirm page 2 and page 3 were requested.
+        // Four, not three: the walk ends on an empty response rather than on the
+        // `total` the provider reported, because an under-reported `total` used to
+        // end it early and silently.
+        expect(fetchSpy).toHaveBeenCalledTimes(4);
+        // The offsets as VALUES — a substring check would also accept `offset=20`
+        // where `offset=2` is meant.
         const urls = fetchSpy.mock.calls.map(c => String(c[0]));
-        expect(urls[0]).toContain('page=1');
-        expect(urls[1]).toContain('page=2');
-        expect(urls[2]).toContain('page=3');
+        expect(urls.map(u => new URL(u).searchParams.get('offset'))).toEqual(['0', '2', '4', '6']);
+        for (const u of urls) expect(u).not.toContain('page=');
       } finally {
         fetchSpy.mockRestore();
       }
