@@ -304,6 +304,26 @@ describe('statedToolGrant', () => {
       .toBe(`grants only ${BUILTIN_ROLES['collector']!.allowTools!.join(', ')}`);
   });
 
+  it('reads the two empty lists apart, the way `resolveTools` reads them', () => {
+    // `allowTools: []` is a bound that admits nothing, so it IS a statement.
+    // `denyTools: []` subtracts nothing, so it is not. Before the split, the second
+    // refused a step for a role that withholds nothing — and said `denies ,` doing it.
+    //
+    // This test was written with the split and did not land with it: the script that
+    // applied the fix died one edit earlier, so the code changed and the assert did not.
+    // Two mutants survived the round that followed (`grants only ` for an empty list, and
+    // an empty denylist counting as a statement) and that is the only reason it is here.
+    const plain: RoleConfig = {
+      model: 'balanced', effort: 'high', autonomy: 'guided', description: 'Base.',
+    };
+    expect(statedToolGrant({ ...plain, allowTools: [] })).toBe('grants no tools at all');
+    expect(statedToolGrant({ ...plain, denyTools: [] })).toBeNull();
+    // The non-empty contrast on the same two shapes, so the lines above are the EMPTY
+    // case and not the field being ignored.
+    expect(statedToolGrant({ ...plain, allowTools: ['read_file'] })).toBe('grants only read_file');
+    expect(statedToolGrant({ ...plain, denyTools: ['bash'] })).toBe('denies bash');
+  });
+
   it('says nothing for a role that states nothing about tools', () => {
     // The negative half, and the one that keeps a caller from reading the predicate as
     // "has a role": model, effort and autonomy are not a tool grant.
