@@ -17,12 +17,13 @@ import type { BeforeImage, PlannedTarget } from './bulk-ledger.js';
 
 /** Most targets one plan may carry. */
 export const BULK_MAX_TARGETS = 5000;
-/** Largest single target image (a file's content, a planned after-state), serialized. */
+/** Largest single target image: a planned after-state as serialized JSON, a file's
+ *  before-image as its size on disk. */
 export const BULK_MAX_TARGET_BYTES = 1024 * 1024;
 /**
- * Largest total of before- plus after-images one plan may record, counted as the JSON the
- * ledger serializes (escapes included). Stored size is about 4/3 of that — base64 of the
- * ciphertext — so one plan writes at most ~43 MB to engine.db.
+ * Largest total one plan may record — before-images, after-states and target keys, each
+ * counted as the JSON the ledger serializes (escapes included). What lands in engine.db is
+ * that total encrypted and base64-encoded (about 4/3 of it) plus a fixed framing per row.
  */
 export const BULK_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 /** Largest source file. */
@@ -141,6 +142,13 @@ function imageBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
 }
 
+/** Keys are stored too — an invalid target keeps the source's own text as its key —
+ *  so they count against the same budget as the images. */
+function chargeKeys(budget: ByteBudget, targets: PlannedTarget[]): PlannedTarget[] {
+  for (const t of targets) budget.charge(imageBytes(t.key));
+  return targets;
+}
+
 class ByteBudget {
   private used = 0;
   charge(bytes: number): void {
@@ -236,7 +244,7 @@ export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAcc
   // whole plan rather than recording half of it. Invalid targets are keyed by what the
   // source said, so they count too.
   rejectDuplicates(resolved.map((r) => r.path ?? r.row.target));
-  return resolved.map(({ row, path }): PlannedTarget => {
+  return chargeKeys(budget, resolved.map(({ row, path }): PlannedTarget => {
     if (path === null) return { key: row.target, invalid: 'path_outside_workspace' };
     if (typeof row.after !== 'string') return { key: path, invalid: 'after_not_text' };
     const afterBytes = imageBytes(row.after);
@@ -252,7 +260,7 @@ export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAcc
     budget.charge(afterBytes);
     if (!before.absent) budget.charge(imageBytes(before.value));
     return { key: path, before, after: row.after };
-  });
+  }));
 }
 
 /**
@@ -301,7 +309,7 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
   }
 
   const budget = new ByteBudget();
-  return keyed.map(({ row, stored, key }): PlannedTarget => {
+  return chargeKeys(budget, keyed.map(({ row, stored, key }): PlannedTarget => {
     if (key === null) return { key: row.target, invalid: 'bad_key' };
     const after = row.after;
     if (after === null || typeof after !== 'object' || Array.isArray(after)) {
@@ -337,5 +345,5 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
     budget.charge(fullBytes);
     if (existing) budget.charge(imageBytes(existing));
     return { key, before, after: full };
-  });
+  }));
 }

@@ -40,6 +40,8 @@ import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
  */
 
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
+/** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
+const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
 const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
@@ -805,6 +807,7 @@ export class EngineDb {
   private db: Database.Database;
   private readonly dbPath: string;
   private readonly _encKey: Buffer | null;
+  private readonly _hashKey: Buffer | null;
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
@@ -821,8 +824,10 @@ export class EngineDb {
     const vaultKey = encryptionKey ?? process.env['LYNOX_VAULT_KEY'] ?? '';
     if (vaultKey) {
       this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
+      this._hashKey = null;
     }
   }
 
@@ -973,14 +978,14 @@ export class EngineDb {
 
   /**
    * A digest of `parts` that cannot be dictionary-attacked from a copy of the file:
-   * HMAC-SHA256 under the engine key, so recomputing it needs the key that `enc()`
-   * needs. Without a key it falls back to plain SHA-256 — the same mixed mode as `enc()`,
+   * HMAC-SHA256 under a subkey derived from the same vault key as `enc()`'s (own HKDF
+   * label), so recomputing it needs that vault key. Without a key it falls back to plain SHA-256 — the same mixed mode as `enc()`,
    * which stores plaintext then. Parts are fed one at a time, length-prefixed, so a
    * large input is never joined into one string and no two part lists collide.
    * @internal — see {@link enc}.
    */
   keyedHash(parts: Iterable<string>): string {
-    const h = this._encKey ? createHmac('sha256', this._encKey) : createHash('sha256');
+    const h = this._hashKey ? createHmac('sha256', this._hashKey) : createHash('sha256');
     for (const p of parts) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
     return h.digest('hex');
   }

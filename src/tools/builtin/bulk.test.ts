@@ -296,6 +296,19 @@ describe('bulk_plan over data-store rows', () => {
       .toContain(`more than ${String(BULK_MAX_TARGETS)} targets`);
   });
 
+  it('holds a collection source to the same byte cap as a file', async () => {
+    seed();
+    store.createCollection({ name: 'fat', scope, columns: [{ name: 'target', type: 'string' }, { name: 'note', type: 'string' }] });
+    for (let i = 0; i < 60; i += 10) {
+      store.insertRecords({
+        collection: 'fat',
+        records: Array.from({ length: 10 }, (_, j) => ({ target: `F${String(i + j)}`, note: 'n'.repeat(100 * 1024) })),
+      });
+    }
+    expect(await bulkPlanTool.handler({ target_system: 'data_store', target_collection: 'products', source_collection: 'fat' }, agent()))
+      .toBe('Error: The source is larger than 5 MB.');
+  });
+
   it('refuses a source file that is not UTF-8', async () => {
     seed();
     writeFileSync(join(ws, 'latin1.csv'), Buffer.from('target,price\nS\xe9,1\n', 'latin1'));

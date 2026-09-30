@@ -93,7 +93,7 @@ describe('ToolEntry.undo declaration', () => {
       memory_block_edit: 'restorable',
       memory_store: 'restorable',
       remember: 'restorable',
-      bulk_plan: 'restorable',
+      bulk_plan: 'none',
       task_update: 'restorable',
       contacts_save: 'restorable',
       subjects_merge: 'restorable',

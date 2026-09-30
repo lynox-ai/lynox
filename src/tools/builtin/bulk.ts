@@ -41,13 +41,20 @@ function formatStatus(s: BulkRunStatus): string {
 }
 
 /** All rows of a data-store query, paged at the store's own page size, stopping one
- *  past the target limit so an oversized source is reported rather than truncated. */
+ *  past the target limit so an oversized source is reported rather than truncated, and
+ *  held to the same byte cap as a source file — a collection has no size of its own
+ *  that would bound what the plan reads into memory. */
 function queryAllRows(agent: IAgent, collection: string, filter: Record<string, unknown> | undefined): Record<string, unknown>[] {
   const store = agent.toolContext.dataStore;
   if (!store) throw new BulkSourceError('The data store is not available.');
   const rows: Record<string, unknown>[] = [];
+  let bytes = 0;
   for (let offset = 0; ; offset += BULK_QUERY_PAGE) {
     const page = store.queryRecords({ collection, filter, limit: BULK_QUERY_PAGE, offset });
+    for (const r of page.rows) bytes += Buffer.byteLength(JSON.stringify(r), 'utf8');
+    if (bytes > BULK_MAX_SOURCE_BYTES) {
+      throw new BulkSourceError(`The source is larger than ${String(BULK_MAX_SOURCE_BYTES / 1024 / 1024)} MB.`);
+    }
     rows.push(...page.rows);
     if (page.rows.length < BULK_QUERY_PAGE || rows.length > BULK_MAX_TARGETS || offset + BULK_QUERY_PAGE >= page.total) return rows;
   }
@@ -55,8 +62,8 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
 
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   // Writes only the ledger — but recording a run also drops the oldest unapproved
-  // previews beyond the cap, so it is not a pure create.
-  undo: 'restorable',
+  // previews beyond the cap, and nothing keeps what was dropped.
+  undo: 'none',
   definition: {
     name: 'bulk_plan',
     description:

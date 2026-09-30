@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, hkdfSync } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -38,17 +38,21 @@ const reasons = (targets: PlannedTarget[]): (string | null)[] => targets.map((t)
 
 describe('source parsing', () => {
   it('stops a CSV at the target cap instead of parsing the whole source', () => {
-    const csv = 'target,after\n' + 'a,b\n'.repeat(BULK_MAX_TARGETS + 1);
+    // The tail is malformed: a parser that read to the end would report the unterminated
+    // quote, one that stops at the cap never reaches it.
+    const csv = 'target,after\n' + 'a,b\n'.repeat(BULK_MAX_TARGETS + 1) + '"unterminated';
     expect(() => parseCsv(csv)).toThrow(`more than ${String(BULK_MAX_TARGETS)} targets`);
     expect(() => parseCsv('target,after\n' + 'a,b\n'.repeat(BULK_MAX_TARGETS))).not.toThrow();
   });
 
   it('does not count blank lines toward the cap', () => {
-    expect(parseCsv('target,after\n\n\na,b\n\n')).toEqual([{ target: 'a', after: 'b' }]);
+    const csv = 'target,after\n' + 'a,b\n\n\n'.repeat(BULK_MAX_TARGETS);
+    expect(parseCsv(csv)).toHaveLength(BULK_MAX_TARGETS);
   });
 
   it('refuses a JSON array over the cap before inspecting its elements', () => {
-    const json = JSON.stringify(Array.from({ length: BULK_MAX_TARGETS + 1 }, () => ({})));
+    // Numbers, not objects: an element check that ran first would answer "array of objects".
+    const json = JSON.stringify(Array.from({ length: BULK_MAX_TARGETS + 1 }, (_, i) => i));
     expect(() => parseSourceText(json, 'json')).toThrow(`more than ${String(BULK_MAX_TARGETS)} targets`);
   });
 
@@ -76,10 +80,26 @@ describe('planWorkspace bounds and reasons', () => {
     expect(reasons(planned)).toEqual(['target_too_large']);
   });
 
-  it('refuses a plan whose images exceed the total cap', () => {
+  it('refuses a plan whose after-states exceed the total cap', () => {
     const size = BULK_MAX_TARGET_BYTES - 16;
     const n = Math.ceil(BULK_MAX_TOTAL_BYTES / size) + 1;
     const source = Array.from({ length: n }, (_, i) => ({ target: `f${String(i)}`, after: 'y'.repeat(size) }));
+    expect(() => planWorkspace(source, fakeAccess({}))).toThrow('in total');
+  });
+
+  it('counts before-images at their serialized size against the total cap', () => {
+    // 40 existing files of 256 KB control characters: 10 MB on disk, ~60 MB as JSON. A
+    // budget that counted raw bytes, or skipped before-images, would let this through.
+    const body = '\u0001'.repeat(256 * 1024);
+    const files: Record<string, string> = {};
+    const source = Array.from({ length: 40 }, (_, i) => { files[`f${String(i)}`] = body; return { target: `f${String(i)}`, after: 'x' }; });
+    expect(() => planWorkspace(source, fakeAccess(files))).toThrow('in total');
+    expect(() => planWorkspace(source.slice(0, 4), fakeAccess(files))).not.toThrow();
+  });
+
+  it('counts target keys against the total cap', () => {
+    // Invalid targets keep the source's text as their key; 40 keys of 1 MB are 40 MB.
+    const source = Array.from({ length: 40 }, (_, i) => ({ target: `../${'k'.repeat(1024 * 1024)}${String(i)}`, after: 'x' }));
     expect(() => planWorkspace(source, fakeAccess({}))).toThrow('in total');
   });
 
@@ -102,6 +122,15 @@ describe('readBulkImage', () => {
   it('marks bytes that are not UTF-8 as not text rather than decoding them', () => {
     writeFileSync(join(dir, 'latin1.txt'), Buffer.from([0x63, 0x61, 0x66, 0xe9]));
     expect(readBulkImage(join(dir, 'latin1.txt'), 1024)).toBe('not_text');
+  });
+
+  it('keeps valid UTF-8 beyond ASCII, a byte-order mark and an empty file as text', () => {
+    writeFileSync(join(dir, 'utf8.txt'), 'café ✓');
+    writeFileSync(join(dir, 'bom.txt'), '\ufeffx');
+    writeFileSync(join(dir, 'empty.txt'), '');
+    expect(readBulkImage(join(dir, 'utf8.txt'), 1024)).toEqual({ absent: false, value: 'café ✓' });
+    expect(readBulkImage(join(dir, 'bom.txt'), 1024)).toEqual({ absent: false, value: '\ufeffx' });
+    expect(readBulkImage(join(dir, 'empty.txt'), 1024)).toEqual({ absent: false, value: '' });
   });
 
   it('refuses a directory', () => {
@@ -179,6 +208,14 @@ describe('BulkLedger', () => {
   const hashOf = (id: string): string =>
     (engineDb.getDb().prepare('SELECT rule_hash FROM bulk_runs WHERE id = ?').get(id) as { rule_hash: string }).rule_hash;
 
+  it('prunes only previews: an older run in another phase survives', () => {
+    engineDb.getDb().prepare(
+      "INSERT INTO bulk_runs (id, created_at, rule_hash, target_system, undo, phase) VALUES ('approved-1', '2000-01-01 00:00:00', 'h', 'workspace', 'restorable', 'approved')",
+    ).run();
+    for (let i = 0; i < BULK_MAX_PREVIEWED_RUNS + 2; i++) record(one(`p${String(i)}`));
+    expect(ledger.getStatus('approved-1')?.phase).toBe('approved');
+  });
+
   it('keeps only the newest unapproved previews, newest first', () => {
     const ids = Array.from({ length: BULK_MAX_PREVIEWED_RUNS + 2 }, (_, i) => record(one(`k${String(i)}`)));
     const listed = ledger.listRuns(50).map((r) => r.id);
@@ -200,9 +237,21 @@ describe('BulkLedger', () => {
     const a = hashOf(record(one('alice@example.test')));
     const b = hashOf(record(one('alice@example.test')));
     expect(a).toBe(b);
+    // Stable across a reopen with the same vault key — a key drawn fresh per handle would
+    // pass the same-handle check above and fail here.
+    engineDb.close();
+    engineDb = new EngineDb(join(dir, 'engine.db'), 'key-one');
+    ledger = new BulkLedger(engineDb);
+    expect(hashOf(record(one('alice@example.test')))).toBe(a);
     const plain = createHash('sha256');
     for (const p of ['workspace', 'workspace', 'alice@example.test', '"x"']) plain.update(`${String(Buffer.byteLength(p))}:`).update(p);
     expect(a).not.toBe(plain.digest('hex'));
+
+    // Not the AES key reused: the MAC runs under its own HKDF subkey.
+    const aesKey = Buffer.from(hkdfSync('sha256', 'key-one', 'lynox-engine', 'lynox-engine-encryption', 32));
+    const underAes = createHmac('sha256', aesKey);
+    for (const p of ['workspace', 'workspace', 'alice@example.test', '"x"']) underAes.update(`${String(Buffer.byteLength(p))}:`).update(p);
+    expect(a).not.toBe(underAes.digest('hex'));
 
     const other = new EngineDb(join(dir, 'engine2.db'), 'key-two');
     try {
