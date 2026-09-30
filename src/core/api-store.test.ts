@@ -636,10 +636,29 @@ describe('ApiStore', () => {
       }
     });
 
+    /**
+     * The membership list, written out rather than derived.
+     *
+     * Deriving it from SUGGESTED_API_CATALOG is the comfortable version and it
+     * is worthless: delete an entry and the expectation shrinks with it. Found
+     * by mutation — removing `vatcomply` left every assertion in this suite
+     * green. So the second source is this literal, and adding or dropping an
+     * entry has to be said here too.
+     */
+    const EXPECTED_IDS = [
+      'hackernews', 'github', 'npm', 'wikipedia', 'arxiv',
+      'open-meteo', 'frankfurter', 'restcountries', 'nager-date', 'vatcomply',
+    ];
+
+    it('carries exactly the catalogue entries this test names', () => {
+      expect([...SUGGESTED_API_CATALOG.suggested_apis].map((a) => a.id).sort())
+        .toEqual([...EXPECTED_IDS].sort());
+    });
+
     it('renders every catalogue entry and nothing else', () => {
       const out = store.formatSuggestedApisForSystemPrompt();
       const rendered = out.split('\n').filter((l) => l.includes(', auth=') && l.startsWith('- '));
-      expect(rendered.length).toBe(SUGGESTED_API_CATALOG.suggested_apis.length);
+      expect(rendered.length).toBe(EXPECTED_IDS.length);
       for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
         expect(out).toContain(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }
