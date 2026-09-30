@@ -1077,14 +1077,15 @@ describe('spawn_agent tool', () => {
   });
 
   /**
-   * The invariant: for a role whose grant is a CEILING, an explicit `spec.tools` may
-   * select WITHIN it and never beyond it. Both directions are asserted, because a
-   * clamp that also broke narrowing would pass a one-sided test while making the
-   * explicit list useless. `resolveTools` applies the ceiling at its single exit, so
-   * tier 1 returning first cannot route around it.
+   * The invariant: an explicit `spec.tools` may select WITHIN a role's grant and never
+   * beyond it. Both directions are asserted, because a bound that also broke narrowing
+   * would pass a one-sided test while making the explicit list useless. `resolveTools`
+   * applies the grant at its single exit, so the caller's list cannot route around it.
    *
-   * The precedence itself is untouched for every other role; `spec.tools overrides
-   * role tool scoping` below still pins that.
+   * Since 2026-09-30 this holds for EVERY role rather than a `readOnly` one; the
+   * `readOnly` fixture stays because the flag still decides one thing — what an absent
+   * allowlist means. `spec.tools narrows within the role grant and cannot reach past
+   * it` below is the same invariant on a denylist role.
    */
   it('an explicit tool list narrows a readOnly role and cannot widen it', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
@@ -1315,7 +1316,25 @@ describe('spawn_agent tool', () => {
     expect(toolNames).toEqual(['read_file']);
   });
 
-  it('spec.tools overrides role tool scoping', async () => {
+  it('the tools parameter tells the model which of the two it is', () => {
+    // The rule is enforced in `resolveTools`, and this is where a caller READS it. It is
+    // prompt surface, so it is priced: the entry is documented in
+    // `cost-regression.test.ts` against STATIC_PREFIX_BUDGET. Without this assert the
+    // description can be deleted for those tokens and nothing goes red.
+    const schema = spawnAgentTool.definition.input_schema as {
+      properties: { agents: { items: { properties: { tools: { description?: string } } } } };
+    };
+    const description = schema.properties.agents.items.properties.tools.description;
+    expect(description).toBeDefined();
+    expect(description).toMatch(/[Nn]arrows/);
+    // The operative half is about THIS parameter and deliberately not about the child:
+    // an explicit list cannot widen a grant. A sentence of the form "the role's promise
+    // holds" would be a claim about everything the child can reach, which one parameter
+    // description is not the place to make and not the code to keep.
+    expect(description).toContain('cannot widen a grant');
+  });
+
+  it('spec.tools narrows within the role grant and cannot reach past it', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     mockGetRole.mockReturnValue({
       model: 'deep',
@@ -1327,14 +1346,19 @@ describe('spawn_agent tool', () => {
 
     const agent = makeAgent();
     await spawnAgentTool.handler(
-      { agents: [{ name: 'r1', task: 'Do it', role: 'researcher', tools: ['bash'] }] },
+      { agents: [{ name: 'r1', task: 'Do it', role: 'researcher', tools: ['bash', 'read_file'] }] },
       agent,
     );
 
     const agentCall = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     const toolNames = (agentCall['tools'] as ToolEntry[]).map(t => t.definition.name);
-    // spec.tools takes precedence, so bash should be included
-    expect(toolNames).toEqual(['bash']);
+    // Pinned the opposite until 2026-09-30 — 'spec.tools overrides role tool scoping',
+    // asserting `['bash']` with the comment "spec.tools takes precedence". Rewritten to
+    // the contract rather than deleted, because a deleted pin is a silent change of it.
+    // Both halves are asserted by the one expectation: `read_file` came through, so the
+    // caller's list still narrows (the parent's `write_file` and `spawn_agent` are gone),
+    // and `bash` did not, so the role's denylist bound the request.
+    expect(toolNames).toEqual(['read_file']);
   });
 
   // The `<context>` frame is built by renderFence since the fence migration, so

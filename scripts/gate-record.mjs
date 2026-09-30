@@ -106,6 +106,24 @@ export const SECURITY_PATHS = [
   /^src\/core\/migration-crypto\.ts$/,
   /^src\/core\/input-guard\.ts$/,
   /^src\/tools\/permission-guard\.ts$/,
+  // The single exit every tool grant to a child agent passes through: the caller's
+  // requested list, a role's own grant, and the parent set all meet here. Added
+  // 2026-10-01, because it was NOT here while it was where a role's grant was decided
+  // — a change confined to this file owed no security gate, and the change that made
+  // that grant bind on every route in only owed one because it also touched
+  // `src/tools/builtin/`. Cheap by the measure the note above uses: **1** of the last 300 commits on main
+  // touched it, and 1 of the last 60, against 6 and 2 for `permission-guard.ts` beside
+  // it. Over the whole history as of `da03ba5b` (1414 commits) it is 2 against 19 — the
+  // ref belongs to the number, which is a count over a history that grows: it read 1415
+  // one commit later, while a delta round was still checking this line.
+  //
+  // The first draft of this line said "2 of the last 300" and was wrong in its SET, not
+  // its direction: `git log -n 300 <ref> -- <path>` applies the limit AFTER the path
+  // filter, so it counts every commit that ever touched the file and the window is not
+  // a window at all. The tell was that 60, 150 and 300 all printed the same number —
+  // three windows agreeing looks like stability and is what a limit that never binds
+  // looks like. Measured as ranges (`$(git rev-list -n N <ref> | tail -1)^..<ref>`).
+  /^src\/tools\/resolve-tools\.ts$/,
   /^src\/tools\/builtin\//,
   /^src\/server\//,
   /^src\/integrations\//,

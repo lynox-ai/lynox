@@ -136,10 +136,39 @@ export function roleToolProfile(role: RoleConfig): RoleToolProfile {
   return {
     allowedTools: allowed,
     deniedTools: role.denyTools ? [...role.denyTools] : undefined,
-    // Carried through so `resolveTools` treats `allowedTools` as a CEILING rather
-    // than a tier an explicit tool list can step around.
+    // Carried through because `resolveTools` still needs it — no longer to decide
+    // WHETHER `allowedTools` binds (it binds for every profile since 2026-10-01) but to
+    // decide what an ABSENT one means: empty bound for a read-only label, no bound
+    // otherwise. This function always fills it for a `readOnly` role, so that
+    // fail-closed branch is unreachable from here and lives for direct callers.
     readOnly: role.readOnly,
   };
+}
+
+/**
+ * What a role STATES about the child's tools, as a phrase for a message, or `null` when
+ * it states nothing at all.
+ *
+ * Pure and exported so a runtime that cannot KEEP such a statement can refuse on the
+ * predicate rather than on the flag that happens to be set. The three shapes are one
+ * promise: `readOnly` names a surface, `allowTools` names a list, `denyTools` names a
+ * subtraction — and a runtime either applies all three or keeps none of them.
+ */
+export function statedToolGrant(role: RoleConfig): string | null {
+  if (role.readOnly === true) return 'is read-only';
+  // The two empty lists are read apart, and the same way `resolveTools` reads them: an
+  // empty ALLOW list is a bound that admits nothing, an empty DENY list subtracts
+  // nothing and therefore states nothing. Without the split, `denyTools: []` refused a
+  // step for a role that withholds nothing, with the message `that role denies ,`.
+  if (role.allowTools !== undefined) {
+    return role.allowTools.length === 0
+      ? 'grants no tools at all'
+      : `grants only ${role.allowTools.join(', ')}`;
+  }
+  if (role.denyTools !== undefined && role.denyTools.length > 0) {
+    return `denies ${role.denyTools.join(', ')}`;
+  }
+  return null;
 }
 
 export const BUILTIN_ROLES: Record<string, RoleConfig> = {
@@ -208,7 +237,12 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
 
 /** Get a role config by name. Returns undefined if not found. */
 export function getRole(name: string): RoleConfig | undefined {
-  return BUILTIN_ROLES[name];
+  // `Object.hasOwn`, because a bracket read INHERITS: `getRole('__proto__')` returned an
+  // object and `getRole('toString')` a function, both truthy. Every "unknown role" guard
+  // in the codebase is written as `!getRole(name)`, so all of them accepted those names,
+  // and `roleToolProfile` then produced `{}` — a role stating no grant at all. A silent
+  // no-op in the three places whose whole job is to be loud about an unknown name.
+  return Object.hasOwn(BUILTIN_ROLES, name) ? BUILTIN_ROLES[name] : undefined;
 }
 
 /** List all available role names. */

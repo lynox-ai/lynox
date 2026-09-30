@@ -224,6 +224,17 @@ describe('gate-record — which gates a diff requires', () => {
     }
   });
 
+  it('demands it for the one exit every tool grant to a child passes through', () => {
+    // Added 2026-10-01 with the entry itself. The template test above derives its tokens
+    // FROM this list, so it goes green either way — removing the entry has to fail
+    // something, and this is that something.
+    expect(requiredGates(['src/tools/resolve-tools.ts']).has('security')).toBe(true);
+    // The floor's edge, named rather than implied: the registry beside it carries the
+    // same allow/deny vocabulary in `scopedView` and is NOT on the list. Nothing in
+    // production calls it today, which is the reason and also the thing that can change.
+    expect(requiredGates(['src/tools/registry.ts']).has('security')).toBe(false);
+  });
+
   it('anchors that entry at src/ — a settings PAGE about integrations is not one', () => {
     // The control for the line above: without the `^src/` anchor the widened entry
     // would swallow the web UI too. This path exists in the repository today.

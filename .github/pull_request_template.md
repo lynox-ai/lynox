@@ -46,6 +46,7 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   required when the diff touches one of the paths the check lists — every module
   under `src/tools/builtin/`, `src/server/`, `src/integrations/`,
   `data-boundary`, `output-guard`, `input-guard`, `permission-guard`,
+  `resolve-tools` (the one exit every tool grant to a child passes through),
   `secret-store` or `migration-crypto`. That list is a **floor**: a change can
   open a trust boundary somewhere it does not name, and then the gate is still
   yours to run. It reaches wider than it strictly must, on purpose — too narrow

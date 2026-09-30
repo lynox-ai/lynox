@@ -1158,7 +1158,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               thinking: { type: 'object' },
               effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
               max_tokens: { type: 'number' },
-              tools: { type: 'array', items: { type: 'string' } },
+              tools: { type: 'array', items: { type: 'string' }, description: 'Narrows the child to these of your tools; it cannot widen a grant.' },
               max_turns: { type: 'number', minimum: 1, maximum: MAX_SPAWN_TURNS },
               max_budget_usd: { type: 'number', minimum: 0, maximum: MAX_SPAWN_BUDGET_USD },
               profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },

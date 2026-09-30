@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { BUILTIN_ROLES, getRole, applyTierGate, READ_ONLY_TOOL_SURFACE, roleToolProfile, type RoleConfig } from './roles.js';
+import { BUILTIN_ROLES, getRole, applyTierGate, READ_ONLY_TOOL_SURFACE, roleToolProfile, statedToolGrant, type RoleConfig } from './roles.js';
+import { resolveTools } from '../tools/resolve-tools.js';
+import type { ToolEntry } from '../types/index.js';
 
 describe('BUILTIN_ROLES', () => {
   it('researcher defaults to balanced — deep is an opt-in override', () => {
@@ -40,6 +42,15 @@ describe('BUILTIN_ROLES', () => {
   it('getRole returns the named role, undefined on miss', () => {
     expect(getRole('researcher')?.model).toBe('balanced');
     expect(getRole('nonexistent')).toBeUndefined();
+    // Inherited keys are a miss too. They were not: a bracket read on an object literal
+    // reaches `Object.prototype`, so these three came back truthy and every guard of the
+    // form `!getRole(name)` let them through as KNOWN roles.
+    for (const inherited of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      expect(getRole(inherited), inherited).toBeUndefined();
+    }
+    // The control for the line above: a real name still resolves, so this is a
+    // prototype test and not `getRole` returning undefined for everything.
+    expect(getRole('collector')).toBeDefined();
   });
 });
 
@@ -200,5 +211,147 @@ describe('read-only roles are granted by an allowlist', () => {
     const creator = roleToolProfile(BUILTIN_ROLES['creator']!);
     expect(creator.allowedTools).toBeUndefined();
     expect(creator.deniedTools).toEqual(['bash']);
+  });
+});
+
+/**
+ * The grant is a promise in the text the NEXT AUTHOR reads — `description` is not
+ * model-facing, per the dated sweep above — and the route it is kept on is
+ * `resolveTools`. A role whose stated shape and enforced shape disagree is how the
+ * enforced one drifts, which is why the two are asserted together.
+ *
+ * The claim is asserted over the SET of built-in roles rather than at the role the
+ * finding named: keyed on `denyTools` the set would be three roles and would miss
+ * `collector`, which states its grant as an allowlist and denies nothing.
+ */
+describe("a role's stated grant binds whether or not the caller names the tool", () => {
+  /**
+   * The parent surface, derived from the roles themselves plus the three tools a role
+   * withholds by name — so a role that starts naming a new tool is covered here without
+   * this list being edited.
+   */
+  const PARENT_NAMES: string[] = [...new Set([
+    ...Object.values(BUILTIN_ROLES).flatMap(r => [...(r.allowTools ?? []), ...(r.denyTools ?? [])]),
+    ...READ_ONLY_TOOL_SURFACE,
+    'bash', 'write_file', 'task_list',
+  ])];
+
+  const parentTools: ToolEntry[] = PARENT_NAMES.map(name => ({
+    definition: { name, description: name, input_schema: { type: 'object' as const, properties: {} } },
+    handler: async () => name,
+  }));
+  const names = (entries: ToolEntry[]): string[] => entries.map(t => t.definition.name);
+
+  /** What the role's own grant shape says the child does not get. */
+  const withheldBy = (role: RoleConfig): string[] => {
+    const outsideAllowlist = role.allowTools
+      ? PARENT_NAMES.filter(n => !role.allowTools!.includes(n))
+      : role.readOnly === true
+        ? PARENT_NAMES.filter(n => !READ_ONLY_TOOL_SURFACE.includes(n))
+        : [];
+    return [...new Set([...(role.denyTools ?? []), ...outsideAllowlist])];
+  };
+
+  it.each(Object.keys(BUILTIN_ROLES))('%s', (name) => {
+    const role = BUILTIN_ROLES[name]!;
+    const withheld = withheldBy(role);
+    // The case has to exist for this role, or the two asserts below pass on an empty
+    // set and say nothing at all.
+    expect(withheld.length, `role "${name}" withholds nothing — nothing to bind`)
+      .toBeGreaterThan(0);
+
+    const profile = roleToolProfile(role);
+    const viaProfile = names(resolveTools(undefined, profile, parentTools));
+    expect(viaProfile.filter(n => withheld.includes(n))).toEqual([]);
+    // The route the finding was about: the caller names exactly what the role withholds.
+    expect(names(resolveTools(withheld, profile, parentTools))).toEqual([]);
+
+    // Positive control on the same route, because an empty result is also what a
+    // resolver that grants nothing at all returns: what the role DOES grant still
+    // arrives when the caller asks for it.
+    const granted = viaProfile[0];
+    expect(granted, `role "${name}" resolves to no tools at all`).toBeDefined();
+    expect(names(resolveTools([granted!], profile, parentTools))).toEqual([granted]);
+  });
+
+  it('creator keeps the sentence its description makes', () => {
+    const creator = BUILTIN_ROLES['creator']!;
+    // The sentence is read by the next author, not by the model (see the sweep above),
+    // and that is exactly why it is pinned to the behaviour: prose nobody enforces drifts
+    // from the code, and here the drift would be a role that reads stricter than it is.
+    expect(creator.description).toContain('No system commands');
+    expect(creator.denyTools).toContain('bash');
+
+    const profile = roleToolProfile(creator);
+    expect(names(resolveTools(['bash'], profile, parentTools))).toEqual([]);
+    // Same call shape, a tool the role does not withhold — so the line above is the
+    // denylist holding and not the call failing.
+    expect(names(resolveTools(['read_file'], profile, parentTools))).toEqual(['read_file']);
+  });
+});
+
+/**
+ * The predicate a runtime that cannot KEEP a role's tool grant refuses on. Asserted
+ * here rather than through a step, because the refusal's effect is a throw and the
+ * claim is about the reading: which roles state something about tools, and which field
+ * the message will name.
+ */
+describe('statedToolGrant', () => {
+  it('reads all three shapes as one promise, and names the field it read', () => {
+    expect(statedToolGrant(BUILTIN_ROLES['operator']!)).toBe('is read-only');
+    expect(statedToolGrant(BUILTIN_ROLES['creator']!)).toBe('denies bash');
+    expect(statedToolGrant(BUILTIN_ROLES['collector']!))
+      .toBe(`grants only ${BUILTIN_ROLES['collector']!.allowTools!.join(', ')}`);
+  });
+
+  it('reads the two empty lists apart, the way `resolveTools` reads them', () => {
+    // `allowTools: []` is a bound that admits nothing, so it IS a statement.
+    // `denyTools: []` subtracts nothing, so it is not. Before the split, the second
+    // refused a step for a role that withholds nothing — and said `denies ,` doing it.
+    //
+    // This test was written with the split and did not land with it: the script that
+    // applied the fix died one edit earlier, so the code changed and the assert did not.
+    // Two mutants survived the round that followed (`grants only ` for an empty list, and
+    // an empty denylist counting as a statement) and that is the only reason it is here.
+    const plain: RoleConfig = {
+      model: 'balanced', effort: 'high', autonomy: 'guided', description: 'Base.',
+    };
+    expect(statedToolGrant({ ...plain, allowTools: [] })).toBe('grants no tools at all');
+    expect(statedToolGrant({ ...plain, denyTools: [] })).toBeNull();
+    // The non-empty contrast on the same two shapes, so the lines above are the EMPTY
+    // case and not the field being ignored.
+    expect(statedToolGrant({ ...plain, allowTools: ['read_file'] })).toBe('grants only read_file');
+    expect(statedToolGrant({ ...plain, denyTools: ['bash'] })).toBe('denies bash');
+  });
+
+  it('says nothing for a role that states nothing about tools', () => {
+    // The negative half, and the one that keeps a caller from reading the predicate as
+    // "has a role": model, effort and autonomy are not a tool grant.
+    expect(statedToolGrant({
+      model: 'balanced', effort: 'high', autonomy: 'guided',
+      description: 'A tier and an effort, and nothing about tools.',
+    })).toBeNull();
+  });
+
+  it('prefers the flag, then the allowlist — a decision, not an accident', () => {
+    // A role with more than one of the three gets ONE phrase, so the order is pinned:
+    // `researcher` carries the flag AND a denylist, and the flag is the wider statement.
+    expect(statedToolGrant(BUILTIN_ROLES['researcher']!)).toBe('is read-only');
+    expect(statedToolGrant({
+      model: 'fast', effort: 'low', autonomy: 'guided',
+      allowTools: ['read_file'], denyTools: ['bash'],
+      description: 'Both lists.',
+    })).toBe('grants only read_file');
+  });
+
+  it('holds for EVERY built-in role — none of the four is keepable on a foreign namespace', () => {
+    // The consequence, stated where it can go red: all four built-ins state a grant, so
+    // a step on the agent runtime that declares any of them is refused. A fifth role
+    // added without a tool grant would be legal there, and this assert would tell the
+    // author which one it is.
+    for (const [name, role] of Object.entries(BUILTIN_ROLES)) {
+      expect(statedToolGrant(role), `role "${name}" states nothing about tools`).not.toBeNull();
+    }
+    expect(Object.keys(BUILTIN_ROLES)).toHaveLength(4);
   });
 });
