@@ -56,26 +56,24 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     // operator decision. Two entries carried the label until 2026-09-30 on the
     // strength of a fast-slot compaction run from 2026-08-10. Three things are wrong
     // with that, and any one of them is enough:
-    //   • the run's scripts are not on main, so nobody reading main can re-run it,
-    //     and no run artefact is committed on either side — the figures survive only
-    //     in prose that quotes them;
+    //   • the run's scripts are not on main, and no run artefact is committed on
+    //     either side, so the figures survive only in prose and one unit-test
+    //     constant. Nor could the run be repeated from the branch: that harness
+    //     judges the reference with `glm-5p2`, itself one of the six withdrawn ids
+    //     listed below;
     //   • the harness requires its REFERENCE to clear a 95% literal-recall bar and
     //     short-circuits to INVALID when it does not — "recalibrate the checklist
     //     before quoting verdicts". Every recorded figure for that reference is below
-    //     the bar, and the two that exist disagree with each other (90.4% in the
-    //     prose here, 91.5% twice on the bench branch), which is itself the point:
-    //     they are prose, not an artefact;
+    //     the bar, and the two figures on record disagree — 90.4% in tier-presets.ts,
+    //     91.5% three times across two files on the bench branch. That disagreement
+    //     is itself the point;
     //   • the decision rule subtracts two scores produced by two DIFFERENT judge
     //     models, so it compares judge strictness and reports the difference as
     //     candidate quality.
-    // The two models so labelled are withdrawn by the provider (404) and pinned by
-    // nothing, so removing them costs no coverage.
-    //
-    // ⚠ BENCH is therefore currently UNSATISFIABLE, and that is worth knowing before
-    // anyone tries to earn it: the only scored-run harness on main judges with
-    // `kimi-k2p6` (scripts/model-fitness/judge.ts), which is one of the six ids
-    // listed below as returning 404. The bar cannot be met until that judge is
-    // replaced — so an entry arriving here as SWEEP or OPERATOR is not laziness.
+    // Four entries leave with this: the two labelled BENCH, plus `glm-5p2` and
+    // `deepseek-v4-pro`, whose bases were a sweep and the replay floor this comment
+    // already stopped accepting. All four are withdrawn by the provider (404) and
+    // pinned by nothing, so removing them costs no coverage.
     // What is deliberately NOT accepted as evidence any more: the R1/R3 replay floor
     // as a POSITIVE signal. It scores delegation behaviour, not answer quality, and
     // per-model rates below n≈8 are noise (glm measured 0/2, 1/2 and 2/8 on the same
@@ -144,7 +142,6 @@ describe('tier-presets (model-presets W2 SoT)', () => {
         }
       }
     }
-
   });
 
   it('CN-provenance models appear ONLY via the Fireworks host — never a direct-CN endpoint', () => {
