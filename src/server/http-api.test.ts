@@ -5932,6 +5932,9 @@ describe('LynoxHTTPApi', () => {
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       bulkLedger.halt(id, BULK_HALT_REASONS.credential);
+      // The halting tick ended the preview trigger; only the resume can make it due again.
+      new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+      expect(new TriggerStore(bulkDb).getDue()).toEqual([]);
       const resumed = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
       expect(resumed.status).toBe(200);
       expect(bulkLedger.getStatus(id)!.haltReason).toBeNull();

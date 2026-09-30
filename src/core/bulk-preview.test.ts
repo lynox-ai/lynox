@@ -604,6 +604,27 @@ describe('the preview effect', () => {
     }
   });
 
+  it('stops reading a run that was halted between two targets', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
+      const c = client();
+      const halting: ExternalClient = {
+        get sent() { return c.sent; },
+        async get(u, signal) {
+          const r = await c.get(u, signal);
+          ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
+          return r;
+        },
+      };
+      expect((await runBulkPreview(runId, previewDeps(halting))).status).toBe('halted');
+      expect(s.requests).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
   it('never closes a preview while a target is unread (§6 Q4)', () => {
     const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
     expect(ledger.recordRead(runId, 0, { before: { price: '2' } })).toBe(true);
