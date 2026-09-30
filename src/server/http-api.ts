@@ -1374,8 +1374,6 @@ export class LynoxHTTPApi {
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
 
-  /** Returns the cookie's issued-at unix-sec on success, null on any failure.
-   *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
   /**
    * How each request authenticated, for the records that must say where an approval came
    * from (a bulk run's `approved_by`): `local` (no secret configured), `bearer`,
@@ -1383,6 +1381,9 @@ export class LynoxHTTPApi {
    * session cookie, so a session is recognisable without its value being stored.
    */
   private readonly _authOrigin = new WeakMap<IncomingMessage, string>();
+
+  /** Returns the cookie's issued-at unix-sec on success, null on any failure.
+   *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
 
   private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
     const cookieHeader = req.headers['cookie'];
@@ -6417,6 +6418,10 @@ export class LynoxHTTPApi {
         return;
       }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
+      // The same check as approving: resuming an external run that halted because it could
+      // not reach its host would only halt again on its first target.
+      const reach = await bulkExternalReach(params['id']!, ledger);
+      if (reach !== null) { errorResponse(res, 409, reach); return; }
       const out = ledger.resume(params['id']!, { checksum });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));

@@ -38,7 +38,8 @@ export type BulkEffect = BulkWriteEffect;
  */
 export interface TargetWriter {
   /** The target may hold something other than what was sent (an external host
-   *  normalises), so what it holds after a write is recorded for the undo. */
+   *  normalises). A write reports what it read back through its return value; this flag
+   *  makes a target found already holding the planned state record what it holds, too. */
   readonly readsBack?: boolean | undefined;
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
   write(key: string, after: BeforeImage): Promise<string | { result: string; actual: ActualImage }>;
@@ -233,7 +234,8 @@ async function rollBack(ledger: BulkLedger, writer: TargetWriter, run: BulkRunFo
   let complete = true;
   for (const t of ledger.listAppliedDesc(run.id)) {
     try {
-      const cur = await writer.read(t.key, fieldsOf(t));
+      // Local only (an external run is never atomic), so there are no fields to project on.
+      const cur = await writer.read(t.key, null);
       if (cur === 'path_changed' || cur === 'foreign' || !sameImage(cur, t.after)) { complete = false; continue; }
       await writer.write(t.key, t.expected);
       ledger.recordRolledBack(run, t.seq, now());

@@ -56,6 +56,8 @@ export type ExternalRead =
 
 /** Longest a `Retry-After` is honoured for within one tick (plan §6 Q3(c)). */
 export const BULK_RETRY_AFTER_CAP_MS = 60_000;
+/** How long an external write waits on a spent profile rate limit before failing the target. */
+const PROFILE_LIMIT_WAIT_MS = 1_000;
 /** One request's own deadline. */
 export const BULK_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -361,8 +363,9 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
  * must expect. Never a DELETE: an external target this run did not create is not removed.
  *
  * A missing credential, a refused one, a blocked host or a call outside the contract halts
- * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`). One 429
- * per request is waited out (capped); anything else that is not a success fails the target.
+ * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`). One wait
+ * per request: a 429 for its `Retry-After` (capped), a spent profile rate limit for a
+ * second. Anything else that is not a success fails the target.
  */
 export function externalWriter(client: ExternalClient, opts: {
   sleep?: (ms: number) => Promise<void>;
@@ -371,7 +374,9 @@ export function externalWriter(client: ExternalClient, opts: {
   const call = async (once: () => Promise<ExternalRead>): Promise<ExternalRead> => {
     let got = await once();
     if (got.kind === 'retry_after' || got.kind === 'rate_limited') {
-      await sleep(got.kind === 'retry_after' ? got.ms : BULK_RETRY_AFTER_CAP_MS);
+      // A profile limit says nothing about when it frees up: a short wait, then the target
+      // fails and the run's failure rules decide, rather than a minute per request.
+      await sleep(got.kind === 'retry_after' ? got.ms : PROFILE_LIMIT_WAIT_MS);
       got = await once();
     }
     switch (got.kind) {

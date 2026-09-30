@@ -11,8 +11,9 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, type BulkRunForApply } from './bulk-ledger.js';
 import {
-  BulkHostBudget, externalClient, externalWriter, mintBulkContract, planExternal, type ExternalClient,
+  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, type ExternalClient,
 } from './bulk-external.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 import { runBulkPreview } from './bulk-preview.js';
 import { bulkWriterFor, runBulkEffect } from './bulk-apply.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
@@ -39,7 +40,7 @@ let ledger: BulkLedger;
 
 interface Shop {
   items: Map<string, Record<string, unknown>>;
-  requests: { method: string; path: string; body: unknown }[];
+  requests: { method: string; path: string; body: unknown; auth: string | undefined }[];
   /** Per `METHOD path`, answered instead: a status and headers. */
   special: Map<string, { status: number; headers?: Record<string, string> }>;
 }
@@ -61,7 +62,8 @@ function serve(s: Shop): () => void {
   return setPinnedTransportForTests(async (input: PinnedTransportInput) => {
     const path = new URL(input.url).pathname;
     const body = input.body === undefined ? undefined : JSON.parse(input.body.toString('utf8')) as unknown;
-    s.requests.push({ method: input.method, path, body });
+    const auth = Object.entries(input.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
+    s.requests.push({ method: input.method, path, body, auth });
     const sp = s.special.get(`${input.method} ${path}`);
     if (sp) return new Response(null, { status: sp.status, headers: sp.headers ?? {} });
     const item = s.items.get(path);
@@ -78,9 +80,9 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean } = {}): ExternalClient {
+function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLimit?: () => string | null } = {}): ExternalClient {
   return externalClient({
-    contract: mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
+    contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
     attach: async (_u, headers) => {
@@ -88,9 +90,15 @@ function client(opts: { attach?: boolean } = {}): ExternalClient {
       headers['authorization'] = `Bearer ${TOKEN}`;
       return true;
     },
-    rateLimit: () => null,
+    rateLimit: opts.rateLimit ?? (() => null),
   });
 }
+
+/** The writer as the worker builds it: from the run's OWN stored contract, or none. */
+const contractWriter = (run: BulkRunForApply) => bulkWriterFor(run, null, (r) => {
+  const contract = parseBulkContract(r.contractJson);
+  return contract ? externalWriter(client({ contract }), { sleep: noSleep }) : null;
+});
 
 const noSleep = async (): Promise<void> => {};
 /** The writer the worker builds, over this test's client. */
@@ -157,9 +165,9 @@ describe('applying an external run', () => {
     const s = shop();
     const restore = serve(s);
     try {
-      const c = client();
-      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }], c);
-      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }, { target: url(1), after: { price: '20' } }]);
+      // Both runs write under their own stored contract — the undo's is copied from its source.
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
       // Someone else changes target 1 in between: that one is a conflict, not overwritten.
       s.items.get('/products/1')!['price'] = '21.00';
 
@@ -167,7 +175,7 @@ describe('applying an external run', () => {
       if (!undo.ok) throw new Error(undo.reason);
       const approved = ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! });
       expect(approved.ok).toBe(true);
-      const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) });
+      const out = await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter });
       expect(out.status).toBe('done');
       // Target 0: the host normalised '15' to '15.00'; expecting '15' would have been a
       // conflict. It is restored.
@@ -248,6 +256,8 @@ describe('applying an external run', () => {
       expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
       // Released, not failed: the resume takes it again.
       expect(ledger.listPending(runId)).toEqual([0, 1, 2]);
+      const claims = engineDb.getDb().prepare('SELECT seq, claimed_at FROM bulk_targets WHERE run_id = ? ORDER BY seq').all(runId);
+      expect(claims).toEqual([0, 1, 2].map((seq) => ({ seq, claimed_at: null })));
 
       s.special.clear();
       const resumed = ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! });
@@ -284,6 +294,51 @@ describe('applying an external run', () => {
       });
       expect(out.status).toBe('done');
       expect(slept).toEqual([2_000]);
+      expect(s.items.get('/products/0')!['price']).toBe('15.00');
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo from an estimated read-back finds the normalised target a conflict, and leaves it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], c);
+      let gets = 0;
+      const flaky: ExternalClient = {
+        get sent() { return c.sent; },
+        patch: (u, b, sig) => c.patch(u, b, sig),
+        async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
+      };
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) });
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) });
+      // It expected '15' (what was sent); the shop holds '15.00'. Not overwritten.
+      expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 0, conflicts: 1 });
+      expect(s.items.get('/products/0')!['price']).toBe('15.00');
+    } finally {
+      restore();
+    }
+  });
+
+  it('waits a second on a spent profile rate limit, then writes', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }]);
+      // The first check (the write's read) finds the limit spent; the one after the wait does not.
+      let checks = 0;
+      const c = client({ rateLimit: () => (++checks === 1 ? 'spent' : null) });
+      const slept: number[] = [];
+      const out = await runBulkEffect(runId, 'bulk_apply', {
+        ledger, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(c, { sleep: async (ms) => { slept.push(ms); } })),
+      });
+      expect(out.status).toBe('done');
+      expect(slept).toEqual([1_000]);
       expect(s.items.get('/products/0')!['price']).toBe('15.00');
     } finally {
       restore();
@@ -342,7 +397,9 @@ describe('applying an external run', () => {
       expect(recordTaskRun.mock.calls[0]![2]).toBe('success');
       expect(s.items.get('/products/0')!['price']).toBe('15.00');
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 1 });
-      expect(s.requests.map((r) => r.method)).toEqual(['GET', 'PATCH', 'GET']);
+      expect(s.requests.map((r) => [r.method, r.auth])).toEqual([
+        ['GET', `Bearer ${TOKEN}`], ['PATCH', `Bearer ${TOKEN}`], ['GET', `Bearer ${TOKEN}`],
+      ]);
     } finally {
       restore();
     }

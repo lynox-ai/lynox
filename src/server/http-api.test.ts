@@ -6012,6 +6012,56 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('refuses to approve or resume an external run the network policy keeps from its host, and says bearer:user under an admin secret', async () => {
+      const host = 'shop.example.com';
+      const key = `https://${host}/products/1`;
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.recordRead(id, 0, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      const engineRef = (api as unknown as { engine: { getToolContext: () => unknown } }).engine;
+      const origCtx = engineRef.getToolContext;
+      const post = (path: string): Promise<Response> =>
+        jsonFetch(`/api/bulk/runs/${id}/${path}`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      try {
+        engineRef.getToolContext = () => ({ tools: [], networkPolicy: 'deny-all', allowedHosts: undefined, allowedWildcards: [], enforceHttps: false });
+        const blocked = await post('approve');
+        expect(blocked.status).toBe(409);
+        expect(((await blocked.json()) as { error: string }).error).toMatch(/network policy does not allow/);
+        engineRef.getToolContext = origCtx;
+
+        process.env['LYNOX_HTTP_ADMIN_SECRET'] = 'not-the-test-secret-admin-fixture';
+        expect((await post('approve')).status).toBe(200);
+        const row = bulkDb.getDb().prepare('SELECT approved_by FROM bulk_runs WHERE id = ?').get(id) as { approved_by: string };
+        expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer:user' });
+        delete process.env['LYNOX_HTTP_ADMIN_SECRET'];
+
+        // Halted on a blocked host, the resume is checked the same way.
+        bulkLedger.halt(id, BULK_HALT_REASONS.blocked);
+        engineRef.getToolContext = () => ({ tools: [], networkPolicy: 'deny-all', allowedHosts: undefined, allowedWildcards: [], enforceHttps: false });
+        expect((await post('resume')).status).toBe(409);
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.blocked);
+        engineRef.getToolContext = origCtx;
+        expect((await post('resume')).status).toBe(200);
+      } finally {
+        engineRef.getToolContext = origCtx;
+        delete process.env['LYNOX_HTTP_ADMIN_SECRET'];
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
     it('records how a local run\'s approval was authenticated — a session is a tag, never its cookie', async () => {
       const id = planRun();
       const { createHash: hash } = await import('node:crypto');
