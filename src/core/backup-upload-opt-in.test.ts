@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -325,25 +326,64 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
     expect(verdict.files_checked).toBeGreaterThan(0);
   });
 
-  it('verifyBackup still catches a corrupt database in an UNENCRYPTED archive', async () => {
-    // The other direction, and the one that makes the relabel a decision rather than a blanket
-    // skip: without it, mutating the condition to always relabel would silently stop checking
-    // SQLite integrity on every unencrypted backup — a corrupt `VACUUM INTO` output would be
-    // promoted as a good archive. This is the assertion that dies in that case.
+  it('verifyBackup catches a corrupt database whose manifest AGREES with it', async () => {
+    // The direction that makes the relabel a DECISION rather than a blanket skip: if the
+    // condition always relabelled, SQLite integrity would stop being checked on every
+    // unencrypted backup, and a corrupt `VACUUM INTO` output would be promoted as a good archive.
+    //
+    // ⚠ The discriminator has to be the relabel, not the checksum. The first version of this test
+    // simply overwrote the database — which changes its checksum, so `verifyBackup` caught it
+    // through the checksum and the always-relabel mutant SURVIVED with the test green. The
+    // checksum is a correlate of "intact"; the integrity check is the property. So the manifest
+    // is made to AGREE with the corrupt file, which is exactly the production case that matters:
+    // a copy whose bytes were recorded faithfully and are not a database.
     const manager = new BackupManager(
       lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null,
     );
     const created = await manager.createBackup();
     expect(created.manifest.encrypted).toBe(false);
-    // Corrupt the copy in the archive, keeping its size so only an integrity check notices.
+
     const dbPath = join(created.path, 'history.db');
     const size = statSync(dbPath).size;
     writeFileSync(dbPath, Buffer.alloc(size, 0x41));
+    // Re-record the manifest so the checksum matches the corrupt bytes.
+    const manifestPath = join(created.path, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+    const entry = manifest.files.find(f => f.path === 'history.db');
+    expect(entry, 'fixture guard: the archive must list history.db').toBeDefined();
+    entry!.checksum_sha256 = createHash('sha256').update(readFileSync(dbPath)).digest('hex');
+    entry!.size_bytes = size;
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
     const verdict = manager.verifyBackup(created.path);
 
     expect(verdict.valid).toBe(false);
     expect(verdict.errors.join(' ')).toContain('history.db');
+    // And the reason is the integrity check, not the checksum — otherwise the assertion above
+    // would pass for the same wrong reason as before.
+    expect(verdict.errors.join(' ').toLowerCase()).toContain('integrity');
+  });
+
+  it('a Drive module that never loaded means NO upload — the gate fails closed', async () => {
+    // `_driveUploadAllowed` returns false when the engine never cached the gate, which happens
+    // when the dynamic import of the Drive module fails. Flipping that to `true` survived the
+    // suite: nothing exercised the uncached state, so the fail-OPEN direction was uncovered. This
+    // is the manager-level equivalent — no predicate handed in means the embedder's default, and
+    // an explicitly refusing predicate means no upload however the uploader got attached.
+    const { calls, uploader } = spyUploader();
+    const manager = new BackupManager(
+      lynoxDir,
+      { backupDir, retentionDays: 30, encrypt: true, uploadAllowed: () => false },
+      VAULT_KEY,
+    );
+    manager.setGDriveUploader(uploader);
+
+    const result = await manager.createBackup();
+
+    expect(result.success).toBe(true);
+    expect(result.manifest.encrypted).toBe(true);
+    expect(localArchiveIsReadable(result.path)).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 
   it('says nothing about a skip when there is no uploader at all', async () => {

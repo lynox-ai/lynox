@@ -344,7 +344,6 @@ export class Engine {
    * a load failure in an optional feature cannot make `init()` throw.
    */
   private _driveGate: {
-    driveBackupAllowed: () => boolean;
     driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
   } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
@@ -2053,7 +2052,7 @@ export class Engine {
         const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
         // Cache the two pure decisions so the upload itself can ask them synchronously.
         // This is what makes a revoked opt-in take effect without a restart.
-        this._driveGate = { driveBackupAllowed, driveUploadOptedIn };
+        this._driveGate = { driveUploadOptedIn };
         // TIER only, and deliberately: this condition is derived from the environment, which
         // cannot change inside a running process, so boot is the right place to ask it — and
         // provisioned instances then never build a credential shim they will not use.
@@ -2462,18 +2461,30 @@ export class Engine {
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   /**
-   * May a backup be uploaded to Drive right now?
+   * Does the user want this backup uploaded to Drive, right now?
    *
-   * Two conditions, two questions: may this DEPLOYMENT upload (tier), and does this USER want it
-   * to (`backup_gdrive`). Read at the moment of the upload, so a config reload changes the answer
-   * in both directions without a restart.
+   * CONSENT only. The tier condition is asked once, at the wiring below, because it is derived
+   * from the environment and cannot change in a running process — and asking it here as well
+   * produced a survivor: with the tier gate already refusing to attach an uploader on a
+   * provisioned instance, dropping the tier term from this expression changed no test's outcome.
+   * Two mechanisms for one condition are a compensating pair, and a redundancy no test can
+   * distinguish makes the coverage look larger than it is. One condition, one place.
    *
    * Fails closed when the Drive module never loaded — no gate, no upload.
+   *
+   * ⚠ That `return false` is a SURVIVING mutant, and it stays deliberately. Flipping it to `true`
+   * changes no test's outcome, because the only path that leaves `_driveGate` null — a failed
+   * dynamic import — sits in the same `try` as the wiring, so it also leaves no uploader attached
+   * and step 10 never asks. The one way to reach the difference is an embedder that calls
+   * `getBackupManager()!.setGDriveUploader(...)` on an instance where that import failed. A test
+   * for that needs a module-level mock in a file of its own, and the reachability argument is
+   * worth more than the coverage it would buy — so it is written here instead. Do not "simplify"
+   * this line: it is the fail-closed direction of a gate, and its mutant is fail-open.
    */
   private _driveUploadAllowed(): boolean {
     const gate = this._driveGate;
     if (!gate) return false;
-    return gate.driveBackupAllowed() && gate.driveUploadOptedIn(this.userConfig);
+    return gate.driveUploadOptedIn(this.userConfig);
   }
 
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
