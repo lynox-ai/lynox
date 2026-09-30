@@ -2397,6 +2397,8 @@ export class Engine {
   }
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
+  /** The bulk-run ledger — null unless `bulk_runs_enabled` and engine.db are both on. */
+  getBulkLedger(): BulkLedger | null { return this._toolContext.bulkLedger; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
   getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {

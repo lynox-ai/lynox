@@ -45,10 +45,10 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v13', () => {
+  it('creates the database and stamps schema_version v14', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(13); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger)
+    expect(row.v).toBe(14); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger) + v14 (bulk apply/undo: atomic, kind, claimed_at)
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -181,7 +181,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(byId['g-workflow']).toBeNull();
     expect(byId['g-backup']).toBeNull();
     expect(byId['g-notify']).toBeNull();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
     e.close();
   });
 
@@ -208,7 +208,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
     expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
     e.close();
   });
 
@@ -243,7 +243,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       text: 'a fact from before v8', source_type: 'user_asserted',
       source_channel: null, source_untrusted: 0, embedding_model: null,
     });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
     e.close();
   });
 
@@ -279,7 +279,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // The two v9 tables exist and are empty.
     expect((db.prepare("SELECT COUNT(*) c FROM knowledge_entries").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_blocks").get() as { c: number }).c).toBe(0);
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
 
     // H6 (pin is a store invariant): an active, trusted row MAY pin.
     expect(() =>
@@ -441,7 +441,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(13); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(14); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -579,7 +579,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // boot backfill re-populating from the still-present legacy history.db).
     expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -587,10 +587,61 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
+  it('v14 migration carries a POPULATED v13 bulk ledger over and admits undo-only `delete` targets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-engine-'));
+    tmpDirs.push(dir);
+    const path = join(dir, 'engine.db');
+    // Rewind to v13: the two bulk tables in their v13 shape (copied from MIGRATIONS[12]),
+    // one dry run in them.
+    const at = new EngineDb(path, '');
+    at.getDb().exec(`
+      DELETE FROM schema_version WHERE version >= 14;
+      DROP TABLE bulk_targets; DROP TABLE bulk_runs;
+      CREATE TABLE bulk_runs (
+        id TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), created_by TEXT,
+        rule_hash TEXT NOT NULL, target_system TEXT NOT NULL,
+        undo TEXT NOT NULL CHECK (undo IN ('restorable','compensatable','none','mixed')),
+        phase TEXT NOT NULL CHECK (phase IN ('planned','previewed','approved','writing','done','aborted','undone')),
+        contract_json TEXT, approved_by TEXT, approved_at TEXT, approval_checksum TEXT, max_targets INTEGER,
+        expires_at TEXT, targets_total INTEGER NOT NULL DEFAULT 0, targets_applied INTEGER NOT NULL DEFAULT 0,
+        targets_failed INTEGER NOT NULL DEFAULT 0, halt_reason TEXT);
+      CREATE INDEX idx_bulk_runs_created ON bulk_runs(created_at);
+      CREATE TABLE bulk_targets (
+        run_id TEXT NOT NULL REFERENCES bulk_runs(id) ON DELETE CASCADE, seq INTEGER NOT NULL,
+        target_key TEXT NOT NULL,
+        change TEXT NOT NULL CHECK (change IN ('update','create','unchanged','invalid')),
+        undo TEXT CHECK (undo IN ('restorable','compensatable','none')),
+        before TEXT, after_planned TEXT, applied_at TEXT, result TEXT, error TEXT, undone_at TEXT,
+        PRIMARY KEY (run_id, seq));
+      INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total) VALUES ('br','h','workspace','restorable','previewed',2);
+      INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned) VALUES ('br',0,'k0','update','restorable','b0','a0');
+      INSERT INTO bulk_targets (run_id, seq, target_key, change, error) VALUES ('br',1,'k1','invalid','bad_key');
+    `);
+    at.close();
+
+    const e = new EngineDb(path, '');
+    const db = e.getDb();
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
+    expect(db.prepare('SELECT id, phase, targets_total, atomic, kind, source_run_id, target_collection FROM bulk_runs').all())
+      .toEqual([{ id: 'br', phase: 'previewed', targets_total: 2, atomic: 0, kind: 'apply', source_run_id: null, target_collection: null }]);
+    expect(db.prepare('SELECT seq, target_key, change, before, after_planned, error, claimed_at, source_seq FROM bulk_targets ORDER BY seq').all())
+      .toEqual([
+        { seq: 0, target_key: 'k0', change: 'update', before: 'b0', after_planned: 'a0', error: null, claimed_at: null, source_seq: null },
+        { seq: 1, target_key: 'k1', change: 'invalid', before: null, after_planned: null, error: 'bad_key', claimed_at: null, source_seq: null },
+      ]);
+    db.prepare("INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('br',2,'k2','delete')").run();
+    expect(() => db.prepare("INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('br',3,'k3','bogus')").run()).toThrow(/CHECK/);
+    expect(() => db.prepare("UPDATE bulk_runs SET atomic = 2 WHERE id = 'br'").run()).toThrow(/CHECK/);
+    // The cascade survived the rebuild.
+    db.prepare("DELETE FROM bulk_runs WHERE id = 'br'").run();
+    expect((db.prepare('SELECT COUNT(*) c FROM bulk_targets').get() as { c: number }).c).toBe(0);
+    e.close();
+  });
+
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
     e.close();
   });
 
@@ -605,7 +656,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(13);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(14);
     e.close();
   });
 });
@@ -652,7 +703,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
       DELETE FROM schema_version WHERE version >= 11;
       DELETE FROM onboarding_flags;
       ALTER TABLE triggers DROP COLUMN waiting_until;   -- v12
-      DROP TABLE bulk_targets; DROP TABLE bulk_runs;    -- v13
+      DROP TABLE bulk_targets; DROP TABLE bulk_runs;    -- v13 (v14 alters these two)
     `);
     e.close();
   };

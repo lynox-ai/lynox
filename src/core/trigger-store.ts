@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus } from '../types/pipeline.js';
+import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -115,6 +115,7 @@ export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
     conditionJson: JSON.stringify({
       schedule_cron: rec.schedule_cron ?? null,
       watch_config: rec.watch_config ?? null,
+      ...(rec.bulk_run_id !== undefined ? { run_id: rec.bulk_run_id } : {}),
     }),
     targetWorkflowId: rec.pipeline_id ?? null,
     paramsJson: rec.pipeline_params ?? '{}',
@@ -211,10 +212,12 @@ const TRIGGER_READ_COLS =
 export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
   let scheduleCron: string | undefined;
   let watchConfig: string | undefined;
+  let bulkRunId: string | undefined;
   try {
-    const cond = JSON.parse(row.condition_json) as { schedule_cron?: string | null; watch_config?: string | null };
+    const cond = JSON.parse(row.condition_json) as { schedule_cron?: string | null; watch_config?: string | null; run_id?: unknown };
     scheduleCron = cond.schedule_cron ?? undefined;
     watchConfig = cond.watch_config ?? undefined;
+    bulkRunId = typeof cond.run_id === 'string' ? cond.run_id : undefined;
   } catch { /* malformed condition_json → schedule_cron / watch_config stay unset */ }
   return {
     id: row.id,
@@ -250,6 +253,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     pipeline_params: row.params_json === '{}' ? undefined : row.params_json,
     enabled: row.enabled,
     confirmed_at: row.confirmed_at ?? undefined,
+    ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
   };
 }
 
@@ -434,6 +438,41 @@ export class TriggerStore {
       retryCount: 0,
       confirmedAt: params.confirmedAt ?? null,
     });
+  }
+
+  /**
+   * Arm the trigger that writes an approved bulk run (PRD bulk-changes-reversible §3.4):
+   * effect `bulk_apply` or `bulk_undo`, `condition_json.run_id`, due at `nextRunAt`. One
+   * trigger per run — id `bulk-<runId>` — so approving, resuming or re-approving re-arms
+   * the same row instead of starting a second loop. The only path that CREATES a bulk
+   * effect: {@link insert} takes its effect from `deriveSourceEffect`, which never
+   * yields one, and {@link updateFields} cannot change `effect` or `run_id`.
+   */
+  armBulkEffect(params: { runId: string; effect: BulkTriggerEffect; title: string; nextRunAt: string }): string {
+    const id = `bulk-${params.runId}`;
+    this.upsert({
+      id,
+      title: params.title,
+      description: '',
+      source: 'manual',
+      effect: params.effect,
+      conditionJson: JSON.stringify({ schedule_cron: null, watch_config: null, run_id: params.runId }),
+      targetWorkflowId: null,
+      paramsJson: '{}',
+      scopeType: 'project',
+      scopeId: '',
+      status: 'open',
+      enabled: true,
+      nextRunAt: params.nextRunAt,
+      lastRunAt: null,
+      lastRunResult: null,
+      lastRunStatus: null,
+      notificationChannel: null,
+      maxRetries: 0,
+      retryCount: 0,
+      confirmedAt: null,
+    });
+    return id;
   }
 
   /** S3f write-cutover: flip the cron kill-switch DIRECTLY on engine.db, mirroring

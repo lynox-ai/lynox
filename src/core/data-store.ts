@@ -431,6 +431,65 @@ export class DataStore {
     return { inserted, updated, errors };
   }
 
+  /**
+   * Upsert ONE full row by the collection's single-column unique key — the bulk
+   * apply/undo write (PRD bulk-changes-reversible §3.4). Every user column is written;
+   * one the row does not name becomes NULL, so callers pass a full row. Plain columns
+   * are coerced as {@link insertRecords} does. `subject` columns are written VERBATIM:
+   * a bulk row is built on a row read raw (its before-image), so a subject cell already
+   * holds a stored `subject_id`, and resolving that as a name — what `insertRecords`
+   * does — would create a subject named after an id. Throws instead of collecting
+   * per-record errors: one row, one outcome.
+   */
+  putRowVerbatim(collection: string, row: Record<string, unknown>): 'inserted' | 'updated' {
+    const info = this._getCollectionMeta(collection);
+    if (!info) throw new Error(`Collection "${collection}" not found.`);
+    const uniqueKey = info.unique_key ? info.unique_key.split(',') : [];
+    if (uniqueKey.length !== 1) throw new Error(`Collection "${collection}" has no single-column unique key.`);
+    const keyCol = uniqueKey[0]!;
+    const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
+    const colNames = new Set(columns.map(c => c.name));
+    for (const k of Object.keys(row)) {
+      if (!colNames.has(k)) throw new Error(`Unknown column "${k}".`);
+    }
+    const values: unknown[] = columns.map((c) => {
+      const val = row[c.name];
+      if (val === undefined || val === null) return null;
+      return c.type === 'subject' ? String(val) : coercePlainColumnValue(val, c);
+    });
+    const keyIdx = columns.findIndex(c => c.name === keyCol);
+    if (keyIdx < 0 || values[keyIdx] === null) throw new Error('The row has no value for the unique key.');
+    this._checkDbSize();
+
+    const tableName = `ds_${collection}`;
+    const now = new Date().toISOString();
+    const allCols = ['_created_at', '_updated_at', ...columns.map(c => c.name)];
+    const updateSet = [...columns.filter(c => c.name !== keyCol).map(c => `"${c.name}" = excluded."${c.name}"`),
+      '"_updated_at" = excluded."_updated_at"'].join(', ');
+    const sql = `INSERT INTO "${tableName}" (${allCols.map(c => `"${c}"`).join(', ')}) VALUES (${allCols.map(() => '?').join(', ')})` +
+      ` ON CONFLICT("${keyCol}") DO UPDATE SET ${updateSet}`;
+    // Identifiers come from the collection's own metadata (an existing collection, a
+    // column of its schema); the one value is bound.
+    const existsSql = `SELECT COUNT(*) as cnt FROM "${tableName}" WHERE "${keyCol}" = ?`;
+    let outcome: 'inserted' | 'updated' = 'updated';
+    this.db.transaction(() => {
+      const exists = (this.db.prepare(existsSql).get(values[keyIdx]) as { cnt: number }).cnt > 0;
+      if (!exists) {
+        if (info.record_count + 1 > MAX_RECORDS) {
+          throw new Error(`Collection "${collection}" would exceed ${MAX_RECORDS} record limit (current: ${info.record_count}).`);
+        }
+        outcome = 'inserted';
+      }
+      this.db.prepare(sql).run(now, now, ...values);
+      // One row in or none: the count moves by the probe's answer, no table scan per write.
+      // Unlike insertRecords this does not re-derive the count, so drift left by another
+      // path stays until the next insertRecords/deleteRecords recount.
+      this.db.prepare('UPDATE ds_collections SET record_count = record_count + ?, updated_at = ? WHERE name = ?')
+        .run(exists ? 0 : 1, now, collection);
+    })();
+    return outcome;
+  }
+
   // === Query ===
 
   queryRecords(params: {
