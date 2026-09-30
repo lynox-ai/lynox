@@ -6031,6 +6031,7 @@ describe('LynoxHTTPApi', () => {
       mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
       const engineRef = (api as unknown as { engine: { getToolContext: () => unknown } }).engine;
       const origCtx = engineRef.getToolContext;
+      const adminBefore = process.env['LYNOX_HTTP_ADMIN_SECRET'];
       const post = (path: string): Promise<Response> =>
         jsonFetch(`/api/bulk/runs/${id}/${path}`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
       try {
@@ -6040,22 +6041,24 @@ describe('LynoxHTTPApi', () => {
         expect(((await blocked.json()) as { error: string }).error).toMatch(/network policy does not allow/);
         engineRef.getToolContext = origCtx;
 
-        process.env['LYNOX_HTTP_ADMIN_SECRET'] = 'not-the-test-secret-admin-fixture';
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'not-the-test-secret-admin-fixture');
         expect((await post('approve')).status).toBe(200);
         const row = bulkDb.getDb().prepare('SELECT approved_by FROM bulk_runs WHERE id = ?').get(id) as { approved_by: string };
         expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer:user' });
-        delete process.env['LYNOX_HTTP_ADMIN_SECRET'];
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', adminBefore);
 
         // Halted on a blocked host, the resume is checked the same way.
         bulkLedger.halt(id, BULK_HALT_REASONS.blocked);
         engineRef.getToolContext = () => ({ tools: [], networkPolicy: 'deny-all', allowedHosts: undefined, allowedWildcards: [], enforceHttps: false });
-        expect((await post('resume')).status).toBe(409);
+        const refused = await post('resume');
+        expect(refused.status).toBe(409);
+        expect(((await refused.json()) as { error: string }).error).toMatch(/network policy does not allow/);
         expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.blocked);
         engineRef.getToolContext = origCtx;
         expect((await post('resume')).status).toBe(200);
       } finally {
         engineRef.getToolContext = origCtx;
-        delete process.env['LYNOX_HTTP_ADMIN_SECRET'];
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', adminBefore);
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
         mockSecretResolve.mockReturnValue(null);

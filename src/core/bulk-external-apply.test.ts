@@ -15,7 +15,7 @@ import {
 } from './bulk-external.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { runBulkPreview } from './bulk-preview.js';
-import { bulkWriterFor, runBulkEffect } from './bulk-apply.js';
+import { bulkWriterFor, runBulkEffect, type TargetWriter } from './bulk-apply.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { createToolContext } from './tool-context.js';
 import { TriggerStore } from './trigger-store.js';
@@ -343,6 +343,34 @@ describe('applying an external run', () => {
     } finally {
       restore();
     }
+  });
+
+  it('halts a write its contract does not grant, before anything is sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }]);
+      // The same host and paths, reading only: the PATCH is not granted.
+      const readOnly = client({ contract: { ...mintBulkContract(HOST, [url(0)]), httpMethods: ['GET'] } });
+      s.requests.length = 0;
+      const out = await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(readOnly) });
+      expect(out.status).toBe('halted');
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.contract);
+      expect(s.requests.map((r) => r.method)).toEqual(['GET']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a local target found already written records no read-back image', async () => {
+    const run = ledger.recordDryRun({
+      createdBy: 't', targetSystem: 'workspace', scope: 'w',
+      targets: [{ key: '/k', before: { absent: false, value: 'old' }, after: 'new' }],
+    });
+    ledger.approve(run.id, { checksum: ledger.computeChecksum(run.id)! });
+    const already: TargetWriter = { async read() { return { absent: false, value: 'new' }; }, async write() { return 'written'; } };
+    expect((await runBulkEffect(run.id, 'bulk_apply', { ledger, writerFor: () => already })).status).toBe('done');
+    expect(engineDb.getDb().prepare('SELECT after_actual FROM bulk_targets WHERE run_id = ?').get(run.id)).toEqual({ after_actual: null });
   });
 
   it('never deletes an external target, and halts a run whose writer is missing', async () => {

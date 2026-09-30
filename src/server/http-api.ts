@@ -1384,7 +1384,6 @@ export class LynoxHTTPApi {
 
   /** Returns the cookie's issued-at unix-sec on success, null on any failure.
    *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
-
   private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
     const cookieHeader = req.headers['cookie'];
     if (!cookieHeader) return null;
@@ -6347,7 +6346,7 @@ export class LynoxHTTPApi {
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
       if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, { apiStore, secretStore }))) {
-        return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then approve again.';
+        return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
     };
