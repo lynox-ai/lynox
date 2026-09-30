@@ -7,6 +7,7 @@
 import type { ModelTier, EffortLevel, AutonomyLevel } from '../types/index.js';
 // Wire contract (CP emits `LYNOX_ACCOUNT_TIER`) — SoT in src/contract/vocab.ts.
 import type { AccountTier } from '../contract/vocab.js';
+import type { ToolResolutionProfile } from '../tools/resolve-tools.js';
 
 export interface RoleConfig {
   readonly model: ModelTier;
@@ -28,32 +29,49 @@ export interface RoleConfig {
  * The tools a `readOnly` role may hold — an ALLOWLIST, so a tool that does not
  * appear here is not granted, including one added after this list was written.
  *
- * Membership criterion, applied per tool by reading its handler: a write is
- * harmless exactly when its only effect is to log THIS run or make it resumable.
- * Anything that changes what a LATER run sees, does or shows is a write. The
- * per-tool test question is "does a later run behave differently because this
- * call happened?" — which is why `ask_user` is here (its `pending_prompts` row is
- * consumed by the answer) and `ask_secret` is not (the same row, but the value
- * lands in the vault, where every later run resolves it).
+ * Membership criterion, applied per tool by reading its handler AND the store
+ * methods that handler calls: a write is harmless exactly when its only effect is
+ * to log THIS run or make it resumable. Anything that changes what a LATER run
+ * sees, does or shows is a write. The per-tool test question is "does a later run
+ * behave differently because this call happened?" — which is why `ask_secret` is
+ * absent: its prompt row is settled by the answer, and the value it collects lands
+ * in the vault, where every later run resolves it.
+ *
+ * The line this is easiest to get wrong on, so it is drawn here rather than left to
+ * the reader: a read that fills a PROCESS cache with what it just read is not a
+ * write for this purpose — a call that changes what a later render SELECTS is one.
+ * `memory_focus` is why the distinction is written down. It persists nothing, and
+ * it is absent from this list all the same, because the field it sets lives on the
+ * engine's single KnowledgeStore and the always-loaded block render falls back to
+ * it on every later turn, in every thread. "Touches no row" answers a narrower
+ * question than the criterion asks.
+ *
+ * SPEND is out of scope, deliberately. A member that makes its own metered call —
+ * the rerank inside `web_research` — costs money, and money is governed by the
+ * budget cap and the overdraft gate, which bind every role alike. Read this list as
+ * a statement about STATE; read as a statement about cost it would be empty, since
+ * a turn that calls any member spends tokens.
  *
  * Names that are not registered in a given configuration are inert: this is an
- * allowlist, so a flag-gated tool (`recall`, `memory_recall`, `data_store_*`,
- * `calendar_read`, `web_research`) is listed once and simply does not match when
- * its flag is off — the same no-op the `collector` grant below relies on.
+ * allowlist, so a conditionally-registered tool (`recall`, `archive_search` and
+ * `memory_recall` behind the durable-memory flags, `data_store_*` behind a live
+ * DataStore handle, `calendar_read` behind a connected feed, `web_research` behind
+ * a reachable search provider) is listed once and simply does not match when its
+ * condition is absent — the same no-op the `collector` grant below relies on.
  *
- * The list is closed against the real registry by
- * `read-only-role-surface-boot.test.ts`, which boots an Engine and asserts that
- * what a `readOnly` role resolves to is a subset of this set.
+ * `read-only-role-surface-boot.test.ts` bounds the list against a booted Engine,
+ * and checks a `readOnly` role's grant against TWO independent references: this
+ * list, and the `destructive` / `requiresConfirmation` flags each tool's own author
+ * sets. The second exists because the first is written here — a reference that an
+ * edit to this file can satisfy is no reference at all.
  */
 export const READ_ONLY_TOOL_SURFACE: readonly string[] = Object.freeze([
   // Filesystem + context
   'read_file',
   'recall_tool_result',
-  // Durable knowledge (DK.1) — recall/search/focus only. `memory_focus` sets an
-  // in-memory override on the store and touches no row (`knowledge-store.ts`).
+  // Durable knowledge (DK.1) — the retrieval side only.
   'recall',
   'archive_search',
-  'memory_focus',
   // Legacy namespace memory — load/list only.
   'memory_recall',
   'memory_list',
@@ -81,16 +99,21 @@ export const READ_ONLY_TOOL_SURFACE: readonly string[] = Object.freeze([
   // hold.
   'web_research',
   'calendar_read',
-  // Human in the loop.
-  'ask_user',
+  // End-of-turn UI action: the handler's only effect is the tool_result that closes
+  // the pair (`suggest-follow-ups.ts`).
+  //
+  // `ask_user` is NOT here, and it is the candidate that looks most like it belongs.
+  // On the worker-loop path the question is a durable `pending_prompts` INSERT, the
+  // trigger is parked with `status: 'waiting'`, a push notification goes to the
+  // user's devices, and the answer starts a FRESH run seeded with it
+  // (`worker-loop.ts`). Its prompt row being settled by the answer is true and does
+  // not settle the trigger row or the notification. A read-only role reports to its
+  // parent, and the parent can ask.
   'suggest_follow_ups',
 ]);
 
-/** The shape `resolveTools` takes. */
-export interface RoleToolProfile {
-  readonly allowedTools?: string[] | undefined;
-  readonly deniedTools?: string[] | undefined;
-}
+/** The shape `resolveTools` takes — defined there, re-exported here by name. */
+export type RoleToolProfile = ToolResolutionProfile;
 
 /**
  * The ONE place a role becomes a tool-resolution profile.
@@ -107,6 +130,9 @@ export function roleToolProfile(role: RoleConfig): RoleToolProfile {
   return {
     allowedTools: allowed,
     deniedTools: role.denyTools ? [...role.denyTools] : undefined,
+    // Carried through so `resolveTools` treats `allowedTools` as a CEILING rather
+    // than a tier an explicit tool list can step around.
+    readOnly: role.readOnly,
   };
 }
 
@@ -139,8 +165,9 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
     model: 'fast',
     effort: 'high',
     autonomy: 'autonomous',
-    // The one role that runs unattended, so its grant is the one that must not be a
-    // subtraction: nobody is watching the turn on which it reaches for something new.
+    // The only role with `autonomy: 'autonomous'`, so its grant is the one that most
+    // needs to be a ceiling rather than a default: no turn of its run is reviewed
+    // before the next one starts.
     readOnly: true,
     denyTools: ['write_file'],
     description: 'Fast status checks, concise reporting. Read-only.',

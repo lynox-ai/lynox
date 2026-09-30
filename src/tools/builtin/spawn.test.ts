@@ -1076,6 +1076,49 @@ describe('spawn_agent tool', () => {
     expect(subject).toContain('read_file');
   });
 
+  /**
+   * `spec.tools` is tier 1 in `resolveTools` and returns before the profile is read,
+   * so for a role whose grant is a CEILING it has to be clamped at the single exit.
+   *
+   * Both directions matter. Narrowing must keep working — that is what an explicit
+   * list is for — and widening must not, or the role's stated shape is a label the
+   * caller can remove by naming a tool. The precedence itself is unchanged for every
+   * other role; `spec.tools overrides role tool scoping` below still pins that.
+   */
+  it('an explicit tool list narrows a readOnly role and cannot widen it', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const parentTools = [makeTool('read_file'), makeTool('task_list'), makeTool('bash'), makeTool('write_file')];
+    const readOnlyRole = {
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      allowTools: ['read_file', 'task_list'],
+      description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig;
+    const childToolsOfCall = (i: number): string[] => {
+      const call = vi.mocked(MockAgent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+      return (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    };
+
+    // WIDEN: names a tool the ceiling does not hold.
+    mockGetRole.mockReturnValue(readOnlyRole);
+    const before = vi.mocked(MockAgent).mock.calls.length;
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'o1', task: 'do', role: 'operator', tools: ['bash', 'read_file'] }] },
+      makeAgent({ tools: parentTools }),
+    );
+    const widened = childToolsOfCall(before);
+    expect(widened).not.toContain('bash');
+    expect(widened).toContain('read_file');
+
+    // NARROW: names a subset of the ceiling, and gets exactly that subset — not the
+    // whole ceiling, which would mean the explicit list had stopped being honoured.
+    const before2 = vi.mocked(MockAgent).mock.calls.length;
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'o2', task: 'do', role: 'operator', tools: ['read_file'] }] },
+      makeAgent({ tools: parentTools }),
+    );
+    expect(childToolsOfCall(before2)).toEqual(['read_file']);
+  });
+
   // === F5/S8: spawn seeds the child's sticky taint from a tainted parent ===
 
   it('F5/S8: a tainted parent seeds the spawned child\'s untrusted taint', async () => {

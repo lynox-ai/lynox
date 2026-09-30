@@ -287,6 +287,45 @@ describe('spawnInline with role', () => {
     expect(subject).toContain('read_file');
   });
 
+  /**
+   * The THIRD grant path. `spawnViaAgent` grants the agent definition's own tools —
+   * module-provided functions, not registry entries — and never consulted `step.role`
+   * for them. A read-only role there was a label with nothing behind it, so it is
+   * refused rather than ignored: silently dropping the tools would leave a step that
+   * runs with none, and silently keeping them is the shape the surface removes.
+   */
+  it('refuses a readOnly role on the agent runtime instead of ignoring it', async () => {
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'ro-agent-step', agent: 'ro-agent-step', runtime: 'agent', role: 'operator',
+    };
+    const agentDef: AgentDef = {
+      name: 'ro-agent-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
+    };
+    await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
+      .rejects.toThrow(/read-only role "operator" on the agent runtime/);
+  });
+
+  it('leaves a NON-readOnly role on the agent runtime alone', async () => {
+    // The other direction: the refusal must key on the flag, not on the presence of a
+    // role. `creator` has always been legal here and still is.
+    mockGetRole.mockReturnValue({
+      model: 'balanced', effort: 'high', autonomy: 'guided',
+      denyTools: ['bash'], description: 'Content creation, tone adaptation. No system commands.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'rw-agent-step', agent: 'rw-agent-step', runtime: 'agent', role: 'creator',
+    };
+    const agentDef: AgentDef = {
+      name: 'rw-agent-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
+    };
+    await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
+      .resolves.toBeDefined();
+  });
+
   it('role defaults to maxIterations 10', async () => {
     const role: RoleConfig = {
       model: 'deep',

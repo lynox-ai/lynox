@@ -630,6 +630,27 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
+  // A read-only role cannot be honoured on THIS runtime, so it is refused rather
+  // than ignored.
+  //
+  // `role` is allowed on any `ManifestStep`, and this path never consulted it for
+  // tools: the grant is `convertAgentTools(agentDef.tools)` — module-provided
+  // functions, not registry entries, so `READ_ONLY_TOOL_SURFACE` cannot speak about
+  // them at all. Keeping the role's label while granting that set is exactly the
+  // shape the surface exists to remove, and silently dropping the tools instead
+  // would leave a step that runs with nothing. Refusing says which of the two the
+  // author meant to write. No manifest in this repo declares a role on
+  // `runtime: 'agent'`.
+  const declaredRole = step.role ? getRole(step.role) : undefined;
+  if (declaredRole?.readOnly === true) {
+    throw new Error(
+      `Step "${step.id}" declares the read-only role "${step.role ?? ''}" on the agent `
+      + `runtime, which grants the agent definition's own tools — a read-only grant `
+      + `cannot be applied to them. Use runtime: 'inline' for a read-only role, or drop `
+      + `the role from this step.`,
+    );
+  }
+
   // Single chokepoint: override gate (now a pass-through, D8) + clamp to
   // max_tier + map to the provider's id. The clamp is the cost cap that applies.
   // Headless deep-consent parity: the step-side twin of spawn's D2 clamp, as a

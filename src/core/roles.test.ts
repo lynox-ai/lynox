@@ -91,9 +91,15 @@ describe('read-only roles are granted by an allowlist', () => {
         `role "${name}" says read-only in its description but is granted by subtraction`,
       ).toBe(true);
     }
-    // Not vacuous: two roles reach the assert above.
-    const claiming = Object.values(BUILTIN_ROLES).filter(r => UNQUALIFIED_READ_ONLY.test(r.description));
-    expect(claiming.length).toBe(2);
+    // Not vacuous — and `>=` rather than `=== 2`, because a third role that correctly
+    // states read-only AND carries the flag is the wanted outcome, not a failure. What
+    // must not drop to zero is the number of roles that reach the assert at all.
+    const claiming = Object.entries(BUILTIN_ROLES)
+      .filter(([, r]) => UNQUALIFIED_READ_ONLY.test(r.description))
+      .map(([name]) => name);
+    expect(claiming.length).toBeGreaterThanOrEqual(2);
+    expect(claiming).toContain('researcher');
+    expect(claiming).toContain('operator');
   });
 
   it('the description check can fail — a violating role is detected', () => {
@@ -128,6 +134,11 @@ describe('read-only roles are granted by an allowlist', () => {
       'remember', 'memory_store', 'memory_block_edit', 'memory_retire', 'memory_update',
       'memory_delete', 'memory_promote',
       'contacts_save', 'data_store_insert', 'data_store_create', 'data_store_drop',
+      'data_store_delete',
+      // Both were candidates that read as pure and are not: `memory_focus` sets the
+      // engine-scoped focus every later render falls back to, `ask_user` parks a
+      // trigger and pushes a notification on the worker-loop path.
+      'memory_focus', 'ask_user',
       'artifact_save', 'artifact_restore', 'artifact_delete',
       'task_create', 'task_update', 'plan_task',
       'set_thread_context', 'subjects_merge',
@@ -138,9 +149,26 @@ describe('read-only roles are granted by an allowlist', () => {
     }
   });
 
+  it('a readOnly role never resolves to an EMPTY ceiling', () => {
+    // `resolveTools` fails closed on `readOnly` with no `allowedTools` — it grants
+    // nothing. That is the right direction for an unfilled ceiling and the wrong
+    // outcome for a real role, so the two must not be confusable: every readOnly role
+    // has to arrive with a non-empty one.
+    for (const [name, role] of Object.entries(BUILTIN_ROLES)) {
+      if (role.readOnly !== true) continue;
+      const profile = roleToolProfile(role);
+      expect(profile.allowedTools, `role "${name}" would resolve to no tools at all`)
+        .not.toHaveLength(0);
+    }
+    expect(READ_ONLY_TOOL_SURFACE.length).toBeGreaterThan(5);
+  });
+
   it('roleToolProfile turns readOnly into the surface, and leaves other roles alone', () => {
     const operator = roleToolProfile(BUILTIN_ROLES['operator']!);
     expect(operator.allowedTools).toEqual([...READ_ONLY_TOOL_SURFACE]);
+    // Carried, not just derived: `resolveTools` reads this to treat the allowlist as a
+    // ceiling an explicit tool list cannot step around.
+    expect(operator.readOnly).toBe(true);
     // denyTools survives the switch — it applies after the allowlist, as a second cut.
     expect(operator.deniedTools).toEqual(['write_file']);
 
