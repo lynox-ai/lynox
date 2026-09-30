@@ -54,13 +54,19 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     // BENCH has NO members, and the empty category is the honest state rather than an
     // oversight — every Fireworks slot this repo pins rests on a sweep or on an
     // operator decision. Two entries carried the label until 2026-09-30 on the
-    // strength of a fast-slot compaction run from 2026-08-10, and it was false on
-    // BOTH halves of its own definition: the run's scripts are not in this repo (they
-    // sit on an unmerged branch, so nobody reading main can re-run it), and that
-    // instrument's own review found its decision rule subtracts two scores produced
-    // by two DIFFERENT judge models — it compares judge strictness and reports the
-    // difference as candidate quality. The two models so labelled are withdrawn by
-    // the provider (404) and pinned by nothing, so removing them costs no coverage.
+    // strength of a fast-slot compaction run from 2026-08-10. Three things are wrong
+    // with that, and any one of them is enough:
+    //   • the run's scripts are not on main, so nobody reading main can re-run it,
+    //     and no run artefact is committed on either side — the figures survive only
+    //     in prose that quotes them;
+    //   • the run's own recorded reference sits at 90.4% literal recall against a
+    //     95% bar, and the harness short-circuits to INVALID in that case, in its own
+    //     words: "no candidate verdict from this run is quotable";
+    //   • the decision rule subtracts two scores produced by two DIFFERENT judge
+    //     models, so it compares judge strictness and reports the difference as
+    //     candidate quality.
+    // The two models so labelled are withdrawn by the provider (404) and pinned by
+    // nothing, so removing them costs no coverage.
     // What is deliberately NOT accepted as evidence any more: the R1/R3 replay floor
     // as a POSITIVE signal. It scores delegation behaviour, not answer quality, and
     // per-model rates below n≈8 are noise (glm measured 0/2, 1/2 and 2/8 on the same
