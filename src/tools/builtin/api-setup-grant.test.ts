@@ -1173,3 +1173,252 @@ describe('fetch_token — the wall-clock ceiling on a dripping body', () => {
     }
   });
 });
+
+describe('an expiring oauth2 token is renewed before the request that needs it', () => {
+  /**
+   * The renewal runs `api_setup` action=fetch_token through a DYNAMIC import,
+   * because `api-setup.ts` imports `http.ts` and a static back-import is a
+   * cycle. A dynamic import moves a load failure out of the build and into the
+   * first renewal — at a customer, a day after a deploy, in a path that writes
+   * secrets.
+   *
+   * So this asserts the import itself, not a mock of it. A test that mocks
+   * `api-setup` proves that the caller makes a call; it cannot prove the module
+   * resolves or still exports what the caller reaches for.
+   */
+  it('the module the renewal imports resolves, and exports the handler it calls', async () => {
+    const mod = await import('./api-setup.js');
+    expect(mod.apiSetupTool).toBeDefined();
+    expect(typeof mod.apiSetupTool.handler).toBe('function');
+  });
+
+  /**
+   * The buffer is derived rather than chosen, so it is pinned against the two
+   * numbers it was derived from. If either grows past it, a token can die
+   * between the check and its use and the failure reads as a revocation.
+   */
+  it('the refresh buffer outlasts a maximum request plus an exchange', async () => {
+    const { OAUTH_REFRESH_BUFFER_MS } = await import('./http.js');
+    const HTTP_TIMEOUT_HARD_CAP_MS = 60_000; // http_request's documented ceiling
+    expect(OAUTH_REFRESH_BUFFER_MS).toBeGreaterThan(HTTP_TIMEOUT_HARD_CAP_MS + TOKEN_EXCHANGE_TIMEOUT_MS);
+  });
+
+  /**
+   * The property the design rests on: the renewal cannot trigger itself. The
+   * exchange runs through `exchangeToken` → `fetchWithValidatedRedirects`, not
+   * through the `http_request` handler, and the attach path has exactly one
+   * caller.
+   *
+   * ⚠ This reads the SOURCE, so it measures the call graph and not the
+   * behaviour — a proxy, and named as one. It is here because the alternative
+   * is a sentence in a PR body that nothing re-checks: it holds today and
+   * becomes an assumption the moment someone adds a second call site.
+   */
+  it('the attach path keeps exactly one caller, so a renewal cannot re-enter it', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(here, 'http.ts'), 'utf-8');
+    const mentions = src.split('attachEngineManagedAuth').length - 1;
+    // One declaration, one call, and one mention in the doc comment above the
+    // refusal type. A fourth means a second call site — read it before raising
+    // this number.
+    expect(mentions, 'a new mention of attachEngineManagedAuth appeared — is it a second call site?').toBe(3);
+  });
+});
+
+describe('the renewal fires on expiry and not otherwise', () => {
+  /** One fetch spy that answers the token endpoint and the API separately. */
+  function stubBoth(newAccessToken: string): { calls: string[] } {
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: newAccessToken, expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { calls };
+  }
+
+  async function callApi(profile: ApiProfile, vaultSeed: Record<string, string>): Promise<{ calls: string[]; vault: MockVault }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(profile);
+    const vault = makeVault(vaultSeed);
+    const { calls } = stubBoth('MINTED_BY_RENEWAL');
+    const { httpRequestTool } = await import('./http.js');
+    await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault),
+    );
+    return { calls, vault };
+  }
+
+  const SEED = {
+    CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+    CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+  };
+
+  it('renews a token inside the buffer, through the real dynamic import', async () => {
+    const past = Date.now() - 1000; // already expired
+    const { calls, vault } = await callApi(
+      crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } } }),
+      SEED,
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), `no token POST went out; calls were ${calls.join(', ')}`).toBe(true);
+    // The exchange ran for real: the vault holds what the stub minted.
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('MINTED_BY_RENEWAL');
+  });
+
+  it('leaves a token alone while it is outside the buffer', async () => {
+    const farFuture = Date.now() + 24 * 60 * 60 * 1000;
+    const { calls, vault } = await callApi(
+      crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: farFuture } } }),
+      SEED,
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a token POST went out for a token that is nowhere near expiry').toBe(false);
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('OLD_TOKEN');
+  });
+
+  it('carries no expiry at all the way it always did — no renewal, no refusal', async () => {
+    const { calls } = await callApi(crmProfile(), SEED);
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(false);
+    expect(calls.some((u) => u.includes('/v1/contacts'))).toBe(true);
+  });
+
+  /**
+   * The fall-through contract. A provider hiccup during renewal must not fail a
+   * request whose stored token is still valid — the buffer exists precisely so
+   * that it is. Nothing is recorded either: this path writes no verdict, and the
+   * handler it calls writes no revocation it has not proven.
+   */
+  it('attaches the stored token when the renewal itself fails', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } } }));
+    const vault = makeVault(SEED);
+
+    const seen: { authorization?: string } = {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) return new Response('{"error":"server_error"}', { status: 500 });
+      const h = new Headers(init?.headers);
+      seen.authorization = h.get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault),
+    );
+    expect(String(out)).not.toMatch(/^Error:/);
+    expect(seen.authorization, 'the stored token was not attached after a failed renewal').toBe('Bearer OLD_TOKEN');
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('OLD_TOKEN');
+  });
+});
+
+describe('the two properties the comments claim, which nothing was checking', () => {
+  // Module-scoped so a THROWN refusal does not take the record with it: `run`
+  // never returns in that case, and the calls are exactly what has to be
+  // asserted then.
+  let lastCalls: string[] = [];
+
+  function stubBoth(): { calls: string[] } {
+    const calls: string[] = [];
+    lastCalls = calls;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { calls };
+  }
+
+  const SEED = {
+    CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+    CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+  };
+
+  async function run(profile: ApiProfile): Promise<{ calls: string[]; out: string }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(profile);
+    const { calls } = stubBoth();
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault(SEED)),
+    );
+    return { calls, out: String(out) };
+  }
+
+  /**
+   * The BUFFER, not merely expiry. A token two minutes from dying is still
+   * valid, and renewing it is the whole point: the request it is about to carry
+   * may run for a minute, and the exchange before it for fifteen seconds.
+   *
+   * Without this, setting the buffer to zero was caught only by the test that
+   * pins the constant — so changing the number and that test together would
+   * have removed the behaviour invisibly.
+   */
+  it('renews a token that is inside the buffer but has NOT expired yet', async () => {
+    const twoMinutesLeft = Date.now() + 2 * 60 * 1000;
+    const { calls } = await run(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: twoMinutesLeft } },
+    }));
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a still-valid token inside the buffer was not renewed').toBe(true);
+  });
+
+  /**
+   * That a revoked grant costs no exchange — which holds for BOTH reasons and
+   * is worth pinning for that: this path checks before renewing, and
+   * `fetch_token` short-circuits on a revoked grant before it posts anything.
+   *
+   * ⚠ It therefore does NOT pin the order. Moving the renewal above the
+   * revoked-grant check leaves this green, measured by mutation. That mutant is
+   * equivalent in behaviour, and the comment in `http.ts` was corrected to say
+   * so rather than a test being invented to defend a claim the code does not
+   * make. The order is a cost and clarity choice.
+   */
+  it('refuses a revoked grant without spending an exchange on it', async () => {
+    const past = Date.now() - 1000;
+    const grant: OAuthGrantRecord = {
+      state: 'revoked',
+      revoked_fp: tokenFingerprint('REFRESH'),
+      revoked_at: '2026-09-30T00:00:00.000Z',
+    };
+    // The refusal is THROWN as a soft failure, not returned — so the assertion
+    // has to catch it. Getting that wrong is how this test first failed, and the
+    // failure was the harness rather than the behaviour.
+    let refusal = '';
+    let calls: string[] = [];
+    try {
+      const r = await run(crmProfile({
+        auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+        oauth_grant: grant,
+      }));
+      calls = r.calls;
+      expect.unreachable('a revoked grant was not refused');
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+      calls = lastCalls;
+    }
+    expect(refusal).toMatch(/revoked or expired/);
+    expect(calls.some((u) => u.includes('/oauth/token')), 'an exchange was spent on a grant already known to be revoked').toBe(false);
+  });
+});

@@ -491,6 +491,87 @@ interface HintContext {
  *                 hint anyway. A shape the engine will never attach is precisely
  *                 the one whose 401 the model cannot explain on its own.
  */
+/**
+ * How far before expiry an oauth2 access token is renewed.
+ *
+ * Derived, not chosen. The token has to stay valid through everything that
+ * happens after the check:
+ *   · the exchange itself — `TOKEN_EXCHANGE_TIMEOUT_MS` is 15 s
+ *     (`core/oauth-token-exchange.ts`);
+ *   · then the request it is attached to — `http_request` caps `timeout_ms`
+ *     at 60 s and defaults to 30 s (see the tool's schema below).
+ * So anything under 75 s can hand a provider a token that dies mid-call, and
+ * the failure would look like a revocation rather than a race. Five minutes is
+ * four times the hard cap, and it is the value the Google path has used since
+ * it was written (`integrations/google/google-auth.ts`) — the one constant a
+ * review of that file classified as provider-neutral rather than Google-shaped.
+ *
+ * ⚠ Degenerate case, named because the arithmetic hides it: a provider issuing
+ * tokens shorter than this buffer would be refreshed on every single call. None
+ * of the providers this engine connects does — Shopify's client-credentials
+ * token lives 24 h — but a profile pointed at one would burn an exchange per
+ * request rather than fail, which is the safer of the two wrong behaviours and
+ * the reason there is no floor here.
+ */
+export const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+/**
+ * Renew an oauth2 access token that is about to expire, by running the SAME
+ * exchange the `api_setup` tool runs — deliberately by calling that handler
+ * rather than by extracting its body into a shared function.
+ *
+ * The exchange carries a guarantee this path must not re-implement: when two
+ * exchanges for one profile overlap, the provider rejects the one that lost as
+ * spent, and `api_setup` re-reads the slot before recording anything — "if the
+ * slot no longer holds what went out, the rejection says nothing about what it
+ * holds now, so it is no revocation". An extracted copy would be identical
+ * today and would hold that line in one of two places tomorrow. A call IS the
+ * same code.
+ *
+ * The import is dynamic because `api-setup.ts` imports this module, so a static
+ * one is a cycle. That moves a load failure from build time to the first
+ * refresh — which is why a test drives this path for real rather than mocking
+ * the module.
+ *
+ * Returns nothing and throws nothing: a failed renewal leaves the vault as it
+ * was and the caller attaches whatever is there. That is deliberate. The buffer
+ * means the stored token is still valid at this moment, so a provider hiccup
+ * must not turn into a refusal — and the existing 401 path already says what to
+ * do if it really is dead. This path records no verdict of its own; the handler
+ * it calls is the only thing that writes state, and it writes no revocation it
+ * has not proven.
+ */
+async function renewExpiringOAuthToken(
+  profileId: string,
+  agent: import('../../types/index.js').IAgent,
+): Promise<void> {
+  // TWO catches, not one, and the split is the point. A first draft wrapped both
+  // steps together — which would have swallowed a failing import as if it were a
+  // provider hiccup, leaving a packaging defect invisible for as long as nobody
+  // looked. That is the same silent fallback that let a shipping gap live in this
+  // repo for four months; it does not get rebuilt here.
+  let mod: typeof import('./api-setup.js');
+  try {
+    mod = await import('./api-setup.js');
+  } catch (err) {
+    // A module that will not load is a build or packaging defect, not a
+    // transient. It cannot be retried into working and it must not be quiet.
+    process.stderr.write(
+      `[lynox:http] oauth token renewal unavailable: api_setup did not load (${err instanceof Error ? err.message : String(err)}). `
+      + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.\n`,
+    );
+    return;
+  }
+
+  try {
+    await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+  } catch {
+    // Swallowed on purpose — see the return contract above. A throw here is the
+    // provider or the network, and the token in the vault is still valid for at
+    // least the buffer, so failing the request would be the wrong trade.
+  }
+}
+
 async function attachEngineManagedAuth(
   url: string,
   headers: Record<string, string>,
@@ -581,6 +662,25 @@ async function attachEngineManagedAuth(
     // written SHOPIFY_SEO_ACCESS_TOKEN, the agent kept reaching for
     // SHOPIFY_ACCESS_TOKEN → 401 forever), and rotation, where every later request
     // should pick up a freshly minted token automatically.
+    // Renew before attaching, not after a 401 comes back. Two reasons it has to
+    // be here rather than in a worker: a worker would have to know every profile
+    // and guess a frequency, and it would keep alive connections nobody uses —
+    // for a 24-hour token that is a daily exchange, and a daily secret write, for
+    // a shop untouched for months. This runs only for a token about to be used.
+    //
+    // Ordered after the revoked-grant check, and the honest reason is smaller
+    // than it looks: `fetch_token` short-circuits on a revoked grant BEFORE it
+    // posts anything (`api-setup.ts`, "posting the very token the provider
+    // already rejected only repeats the rejection"), so swapping the two changes
+    // no observable behaviour — measured by mutation, which survived. What the
+    // order buys is a dynamic import and a handler call not spent on a case
+    // already decided, and one place the refusal is phrased. A cost and clarity
+    // choice, not a correctness property; do not cite it as one.
+    const expiresAt = profile.auth?.oauth?.token_expires_at;
+    if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
+      await renewExpiringOAuthToken(profile.id, agent);
+    }
+
     const tokenKey = accessTokenKey(profile.id);
     const resolved = secretStore.resolve(tokenKey);
     if (!resolved) {
