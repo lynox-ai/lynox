@@ -233,6 +233,34 @@ describe('BulkLedger', () => {
     expect(ledger.getStatus('approved-1')?.phase).toBe('approved');
   });
 
+  it('never prunes an undo preview — the model\'s plans cannot drop the undo the owner is about to approve', () => {
+    const applied = (key: string): string => {
+      const id = record(one(key));
+      ledger.approve(id, { checksum: ledger.computeChecksum(id)! });
+      ledger.setPhase(id, ['approved'], 'writing');
+      expect(ledger.claimTarget(id, 0)).toBe(true);
+      ledger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'ok');
+      ledger.finish({ id, kind: 'apply', sourceRunId: null });
+      return id;
+    };
+    const planUndo = (src: string): string => {
+      const out = ledger.planUndo(src);
+      if (!out.ok) throw new Error(out.reason);
+      return out.status.id;
+    };
+    const firstUndo = planUndo(applied('s1'));
+    const secondSource = applied('s2');
+    // Enough plans to fill the cap twice over, then a second undo on top: the first
+    // undo is now the oldest preview of all, which is what a kind-blind prune drops.
+    for (let i = 0; i < 2 * BULK_MAX_PREVIEWED_RUNS; i++) record(one(`m${String(i)}`));
+    const secondUndo = planUndo(secondSource);
+    expect([ledger.getStatus(firstUndo)?.phase, ledger.getStatus(secondUndo)?.phase]).toEqual(['previewed', 'previewed']);
+    const applyPreviews = engineDb.getDb().prepare(
+      "SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply'",
+    ).get() as { n: number };
+    expect(applyPreviews.n).toBe(BULK_MAX_PREVIEWED_RUNS);
+  });
+
   it('keeps only the newest unapproved previews, newest first', () => {
     const ids = Array.from({ length: BULK_MAX_PREVIEWED_RUNS + 2 }, (_, i) => record(one(`k${String(i)}`)));
     const listed = ledger.listRuns(50).map((r) => r.id);

@@ -79,6 +79,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BulkTriggerLockedError } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -6195,7 +6196,14 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown>;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
-        if (!taskManager.setEnabled(params['id']!, b['enabled'])) { errorResponse(res, 404, 'Task not found'); return; }
+        let found: boolean;
+        try {
+          found = taskManager.setEnabled(params['id']!, b['enabled']);
+        } catch (err: unknown) {
+          if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
+          throw err;
+        }
+        if (!found) { errorResponse(res, 404, 'Task not found'); return; }
         // setEnabled toggles a TRIGGER (the `triggers` table), so read the
         // updated row back from there — getTask reads the `tasks` table and
         // would always miss, dropping the response to the {id, enabled} stub.
@@ -6203,7 +6211,13 @@ export class LynoxHTTPApi {
         jsonResponse(res, 200, updated ?? { id: params['id'], enabled: b['enabled'] ? 1 : 0 });
         return;
       }
-      const task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
+      let task;
+      try {
+        task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
+      } catch (err: unknown) {
+        if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
+        throw err;
+      }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
     }));
@@ -6221,7 +6235,13 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
-      const task = taskManager.complete(params['id']!);
+      let task;
+      try {
+        task = taskManager.complete(params['id']!);
+      } catch (err: unknown) {
+        if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
+        throw err;
+      }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
     }));
@@ -6235,7 +6255,13 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
-      const trigger = taskManager.confirmTrigger(params['id']!);
+      let trigger;
+      try {
+        trigger = taskManager.confirmTrigger(params['id']!);
+      } catch (err: unknown) {
+        if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
+        throw err;
+      }
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
       jsonResponse(res, 200, trigger);
     }));
