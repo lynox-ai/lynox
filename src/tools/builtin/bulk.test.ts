@@ -362,6 +362,27 @@ describe('bulk_plan over data-store rows', () => {
   });
 });
 
+describe('bulk_status on an instance without a vault key', () => {
+  it('says the approval checksum does not bind — and says nothing when it does', async () => {
+    const plan = (l: BulkLedger): string => l.recordDryRun({
+      createdBy: 't', targetSystem: 'workspace', scope: 's',
+      targets: [{ key: 'a.md', before: { absent: true }, after: 'x' }],
+    }).id;
+    const line = /Approval checksum: unkeyed/;
+    expect(await bulkStatusTool.handler({ run_id: plan(ledger) }, agent())).not.toMatch(line);
+
+    const bareDb = new EngineDb(join(dir, 'unkeyed.db'), '');
+    try {
+      const bare = new BulkLedger(bareDb);
+      const a = { toolContext: { bulkLedger: bare, dataStore: store } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: plan(bare) }, a)).toMatch(line);
+      expect(await bulkStatusTool.handler({}, a)).toMatch(line);
+    } finally {
+      bareDb.close();
+    }
+  });
+});
+
 describe('bulk tools without a ledger', () => {
   it('refuse instead of failing', async () => {
     const bare = { toolContext: { bulkLedger: null, dataStore: null } } as unknown as IAgent;
