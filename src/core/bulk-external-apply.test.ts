@@ -9,7 +9,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { BulkLedger, BULK_HALT_REASONS, type BulkRunForApply } from './bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, resourceKindOf, type BulkRunForApply } from './bulk-ledger.js';
 import {
   BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
   type BulkWriteMethod, type ExternalClient,
@@ -116,9 +116,9 @@ const writerFor = (c: ExternalClient) => (run: BulkRunForApply) => bulkWriterFor
 /** Plan, preview and approve an external run: what an owner does before the first write. */
 /** A probe the owner confirmed for the host and verb — the fixture for tests that are not
  *  about the probe itself. */
-function seedProbe(method: BulkWriteMethod = 'PATCH'): void {
-  engineDb.getDb().prepare('INSERT OR REPLACE INTO bulk_host_probes (host, method, run_id, confirmed_at) VALUES (?, ?, ?, ?)')
-    .run(HOST, method, 'fixture', '2026-09-30T00:00:00.000Z');
+function seedProbe(method: BulkWriteMethod = 'PATCH', kind = '/products/'): void {
+  engineDb.getDb().prepare('INSERT OR REPLACE INTO bulk_host_probes (host, method, kind, run_id, confirmed_at) VALUES (?, ?, ?, ?, ?)')
+    .run(HOST, method, kind, 'fixture', '2026-09-30T00:00:00.000Z');
 }
 
 async function previewedRun(rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH'): Promise<string> {
@@ -416,7 +416,8 @@ describe('applying an external run', () => {
     const s = shop();
     const restore = serve(s);
     try {
-      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }]);
+      // PUT, not the default: the worker takes the verb from the run's contract.
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], client(), 'PUT');
       const apiStore = new ApiStore();
       apiStore.register({
         id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
@@ -450,7 +451,7 @@ describe('applying an external run', () => {
       expect(s.items.get('/products/0')!['price']).toBe('15.00');
       expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 1 });
       expect(s.requests.map((r) => [r.method, r.auth])).toEqual([
-        ['GET', `Bearer ${TOKEN}`], ['PATCH', `Bearer ${TOKEN}`], ['GET', `Bearer ${TOKEN}`],
+        ['GET', `Bearer ${TOKEN}`], ['PUT', `Bearer ${TOKEN}`], ['GET', `Bearer ${TOKEN}`],
       ]);
     } finally {
       restore();
@@ -579,6 +580,61 @@ describe('the write verb and the one-target probe', () => {
       await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) });
       expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 0, conflicts: 1 });
       expect(s.items.get('/products/0')).toMatchObject({ title: 'Renamed by someone else', price: '15.00' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('names a resource kind by its path without the last segment', () => {
+    expect(resourceKindOf('/2.0/article/7')).toBe('/2.0/article/');
+    expect(resourceKindOf('/2.0/contact/7/')).toBe('/2.0/contact/');
+    expect(resourceKindOf('/wp-json/wc/v3/products/794')).toBe('/wp-json/wc/v3/products/');
+  });
+
+  it('a probe vouches for its kind of resource only, and a run over two kinds needs both', async () => {
+    const s = shop();
+    s.items.set('/contacts/1', { id: 1, name_1: 'Acme', note: 'x', updated_at: 't0' });
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0), url(1), `https://${HOST}/contacts/1`], 'PUT') });
+      seedProbe('PUT', '/products/');
+      const mixed = await previewedRun([
+        { target: url(0), after: { price: '1' } }, { target: url(1), after: { price: '1' } },
+        { target: `https://${HOST}/contacts/1`, after: { note: 'y' } },
+      ], c, 'PUT');
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! })).toEqual({ ok: false, reason: 'probe_required' });
+      seedProbe('PUT', '/contacts/');
+      expect(ledger.approve(mixed, { checksum: ledger.computeChecksum(mixed)! }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('only a stopped apply run that wrote one target is a probe — not one still approved, not an undo', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [url(0), url(1)], 'PUT') });
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c, 'PUT');
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // Approved, not yet written: nothing to vouch for.
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: false, reason: 'not_a_probe' });
+      const putWriter = (run: BulkRunForApply) => bulkWriterFor(run, null, () => externalWriter(c, { method: 'PUT', sleep: noSleep }));
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: putWriter });
+      // Stopped at its cap with one target written: this one is a probe, and it records PUT.
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(engineDb.getDb().prepare('SELECT host, method, kind, run_id FROM bulk_host_probes').all())
+        .toEqual([{ host: HOST, method: 'PUT', kind: '/products/', run_id: runId }]);
+      // The undo of that one write is none: an undo writes back, it tests nothing new.
+      engineDb.getDb().prepare('DELETE FROM bulk_host_probes').run();
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'done', halt_reason = NULL WHERE id = ?`).run(runId);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: putWriter });
+      expect(ledger.getStatus(undo.status.id)!.applied).toBe(1);
+      expect(ledger.confirmProbe(undo.status.id)).toEqual({ ok: false, reason: 'not_a_probe' });
     } finally {
       restore();
     }

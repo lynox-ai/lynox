@@ -232,6 +232,26 @@ function parseContractMethods(json: string | null): string | null {
   }
 }
 
+/** The kind of resource a target URL path names: the path without its last segment —
+ *  `/2.0/article/7` → `/2.0/article/`. One host serves many kinds (bexio: articles and
+ *  contacts), and a verb that keeps unsent fields on one may replace the resource on another,
+ *  so a probe vouches for its kind only. */
+export function resourceKindOf(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  return trimmed.slice(0, trimmed.lastIndexOf('/') + 1);
+}
+
+/** The target paths an external run's stored contract grants. */
+function parseContractPaths(json: string | null): string[] {
+  if (json === null) return [];
+  try {
+    const paths = (JSON.parse(json) as { pathPatterns?: unknown }).pathPatterns;
+    return Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 /** An external run's target system, `http:<host>`. */
 export function externalHostOf(targetSystem: string): string | null {
   return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
@@ -627,17 +647,21 @@ export class BulkLedger {
   private probeHolds(run: RunRow): boolean {
     const host = externalHostOf(run.target_system);
     if (host === null) return true;
-    const contract = parseContractMethods(run.contract_json);
-    if (contract === null) return false;
-    return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ?').get(host, contract) !== undefined;
+    const method = parseContractMethods(run.contract_json);
+    const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
+    if (method === null || kinds.length === 0) return false;
+    // Every kind of resource the run writes needs its own probe.
+    const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
+    return kinds.every((kind) => probed.get(host, method, kind) !== undefined);
   }
 
   /**
    * The owner confirms a probe: an external apply run wrote exactly one target with its
    * verb, and the owner checked on the provider's side that the target kept the fields the
-   * write did not send. From then on runs to that host with that verb may be approved, or
-   * resumed, for more than one target. A target found already holding its value was not
-   * written and proves nothing, so it does not count.
+   * write did not send. From then on runs to that host with that verb, over targets of that
+   * kind ({@link resourceKindOf}), may be approved or resumed for more than one target. A
+   * target found already holding its value was not written and proves nothing, so it does
+   * not count.
    */
   confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
     { ok: true } | { ok: false; reason: 'not_found' | 'not_a_probe' } {
@@ -647,14 +671,18 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     if (host === null || method === null || run.kind !== 'apply') return { ok: false, reason: 'not_a_probe' };
     const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
-    const results = (this.engineDb.getDb().prepare(
-      'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
-    ).all(runId) as { result: string | null }[]).map((r) => (r.result === null ? null : this.engineDb.dec(r.result)));
-    if (!stopped || results.length !== 1 || results[0] !== 'written') return { ok: false, reason: 'not_a_probe' };
+    const applied = (this.engineDb.getDb().prepare(
+      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+    ).all(runId) as { target_key: string; result: string | null }[]);
+    const only = applied[0];
+    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') {
+      return { ok: false, reason: 'not_a_probe' };
+    }
+    const kind = resourceKindOf(new URL(this.engineDb.dec(only.target_key)).pathname);
     this.engineDb.getDb().prepare(
-      `INSERT INTO bulk_host_probes (host, method, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (host, method) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
-    ).run(host, method, runId, params.confirmedBy ?? null, new Date(params.now ?? Date.now()).toISOString());
+      `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
+    ).run(host, method, kind, runId, params.confirmedBy ?? null, new Date(params.now ?? Date.now()).toISOString());
     return { ok: true };
   }
 
