@@ -1260,6 +1260,12 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     // callers pass nothing, and there is no file and no env var behind it. It
     // exists because the empty-list guard below could otherwise only be read,
     // not run — and the version of that guard this replaced was wrong.
+    //
+    // ⚠ Never pass externally sourced data through it. Every string below is
+    // interpolated into the system prompt verbatim; `renderFence` neutralises
+    // a closing tag and nothing else. The frozen constant is the only thing
+    // production passes, and that is what makes the block's content a decision
+    // rather than an input.
     const cat = catalogue;
     // BOTH lists, not just the first: the guard used to name `suggested_apis`
     // alone, so emptying the offer list would have silently taken the

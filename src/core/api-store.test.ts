@@ -744,6 +744,44 @@ describe('ApiStore', () => {
       ['shopware', 'https://developer.shopware.com/docs/guides/development/integrations-api/', 'oauth2 client_credentials'],
     ];
 
+    /**
+     * The facts inside each `value_prop`, pinned by substring.
+     *
+     * The table above deliberately leaves `value_prop` unpinned as prose, and
+     * for `name`, `category` and a selling sentence that is right. It stopped
+     * being right when the prose started carrying FACTS — measured by mutation:
+     * deleting "API base is https://api.bexio.com/2.0/" from bexio's entry left
+     * the whole suite green, and that sentence is the reason the entry works at
+     * all. `api_setup` bootstrap derives `base_url` from the DOCS host, so
+     * without it the model is handed a profile pointing at a documentation
+     * site.
+     *
+     * So: the API base, and the limits a person needs in order to decide
+     * whether to connect. Every string here was read at the provider's own
+     * documentation. Prose around them stays free.
+     */
+    const REQUIRED_IN_VALUE_PROP: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ['bexio', ['https://api.bexio.com/2.0/', '60 days', 'full access to the company']],
+      ['notion', ['https://api.notion.com/v1/', 'Notion-Version']],
+      ['hubspot', ['https://api.hubapi.com/', 'Legacy apps', 'no automatic expiry']],
+      ['airtable', ['https://api.airtable.com/v0/', '403 Forbidden']],
+      ['wordpress', ['/wp-json/wp/v2/', 'WordPress 5.6', 'SSL/HTTPS']],
+      ['woocommerce', ['/wp-json/wc/v3/', 'Advanced -> REST API']],
+      ['shopware', ['/api/', '/api/oauth/token', 'Administrator', 'client_credentials']],
+    ];
+
+    it('keeps the API base and the stated limits in every on-request entry', () => {
+      const byId = new Map(SUGGESTED_API_CATALOG.connect_when_user_asks.map((a) => [a.id, a]));
+      expect([...byId.keys()].sort()).toEqual(REQUIRED_IN_VALUE_PROP.map(([id]) => id).sort());
+      for (const [id, needles] of REQUIRED_IN_VALUE_PROP) {
+        const entry = byId.get(id);
+        expect(entry, `no on-request entry with id ${id}`).toBeDefined();
+        for (const needle of needles) {
+          expect(entry!.value_prop, `${id}.value_prop lost "${needle}"`).toContain(needle);
+        }
+      }
+    });
+
     it('carries exactly the on-request providers this test names, with their docs URL and auth type', () => {
       const actual = SUGGESTED_API_CATALOG.connect_when_user_asks
         .map((a) => [a.id, a.docs_url, a.auth_type] as const)
@@ -816,7 +854,13 @@ describe('ApiStore', () => {
      */
     it('keeps the clause that makes the on-request list a carve-out and not a contradiction', () => {
       const doNot = sectionsOf(store.formatSuggestedApisForSystemPrompt()).get('do-not-suggest') ?? [];
-      expect(doNot.some((l) => l.includes('without the user explicitly asking to wire it'))).toBe(true);
+      // The WHOLE bullet, not the qualifier alone. A substring pin survives a
+      // rewrite that keeps the words and inverts the sentence — "… — always
+      // suggest it without the user explicitly asking to wire it" contains the
+      // clause and says the opposite of it.
+      expect(doNot).toContain(
+        'any API that mutates production billing, customer records, or live financial state without the user explicitly asking to wire it',
+      );
     });
 
     it('renders each heading exactly once', () => {
@@ -853,20 +897,22 @@ describe('ApiStore', () => {
     it('does not call the on-request providers free, and says not to raise them', () => {
       const out = store.formatSuggestedApisForSystemPrompt();
       expect(out).toContain(`\n\n${ON_REQUEST_HEADING}`);
-      expect(ON_REQUEST_HEADING).toContain('Never name one yourself');
-      expect(ON_REQUEST_HEADING).toContain('ask which product they use');
-      expect(ON_REQUEST_HEADING).toContain('carve-out of the rule above');
+      // Against the RENDERED block. Asserting these on ON_REQUEST_HEADING would
+      // have been three checks of this file's own literal against itself.
+      expect(out).toContain('Never name one yourself');
+      expect(out).toContain('ask which product they use');
+      expect(out).toContain('carve-out of the rule above');
       // "free" is checked on the HEADING, not on the section: a future
       // value_prop may legitimately say "free tier" or "freely available", and
       // a tail-slice check would turn a correct entry red. What must not be
       // free is the claim the heading makes about these providers.
       //
-      // The line below reads as a check on this file's own literal, which on
-      // its own would prove nothing. It is the second half of one: the
-      // `toContain` above pins the RENDERED heading to this literal byte for
-      // byte, so a "free" that reaches the block fails there, and this line is
-      // what stops the literal being edited to follow it.
-      expect(ON_REQUEST_HEADING.toLowerCase()).not.toContain('free');
+      // On the rendered heading line, found by its own prefix rather than by
+      // this file's copy of it — so the check survives a heading rewrite and
+      // still asks the one question it is here to ask.
+      const headingLine = out.split('\n').find((l) => l.startsWith('Connect ONLY after the user names'));
+      expect(headingLine, 'on-request heading line not found').toBeDefined();
+      expect(headingLine!.toLowerCase()).not.toContain('free');
     });
 
     it('carries exactly the catalogue entries this test names, with their docs URL and auth type', () => {

@@ -109,9 +109,12 @@ export interface SuggestedApiCatalog {
    *
    * Each `value_prop` names the API's own host, or says the user supplies it.
    * That is not decoration: `api_setup` action=bootstrap derives `base_url`
-   * from the DOCS host, which is wrong for every entry here whose API lives
-   * somewhere else — and for WordPress, WooCommerce and Shopware there is no
-   * fixed host at all, because the API is the user's own site.
+   * from the DOCS host, and for all seven of these the docs host is not the
+   * API host — for WordPress, WooCommerce and Shopware there is no fixed host
+   * at all, because the API is the user's own site. Three of them (bexio,
+   * Notion, Airtable) additionally get an advisory note from bootstrap's
+   * same-domain host scan, but the drafted `base_url` is wrong in every case:
+   * the scan only appends "verify before swapping", it never swaps.
    */
   readonly connect_when_user_asks: readonly SuggestedApi[];
 }
@@ -247,7 +250,7 @@ export const SUGGESTED_API_CATALOG: SuggestedApiCatalog = Object.freeze({
       category: "databases / spreadsheets",
       docs_url: "https://airtable.com/developers/web/api/authentication",
       auth_type: "bearer",
-      value_prop: "Airtable bases as structured data: records, fields, views. API base is https://api.airtable.com/v0/. The user creates a personal access token, sent as a Bearer token; it needs both the right scope and the specific base added to it as a resource, and Airtable answers a request outside either with 403 Forbidden.",
+      value_prop: "Airtable bases as structured data: records, fields, views. API base is https://api.airtable.com/v0/. The user creates a personal access token, sent as a Bearer token; it needs both the right scope and the specific base added to it as a resource; Airtable documents 403 Forbidden for credentials that do not have access to a resource, so a missing grant surfaces as an error rather than as an empty result.",
     }),
     Object.freeze({
       id: "wordpress",
@@ -255,7 +258,7 @@ export const SUGGESTED_API_CATALOG: SuggestedApiCatalog = Object.freeze({
       category: "CMS / website",
       docs_url: "https://developer.wordpress.org/rest-api/using-the-rest-api/authentication/",
       auth_type: "basic",
-      value_prop: "A WordPress site's own content: posts, pages, media, users. There is no shared host — the API base is the user's own site, https://THEIR-SITE/wp-json/wp/v2/, so ask for it. The user creates an Application Password under Users -> Edit User, in core since WordPress 5.6 with no plugin needed, and it goes as Basic auth. The field only appears on a site served over HTTPS, and a security plugin or a filter can remove it.",
+      value_prop: "A WordPress site's own content: posts, pages, media, users. There is no shared host — the API base is the user's own site, https://THEIR-SITE/wp-json/wp/v2/, so ask for it. The user creates an Application Password under Users -> Edit User, in core since WordPress 5.6 with no plugin needed, and it goes as Basic auth. The field only appears on a site served over SSL/HTTPS, and the filters wp_is_application_passwords_available and ..._for_user let a plugin switch it off globally or per user.",
     }),
     Object.freeze({
       id: "woocommerce",
