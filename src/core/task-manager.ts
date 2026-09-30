@@ -613,8 +613,10 @@ export class TaskManager {
    *  trigger matched. */
   setEnabled(id: string, enabled: boolean): boolean {
     const trigger = this.history.getTrigger(id);
-    if (trigger) refuseBulkTrigger(trigger);
-    return this.history.setTriggerEnabled(id, enabled);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    // Write the row that was checked, like the four methods above.
+    return this.history.setTriggerEnabled(trigger.id, enabled);
   }
 
   /** Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for

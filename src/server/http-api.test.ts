@@ -5824,6 +5824,9 @@ describe('LynoxHTTPApi', () => {
         expect(res.status, `${method} ${path}`).toBe(409);
         expect(((await res.json()) as { error: string }).error, path).toBe(new BulkTriggerLockedError().message);
       }
+      // Only the lock is a 409: any other error the manager throws is not turned into one.
+      mockTaskComplete.mockImplementationOnce(() => { throw new Error('boom'); });
+      expect((await jsonFetch('/api/tasks/t/complete', { method: 'POST' })).status).not.toBe(409);
     });
 
     it('POST /api/tasks/:id/complete completes a task', async () => {
