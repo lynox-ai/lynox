@@ -204,10 +204,21 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // flag removed. An over-claiming comment is worse than none, because it removes
   // the pressure to build the thing it describes.
   //
-  // So the mechanism now exists. Every diagnostic goes through `report`, which sets
-  // the flag and warns in one statement, so "setting it IS warning" is true by
-  // construction rather than by discipline — and a fourth branch cannot write one
-  // without the other, because there is only one way to say it.
+  // So the three diagnostics in this function go through `report`, which sets the
+  // flag and warns in one statement. That removes the ordinary way to get it wrong.
+  //
+  // ⚠⚠ It is NOT a guarantee, and the first version of this comment said it was —
+  // the third over-claim in a row about this same four-line coupling. It read "a
+  // fourth branch cannot write one without the other, because there is only one way
+  // to say it". A review refuted that from inside this very file: six of its
+  // diagnostics are written as `process.stderr.write`, and a fourth branch in that
+  // idiom warns without setting the flag, with the whole suite green.
+  //
+  // What exists is a TRIPWIRE, not a proof: the test beside this file greps the body
+  // of this function for an output channel outside `report`. It catches the likely
+  // accidents and it is defeated by anything it does not enumerate. Calling that
+  // "by construction" is what removed the pressure to think about the idiom the file
+  // actually uses — twice. So it is named for what it is.
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;

@@ -323,7 +323,10 @@ describe('the cache keeps a clean result longer than a doubtful one', () => {
       }));
       const listMistralVoices = await freshListVoices();
       const voices = await listMistralVoices();
-      expect(voices.length).toBeLessThan(TOTAL); // the fallback, not a catalogue
+      // ⚠ Counted, not bounded. `toBeLessThan(TOTAL)` is satisfied by 0 as well, so
+      // it could not see the fallback substitution disappearing — the prose said
+      // "five-entry hardcoded fallback" and the assertion never counted five.
+      expect(voices).toHaveLength(5);
       const afterFirst = requested.length;
       vi.setSystemTime(Date.now() + 5 * 60_000);
       await listMistralVoices();
@@ -432,25 +435,59 @@ describe('what was already collected is not thrown away', () => {
   });
 });
 
-describe('there is one way to warn, and a grep holds it that way', () => {
-  it('routes every diagnostic through `report`, so warning and the flag cannot part', () => {
-    // ⚠ This is the mechanism the comment claims. Without it the coupling was three
-    // hand-written assignments guarded by three hand-written tests — a review proved
-    // that by deleting ONE of those tests, after which the assignment it covered was
-    // free to vanish with the suite still green.
+describe('a tripwire against the likely bypass, and it says what it is not', () => {
+  it('finds no output channel inside listMistralVoices outside `report`', () => {
+    // ⚠ This is a TRIPWIRE, not a proof, and the distinction is the whole point.
+    // Its first version grepped the FILE for `console.warn(` and called the result
+    // "by construction". Both halves were wrong: the property is about this
+    // function, not the file — so it was red for a `console.warn` in a comment and
+    // for one in an unrelated code path — and it was blind to the idiom this file
+    // actually uses six times, `process.stderr.write`, through which a fourth
+    // diagnostic warned without setting the flag with every test green.
     //
-    // A fourth diagnostic can still be written. What it cannot do is warn without
-    // setting the flag, because there is exactly one `console.warn` in the file and
-    // it lives inside `report`. That is a property of the source, so it is checked
-    // against the source — the same shape as the drift guard that holds a tool list
-    // against the pipeline it describes.
+    // It now scopes to the function body and enumerates the channels. It still only
+    // catches what it enumerates. That limit is stated rather than papered over,
+    // because the previous two versions of this claim were each defeated by exactly
+    // the thing the claim had not thought of.
     const src = readFileSync(
       resolve(fileURLToPath(import.meta.url), '../mistral-voxtral-tts.ts'),
       'utf8',
     );
-    const calls = [...src.matchAll(/console\.warn\(/g)];
-    expect(calls, 'expected exactly one console.warn, inside `report`').toHaveLength(1);
-    // And it is the one inside `report`, not merely one somewhere.
-    expect(src).toContain('const report = (message: string): void => {\n    doubtful = true;\n    console.warn(message);');
+    const start = src.indexOf('export async function listMistralVoices');
+    expect(start, 'listMistralVoices not found — this test is measuring nothing').toBeGreaterThan(0);
+    const after = src.indexOf('\nexport ', start + 1);
+    const body = src.slice(start, after === -1 ? undefined : after);
+
+    // Comments stripped first, so prose about `console.warn` is not a failure — and
+    // then `report`'s own body, which is the ONE place that is allowed to write. It
+    // is a closure declared inside this function, so a body-scoped scan finds it;
+    // the check immediately did, which is how I know it looks in the right place.
+    const withoutComments = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const reportStart = withoutComments.indexOf('const report =');
+    expect(reportStart, '`report` not found — the exemption below would hide everything').toBeGreaterThan(0);
+    // The first `};` after the declaration, not a newline-and-indent pattern: the
+    // first version pinned `\n  };` and therefore failed on a behaviour-identical
+    // one-line `report`. A false red gets "fixed" by loosening the channel list, and
+    // then the guard is a no-op — so the brittleness matters more than it looks.
+    const reportEnd = withoutComments.indexOf('};', reportStart);
+    expect(reportEnd, '`report` body end not found').toBeGreaterThan(reportStart);
+    const code = withoutComments.slice(0, reportStart) + withoutComments.slice(reportEnd);
+    const channels = [
+      /console\s*\.\s*(warn|error|log|info|debug)\s*\(/g,
+      /console\s*\[\s*['"`]/g,
+      /process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/g,
+    ];
+    const found = channels.flatMap((re) => [...code.matchAll(re)].map((m) => m[0]));
+    expect(found, `output outside \`report\` in listMistralVoices: ${found.join(', ')}`).toHaveLength(0);
+
+    // Positive control on the scoping: the enumeration must actually match this
+    // file's own idiom, or the check is green because it looks for nothing.
+    expect(/process\s*\.\s*std(out|err)\s*\.\s*write\s*\(/.test(src)).toBe(true);
+    // And `report` itself is the one place that pairs them.
+    expect(src).toMatch(/const report\s*=[\s\S]{0,120}doubtful\s*=\s*true;[\s\S]{0,60}console\.warn\(message\)/);
+    // ⚠ A known miss, measured rather than assumed: `const w = console.warn; w(…)`
+    // slips through, because an alias cannot be caught by enumerating channels. That
+    // is what "tripwire, not proof" means concretely, and naming the case is worth
+    // more than pretending the list is closed.
   });
 });
