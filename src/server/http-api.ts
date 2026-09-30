@@ -78,6 +78,7 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
+import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -6282,6 +6283,10 @@ export class LynoxHTTPApi {
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
     };
+    // Every response a run is approved from, or whose checksum it carries, says whether
+    // that checksum binds — the approver decides with it, not only a later status read.
+    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed' }>(status: T): T & { checksumNote?: string } =>
+      status.checksumBinding === 'unkeyed' ? { ...status, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : status;
     const refuse = (res: import('node:http').ServerResponse, reason: string): void => {
       const [code, msg] = BULK_REFUSALS[reason] ?? [400, 'Refused.'];
       errorResponse(res, code, msg);
@@ -6290,7 +6295,7 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/bulk/runs', async (_req, res) => {
       const ledger = bulkLedger(res);
       if (!ledger) return;
-      jsonResponse(res, 200, { runs: ledger.listRuns(50) });
+      jsonResponse(res, 200, { runs: ledger.listRuns(50).map(withBinding) });
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id', async (_req, res, params) => {
@@ -6301,7 +6306,7 @@ export class LynoxHTTPApi {
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
       const actionable = status.phase === 'previewed' || status.phase === 'approved' || status.phase === 'writing';
-      jsonResponse(res, 200, { ...status, checksum: actionable ? ledger.computeChecksum(params['id']!) : null });
+      jsonResponse(res, 200, { ...withBinding(status), checksum: actionable ? ledger.computeChecksum(params['id']!) : null });
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id/targets', async (req, res, params) => {
@@ -6327,7 +6332,7 @@ export class LynoxHTTPApi {
       const maxTargets = rawMax === undefined ? undefined : typeof rawMax === 'number' ? rawMax : Number.NaN;
       const out = ledger.approve(params['id']!, { checksum, maxTargets });
       if (!out.ok) { refuse(res, out.reason); return; }
-      jsonResponse(res, 200, out.status);
+      jsonResponse(res, 200, withBinding(out.status));
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
@@ -6337,7 +6342,7 @@ export class LynoxHTTPApi {
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
       const out = ledger.resume(params['id']!, { checksum });
       if (!out.ok) { refuse(res, out.reason); return; }
-      jsonResponse(res, 200, out.status);
+      jsonResponse(res, 200, withBinding(out.status));
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/undo', async (_req, res, params) => {
@@ -6346,7 +6351,7 @@ export class LynoxHTTPApi {
       const out = ledger.planUndo(params['id']!);
       if (!out.ok) { refuse(res, out.reason); return; }
       // A previewed undo run: approving it is the second approval (§3.5).
-      jsonResponse(res, 201, { ...out.status, checksum: ledger.computeChecksum(out.status.id) });
+      jsonResponse(res, 201, { ...withBinding(out.status), checksum: ledger.computeChecksum(out.status.id) });
     }));
 
     // ── Artifacts ──

@@ -17,7 +17,7 @@ import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
-import { BulkLedger } from '../core/bulk-ledger.js';
+import { BulkLedger, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { TriggerStore } from '../core/trigger-store.js';
 
 // === Mock dependencies ===
@@ -5948,6 +5948,42 @@ describe('LynoxHTTPApi', () => {
       // Approving the undo is the second approval: it arms bulk_undo.
       await jsonFetch(`/api/bulk/runs/${undo.id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: undo.checksum }) });
       expect(new TriggerStore(bulkDb).getById(`bulk-${undo.id}`)?.effect).toBe('bulk_undo');
+    });
+
+    it('says where the run is approved whether its checksum binds', async () => {
+      // With a vault key: keyed, and no note on any response.
+      const keyed = planRun();
+      const kRun = await (await jsonFetch(`/api/bulk/runs/${keyed}`)).json() as Record<string, unknown>;
+      expect([kRun['checksumBinding'], 'checksumNote' in kRun]).toEqual(['keyed', false]);
+      const kList = await (await jsonFetch('/api/bulk/runs')).json() as { runs: Record<string, unknown>[] };
+      expect(kList.runs.map((r) => 'checksumNote' in r)).toEqual([false]);
+      const kApproved = await (await jsonFetch(`/api/bulk/runs/${keyed}/approve`, { method: 'POST', body: JSON.stringify({ checksum: kRun['checksum'] }) })).json() as Record<string, unknown>;
+      expect([kApproved['phase'], 'checksumNote' in kApproved]).toEqual(['approved', false]);
+      const kResumed = await (await jsonFetch(`/api/bulk/runs/${keyed}/resume`, { method: 'POST', body: JSON.stringify({ checksum: kRun['checksum'] }) })).json() as Record<string, unknown>;
+      expect([kResumed['phase'], 'checksumNote' in kResumed]).toEqual(['approved', false]);
+
+      // Without one: every response the owner approves from carries the note.
+      bulkDb.close();
+      bulkDb = new EngineDb(join(bulkDir, 'unkeyed.db'), '');
+      bulkLedger = new BulkLedger(bulkDb);
+      bulkHolder.ledger = bulkLedger;
+      const id = planRun();
+      const run = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as { checksumBinding: string; checksumNote: string; checksum: string };
+      expect([run.checksumBinding, run.checksumNote]).toEqual(['unkeyed', BULK_UNKEYED_CHECKSUM_NOTE]);
+      const list = await (await jsonFetch('/api/bulk/runs')).json() as { runs: { checksumNote?: string }[] };
+      expect(list.runs.map((r) => r.checksumNote)).toEqual([BULK_UNKEYED_CHECKSUM_NOTE]);
+      const approved = await (await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: run.checksum }) })).json() as { checksumNote?: string };
+      expect(approved.checksumNote).toBe(BULK_UNKEYED_CHECKSUM_NOTE);
+      const resumed = await (await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum: run.checksum }) })).json() as { checksumNote?: string };
+      expect(resumed.checksumNote).toBe(BULK_UNKEYED_CHECKSUM_NOTE);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      for (const seq of [0, 1]) {
+        expect(bulkLedger.claimTarget(id, seq)).toBe(true);
+        bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, seq, 'ok');
+      }
+      bulkLedger.finish({ id, kind: 'apply', sourceRunId: null });
+      const undo = await (await jsonFetch(`/api/bulk/runs/${id}/undo`, { method: 'POST' })).json() as { checksumNote?: string };
+      expect(undo.checksumNote).toBe(BULK_UNKEYED_CHECKSUM_NOTE);
     });
   });
 

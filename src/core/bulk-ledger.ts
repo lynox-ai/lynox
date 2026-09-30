@@ -78,10 +78,23 @@ export interface BulkRunStatus {
   kind: BulkRunKind;
   atomic: boolean;
   sourceRunId: string | null;
+  /** `keyed`: the approval checksum is an HMAC under the vault key, so only the engine can
+   *  produce one that matches. `unkeyed` (no vault key): plain SHA-256 — it still detects
+   *  a run that changed by accident, but whoever can write the engine database can change
+   *  the run and recompute it, so it does not bind the approval to what was shown. */
+  checksumBinding: 'keyed' | 'unkeyed';
   /** Relayed to the model by `bulk_status`, so only ENGINE-authored text may ever be
    *  written here — a {@link BULK_HALT_REASONS} value, never an API response or error. */
   haltReason: string | null;
 }
+
+/** Shown wherever a run is approved or its checksum presented, when the instance has no
+ *  vault key: the weaker variant runs, but it says so (the same rule as an unencrypted
+ *  backup). */
+export const BULK_UNKEYED_CHECKSUM_NOTE =
+  'This instance has no vault key, so the approval checksum is a plain SHA-256: it catches a run that ' +
+  'changed by accident, but whoever can write the engine database can change the run and recompute it. ' +
+  'It does not bind your approval to what you were shown. Set a vault key for a checksum that does.';
 
 /**
  * Why a run stopped short. FIXED texts: `halt_reason` reaches the model through
@@ -358,6 +371,7 @@ export class BulkLedger {
       applied: row.targets_applied, failed: row.targets_failed,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
+      checksumBinding: this.engineDb.hashIsKeyed ? 'keyed' : 'unkeyed',
       haltReason: row.halt_reason,
     };
   }
@@ -369,11 +383,13 @@ export class BulkLedger {
   // ── Approval ────────────────────────────────────────────────────────────────
 
   /**
-   * The approval checksum (PRD §3.1 `approval_checksum`): a keyed hash over everything
+   * The approval checksum (PRD §3.1 `approval_checksum`): a digest over everything
    * an apply would do — the run's kind, system, collection, atomicity and source run,
    * and per target its key, change, before-image and planned after-state, in seq order.
    * The owner's view shows it, approving has to present it, and the effect recomputes
    * it before it writes: a ledger that changed after approval is refused, not applied.
+   * It binds only with a vault key (HMAC); without one it is plain SHA-256, and the
+   * status says so ({@link BulkRunStatus.checksumBinding}).
    */
   computeChecksum(runId: string): string | null {
     const run = this.runRow(runId);

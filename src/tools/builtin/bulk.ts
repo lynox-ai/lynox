@@ -42,6 +42,9 @@ function formatStatus(s: BulkRunStatus): string {
     lines.push(`Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
   }
   if (s.haltReason) lines.push(`Halted: ${s.haltReason}.`);
+  if (s.checksumBinding === 'unkeyed') {
+    lines.push('Approval checksum: unkeyed — this instance has no vault key, so the checksum does not bind the approval to the run.');
+  }
   return lines.join('\n');
 }
 
