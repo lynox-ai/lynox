@@ -38,14 +38,14 @@
  * foothold worth taking. The move relocates the same reachability; it does not
  * remove it.
  *
- * ⚠ Its neighbour {@link ./oauth-presets.ts} argues at length why the OAuth
- * preset register must not be a file, and names this catalogue as the
- * justified exception — "right for a list of hints the model may read". That
- * ranking is correct and stands: a preset decides which site a user is sent to
- * and hands consent to, enforced by host validation; this is hint text the
- * model is told to ask about before acting on. This module moved for a
- * different reason than that one did, and the two should not be read as the
- * same argument.
+ * ⚠ Its neighbour {@link ./oauth-presets.ts} argues that the OAuth preset
+ * register must not be a file, and names this catalogue as the justified
+ * exception — "right for a list of hints the model may read". That ranking is
+ * correct and stands: a preset decides which site a user is sent to and hands
+ * consent to, enforced by host validation; this is hint text the model is told
+ * to ask about before acting on. This module moved for a different reason than
+ * that one did, so do not read the move as the preset argument winning a second
+ * case — that paragraph is unchanged, and this one is not evidence for it.
  *
  * There is no `schema_version` here. It was a handshake between a file and a
  * parser that could disagree about its format; a constant and its type cannot.

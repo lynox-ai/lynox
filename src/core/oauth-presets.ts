@@ -7,17 +7,22 @@
  * A profile names a preset id and its parameters; it does NOT name a host.
  *
  * ⚠ Deliberately NOT like its neighbour. The suggested-APIs catalogue can be
- * switched off with an env var (`api-store.ts`, `formatSuggestedApis`). That is
- * right for a list of hints the model may read, and wrong here: there is no env
- * var and no registration function for presets — if you are adding one, you are
+ * switched off with an env var (`api-store.ts`,
+ * `formatSuggestedApisForSystemPrompt`). That is right for a list of hints the
+ * model may read, and wrong here: a file is an operator-editable input, and on
+ * a compromised instance an attacker-editable one. There is no file, no env var
+ * and no registration function for presets — if you are adding one, you are
  * moving the boundary, and that belongs in a decision, not in a patch.
  *
- * That catalogue used to be read at runtime from `data/suggested-apis.json`,
- * and this comment cited the file as the contrast. It is a compiled constant
- * now ({@link ./suggested-apis.ts}) — but it moved because the file never
- * reached the container, NOT because a file was judged unsafe for it. The
- * ranking this paragraph draws is unchanged: a preset decides which site a user
- * is sent to and hands consent to; a hint is text the model must ask about
+ * ⚠ The catalogue used to BE that file, and this paragraph cited it as the
+ * contrast. It is a compiled constant now ({@link ./suggested-apis.ts}) — but
+ * it moved because the file never reached the container, NOT because anyone
+ * showed a file was unsafe for it. Do not read the move as agreement: in the
+ * published image `dist/` is owned by the process user, so a constant there is
+ * no less reachable than a data file would have been. The ranking this
+ * paragraph draws is untouched by that, and it is the ranking that matters
+ * here: a preset decides which site a user is sent to and hands consent to,
+ * enforced by host validation below; a hint is text the model must ask about
  * before acting on.
  *
  * Every function here takes the register as a parameter with the constant as

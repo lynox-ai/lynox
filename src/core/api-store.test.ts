@@ -631,6 +631,16 @@ describe('ApiStore', () => {
       expect(supported).toBeLessThan(notSupported);
       expect(notSupported).toBeLessThan(doNot);
       expect(doNot).toBeLessThan(curated);
+
+      // The blank line before a heading is not layout. Without it the heading
+      // follows a `- ` bullet directly, which markdown reads as a lazy
+      // continuation OF that bullet — so "Do NOT proactively suggest" would
+      // arrive as part of the last not-supported item, and the offer list as
+      // part of the last prohibition. Reported as a harmless survivor in the
+      // first mutation round; it is not.
+      expect(out).toContain('\n\nNOT supported (cannot be bootstrapped today');
+      expect(out).toContain('\n\nDo NOT proactively suggest bootstrapping:');
+      expect(out).toContain('\n\nCurated free APIs you can offer to bootstrap');
     });
 
     it('names payment and hosting in the do-not-suggest section specifically', () => {
