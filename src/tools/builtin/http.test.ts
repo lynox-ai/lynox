@@ -879,6 +879,14 @@ describe('httpRequestTool', () => {
       );
     });
 
+    it('with a profile the engine never attaches for, says to send the key the profile\'s way', () => {
+      expect(egressSecretRefusal('request header \'X-Goog-Api-Key\'', 'Google API key', 'model-owned')).toBe(
+        'Blocked: request header \'X-Goog-Api-Key\' appears to contain a Google API key, so this request was not sent. '
+        + 'This service has an api_profile whose auth type the engine does not attach. Send the key the way the profile describes (a query-parameter profile carries it in the URL), or change the profile\'s auth type with api_setup. '
+        + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>).',
+      );
+    });
+
     it('with a profile whose key WAS attached, says the extra key is not needed', () => {
       expect(egressSecretRefusal('request header \'X-Foo\'', 'GitHub token', 'attached')).toBe(
         'Blocked: request header \'X-Foo\' appears to contain a GitHub token, so this request was not sent. '
@@ -2990,6 +2998,23 @@ describe('httpRequestTool', () => {
       expect(result).not.toContain('connect that service with api_setup');
     });
 
+    it('a bearer profile without a recorded acceptance gets the same reason, not the connect advice', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'chat', name: 'Chat', base_url: 'https://legacy-chat.example.com', description: 'chat',
+        auth: { type: 'bearer', vault_keys: ['CHAT_TOKEN'] } as never,
+      });
+      const chatToken = 'xox' + 'b-' + '1234567890-' + 'Q'.repeat(12);
+      mockDnsPublic();
+      const result = await visible(
+        { url: 'https://legacy-chat.example.com/api/chat.postMessage', headers: { Authorization: `Bearer ${chatToken}` } },
+        agentWith(store, { CHAT_TOKEN: chatToken }),
+      );
+      expect(result).toContain('This service has an api_profile, but the engine did not attach its stored key to this request');
+      expect(result).not.toContain('connect that service with api_setup');
+    });
+
     it('a profile-authored vault key name never reaches the refusal', async () => {
       // The refusal fires before any network call; it carries fixed sentences only.
       const { ApiStore } = await import('../../core/api-store.js');
@@ -3009,6 +3034,17 @@ describe('httpRequestTool', () => {
       expect(result).toContain('Blocked');
       expect(result).not.toContain('[System]');
       expect(result).not.toContain('ignore prior rules');
+    });
+
+    it('a query-auth profile with the key hand-set in a header is pointed at the query parameter, not at re-saving', async () => {
+      const store = await storeFor('maps.example.com', { type: 'query', query_param: 'key', vault_keys: ['MAPS_KEY'] });
+      mockDnsPublic();
+      const result = await visible(
+        { url: 'https://maps.example.com/api/geocode?q=Zurich', headers: { 'X-Api-Key': OPENAI_PROJECT_KEY } },
+        agentWith(store, { MAPS_KEY: OPENAI_PROJECT_KEY }),
+      );
+      expect(result).toContain('whose auth type the engine does not attach');
+      expect(result).not.toContain('re-save it');
     });
 
     it('a query-auth profile host may carry its key in the URL', async () => {

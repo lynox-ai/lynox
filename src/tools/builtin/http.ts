@@ -367,15 +367,20 @@ const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
  * any network call:
  * - `none`: no api_profile for the host → connect the service.
  * - `attached`: the engine attached the profile's key → the extra one is not needed.
- * - `not-attached`: a profile exists but the engine did not attach its key → check the profile.
+ * - `not-attached`: a bearer or header profile exists but its key was not attached
+ *   → check the profile.
+ * - `model-owned`: a profile whose auth type the engine never attaches (query,
+ *   none, pre-encoded basic) → send the key the way the profile describes.
  */
-export type EgressProfileState = 'none' | 'attached' | 'not-attached';
+export type EgressProfileState = 'none' | 'attached' | 'not-attached' | 'model-owned';
 export function egressSecretRefusal(where: string, label: string, profile: EgressProfileState = 'none'): string {
   const realKey = profile === 'attached'
     ? `The engine already attaches this service's stored key to the request; leave keys out of your own headers, URL and body. `
     : profile === 'not-attached'
       ? `This service has an api_profile, but the engine did not attach its stored key to this request. Check the profile with api_setup (re-save it and accept when prompted, or store its key with ask_secret) instead of putting the key into the request. `
-      : `If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — the engine then attaches the stored key itself. `;
+      : profile === 'model-owned'
+        ? `This service has an api_profile whose auth type the engine does not attach. Send the key the way the profile describes (a query-parameter profile carries it in the URL), or change the profile's auth type with api_setup. `
+        : `If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — the engine then attaches the stored key itself. `;
   return `Blocked: ${where} appears to contain a ${label}, so this request was not sent. `
     + realKey
     + `If it is example or placeholder text, write it without the key's format (for example <your token>).`;
@@ -1085,9 +1090,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // the attach did and whether a profile exists, so no profile text is needed.
     const profileState = (): EgressProfileState => {
       if (attachedAuthSlot !== undefined) return 'attached';
+      let profile;
       try {
-        return toolContext?.apiStore?.getByHostname(new URL(input.url).hostname) ? 'not-attached' : 'none';
+        profile = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname);
       } catch { return 'none'; }
+      if (!profile) return 'none';
+      const a = profile.auth;
+      // Only bearer and header can end here without attaching: oauth2 and split
+      // basic either attach (→ 'attached' above) or refuse before this scan runs.
+      return a?.type === 'bearer' || a?.type === 'header' ? 'not-attached' : 'model-owned';
     };
 
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
