@@ -188,7 +188,16 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // Hoisted so the catch can still see what the loop had collected, and so the
   // cache TTL can depend on whether the walk was clean.
   const partial: VoiceInfo[] = [];
-  let ignoredCatalogue = false;
+  // ⚠ ONE flag with ONE meaning: "this walk reported something". It replaces a
+  // flag that was set only in the pagination branch, which made the comment below
+  // false for two of the three diagnostics — a warned, incomplete catalogue was
+  // still cached for an hour. Measured: 29 of 30 voices with two warnings fired,
+  // and the second call five minutes later did not re-fetch.
+  //
+  // Tying the TTL to "did we warn" rather than to a list of conditions makes the
+  // invariant structural instead of restated: a fourth diagnostic added later
+  // cannot forget to shorten the lifetime, because setting it IS warning.
+  let doubtful = false;
   try {
     const controller = new AbortController();
     // ⚠ This said "2 s per request × up to MAX_PAGES pages means worst case ~200 s"
@@ -270,7 +279,6 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
         // which is the only shape that means the offset did not move the window.
         if (parsed.voices.length > 0 && newThisRound === 0) {
           ignoredPagination = true;
-          ignoredCatalogue = true;
           break;
         }
         // ⚠ No `offset >= total` break. It was pure optimisation — the round
@@ -284,21 +292,33 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
       // different remedies. The earlier single check could not express any of them
       // without also claiming the others.
       if (ignoredPagination) {
+        doubtful = true;
         console.warn(
           '[speak] Mistral voice catalogue: a page came back entirely already-seen — ' +
             'the `offset` parameter is not being honoured. Look at the request.',
         );
       }
       if (total !== undefined && voices.length < total) {
+        doubtful = true;
         console.warn(
           `[speak] Mistral voice catalogue: ${voices.length} of ${total} voices reached the picker ` +
             `(${receivedRaw} entries arrived, ${dupes} duplicate, ${unusable} unusable).`,
         );
       }
       if (unusable > 0) {
+        doubtful = true;
+        // ⚠ The tail is conditional, and it has to be: with BOTH causes present the
+        // flat version said "not the request" one line below a warning that said
+        // "Look at the request." Two diagnostics contradicting each other, in the
+        // block whose comment promises that cannot happen. Measured with the offset
+        // ignored and one entry unusable — all three fired, and the third denied
+        // what the first had just reported.
         console.warn(
           `[speak] Mistral voice catalogue: ${unusable} of ${receivedRaw} arrived entries had no ` +
-            'usable voice slug and were dropped — look at the payload, not the request.',
+            'usable voice slug and were dropped — ' +
+            (ignoredPagination
+              ? 'a payload problem ON TOP of the request problem above; both need looking at.'
+              : 'look at the payload, not the request.'),
         );
       }
     } finally {
@@ -311,7 +331,7 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
     // earlier version: an incomplete catalogue was served for a full hour off one
     // stderr line, while an outright ERROR was retried after a minute — an
     // incomplete success was treated as more authoritative than a failure.
-    const complete = voices.length > 0 && !ignoredCatalogue;
+    const complete = voices.length > 0 && !doubtful;
     _voicesCache = { voices: final, expiresAt: now + (complete ? VOICES_TTL_MS : 60_000) };
     return final;
   } catch (err) {

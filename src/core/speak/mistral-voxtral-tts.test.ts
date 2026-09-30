@@ -277,6 +277,117 @@ describe('the cache keeps a clean result longer than a doubtful one', () => {
       vi.useRealTimers();
     }
   });
+
+  it('re-probes after a PAYLOAD shortfall too, not only after an ignored offset', async () => {
+    // ⚠ Both earlier cache cases used `honourOffset: false` — the one condition that
+    // set the doubtful flag — so the TTL had a witness for exactly one of the three
+    // diagnostics, and a warned-but-payload-short catalogue was held for an hour.
+    // The flag now means "this walk reported something", which is the property the
+    // comment claims, and this case is the second cause proving it.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', stubMistral({ unusableAt: [3] }));
+      const listMistralVoices = await freshListVoices();
+      const voices = await listMistralVoices();
+      expect(voices.length).toBe(TOTAL - 1);
+      expect(warned('had no usable voice slug')).toBe(true);
+      expect(warned('not being honoured')).toBe(false); // offset was honoured
+      const afterFirst = requested.length;
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      await listMistralVoices();
+      expect(requested.length).toBeGreaterThan(afterFirst);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ⚠ One case per diagnostic where ONLY that one fires. The payload case above
+  // trips the shortfall warning as well (29 of 30), so each `doubtful` assignment
+  // was individually redundant there and a mutation sweep showed both surviving.
+  // A flag that three branches set needs three witnesses, not one that happens to
+  // pass through two of them.
+  it('re-probes when ONLY the pagination warning fired', async () => {
+    vi.useFakeTimers();
+    try {
+      // Offset ignored, no `total` reported, every entry usable: the pagination
+      // warning is the only one, so this is the third branch's own witness. Without
+      // it the assignment there was redundant — the ignored-offset case also trips
+      // the shortfall whenever `total` is present.
+      vi.stubGlobal('fetch', stubMistral({ honourOffset: false, reportTotal: false }));
+      const listMistralVoices = await freshListVoices();
+      const voices = await listMistralVoices();
+      expect(voices.length).toBe(SERVER_PAGE);
+      expect(warned('not being honoured')).toBe(true);
+      expect(warned('reached the picker')).toBe(false);
+      expect(warned('had no usable voice slug')).toBe(false);
+      const afterFirst = requested.length;
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      await listMistralVoices();
+      expect(requested.length).toBeGreaterThan(afterFirst);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-probes when ONLY the shortfall fired', async () => {
+    vi.useFakeTimers();
+    try {
+      // `total` over-reported, every entry usable, offset honoured: shortfall alone.
+      vi.stubGlobal('fetch', stubMistral({ totalOverride: 40 }));
+      const listMistralVoices = await freshListVoices();
+      const voices = await listMistralVoices();
+      expect(voices.length).toBe(TOTAL);
+      expect(warned('30 of 40 voices reached the picker')).toBe(true);
+      expect(warned('had no usable voice slug')).toBe(false);
+      expect(warned('not being honoured')).toBe(false);
+      const afterFirst = requested.length;
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      await listMistralVoices();
+      expect(requested.length).toBeGreaterThan(afterFirst);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-probes when ONLY the unusable warning fired', async () => {
+    vi.useFakeTimers();
+    try {
+      // One unusable entry and a `total` the delivered count reaches, so the
+      // shortfall stays quiet and the payload warning is the only one.
+      vi.stubGlobal('fetch', stubMistral({ unusableAt: [3], totalOverride: TOTAL - 1 }));
+      const listMistralVoices = await freshListVoices();
+      const voices = await listMistralVoices();
+      expect(voices.length).toBe(TOTAL - 1);
+      expect(warned('had no usable voice slug')).toBe(true);
+      expect(warned('reached the picker')).toBe(false);
+      expect(warned('not being honoured')).toBe(false);
+      const afterFirst = requested.length;
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      await listMistralVoices();
+      expect(requested.length).toBeGreaterThan(afterFirst);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('two causes at once are reported as two, never as one denying the other', () => {
+  it('does not tell the reader to ignore the request it just blamed', async () => {
+    // Measured: with the offset ignored AND an unusable entry, all three fired and
+    // the third ended "look at the payload, not the request" — one line below a
+    // warning that said "Look at the request." The exclusion was only ever asserted
+    // where it happened to be true.
+    vi.stubGlobal('fetch', stubMistral({ honourOffset: false, unusableAt: [3] }));
+    const voices = await (await freshListVoices())();
+
+    expect(voices.length).toBeGreaterThan(0);
+    expect(warned('the `offset` parameter is not being honoured')).toBe(true);
+    expect(warned('had no usable voice slug')).toBe(true);
+    // The contradiction, asserted as an absence — and the replacement asserted as a
+    // presence, so a silent revert to the flat tail cannot pass.
+    expect(warned('look at the payload, not the request')).toBe(false);
+    expect(warned('ON TOP of the request problem above')).toBe(true);
+  });
 });
 
 describe('what was already collected is not thrown away', () => {
