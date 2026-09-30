@@ -1508,3 +1508,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
   },
 };
+
+/**
+ * The engine-managed credential attach for a caller with no agent — a bulk run's
+ * worker effect (`core/bulk-external.ts`). It is a CALL of the decision
+ * `http_request` makes, not a copy: the attach reads only the profile store and the
+ * vault, and both are the engine's own objects on either path.
+ *
+ * Only an attached credential counts. A `refusal`, a `hint` and no profile at all
+ * are one answer here — the bulk path has no model header to fall back on, so any
+ * of them would send the request without the credential the run was planned with.
+ * No text is returned: the caller reports a fixed reason, never a profile's wording.
+ */
+export async function attachStoredCredential(
+  url: string,
+  headers: Record<string, string>,
+  stores: { apiStore: NonNullable<ToolContext['apiStore']>; secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']> },
+): Promise<boolean> {
+  const auth = await attachEngineManagedAuth(
+    url,
+    headers,
+    { apiStore: stores.apiStore } as Pick<ToolContext, 'apiStore'> as ToolContext,
+    { secretStore: stores.secretStore } as Pick<import('../../types/index.js').IAgent, 'secretStore'> as import('../../types/index.js').IAgent,
+  );
+  return auth.slot !== undefined && auth.refusal === undefined;
+}

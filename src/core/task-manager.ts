@@ -26,7 +26,7 @@ import { compose, renderFence } from '../core/data-boundary.js';
  */
 /** Exhaustive over {@link BulkTriggerEffect}: a new bulk effect has to be listed here
  *  before it compiles, so it cannot slip past {@link BulkTriggerLockedError}. */
-const BULK_EFFECTS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true };
+const BULK_EFFECTS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true, bulk_preview: true };
 
 /** Thrown when a task path would edit a bulk run's trigger. That trigger is armed,
  *  re-armed and ended only by the bulk run's own approval and effect; a status or

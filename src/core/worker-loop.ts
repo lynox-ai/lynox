@@ -14,7 +14,7 @@ import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TriggerRecord, PromptText, BulkTriggerEffect } from '../types/index.js';
+import type { TriggerRecord, PromptText, BulkWriteEffect } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -535,6 +535,12 @@ export class WorkerLoop {
             // approved, inside its window and matching the approved checksum.
             await this.executeBulk(task, effect);
             break;
+          case 'bulk_preview':
+            // Deterministic: reads a planned external run's targets into its ledger and
+            // writes none of them. Its trigger is armed only by the owner starting or
+            // resuming the read; the handler refuses any run that is not planned and unhalted.
+            await this.executeBulkPreview(task, controller.signal);
+            break;
           default:
             // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
             // money-spending run. Record + stop, so it stops re-firing every tick.
@@ -624,7 +630,7 @@ export class WorkerLoop {
    * or claims of a loop that died) is re-armed shortly; every other outcome ends the
    * trigger — a halt waits for a human to resume it through the approval route.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkTriggerEffect): Promise<void> {
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect): Promise<void> {
     const ledger = this.engine.getBulkLedger();
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
@@ -641,6 +647,67 @@ export class WorkerLoop {
       this.engine.getRunHistory()?.updateTrigger(task.id, {
         status: 'open',
         nextRunAt: new Date(Date.now() + BULK_RETRY_DELAY_MS).toISOString(),
+      });
+      return;
+    }
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
+  }
+
+  /**
+   * Read an external bulk run's targets off its preview trigger. A preview that waits
+   * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
+   * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
+   */
+  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal): Promise<void> {
+    const ledger = this.engine.getBulkLedger();
+    if (!ledger || task.bulk_run_id === undefined) {
+      this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
+      return;
+    }
+    const { runBulkPreview } = await import('./bulk-preview.js');
+    const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
+    const { externalClient, parseBulkContract } = await import('./bulk-external.js');
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { resolveGuardedAckHosts } = await import('./tool-context.js');
+    const apiStore = this.engine.getApiStore();
+    const secretStore = this.engine.getSecretStore();
+    const toolContext = this.engine.getToolContext();
+    const run = ledger.getRunForPreview(task.bulk_run_id);
+    const host = run ? externalHostOf(run.targetSystem) : null;
+    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
+    let outcome: Awaited<ReturnType<typeof runBulkPreview>>;
+    try {
+      outcome = await runBulkPreview(task.bulk_run_id, {
+        ledger,
+        signal,
+        costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
+        clientFor: (run) => {
+          const contract = parseBulkContract(run.contractJson);
+          if (!contract || !apiStore || !secretStore) return null;
+          return externalClient({
+            contract,
+            hostPolicy: toolContext,
+            ackHosts: resolveGuardedAckHosts(toolContext),
+            attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore }),
+            rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
+          });
+        },
+      });
+    } catch (err: unknown) {
+      // A preview that threw would leave its run `planned` and unhalted with no trigger
+      // left to read it — and holding the one-external-run slot. Halted, the owner can
+      // resume it. The error is still reported: it is a defect, not a host's answer.
+      void import('./error-reporting.js').then(({ captureError }) => captureError(err)).catch(() => {});
+      ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.unavailable);
+      const reason = ledger.getStatus(task.bulk_run_id)?.haltReason;
+      this.recordAndNotify(task, reason ? `Bulk preview halted: ${reason}.` : 'Bulk preview stopped.', false);
+      return;
+    }
+    if (outcome.status === 'pending') {
+      this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
+      this.engine.getRunHistory()?.updateTrigger(task.id, {
+        status: 'open',
+        nextRunAt: new Date(outcome.retryAt ?? Date.now()).toISOString(),
       });
       return;
     }

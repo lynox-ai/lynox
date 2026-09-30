@@ -17,7 +17,8 @@ import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
-import { BulkLedger, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { mintBulkContract } from '../core/bulk-external.js';
 import { BulkTriggerLockedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 
@@ -5920,6 +5921,33 @@ describe('LynoxHTTPApi', () => {
       expect(due.map((d) => [d.id, d.effect, d.bulk_run_id])).toEqual([[`bulk-${id}`, 'bulk_apply', id]]);
 
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
+    });
+
+    it('refuses to approve an external run, and resumes a halted external preview without a checksum', async () => {
+      const host = 'shop.example.com';
+      const key = `https://${host}/products/1`;
+      const planned = bulkLedger.recordExternalPlan({
+        createdBy: 't', host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]),
+      });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.halt(id, BULK_HALT_REASONS.credential);
+      // The halting tick ended the preview trigger; only the resume can make it due again.
+      new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+      expect(new TriggerStore(bulkDb).getDue()).toEqual([]);
+      const resumed = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
+      expect(resumed.status).toBe(200);
+      expect(bulkLedger.getStatus(id)!.haltReason).toBeNull();
+      expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_preview']]);
+      // Not halted any more: nothing to resume.
+      expect((await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' })).status).toBe(409);
+
+      bulkLedger.recordRead(id, 0, { before: { price: '2' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toMatch(/external system is not available yet/);
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
     });
 
     it('rejects a maxTargets that is not a number in range', async () => {

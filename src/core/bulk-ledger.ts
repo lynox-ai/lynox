@@ -18,14 +18,17 @@
 import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
-import { TriggerStore } from './trigger-store.js';
+import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
+import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 
-/** Target systems a run can plan and write today. External (`http:<host>`), memory and
- *  artifacts are not built yet (PRD §4 D; §3.1 lists the full set). */
+/** Local target systems a run can plan and write. An external run's system is
+ *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
+ *  not written yet. Memory and artifacts are not built (PRD §4 D; §3.1 lists the set). */
 export type BulkTargetSystem = 'workspace' | 'data_store';
 
-/** The run's lifecycle (PRD §3.1). A dry run is recorded straight as `previewed`;
- *  `planned` is the schema's name for a run not yet imaged, which nothing writes today. */
+/** The run's lifecycle (PRD §3.1). A local dry run is recorded straight as `previewed`;
+ *  an external one is `planned` until its preview effect has read every target. */
 export type BulkPhase = 'planned' | 'previewed' | 'approved' | 'writing' | 'done' | 'aborted' | 'undone';
 /** `delete` is only ever planned by an undo: taking back a created target removes it. */
 export type BulkChange = 'update' | 'create' | 'delete' | 'unchanged' | 'invalid';
@@ -56,7 +59,28 @@ export type BulkInvalidReason =
   /** a `subject` column: converting it would create a subject, which a dry run must not */
   | 'subject_column'
   | 'bad_value'
-  | 'bad_key';
+  | 'bad_key'
+  // External targets (`http:<host>`):
+  /** not an HTTPS URL on the run's host without port, user info, query or fragment */
+  | 'bad_url'
+  /** the after-state is not a non-empty JSON object */
+  | 'after_not_object'
+  /** a field of the after-state or of the target is not a JSON scalar */
+  | 'field_not_scalar'
+  /** the target lacks a field the run would write, so undo could not restore it */
+  | 'field_missing'
+  /** the target is not a JSON object */
+  | 'before_not_object'
+  /** the target does not exist — a PATCH cannot create it */
+  | 'not_found'
+  /** the target answered with a redirect, which a run never follows */
+  | 'redirect'
+  /** the target's body is not JSON */
+  | 'not_json'
+  /** the host refused to serve the target, or failed to */
+  | 'read_failed'
+  /** the after-state holds something shaped like a credential */
+  | 'secret_in_after';
 
 export interface BulkRunStatus {
   id: string;
@@ -67,6 +91,9 @@ export interface BulkRunStatus {
   phase: BulkPhase;
   undo: UndoKind | 'mixed';
   total: number;
+  /** Targets of a `planned` external run not read yet. Their change is not known, so
+   *  {@link changes} counts them as `update` until the read decides. */
+  unread: number;
   changes: Record<BulkChange, number>;
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
@@ -102,6 +129,7 @@ export const BULK_UNKEYED_CHECKSUM_NOTE =
  * — would carry a target's strings into the model's context.
  */
 export const BULK_HALT_REASONS = {
+  awaitingStart: 'waiting for the owner to start reading the targets',
   failureRate: 'more than 5 % of the targets failed',
   consecutiveFailures: 'three targets in a row failed',
   timeBudget: 'the run used up its time budget',
@@ -111,6 +139,10 @@ export const BULK_HALT_REASONS = {
   atomicRolledBack: 'a target of an atomic run could not be written; the targets written before it were rolled back',
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
   unavailable: 'the target system is not available',
+  credential: 'the access credential for this host cannot be attached',
+  unauthorized: 'the host did not accept the stored credential',
+  blocked: 'the network policy does not allow this host',
+  contract: 'a target lies outside the run\'s contract',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
@@ -158,6 +190,22 @@ interface RunRow {
   targets_total: number; targets_applied: number; targets_failed: number; halt_reason: string | null;
   atomic: number; kind: BulkRunKind; source_run_id: string | null; target_collection: string | null;
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
+  contract_json: string | null;
+}
+
+/** An external run as its preview effect reads it. Not model-facing. */
+export interface BulkRunForPreview {
+  id: string;
+  kind: BulkRunKind;
+  targetSystem: string;
+  phase: BulkPhase;
+  haltReason: string | null;
+  contractJson: string | null;
+}
+
+/** An external run's target system, `http:<host>`. */
+export function externalHostOf(targetSystem: string): string | null {
+  return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
 }
 
 /** A run as the effect loop reads it. Not model-facing. */
@@ -242,7 +290,10 @@ export function diffTarget(before: BeforeImage, after: unknown): TargetDiff {
 
 /** The (key, after) pairs that make up a rule as planned, in key order, so the same
  *  rule planned twice yields the same sequence. */
-function* rulePairs(targetSystem: string, scope: string, targets: readonly PlannedTarget[]): Generator<string> {
+function* rulePairs(
+  targetSystem: string, scope: string,
+  targets: readonly ({ key: string; after: unknown } | { key: string; invalid: BulkInvalidReason })[],
+): Generator<string> {
   yield targetSystem;
   yield scope;
   const sorted = [...targets].sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
@@ -290,10 +341,6 @@ export class BulkLedger {
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    const prune = db.prepare(
-      `DELETE FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' AND id NOT IN (
-         SELECT id FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
-    );
     db.transaction(() => {
       insertRun.run(
         // Keyed: a plain hash over (key, after) pairs would let a copy of the file confirm
@@ -312,9 +359,103 @@ export class BulkLedger {
           this.engineDb.enc(JSON.stringify(t.before)), this.engineDb.enc(JSON.stringify(t.after ?? null)), null,
         );
       });
-      prune.run(BULK_MAX_PREVIEWED_RUNS);
+      this.pruneUnapproved();
     })();
     return this.getStatus(id)!;
+  }
+
+  /**
+   * Drop the oldest unapproved apply runs beyond {@link BULK_MAX_PREVIEWED_RUNS}:
+   * previewed ones, and `planned` external ones whose preview is still reading. A dropped
+   * planned run's preview trigger goes with it, in the caller's transaction (plan §6
+   * Q3(b)); an effect already running finds no run on its next target and stops.
+   */
+  private pruneUnapproved(): void {
+    const db = this.engineDb.getDb();
+    const doomed = db.prepare(
+      `SELECT id FROM bulk_runs WHERE phase IN ('previewed','planned') AND kind = 'apply' AND id NOT IN (
+         SELECT id FROM bulk_runs WHERE phase IN ('previewed','planned') AND kind = 'apply'
+         ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+    ).all(BULK_MAX_PREVIEWED_RUNS) as { id: string }[];
+    const triggers = new TriggerStore(this.engineDb);
+    const drop = db.prepare('DELETE FROM bulk_runs WHERE id = ?');
+    for (const { id } of doomed) {
+      triggers.remove(bulkPreviewTriggerId(id));
+      drop.run(id);
+    }
+  }
+
+  /**
+   * Record an external plan (`http:<host>`, plan B §3): the run in phase `planned`, its
+   * contract, every target with its after-state and no before-image — in one transaction
+   * (plan §6 Q3(a)). Sends nothing, and arms nothing: the run is halted with
+   * {@link BULK_HALT_REASONS.awaitingStart} until the owner starts the read through
+   * {@link resumePreview}. Every read carries the host's stored credential and may cost
+   * money on a per-call profile, so its start is a human step, like an approval — the
+   * host budget stays as a second line. While another external run is reading, a second
+   * plan is refused: an ordering rule, not a cap.
+   */
+  recordExternalPlan(params: {
+    createdBy: string | undefined;
+    host: string;
+    targets: readonly ExternalPlanned[];
+    contract: CapabilityContract;
+  }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
+    const seen = new Set<string>();
+    for (const t of params.targets) {
+      if (seen.has(t.key)) throw new Error('A bulk plan names the same target twice.');
+      seen.add(t.key);
+    }
+    const db = this.engineDb.getDb();
+    const id = randomUUID();
+    const targetSystem = `http:${params.host}`;
+    const valid = params.targets.some((t) => !('invalid' in t));
+    const insertTarget = db.prepare(
+      `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+    );
+    const recorded = db.transaction((): boolean => {
+      const reading = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
+      ).get() as { n: number };
+      if (reading.n > 0) return false;
+      db.prepare(
+        `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      ).run(
+        id, params.createdBy ?? null,
+        this.engineDb.keyedHash(rulePairs(targetSystem, params.host, params.targets)),
+        // Nothing valid to read: the run is complete as planned.
+        targetSystem, valid ? 'restorable' : 'none', valid ? 'planned' : 'previewed', params.targets.length,
+        JSON.stringify(params.contract),
+        // The start gate: nothing is read until the owner starts it (resumePreview). A plan
+        // is what the model can make; a request with the host's credential is not.
+        valid ? BULK_HALT_REASONS.awaitingStart : null,
+      );
+      params.targets.forEach((t, seq) => {
+        const key = this.engineDb.enc(t.key);
+        if ('invalid' in t) {
+          insertTarget.run(id, seq, key, 'invalid', null, null, t.invalid);
+          return;
+        }
+        // `update` until the preview reads the target; `unread` in the status says so.
+        insertTarget.run(id, seq, key, 'update', 'restorable', this.engineDb.enc(JSON.stringify(t.after)), null);
+      });
+      this.pruneUnapproved();
+      return true;
+    })();
+    if (!recorded) return { ok: false, reason: 'external_in_progress' };
+    return { ok: true, status: this.getStatus(id)! };
+  }
+
+  private armPreviewTrigger(runId: string, now: number): string {
+    return new TriggerStore(this.engineDb).armBulkEffect({
+      runId,
+      effect: 'bulk_preview',
+      // Engine text only: a trigger title is listed to the model by task_list.
+      title: `Bulk preview ${runId}`,
+      nextRunAt: new Date(now).toISOString(),
+    });
   }
 
   /** Counters and phase of one run. No target key, value or diff. */
@@ -366,11 +507,12 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(undone_at IS NOT NULL) AS undone FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; undone: number | null };
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(undone_at IS NOT NULL) AS undone,
+         SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
+    ).get(row.id) as { conflicts: number | null; undone: number | null; unread: number | null };
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
-      total: row.targets_total, changes, invalidReasons,
+      total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
       applied: row.targets_applied, failed: row.targets_failed,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
@@ -410,6 +552,12 @@ export class BulkLedger {
       yield String(run!.atomic);
       yield run!.source_run_id ?? '';
       yield run!.rule_hash;
+      // Only where there is one, so a local run's digest is what it was before contracts
+      // existed — an approved run must not halt on an upgrade.
+      if (run!.contract_json !== null) {
+        yield 'contract';
+        yield run!.contract_json;
+      }
       for (const r of rows) {
         yield String(r.seq);
         yield db.dec(r.target_key);
@@ -454,10 +602,13 @@ export class BulkLedger {
     maxTargets?: number | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'external_not_writable' } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
+    // The write side of external runs is not built: an external run is previewed and
+    // reviewed, never applied, until it is.
+    if (externalHostOf(run.target_system) !== null) return { ok: false, reason: 'external_not_writable' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
     const writing = this.countWriting(runId);
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
@@ -579,12 +730,138 @@ export class BulkLedger {
           t.sourceSeq,
         );
       });
-      db.prepare(
-        `DELETE FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' AND id NOT IN (
-           SELECT id FROM bulk_runs WHERE phase = 'previewed' AND kind = 'apply' ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
-      ).run(BULK_MAX_PREVIEWED_RUNS);
+      this.pruneUnapproved();
     })();
     return { ok: true, status: this.getStatus(id)! };
+  }
+
+  // ── The preview effect's reads and writes (bulk-preview.ts) ─────────────────
+
+  getRunForPreview(runId: string): BulkRunForPreview | null {
+    const r = this.runRow(runId);
+    if (!r) return null;
+    return { id: r.id, kind: r.kind, targetSystem: r.target_system, phase: r.phase, haltReason: r.halt_reason, contractJson: r.contract_json };
+  }
+
+  /** Targets the preview has still to read, in seq order. A target read before — by an
+   *  earlier tick, or another loop — is not read again (plan §6 Q7). */
+  listUnread(runId: string): number[] {
+    // A target whose read failed once comes last, so it cannot hold up the others.
+    return (this.engineDb.getDb().prepare(
+      `SELECT seq FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND before IS NULL
+       ORDER BY error IS NOT NULL, seq`,
+    ).all(runId) as { seq: number }[]).map((r) => r.seq);
+  }
+
+  /** An unread external target: its URL and planned after-state. */
+  loadExternalTarget(runId: string, seq: number): { key: string; after: ExternalImage } | null {
+    const r = this.engineDb.getDb().prepare(
+      `SELECT target_key, after_planned FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL`,
+    ).get(runId, seq) as { target_key: string; after_planned: string | null } | undefined;
+    if (!r || r.after_planned === null) return null;
+    return { key: this.engineDb.dec(r.target_key), after: JSON.parse(this.engineDb.dec(r.after_planned)) as ExternalImage };
+  }
+
+  /**
+   * Record what the preview read for one target: its before-image over F and the change
+   * that follows, or why it cannot be planned. Only while the run is still `planned` and
+   * the target unread, so a run that was dropped, or a target another loop read, is not
+   * written twice.
+   */
+  recordRead(runId: string, seq: number, read: { before: Record<string, unknown> } | { invalid: BulkInvalidReason }): boolean {
+    const db = this.engineDb.getDb();
+    const guard = `run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
+      AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL)`;
+    if ('invalid' in read) {
+      return db.prepare(`UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ? WHERE ${guard}`)
+        .run(read.invalid, runId, seq, runId).changes === 1;
+    }
+    const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
+    if (!row || row.after_planned === null) return false;
+    const before: BeforeImage = { absent: false, value: read.before };
+    // The before-image holds exactly F, so comparing whole images compares over F (§6 P4).
+    const change = classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
+    return db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
+      .run(this.engineDb.enc(JSON.stringify(before)), change, runId, seq, runId).changes === 1;
+  }
+
+  /**
+   * A read that failed on the host's side (5xx, a timeout, a broken connection). The first
+   * leaves the target unread, marked, to be read again after the others; the second makes
+   * it `invalid` (`read_failed`). Returns what it did, or null when the run or target has
+   * moved on.
+   */
+  recordReadFailure(runId: string, seq: number): 'retry' | 'invalid' | null {
+    const db = this.engineDb.getDb();
+    return db.transaction((): 'retry' | 'invalid' | null => {
+      const row = db.prepare(
+        `SELECT error FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NULL
+           AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL)`,
+      ).get(runId, seq, runId) as { error: string | null } | undefined;
+      if (!row) return null;
+      if (row.error === null) {
+        db.prepare(`UPDATE bulk_targets SET error = 'read_failed' WHERE run_id = ? AND seq = ?`).run(runId, seq);
+        return 'retry';
+      }
+      db.prepare(`UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = 'read_failed' WHERE run_id = ? AND seq = ?`).run(runId, seq);
+      return 'invalid';
+    })();
+  }
+
+  /** Halt a preview that is still reading, keeping a reason already set. */
+  haltPreview(runId: string, reason: BulkHaltReason): void {
+    this.engineDb.getDb().prepare(
+      `UPDATE bulk_runs SET halt_reason = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL`,
+    ).run(reason, runId);
+  }
+
+  /**
+   * Close a preview: `planned` → `previewed`, and only when every target that is not
+   * invalid holds a before-image (plan §6 Q4). A run approved with a target it never read
+   * would compare that target against nothing. False when the run is not ready.
+   */
+  finishPreview(runId: string): boolean {
+    const db = this.engineDb.getDb();
+    return db.transaction((): boolean => {
+      const unread = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND before IS NULL`,
+      ).get(runId) as { n: number };
+      if (unread.n > 0) return false;
+      const valid = db.prepare(`SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change != 'invalid'`).get(runId) as { n: number };
+      return db.prepare(
+        `UPDATE bulk_runs SET phase = 'previewed', undo = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL`,
+      ).run(valid.n > 0 ? 'restorable' : 'none', runId).changes === 1;
+    })();
+  }
+
+  /**
+   * Start a planned run's read, or start it again after a halt (plan §6 Q5): the owner's
+   * route clears the halt — the start gate included — and the preview trigger is due at
+   * once. Targets already read stay read.
+   */
+  resumePreview(runId: string, now: number = Date.now()):
+    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' } {
+    const run = this.runRow(runId);
+    if (!run) return { ok: false, reason: 'not_found' };
+    if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false, reason: 'wrong_phase' };
+    const db = this.engineDb.getDb();
+    let triggerId = '';
+    const moved = db.transaction((): 'moved' | 'busy' | 'gone' => {
+      // The ordering rule is decided here, where a read starts — plans land halted, so
+      // at plan time nothing is reading yet.
+      const reading = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL
+           AND target_system LIKE 'http:%' AND id != ?`,
+      ).get(runId) as { n: number };
+      if (reading.n > 0) return 'busy';
+      const res = db.prepare(`UPDATE bulk_runs SET halt_reason = NULL WHERE id = ? AND phase = 'planned' AND halt_reason IS NOT NULL`).run(runId);
+      if (res.changes !== 1) return 'gone';
+      triggerId = this.armPreviewTrigger(runId, now);
+      return 'moved';
+    })();
+    if (moved === 'busy') return { ok: false, reason: 'external_in_progress' };
+    if (moved !== 'moved') return { ok: false, reason: 'wrong_phase' };
+    return { ok: true, status: this.getStatus(runId)!, triggerId };
   }
 
   // ── The effect loop's reads and writes (bulk-apply.ts) ──────────────────────

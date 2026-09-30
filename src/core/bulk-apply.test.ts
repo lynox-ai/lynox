@@ -256,11 +256,11 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
 describe('the effect can only come from the approval (§7 b, the derivation property)', () => {
   // MUTATION: map any task_type onto `bulk_apply` in deriveSourceEffect → this fails.
   it('no create-path intent derives a bulk effect', () => {
-    const intents = ['bulk_apply', 'bulk_undo', 'bulk', 'backup', 'reminder', 'pipeline', 'watch', 'manual', '', 'run_agent'];
+    const intents = ['bulk_apply', 'bulk_undo', 'bulk_preview', 'bulk', 'backup', 'reminder', 'pipeline', 'watch', 'manual', '', 'run_agent'];
     for (const taskType of intents) {
       for (const extra of [{}, { scheduleCron: '0 9 * * *' }, { pipelineId: 'wf' }, { watchConfig: '{}' }]) {
         const { effect } = deriveSourceEffect({ taskType, ...extra });
-        expect(effect === 'bulk_apply' || effect === 'bulk_undo', `${taskType} ${JSON.stringify(extra)}`).toBe(false);
+        expect(effect.startsWith('bulk_'), `${taskType} ${JSON.stringify(extra)}`).toBe(false);
       }
     }
   });
