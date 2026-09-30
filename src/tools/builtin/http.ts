@@ -362,14 +362,20 @@ const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
  * What the model reads when a request is refused for carrying a credential.
  * The scanner cannot tell a real key from a placeholder written in the same
  * format, so the text names the way out for each. For a real key the way out
- * depends on the host: with no profile, connect the service; with a profile the
- * engine did not attach (no recorded acceptance, no vault value, …), the reason
- * it did not — the service is already connected, so "connect it" would be wrong.
+ * depends on the host's profile, and the three cases get fixed sentences — no
+ * profile-authored text enters this string, since it reaches the model before
+ * any network call:
+ * - `none`: no api_profile for the host → connect the service.
+ * - `attached`: the engine attached the profile's key → the extra one is not needed.
+ * - `not-attached`: a profile exists but the engine did not attach its key → check the profile.
  */
-export function egressSecretRefusal(where: string, label: string, profileHint?: string | undefined): string {
-  const realKey = profileHint !== undefined
-    ? `This service has an api_profile, but the engine did not attach its stored key: ${profileHint} Once it does, leave the key out of your request. `
-    : `If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — for a bearer or header profile the engine attaches the stored key itself. `;
+export type EgressProfileState = 'none' | 'attached' | 'not-attached';
+export function egressSecretRefusal(where: string, label: string, profile: EgressProfileState = 'none'): string {
+  const realKey = profile === 'attached'
+    ? `The engine already attaches this service's stored key to the request; leave keys out of your own headers, URL and body. `
+    : profile === 'not-attached'
+      ? `This service has an api_profile, but the engine did not attach its stored key to this request. Check the profile with api_setup (re-save it and accept when prompted, or store its key with ask_secret) instead of putting the key into the request. `
+      : `If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — the engine then attaches the stored key itself. `;
   return `Blocked: ${where} appears to contain a ${label}, so this request was not sent. `
     + realKey
     + `If it is example or placeholder text, write it without the key's format (for example <your token>).`;
@@ -1075,10 +1081,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // no access_token …`), so it goes to the ledger verbatim.
     if (auth.refusal) blockedVerbatim(auth.refusal);
     const attachedAuthSlot = auth.slot;
-    // Why the engine did not attach, if it did not — a refusal for a key the model
-    // set by hand names this instead of telling it to connect a connected service.
-    // Resolved only on a refusal, keeping the hint as lazy as the 401 path keeps it.
-    const profileHint = (): string | undefined => auth.hint?.({ crossOriginRedirect: false });
+    // Which of the refusal's three cases this host is in — decided here, from what
+    // the attach did and whether a profile exists, so no profile text is needed.
+    const profileState = (): EgressProfileState => {
+      if (attachedAuthSlot !== undefined) return 'attached';
+      try {
+        return toolContext?.apiStore?.getByHostname(new URL(input.url).hostname) ? 'not-attached' : 'none';
+      } catch { return 'none'; }
+    };
 
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
     // Headers are an equally valid exfil channel as bodies — `Authorization:
@@ -1092,7 +1102,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (attachedAuthSlot !== undefined && headerName.toLowerCase() === attachedAuthSlot) continue;
       const headerMatch = detectSecretInContent(headerValue);
       if (headerMatch) {
-        blockedVerbatim(egressSecretRefusal(`request header '${headerName}'`, headerMatch, profileHint()));
+        blockedVerbatim(egressSecretRefusal(`request header '${headerName}'`, headerMatch, profileState()));
       }
     }
 
@@ -1116,7 +1126,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
-        blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch, profileHint()));
+        blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch, profileState()));
       }
     }
 
@@ -1161,7 +1171,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (input.body && WRITE_METHODS.has(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
-        blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileHint()));
+        blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileState()));
       }
     }
 
