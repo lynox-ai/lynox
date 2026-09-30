@@ -437,6 +437,14 @@ describe('stop at ~80 % and resume (§7 c)', () => {
   });
 });
 
+describe('the owner view', () => {
+  it('serves at most 500 targets per page', () => {
+    const { runId } = recordMemoryRun(501);
+    expect(ledger.getPreview(runId, { limit: 5000 })).toHaveLength(500);
+    expect(ledger.getPreview(runId, { offset: 500 })).toHaveLength(1);
+  });
+});
+
 describe('the claim predicate (BulkLedger.claimTarget)', () => {
   // Asserted directly: in the loop, an applied target that is claimed again only reaches
   // the "already holds the planned state" path, which hides a claim that should never
@@ -775,6 +783,23 @@ describe('workspace writes stay in the file area (A-review obligation)', () => {
     const { lstatSync } = await import('node:fs');
     expect(lstatSync(join(ws, 'leaf.txt')).isSymbolicLink()).toBe(true);
     expect(ledger.getPreview(runId)[0]!.error).toBe('path_changed');
+  });
+
+  it('a symlink planted between read and write is refused, and nothing is written through it', async () => {
+    writeFileSync(join(ws, 'r.txt'), 'before');
+    const secret = join(dir, 'secret-r.txt');
+    writeFileSync(secret, 'secret', { mode: 0o600 });
+    const key = realpathSync(join(ws, 'r.txt'));
+    const w = workspaceWriter();
+    expect(await w.read(key)).toEqual({ absent: false, value: 'before' });
+    rmSync(key);
+    symlinkSync(secret, key);
+    await expect(w.write(key, { absent: false, value: 'written' })).rejects.toThrow();
+    await expect(w.write(key, { absent: true })).rejects.toThrow();
+    expect(readFileSync(secret, 'utf-8')).toBe('secret');
+    const { lstatSync, statSync } = await import('node:fs');
+    expect(lstatSync(key).isSymbolicLink()).toBe(true);
+    expect(statSync(secret).mode & 0o777).toBe(0o600);
   });
 
   it('creates missing directories inside the area and keeps an existing file\'s mode', async () => {

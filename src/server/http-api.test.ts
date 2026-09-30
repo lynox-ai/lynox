@@ -5937,6 +5937,9 @@ describe('LynoxHTTPApi', () => {
         bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, seq, 'ok');
       }
       bulkLedger.finish({ id, kind: 'apply', sourceRunId: null });
+      // A finished run has nothing to present a checksum for.
+      const done = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as { phase: string; checksum: string | null };
+      expect([done.phase, done.checksum]).toEqual(['done', null]);
       const res = await jsonFetch(`/api/bulk/runs/${id}/undo`, { method: 'POST' });
       expect(res.status).toBe(201);
       const undo = await res.json() as { id: string; kind: string; phase: string; checksum: string; sourceRunId: string };

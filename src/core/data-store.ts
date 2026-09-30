@@ -482,6 +482,8 @@ export class DataStore {
       }
       this.db.prepare(sql).run(now, now, ...values);
       // One row in or none: the count moves by the probe's answer, no table scan per write.
+      // Unlike insertRecords this does not re-derive the count, so drift left by another
+      // path stays until the next insertRecords/deleteRecords recount.
       this.db.prepare('UPDATE ds_collections SET record_count = record_count + ?, updated_at = ? WHERE name = ?')
         .run(exists ? 0 : 1, now, collection);
     })();
