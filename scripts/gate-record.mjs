@@ -113,7 +113,9 @@ export const SECURITY_PATHS = [
   // that grant bind on every route in only owed one because it also touched
   // `src/tools/builtin/`. Cheap by the measure the note above uses: **1** of the last 300 commits on main
   // touched it, and 1 of the last 60, against 6 and 2 for `permission-guard.ts` beside
-  // it. Over the whole history (1414 commits) it is 2 against 19.
+  // it. Over the whole history as of `da03ba5b` (1414 commits) it is 2 against 19 — the
+  // ref belongs to the number, which is a count over a history that grows: it read 1415
+  // one commit later, while a delta round was still checking this line.
   //
   // The first draft of this line said "2 of the last 300" and was wrong in its SET, not
   // its direction: `git log -n 300 <ref> -- <path>` applies the limit AFTER the path
