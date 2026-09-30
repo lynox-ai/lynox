@@ -105,6 +105,11 @@ export interface BulkRunStatus {
   kind: BulkRunKind;
   atomic: boolean;
   sourceRunId: string | null;
+  /** An external run's write verb, from its contract; null for a local run. */
+  writeMethod: string | null;
+  /** An external run may be approved for more than one target (a probe is confirmed for
+   *  its host and verb, or it is local). */
+  probeConfirmed: boolean;
   /** `keyed`: the approval checksum is an HMAC under the vault key, so only the engine can
    *  produce one that matches. `unkeyed` (no vault key): plain SHA-256 — it still detects
    *  a run that changed by accident, but whoever can write the engine database can change
@@ -183,6 +188,10 @@ export type TargetDiff =
 export interface PreviewTarget {
   seq: number;
   key: string;
+  /** External targets: fields the write sends although their value does not change —
+   *  because the source named them, or the provider requires them on every edit. Shown so
+   *  an owner does not read them as a mistake; the undo writes them back too. */
+  sentUnchanged?: string[] | undefined;
   change: BulkChange;
   undo: UndoKind | null;
   before: BeforeImage | null;
@@ -207,6 +216,20 @@ export interface BulkRunForPreview {
   phase: BulkPhase;
   haltReason: string | null;
   contractJson: string | null;
+}
+
+/** The write verb an external run's stored contract grants besides GET, or null. Read
+ *  here rather than imported: the ledger must not depend on the writer's module. */
+function parseContractMethods(json: string | null): string | null {
+  if (json === null) return null;
+  try {
+    const methods = (JSON.parse(json) as { httpMethods?: unknown }).httpMethods;
+    if (!Array.isArray(methods)) return null;
+    const writes = methods.filter((m) => m !== 'GET');
+    return writes.length === 1 && typeof writes[0] === 'string' ? writes[0] : null;
+  } catch {
+    return null;
+  }
 }
 
 /** An external run's target system, `http:<host>`. */
@@ -494,13 +517,19 @@ export class BulkLedger {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
       before: string | null; after_planned: string | null; error: string | null;
     }[];
+    const external = externalHostOf(this.runRow(runId)?.target_system ?? '') !== null;
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       const after: unknown = r.after_planned === null ? null : JSON.parse(this.engineDb.dec(r.after_planned));
+      const prior = before !== null && !before.absent ? before.value : null;
+      const sentUnchanged = external && prior !== null && typeof prior === 'object' && after !== null && typeof after === 'object'
+        ? Object.keys(after).sort().filter((f) => canonicalJson((prior as Record<string, unknown>)[f]) === canonicalJson((after as Record<string, unknown>)[f]))
+        : undefined;
       return {
         seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after,
         diff: before === null ? { kind: 'none' } : diffTarget(before, after),
         error: r.error,
+        ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
       };
     });
   }
@@ -524,6 +553,8 @@ export class BulkLedger {
       applied: row.targets_applied, failed: row.targets_failed,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
+      writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
+      probeConfirmed: this.probeHolds(row),
       checksumBinding: this.engineDb.hashIsKeyed ? 'keyed' : 'unkeyed',
       haltReason: row.halt_reason,
     };
@@ -586,6 +617,47 @@ export class BulkLedger {
     return r ? this.engineDb.dec(r.target_key) : null;
   }
 
+  /**
+   * Whether this run may write more than one target: a local run always; an external one
+   * only once its host and write verb have a probe the owner confirmed ({@link confirmProbe}).
+   * No provider documents whether its update verb keeps the fields a write does not send.
+   * If it does not, every target of a wide run loses them, and the undo cannot bring them
+   * back — it knows only the fields it wrote.
+   */
+  private probeHolds(run: RunRow): boolean {
+    const host = externalHostOf(run.target_system);
+    if (host === null) return true;
+    const contract = parseContractMethods(run.contract_json);
+    if (contract === null) return false;
+    return this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ?').get(host, contract) !== undefined;
+  }
+
+  /**
+   * The owner confirms a probe: an external apply run wrote exactly one target with its
+   * verb, and the owner checked on the provider's side that the target kept the fields the
+   * write did not send. From then on runs to that host with that verb may be approved, or
+   * resumed, for more than one target. A target found already holding its value was not
+   * written and proves nothing, so it does not count.
+   */
+  confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
+    { ok: true } | { ok: false; reason: 'not_found' | 'not_a_probe' } {
+    const run = this.runRow(runId);
+    if (!run) return { ok: false, reason: 'not_found' };
+    const host = externalHostOf(run.target_system);
+    const method = parseContractMethods(run.contract_json);
+    if (host === null || method === null || run.kind !== 'apply') return { ok: false, reason: 'not_a_probe' };
+    const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
+    const results = (this.engineDb.getDb().prepare(
+      'SELECT result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+    ).all(runId) as { result: string | null }[]).map((r) => (r.result === null ? null : this.engineDb.dec(r.result)));
+    if (!stopped || results.length !== 1 || results[0] !== 'written') return { ok: false, reason: 'not_a_probe' };
+    this.engineDb.getDb().prepare(
+      `INSERT INTO bulk_host_probes (host, method, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (host, method) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
+    ).run(host, method, runId, params.confirmedBy ?? null, new Date(params.now ?? Date.now()).toISOString());
+    return { ok: true };
+  }
+
   /** Targets the run writes: `update`, `create`, `delete`. */
   countWriting(runId: string): number {
     return (this.engineDb.getDb().prepare(
@@ -619,7 +691,7 @@ export class BulkLedger {
     maxTargets?: number | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
@@ -628,6 +700,7 @@ export class BulkLedger {
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;
     if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
+    if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     // An atomic run capped below its size could only ever stop half written.
     if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
     const now = params.now ?? Date.now();
@@ -657,22 +730,32 @@ export class BulkLedger {
    * one approved; the window restarts, the halt clears, failed and conflicting targets
    * are retried, and the trigger is due again.
    */
-  resume(runId: string, params: { checksum: string; now?: number | undefined }):
-    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' } {
+  resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
+    { ok: true; status: BulkRunStatus; triggerId: string }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
     if (params.checksum !== run.approval_checksum || params.checksum !== this.computeChecksum(runId)) {
       return { ok: false, reason: 'checksum' };
     }
+    // A resume may widen the cap — after a confirmed probe, the way from one target to N.
+    let maxTargets = run.max_targets;
+    if (params.maxTargets !== undefined) {
+      const writing = this.countWriting(runId);
+      maxTargets = params.maxTargets;
+      if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
+      if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
+      if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
+    }
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
     const moved = db.transaction(() => {
       const res = db.prepare(
-        `UPDATE bulk_runs SET halt_reason = NULL, expires_at = ?, targets_failed = 0
+        `UPDATE bulk_runs SET halt_reason = NULL, expires_at = ?, targets_failed = 0, max_targets = ?
          WHERE id = ? AND phase IN ('approved','writing')`,
-      ).run(this.approvalWindow(this.countWriting(runId), now), runId);
+      ).run(this.approvalWindow(this.countWriting(runId), now), maxTargets, runId);
       if (res.changes !== 1) return false;
       db.prepare('UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL')
         .run(runId);

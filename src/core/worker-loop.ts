@@ -637,7 +637,7 @@ export class WorkerLoop {
       return;
     }
     const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
-    const { externalWriter } = await import('./bulk-external.js');
+    const { externalWriter, parseBulkContract, writeMethodOf } = await import('./bulk-external.js');
     const dataStore = this.engine.getDataStore();
     // Built only for an external run: a local run needs none of the stores it reads.
     const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
@@ -646,7 +646,9 @@ export class WorkerLoop {
       ledger,
       writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
         const client = clientFor(r.contractJson);
-        return client ? externalWriter(client) : null;
+        const contract = parseBulkContract(r.contractJson);
+        const method = contract ? writeMethodOf(contract) : null;
+        return client && method ? externalWriter(client, { method }) : null;
       }),
     });
     if (outcome.status === 'pending') {

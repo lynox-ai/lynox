@@ -6323,6 +6323,8 @@ export class LynoxHTTPApi {
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
+      probe_required: [409, 'This host and write method have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
+      not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
@@ -6417,13 +6419,25 @@ export class LynoxHTTPApi {
         return;
       }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
+      const rawResumeMax = (body as Record<string, unknown>)['maxTargets'];
+      const resumeMax = rawResumeMax === undefined ? undefined : typeof rawResumeMax === 'number' ? rawResumeMax : Number.NaN;
       // The same check as approving: resuming an external run that halted because it could
       // not reach its host would only halt again on its first target.
       const reach = await bulkExternalReach(params['id']!, ledger);
       if (reach !== null) { errorResponse(res, 409, reach); return; }
-      const out = ledger.resume(params['id']!, { checksum });
+      const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
+    }));
+
+    // The owner's statement that the one target an external run wrote kept every field the
+    // write did not send. It is what lets runs to that host with that verb go wider.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/confirm-probe', async (req, res, params) => {
+      const ledger = bulkLedger(res);
+      if (!ledger) return;
+      const out = ledger.confirmProbe(params['id']!, { confirmedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown' }) });
+      if (!out.ok) { refuse(res, out.reason); return; }
+      jsonResponse(res, 200, withBinding(ledger.getStatus(params['id']!)!));
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/undo', async (_req, res, params) => {

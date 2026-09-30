@@ -1,6 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { BulkRunStatus, BulkTargetSystem, PlannedTarget } from '../../core/bulk-ledger.js';
-import { canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
+import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
 import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
@@ -21,6 +21,7 @@ interface BulkPlanInput {
   target_system: BulkTargetSystem | 'http';
   target_collection?: string | undefined;
   target_host?: string | undefined;
+  write_method?: 'PATCH' | 'PUT' | 'POST' | undefined;
   source_file?: string | undefined;
   source_format?: 'json' | 'csv' | undefined;
   source_collection?: string | undefined;
@@ -42,6 +43,9 @@ function formatStatus(s: BulkRunStatus): string {
       `unchanged ${String(s.changes.unchanged)}, invalid ${String(s.changes.invalid)}${invalid ? ` (${invalid})` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
+  if (s.writeMethod !== null) {
+    lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);
+  }
   if (s.phase === 'planned') {
     lines.push(`Reading targets: ${String(s.unread)} of ${String(s.total - s.changes.invalid)} not read yet — ` +
       'the counts above are final once the phase is previewed.');
@@ -94,6 +98,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       properties: {
         target_system: { type: 'string', enum: ['workspace', 'data_store', 'http'], description: 'What the targets are: workspace files, rows of one data-store collection, or JSON resources on one web API host.' },
         target_host: { type: 'string', description: 'For target_system "http": the API host name, e.g. api.example.com — every target URL must be on it.' },
+        write_method: { type: 'string', enum: ['PATCH', 'PUT', 'POST'], description: 'For target_system "http": the verb the API edits an existing resource with at its own URL. Default PATCH. Some APIs edit with PUT, or with POST to the resource URL — use what the API documents for an edit, never a create endpoint.' },
         target_collection: { type: 'string', description: 'For target_system "data_store": the collection whose rows change. It needs a single-column unique key.' },
         source_file: { type: 'string', description: 'Workspace path of the JSON or CSV source. Give this or source_collection.' },
         source_format: { type: 'string', enum: ['json', 'csv'], description: 'Format of source_file. Default: csv for a .csv path, json otherwise.' },
@@ -152,8 +157,10 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
         const external = planExternal(source, host, detectSecretInContent);
         const keys = external.filter((t) => !('invalid' in t)).map((t) => t.key);
+        const method = input.write_method ?? 'PATCH';
+        if (!(BULK_WRITE_METHODS as readonly string[]).includes(method)) throw new BulkSourceError('write_method must be PATCH, PUT or POST.');
         const out = ledger.recordExternalPlan({
-          createdBy: agent.currentThreadId, host, targets: external, contract: mintBulkContract(host, keys),
+          createdBy: agent.currentThreadId, host, targets: external, contract: mintBulkContract(host, keys, method),
         });
         if (!out.ok) {
           return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';

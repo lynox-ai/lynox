@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, type BulkRunForApply } from './bulk-ledger.js';
 import {
-  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, type ExternalClient,
+  BulkHostBudget, externalClient, externalWriter, mintBulkContract, parseBulkContract, planExternal, writeMethodOf,
+  type BulkWriteMethod, type ExternalClient,
 } from './bulk-external.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { runBulkPreview } from './bulk-preview.js';
@@ -24,6 +25,8 @@ import { ApiStore } from './api-store.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import { detectSecretInContent } from '../tools/builtin/http.js';
+import { bulkStatusTool } from '../tools/builtin/bulk.js';
+import type { IAgent } from '../types/index.js';
 
 /**
  * Build plan B, the write half (§1.4, §2.3–§2.4, §4 F5/F7): an approved external run is
@@ -43,6 +46,8 @@ interface Shop {
   requests: { method: string; path: string; body: unknown; auth: string | undefined }[];
   /** Per `METHOD path`, answered instead: a status and headers. */
   special: Map<string, { status: number; headers?: Record<string, string> }>;
+  /** A PUT that replaces the resource with the body — the failure the probe is for. */
+  replacingPut?: boolean;
 }
 
 /** A price as the shop stores it: always two decimals. */
@@ -68,7 +73,10 @@ function serve(s: Shop): () => void {
     if (sp) return new Response(null, { status: sp.status, headers: sp.headers ?? {} });
     const item = s.items.get(path);
     if (!item) return new Response(null, { status: 404 });
-    if (input.method === 'PATCH') {
+    if (input.method === 'PUT' && s.replacingPut) {
+      for (const k of Object.keys(item)) if (k !== 'id') delete item[k];
+    }
+    if (input.method === 'PATCH' || input.method === 'PUT' || input.method === 'POST') {
       for (const [k, v] of Object.entries(body as Record<string, unknown>)) item[k] = normalise(v);
       item['updated_at'] = `t${String(++clock)}`;
       return new Response(null, { status: 204 });
@@ -97,7 +105,8 @@ function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLim
 /** The writer as the worker builds it: from the run's OWN stored contract, or none. */
 const contractWriter = (run: BulkRunForApply) => bulkWriterFor(run, null, (r) => {
   const contract = parseBulkContract(r.contractJson);
-  return contract ? externalWriter(client({ contract }), { sleep: noSleep }) : null;
+  const method = contract ? writeMethodOf(contract) : null;
+  return contract && method ? externalWriter(client({ contract }), { method, sleep: noSleep }) : null;
 });
 
 const noSleep = async (): Promise<void> => {};
@@ -105,18 +114,32 @@ const noSleep = async (): Promise<void> => {};
 const writerFor = (c: ExternalClient) => (run: BulkRunForApply) => bulkWriterFor(run, null, () => externalWriter(c, { sleep: noSleep }));
 
 /** Plan, preview and approve an external run: what an owner does before the first write. */
-async function approvedRun(rows: { target: string; after: unknown }[], c: ExternalClient = client()): Promise<string> {
+/** A probe the owner confirmed for the host and verb — the fixture for tests that are not
+ *  about the probe itself. */
+function seedProbe(method: BulkWriteMethod = 'PATCH'): void {
+  engineDb.getDb().prepare('INSERT OR REPLACE INTO bulk_host_probes (host, method, run_id, confirmed_at) VALUES (?, ?, ?, ?)')
+    .run(HOST, method, 'fixture', '2026-09-30T00:00:00.000Z');
+}
+
+async function previewedRun(rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH'): Promise<string> {
   const targets = planExternal(rows, HOST, detectSecretInContent);
   const out = ledger.recordExternalPlan({
-    createdBy: 't', host: HOST, targets, contract: mintBulkContract(HOST, targets.filter((t) => !('invalid' in t)).map((t) => t.key)),
+    createdBy: 't', host: HOST, targets, contract: mintBulkContract(HOST, targets.filter((t) => !('invalid' in t)).map((t) => t.key), method),
   });
   if (!out.ok) throw new Error(out.reason);
   if (!ledger.resumePreview(out.status.id).ok) throw new Error('not started');
   const preview = await runBulkPreview(out.status.id, { ledger, clientFor: () => c, budget: new BulkHostBudget(10_000, 0), sleep: noSleep });
   if (preview.status !== 'done') throw new Error(`preview ${preview.status}`);
-  const approved = ledger.approve(out.status.id, { checksum: ledger.computeChecksum(out.status.id)! });
-  if (!approved.ok) throw new Error(approved.reason);
   return out.status.id;
+}
+
+/** Plan, preview and approve an external run with a confirmed probe for its verb. */
+async function approvedRun(rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH'): Promise<string> {
+  const runId = await previewedRun(rows, c, method);
+  seedProbe(method);
+  const approved = ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! });
+  if (!approved.ok) throw new Error(approved.reason);
+  return runId;
 }
 
 beforeEach(() => {
@@ -215,7 +238,7 @@ describe('applying an external run', () => {
       let gets = 0;
       const flaky: ExternalClient = {
         get sent() { return c.sent; },
-        patch: (u, b, sig) => c.patch(u, b, sig),
+        write: (u, m, b, sig) => c.write(u, m, b, sig),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) })).status).toBe('done');
@@ -284,8 +307,8 @@ describe('applying an external run', () => {
       const once: ExternalClient = {
         get sent() { return c.sent; },
         get: (u, sig) => c.get(u, sig),
-        async patch(u, b, sig) {
-          const r = await c.patch(u, b, sig);
+        async write(u, m, b, sig) {
+          const r = await c.write(u, m, b, sig);
           s.special.delete('PATCH /products/0');
           return r;
         },
@@ -310,7 +333,7 @@ describe('applying an external run', () => {
       let gets = 0;
       const flaky: ExternalClient = {
         get sent() { return c.sent; },
-        patch: (u, b, sig) => c.patch(u, b, sig),
+        write: (u, m, b, sig) => c.write(u, m, b, sig),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
       await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) });
@@ -376,7 +399,7 @@ describe('applying an external run', () => {
 
   it('never deletes an external target, and halts a run whose writer is missing', async () => {
     const w = externalWriter(client(), { sleep: noSleep });
-    await expect(w.write(url(0), { absent: true })).rejects.toThrow(/only ever patched/);
+    await expect(w.write(url(0), { absent: true })).rejects.toThrow(/never removed/);
     const s = shop();
     const restore = serve(s);
     try {
@@ -429,6 +452,133 @@ describe('applying an external run', () => {
       expect(s.requests.map((r) => [r.method, r.auth])).toEqual([
         ['GET', `Bearer ${TOKEN}`], ['PATCH', `Bearer ${TOKEN}`], ['GET', `Bearer ${TOKEN}`],
       ]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('the write verb and the one-target probe', () => {
+  it('approves an unprobed external run for one target only, and widens it after the owner confirms the probe', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.getStatus(runId)).toMatchObject({ writeMethod: 'PATCH', probeConfirmed: false });
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent))
+        .toContain('Writes with PATCH. It can be applied to one target first; more only after the user has checked that one.');
+      expect(ledger.approve(runId, { checksum })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(s.requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+      // Not yet confirmed: the resume cannot widen it.
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 })).toEqual({ ok: false, reason: 'probe_required' });
+
+      expect(ledger.confirmProbe(runId, { confirmedBy: '{"auth":"bearer"}' })).toEqual({ ok: true });
+      expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
+      expect(ledger.resume(runId, { checksum, maxTargets: 3 }).ok).toBe(true);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', applied: 3 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a target found already holding its value proves nothing, and a probe is per verb', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      s.items.get('/products/0')!['price'] = '15.00';
+      const already = await previewedRun([{ target: url(0), after: { price: '15.00' } }], c);
+      // Unchanged targets are not written at all; nothing to approve.
+      expect(ledger.approve(already, { checksum: ledger.computeChecksum(already)! })).toEqual({ ok: false, reason: 'nothing_to_apply' });
+
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+      const run = await previewedRun([{ target: url(1), after: { price: '15.00' } }], c);
+      expect(ledger.approve(run, { checksum: ledger.computeChecksum(run)!, maxTargets: 1 }).ok).toBe(true);
+      // The host already holds it by the time the run writes: recorded `already`.
+      s.items.get('/products/1')!['price'] = '15.00';
+      await runBulkEffect(run, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      expect(ledger.confirmProbe(run)).toEqual({ ok: false, reason: 'not_a_probe' });
+
+      // A PATCH probe does not vouch for PUT.
+      seedProbe('PATCH');
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+      const put = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '9' } })), client({ contract: mintBulkContract(HOST, [url(2), url(3)], 'PUT') }), 'PUT');
+      expect(ledger.approve(put, { checksum: ledger.computeChecksum(put)! })).toEqual({ ok: false, reason: 'probe_required' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('writes with the run\'s verb — PUT or POST to the resource URL — and the contract grants no other', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      for (const method of ['PUT', 'POST'] as const) {
+        engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+        s.requests.length = 0;
+        const runId = await approvedRun([{ target: url(0), after: { price: method === 'PUT' ? '16' : '17' } }], client(), method);
+        expect(ledger.getStatus(runId)!.writeMethod).toBe(method);
+        expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter })).status).toBe('done');
+        expect(s.requests.filter((r) => r.method !== 'GET').map((r) => [r.method, r.path])).toEqual([[method, '/products/0']]);
+      }
+      // A PATCH through a PUT run's contract is refused before it is sent.
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted'`).run();
+      const runId = await approvedRun([{ target: url(1), after: { price: '5' } }], client(), 'PUT');
+      s.requests.length = 0;
+      const patching = (run: BulkRunForApply) => bulkWriterFor(run, null, (r) =>
+        externalWriter(client({ contract: parseBulkContract(r.contractJson)! }), { method: 'PATCH', sleep: noSleep }));
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: patching })).status).toBe('halted');
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.contract);
+      expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a PUT that replaces the whole resource costs one target during the probe, not N', async () => {
+    const s = shop();
+    s.replacingPut = true;
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [0, 1, 2].map(url), 'PUT') });
+      const runId = await previewedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })), c, 'PUT');
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: (run) => bulkWriterFor(run, null, () => externalWriter(c, { method: 'PUT', sleep: noSleep })) });
+      // What the owner sees when checking the probe: the title is gone on the one target…
+      expect(s.items.get('/products/0')).toEqual({ id: 0, price: '15.00', updated_at: 't1' });
+      // …and on no other.
+      expect(s.items.get('/products/1')!['title']).toBe('Item 1');
+      expect(s.items.get('/products/2')!['title']).toBe('Item 2');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a field the provider requires is sent unchanged, named as such, and a foreign change to it makes the undo a conflict', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      // `title` stands in for a field the provider requires on every edit (bexio's name_1).
+      const runId = await approvedRun([{ target: url(0), after: { title: 'Item 0', price: '15' } }], c);
+      expect(ledger.getPreview(runId)[0]!.sentUnchanged).toEqual(['title']);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      s.items.get('/products/0')!['title'] = 'Renamed by someone else';
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! });
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) });
+      expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 0, conflicts: 1 });
+      expect(s.items.get('/products/0')).toMatchObject({ title: 'Renamed by someone else', price: '15.00' });
     } finally {
       restore();
     }

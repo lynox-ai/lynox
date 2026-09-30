@@ -587,7 +587,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
-  it('v15 migration keeps a populated v14 bulk ledger and adds an empty after_actual', () => {
+  it('v15 migration keeps a populated v14 bulk ledger, adds an empty after_actual and the probe table', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-engine-'));
     tmpDirs.push(dir);
     const path = join(dir, 'engine.db');
@@ -597,6 +597,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, applied_at, result)
         VALUES ('br',0,'k0','update','restorable','b0','a0','2026-09-30T00:00:00Z','written');
       ALTER TABLE bulk_targets DROP COLUMN after_actual;
+      DROP TABLE bulk_host_probes;
       DELETE FROM schema_version WHERE version >= 15;
     `);
     at.close();
@@ -606,6 +607,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     expect(db.prepare('SELECT seq, before, after_planned, result, after_actual FROM bulk_targets').all())
       .toEqual([{ seq: 0, before: 'b0', after_planned: 'a0', result: 'written', after_actual: null }]);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
     e.close();
   });
 
@@ -618,7 +620,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const at = new EngineDb(path, '');
     at.getDb().exec(`
       DELETE FROM schema_version WHERE version >= 14;
-      DROP TABLE bulk_targets; DROP TABLE bulk_runs;
+      DROP TABLE bulk_targets; DROP TABLE bulk_runs; DROP TABLE bulk_host_probes;
       CREATE TABLE bulk_runs (
         id TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), created_by TEXT,
         rule_hash TEXT NOT NULL, target_system TEXT NOT NULL,
@@ -726,6 +728,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
       DELETE FROM onboarding_flags;
       ALTER TABLE triggers DROP COLUMN waiting_until;   -- v12
       DROP TABLE bulk_targets; DROP TABLE bulk_runs;    -- v13 (v14 alters these two)
+      DROP TABLE bulk_host_probes;                      -- v15
     `);
     e.close();
   };

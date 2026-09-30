@@ -6066,6 +6066,44 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('confirms a probe only for an external run that wrote one target, and a resume widens only after one', async () => {
+      const local = planRun();
+      const notProbe = await jsonFetch(`/api/bulk/runs/${local}/confirm-probe`, { method: 'POST', body: '{}' });
+      expect(notProbe.status).toBe(409);
+      expect(((await notProbe.json()) as { error: string }).error).toMatch(/wrote exactly one target/);
+
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      bulkLedger.recordRead(id, 0, { before: { price: '2' } });
+      bulkLedger.recordRead(id, 1, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      const checksum = bulkLedger.computeChecksum(id)!;
+      expect(bulkLedger.approve(id, { checksum, maxTargets: 1 }).ok).toBe(true);
+      // The host is reachable with a credential, so what answers is the probe rule.
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${host}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
+      try {
+        const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
+        expect(widened.status).toBe(409);
+        expect(((await widened.json()) as { error: string }).error).toMatch(/no confirmed probe yet/);
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
+
     it('records how a local run\'s approval was authenticated — a session is a tag, never its cookie', async () => {
       const id = planRun();
       const { createHash: hash } = await import('node:crypto');

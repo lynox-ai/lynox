@@ -840,8 +840,20 @@ const MIGRATIONS: string[] = [
   // right after the run wrote it, read back with a GET and projected onto the fields the
   // run writes. A shop normalises what it is sent ("12" → "12.00"), so the undo has to
   // expect what is there, not what was sent. Customer data, written through `enc()`.
+  // `bulk_host_probes`: a host and write verb whose effect on the fields a write does NOT
+  // send the owner has checked on one real target. No provider documents it, and a verb
+  // that replaces the whole resource would wipe every other field of N targets — so until
+  // a probe is confirmed, an external run is approved for one target only.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (15);
-   ALTER TABLE bulk_targets ADD COLUMN after_actual TEXT;`,
+   ALTER TABLE bulk_targets ADD COLUMN after_actual TEXT;
+   CREATE TABLE bulk_host_probes (
+     host TEXT NOT NULL,
+     method TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     confirmed_by TEXT,
+     confirmed_at TEXT NOT NULL,
+     PRIMARY KEY (host, method)
+   );`,
 ];
 
 /**
