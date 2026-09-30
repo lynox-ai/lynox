@@ -98,10 +98,29 @@ function makeVault(
   return vault;
 }
 
-function makeAgent(apiStore: ApiStore, vault: MockVault, promptUser?: () => Promise<string>): never {
+/**
+ * `granted` models the agent's TOOL SURFACE, and it has to be modelled because
+ * the renewal is gated on it.
+ *
+ * The default holds `api_setup`, which is what an ordinary session has: the tool
+ * is registered unconditionally and a session with no role gets the whole
+ * registry. Passing `[]` (or a list without it) builds the other real case — a
+ * role-scoped child or a workflow step, neither of which can hold `api_setup`.
+ *
+ * ⚠ Without this the fixture had no tool surface at all, so every "does NOT
+ * renew" test would have gone green for the wrong reason: the gate would have
+ * refused everything and the assertions would have proved nothing.
+ */
+function makeAgent(
+  apiStore: ApiStore,
+  vault: MockVault,
+  promptUser?: () => Promise<string>,
+  granted: readonly string[] = ['http_request', 'api_setup'],
+): never {
   return {
     sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
     secretStore: vault,
+    getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
     promptUser,
     toolContext: {
       apiStore,
@@ -1394,6 +1413,83 @@ describe('the renewal fires on expiry and not otherwise', () => {
   });
 });
 
+describe('who may have a token renewed on their behalf', () => {
+  /**
+   * The gate is asserted DIRECTLY, on the exported predicate, because the effect
+   * it guards writes secrets and posts a client secret. A test that could only
+   * reach this judgement by running the renewal would have to run that too.
+   */
+  function agentWith(over: Record<string, unknown>): never {
+    return {
+      sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+      toolContext: { apiStore: null },
+      getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
+      ...over,
+    } as never;
+  }
+
+  it('permits a caller that holds api_setup and carries both guards', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    expect(mayRenewOAuthUnattended(agentWith({}))).toBe(true);
+  });
+
+  it('refuses a caller that does not hold api_setup', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // The two real populations: a role-scoped child, and a workflow step whose
+    // tools are filtered to a set that never admits `api_setup`.
+    expect(mayRenewOAuthUnattended(agentWith({
+      getAvailableTools: () => [{ definition: { name: 'http_request' } }],
+    }))).toBe(false);
+    expect(mayRenewOAuthUnattended(agentWith({ getAvailableTools: () => [] }))).toBe(false);
+  });
+
+  it('pins the literal tool name against the tool itself', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // `http.ts` cannot import `api-setup.ts` statically — that is a cycle — so it
+    // carries the name as a literal. A rename would fail OPEN: the gate would
+    // stop finding the tool and every renewal would quietly refuse. This is the
+    // only thing tying the two together, and it does it behaviourally rather
+    // than by exporting the constant.
+    expect(mayRenewOAuthUnattended(agentWith({
+      getAvailableTools: () => [{ definition: { name: apiSetupTool.definition.name } }],
+    }))).toBe(true);
+  });
+
+  it('refuses a caller with no session counters, and does not throw reaching that answer', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // `fetch_token` dereferences `agent.sessionCounters.httpRequests` with no
+    // guard, so this is the difference between a clean refusal and a TypeError.
+    expect(mayRenewOAuthUnattended(agentWith({ sessionCounters: undefined }))).toBe(false);
+    expect(mayRenewOAuthUnattended(agentWith({ sessionCounters: {} }))).toBe(false);
+  });
+
+  it('refuses a caller with no tool context', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // `toolContext` is what `exchangeToken` is handed as the carrier of the
+    // egress controls. Absent, the POST would go out past them.
+    expect(mayRenewOAuthUnattended(agentWith({ toolContext: undefined }))).toBe(false);
+  });
+
+  /**
+   * The fabricated agent that actually exists: a bulk run's worker effect builds
+   * `{ secretStore } as IAgent` and hands it to the attach. It satisfies the
+   * compiler and carries neither guard nor tool surface.
+   *
+   * ⚠ This is the test that catches a revert. The temptation on the other side
+   * is to make the fake MORE complete so the renewal works — and each field
+   * added there removes one barrier here, in an order that matters: without
+   * `sessionCounters` the exchange throws BEFORE its POST, so the missing field
+   * is currently what stops an unguarded egress. A fake that gained
+   * `sessionCounters` would post past the egress controls instead of failing.
+   */
+  it('refuses a fabricated agent that carries only a secret store', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    const fabricated = { secretStore: makeVault({}) } as never;
+    expect(() => mayRenewOAuthUnattended(fabricated)).not.toThrow();
+    expect(mayRenewOAuthUnattended(fabricated)).toBe(false);
+  });
+});
+
 describe('the two properties the comments claim, which nothing was checking', () => {
   // Module-scoped so a THROWN refusal does not take the record with it: `run`
   // never returns in that case, and the calls are exactly what has to be
@@ -1421,7 +1517,11 @@ describe('the two properties the comments claim, which nothing was checking', ()
     CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
   };
 
-  async function run(profile: ApiProfile, vault?: MockVault): Promise<{ calls: string[]; out: string }> {
+  async function run(
+    profile: ApiProfile,
+    vault?: MockVault,
+    granted?: readonly string[],
+  ): Promise<{ calls: string[]; out: string }> {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);
     const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
@@ -1430,7 +1530,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     const { httpRequestTool } = await import('./http.js');
     const out = await httpRequestTool.handler(
       { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
-      makeAgent(apiStore, vault ?? makeVault(SEED)),
+      makeAgent(apiStore, vault ?? makeVault(SEED), undefined, granted),
     );
     return { calls, out: String(out) };
   }
@@ -1487,6 +1587,110 @@ describe('the two properties the comments claim, which nothing was checking', ()
     }
     expect(refusal).toMatch(/revoked or expired/);
     expect(calls.some((u) => u.includes('/oauth/token')), 'an exchange was spent on a grant already known to be revoked').toBe(false);
+  });
+
+  /**
+   * The gate at the EFFECT level, not only on the predicate: a caller without
+   * `api_setup` spends no exchange, and still gets its stored token attached.
+   *
+   * The second half is what makes this a degradation rather than a regression —
+   * the request goes out exactly as it did before the renewal existed, and the
+   * existing 401 path says what to do if the token is truly dead.
+   */
+  it('spends no exchange for a caller that does not hold api_setup', async () => {
+    const past = Date.now() - 1000;
+    const { calls, out } = await run(
+      crmProfile({
+        auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+      }),
+      undefined,
+      ['http_request'],
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a caller without api_setup had a token minted on its behalf').toBe(false);
+    expect(calls.some((u) => u.includes('/v1/contacts')), 'the request itself did not go out, so this is a regression rather than a degradation').toBe(true);
+    expect(out).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * ONE exchange for N concurrent requests on one expiring profile.
+   *
+   * `api_setup` has no in-flight guard: what its concurrency re-read guarantees
+   * is that an overlapping exchange cannot record a FALSE revocation, not that
+   * overlap does not happen. Without coalescing, three requests present the same
+   * refresh token three times; a rotating provider rejects two, and one with
+   * reuse detection kills the grant. Precedent: `google-auth.ts › refreshInFlight`.
+   *
+   * The token endpoint is made slow on purpose so the three overlap; with the
+   * coalescer removed this sees three POSTs.
+   */
+  it('coalesces concurrent renewals for one profile into a single exchange', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        await new Promise((r) => setTimeout(r, 60));
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const agent = makeAgent(apiStore, makeVault(SEED));
+    await Promise.all([1, 2, 3].map(() => httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      agent,
+    )));
+
+    const exchanges = calls.filter((u) => u.includes('/oauth/token'));
+    expect(exchanges.length, `three overlapping requests minted ${String(exchanges.length)} tokens instead of one`).toBe(1);
+    expect(calls.filter((u) => u.includes('/v1/contacts')).length, 'all three requests still went out').toBe(3);
+  });
+
+  /**
+   * A REFUSED renewal reaches stderr.
+   *
+   * This is a correction, not an addition. The first version discarded the
+   * handler's return value while a comment claimed the two catches meant a
+   * non-transient failure "must not be quiet". The `fetch_token` branch throws
+   * nowhere — every failure is a returned string — so discarding it made every
+   * real refusal silent, including "the per-session HTTP budget is exhausted".
+   */
+  it('writes a refused renewal to stderr instead of discarding it', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    // No client_secret in the vault: `fetch_token` RETURNS a refusal naming the
+    // missing key and never posts.
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    const { calls } = stubBoth();
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault({ CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' })),
+    );
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'the refusal came from the provider rather than from fetch_token').toBe(false);
+    expect(written.join(''), 'a refused renewal left no trace at all').toMatch(/oauth token renewal refused for profile "crm-api"/);
+    expect(String(out)).not.toMatch(/^Error:/);
   });
 
   /**

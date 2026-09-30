@@ -516,6 +516,89 @@ interface HintContext {
 export const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 /**
+ * The name `api_setup` registers under. A literal, because a static import of
+ * `api-setup.ts` from this module is a cycle — the same reason the renewal below
+ * imports it dynamically. Pinned by a test against `apiSetupTool.definition.name`
+ * rather than trusted, since a rename here fails open: the gate would stop finding
+ * the tool and every renewal would quietly refuse.
+ */
+const API_SETUP_TOOL_NAME = 'api_setup';
+
+/**
+ * Whether a token may be renewed on THIS caller's behalf.
+ *
+ * Pure and exported so a test can assert the decision without performing it. The
+ * renewal writes secrets and posts a client secret; a test that could only reach
+ * this judgement by running it would have to run that too.
+ *
+ * TWO conditions, answering two different questions, and an agent can pass one
+ * and fail the other:
+ *
+ * **1. The right.** Tool scoping in this engine is keyed on `definition.name`
+ * (`tools/registry.ts › scopedView`, `tools/resolve-tools.ts › selectByTier`), so
+ * calling another tool's handler directly walks past it. Without this check an
+ * `http_request` would carry out the write side of `api_setup` for a caller that
+ * does not hold `api_setup` — and two populations are exactly in that state:
+ * `roles.ts`'s `collector` (which describes itself as writing only to memory), and
+ * every workflow step, because `INLINE_CORE_TOOLS` never admits `api_setup` and
+ * the step's tools are filtered to that set. So the renewal is allowed only where
+ * the caller could have run `fetch_token` itself, which means it adds no right.
+ * That is also why it is not enough to read `toolContext.tools`: `session.ts`
+ * fills that with the UNSCOPED registry.
+ *
+ * **2. The guards.** `fetch_token` dereferences two things it is handed:
+ * `agent.sessionCounters.httpRequests`, the per-session HTTP budget, and
+ * `agent.toolContext`, which it passes to `exchangeToken` as the carrier of the
+ * egress controls. A fabricated agent — `{ secretStore } as IAgent` is one that
+ * exists — satisfies the compiler and neither of those.
+ *
+ * ⚠ The runtime checks below look redundant against the types, and are not:
+ * `IAgent` declares both fields non-optional, so an `as IAgent` cast is a promise
+ * the type system then stops questioning. This is the one place that has to
+ * distrust it.
+ *
+ * ⚠ And condition 2 is NECESSARY, not SUFFICIENT — said plainly because the
+ * cheap reading of it is that a caller which passes carries real guards. It
+ * refuses a dereference that would throw, and it refuses the fabricated agent
+ * that exists today. It cannot certify that a `toolContext` it was handed
+ * actually holds a network policy or a rate-limit provider, because a real agent
+ * may legitimately have neither set. Nothing here can close that; the durable
+ * answer is an authorization recorded when the work is PLANNED and carried by
+ * the effect, rather than inferred at runtime from an object's shape.
+ */
+export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IAgent): boolean {
+  // Condition 2 first, and deliberately: on a fabricated agent
+  // `getAvailableTools` is not a function, so asking condition 1 first would
+  // throw the very TypeError this is here to avoid.
+  const counters: unknown = agent.sessionCounters;
+  if (typeof counters !== 'object' || counters === null) return false;
+  if (typeof (counters as { httpRequests?: unknown }).httpRequests !== 'number') return false;
+  const toolContext: unknown = agent.toolContext;
+  if (typeof toolContext !== 'object' || toolContext === null) return false;
+
+  if (typeof agent.getAvailableTools !== 'function') return false;
+  return agent.getAvailableTools().some((t) => t.definition.name === API_SETUP_TOOL_NAME);
+}
+
+/**
+ * One renewal per profile at a time.
+ *
+ * Not a nicety: `api_setup` has no in-flight guard of its own — the comment at
+ * its concurrency re-read says so, and what it guarantees is that an overlapping
+ * exchange cannot record a FALSE revocation, not that overlap does not happen.
+ * Before this, N concurrent `http_request` calls against one expiring profile
+ * started N exchanges, each presenting the same refresh token. A provider that
+ * rotates rejects all but one; on a provider with reuse detection, the whole
+ * grant dies. The in-repo precedent is `integrations/google/google-auth.ts ›
+ * refreshInFlight`, and this is that shape.
+ *
+ * Keyed by profile id, so it bounds by the number of profiles. The entry is
+ * removed when the renewal settles, which makes the map a coalescer and not a
+ * cache: a later request renews again.
+ */
+const oauthRenewalsInFlight = new Map<string, Promise<void>>();
+
+/**
  * Renew an oauth2 access token that is about to expire, by running the SAME
  * exchange the `api_setup` tool runs — deliberately by calling that handler
  * rather than by extracting its body into a shared function.
@@ -540,8 +623,39 @@ export const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
  * do if it really is dead. This path records no verdict of its own; the handler
  * it calls is the only thing that writes state, and it writes no revocation it
  * has not proven.
+ *
+ * ⚠ Residue, named rather than left for a reader to discover: there is no
+ * back-off after a failure. A profile whose renewal keeps failing is retried on
+ * every request that reaches the buffer, at up to the exchange timeout each
+ * time, and each attempt that reaches the POST charges the per-session HTTP
+ * budget. That is bounded by the budget itself and it does not corrupt state, so
+ * it is left as cost rather than answered with a cache that would also refuse a
+ * provider that has recovered.
  */
 async function renewExpiringOAuthToken(
+  profileId: string,
+  agent: import('../../types/index.js').IAgent,
+): Promise<void> {
+  if (!mayRenewOAuthUnattended(agent)) {
+    // Silent on purpose, and this is the one refusal that should be: it is the
+    // ordinary state of a scoped caller, not a fault. The request goes out with
+    // the stored token and the existing 401 path says what to do — which is what
+    // happened before this renewal existed at all.
+    return;
+  }
+
+  const running = oauthRenewalsInFlight.get(profileId);
+  if (running !== undefined) return running;
+
+  const run = runOAuthRenewal(profileId, agent).finally(() => {
+    oauthRenewalsInFlight.delete(profileId);
+  });
+  oauthRenewalsInFlight.set(profileId, run);
+  return run;
+}
+
+/** The renewal itself. Never rejects — see the contract on the caller above. */
+async function runOAuthRenewal(
   profileId: string,
   agent: import('../../types/index.js').IAgent,
 ): Promise<void> {
@@ -558,17 +672,37 @@ async function renewExpiringOAuthToken(
     // transient. It cannot be retried into working and it must not be quiet.
     process.stderr.write(
       `[lynox:http] oauth token renewal unavailable: api_setup did not load (${err instanceof Error ? err.message : String(err)}). `
-      + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.\n`,
+      + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.
+`,
     );
     return;
   }
 
+  // The RETURN VALUE is read, and that is a correction rather than an addition.
+  // The first version discarded it and a comment claimed the two catches above
+  // meant a non-transient failure "must not be quiet". Measured: the
+  // `fetch_token` branch throws NOWHERE — every one of its failures is a
+  // `return` of a string, including the one that says the per-session HTTP
+  // budget is exhausted. So the catch below fires for almost nothing, and
+  // discarding the string made every real refusal silent. (The earlier count of
+  // "one throw" came from grepping for the WORD: the only two occurrences are in
+  // comments.)
   try {
-    await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+    const answer = await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+    if (typeof answer === 'string' && answer.startsWith('Error:')) {
+      // stderr, not a refusal to the model: the stored token is still valid for
+      // at least the buffer, so the request continues. This exists so an
+      // operator reading logs can tell a renewal that was refused from one that
+      // never ran.
+      process.stderr.write(
+        `[lynox:http] oauth token renewal refused for profile "${profileId}": ${answer.slice(0, 300)}\n`,
+      );
+    }
   } catch {
-    // Swallowed on purpose — see the return contract above. A throw here is the
-    // provider or the network, and the token in the vault is still valid for at
-    // least the buffer, so failing the request would be the wrong trade.
+    // Reached only if something under `fetch_token` throws rather than returning
+    // — a transport or JSON failure it does not convert. The token in the vault
+    // is still valid for at least the buffer, so failing the request would be
+    // the wrong trade.
   }
 }
 
