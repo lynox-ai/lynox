@@ -746,13 +746,26 @@ describe('ApiStore', () => {
       }
     });
 
-    it('renders every catalogue entry and nothing else', () => {
+    it('renders every catalogue entry, in the order the table names, and nothing else', () => {
       const out = store.formatSuggestedApisForSystemPrompt();
       const rendered = out.split('\n').filter((l) => l.includes(', auth=') && l.startsWith('- '));
       expect(rendered.length).toBe(EXPECTED_IDS.length);
       for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
         expect(out).toContain(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }
+
+      // Order, which was left unpinned on the argument that it carries salience
+      // and no statement. Salience IS what this block spends: a list the model is
+      // told to offer "when relevant" is read top-down, so the order is a weak
+      // recommendation whether anyone decided it or not. Unpinned, reversing all
+      // ten passed. Pinned here rather than in the constant, so that adding an
+      // entry means choosing where it goes.
+      const renderedIds = rendered.map((line) => {
+        const entry = SUGGESTED_API_CATALOG.suggested_apis.find((a) => line.startsWith(`- ${a.name} (`));
+        expect(entry, `rendered line matches no catalogue entry: ${line}`).toBeDefined();
+        return entry!.id;
+      });
+      expect(renderedIds).toEqual(EXPECTED_IDS);
     });
 
     /**
