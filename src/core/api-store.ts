@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { compose, wrapUntrustedData, renderFence } from './data-boundary.js';
-import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
+import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
@@ -1252,11 +1252,20 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
    * briefing, so there is no fallback here any more. See
    * {@link ./suggested-apis.ts} for the measurement.
    */
-  formatSuggestedApisForSystemPrompt(): string {
+  formatSuggestedApisForSystemPrompt(catalogue: SuggestedApiCatalog = SUGGESTED_API_CATALOG): string {
     if (process.env['LYNOX_SKIP_SUGGESTED_APIS'] === '1') return '';
 
-    const cat = SUGGESTED_API_CATALOG;
-    if (cat.suggested_apis.length === 0) return '';
+    // A parameter with the constant as its default, the way `oauth-presets.ts`
+    // takes its register: a test seam, not an extension point. Production
+    // callers pass nothing, and there is no file and no env var behind it. It
+    // exists because the empty-list guard below could otherwise only be read,
+    // not run — and the version of that guard this replaced was wrong.
+    const cat = catalogue;
+    // BOTH lists, not just the first: the guard used to name `suggested_apis`
+    // alone, so emptying the offer list would have silently taken the
+    // on-request providers with it — the same shape of silence this whole
+    // module moved out of a file to avoid.
+    if (cat.suggested_apis.length === 0 && cat.connect_when_user_asks.length === 0) return '';
 
     // Was assembled with the tag as the first array element and the close tag
     // pushed at the end — a frame built in pieces, which a rule about template
@@ -1285,20 +1294,27 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
       lines.push('');
     }
 
-    lines.push('Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):');
-    for (const api of cat.suggested_apis) {
-      lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+    if (cat.suggested_apis.length > 0) {
+      lines.push('Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):');
+      for (const api of cat.suggested_apis) {
+        lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
     }
 
-    // The second list, and it gets the opposite instruction. These providers are
-    // the ones `do_not_proactively_suggest` covers — they move billing, customer
-    // records or orders — so the model may not raise them. When the USER raises
-    // one, this is the path. Rendering them into the list above would have put
-    // "you can offer" and "do not suggest" three lines apart about the same
-    // provider, under a heading calling them free, which none of them is.
+    // The second list, and it gets the opposite instruction. It is an
+    // instruction and not a control: nothing downstream checks who raised the
+    // provider (see the field's own comment in `suggested-apis.ts`).
+    //
+    // Two things the heading has to carry, both of which the first draft left
+    // to the reader. It has to say it is the carve-out of the prohibition
+    // above rather than a second rule beside it — the do-not bullet already
+    // ends "without the user explicitly asking to wire it", and that clause is
+    // this section. And it has to answer the case that actually occurs: a user
+    // who names a KIND ("connect my accounting"), where listing the candidates
+    // would be the very thing the section forbids.
     if (cat.connect_when_user_asks.length > 0) {
       lines.push('');
-      lines.push('Connect ONLY when the user names the provider — these are NOT suggestions, do not raise them unprompted. Each needs a credential the user creates in their own account: walk them through creating it, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url:');
+      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url. `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
       for (const api of cat.connect_when_user_asks) {
         lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }
