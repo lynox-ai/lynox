@@ -5955,6 +5955,12 @@ describe('LynoxHTTPApi', () => {
       const keyed = planRun();
       const kRun = await (await jsonFetch(`/api/bulk/runs/${keyed}`)).json() as Record<string, unknown>;
       expect([kRun['checksumBinding'], 'checksumNote' in kRun]).toEqual(['keyed', false]);
+      const kList = await (await jsonFetch('/api/bulk/runs')).json() as { runs: Record<string, unknown>[] };
+      expect(kList.runs.map((r) => 'checksumNote' in r)).toEqual([false]);
+      const kApproved = await (await jsonFetch(`/api/bulk/runs/${keyed}/approve`, { method: 'POST', body: JSON.stringify({ checksum: kRun['checksum'] }) })).json() as Record<string, unknown>;
+      expect([kApproved['phase'], 'checksumNote' in kApproved]).toEqual(['approved', false]);
+      const kResumed = await (await jsonFetch(`/api/bulk/runs/${keyed}/resume`, { method: 'POST', body: JSON.stringify({ checksum: kRun['checksum'] }) })).json() as Record<string, unknown>;
+      expect([kResumed['phase'], 'checksumNote' in kResumed]).toEqual(['approved', false]);
 
       // Without one: every response the owner approves from carries the note.
       bulkDb.close();

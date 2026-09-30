@@ -369,7 +369,7 @@ describe('bulk_status on an instance without a vault key', () => {
       targets: [{ key: 'a.md', before: { absent: true }, after: 'x' }],
     }).id;
     const line = /Approval checksum: unkeyed/;
-    expect(await bulkStatusTool.handler({ run_id: plan(ledger) }, agent())).not.toMatch(line);
+    expect(await bulkStatusTool.handler({ run_id: plan(ledger) }, agent())).not.toMatch(/checksum/i);
 
     const bareDb = new EngineDb(join(dir, 'unkeyed.db'), '');
     try {

@@ -1015,6 +1015,12 @@ export class EngineDb {
     return ENCRYPTED_PREFIX + Buffer.concat([iv, tag, encrypted]).toString('base64');
   }
 
+  /** Whether {@link keyedHash} is an HMAC (a vault key is set) or plain SHA-256. A
+   *  caller whose digest is meant to BIND something must say which one it got. */
+  get hashIsKeyed(): boolean {
+    return this._hashKey !== null;
+  }
+
   /**
    * A digest of `parts` that, with a vault key, cannot be dictionary-attacked from a copy
    * of the file:
@@ -1024,12 +1030,6 @@ export class EngineDb {
    * large input is never joined into one string and no two part lists collide.
    * @internal — see {@link enc}.
    */
-  /** Whether {@link keyedHash} is an HMAC (a vault key is set) or plain SHA-256. A
-   *  caller whose digest is meant to BIND something must say which one it got. */
-  get hashIsKeyed(): boolean {
-    return this._hashKey !== null;
-  }
-
   keyedHash(parts: Iterable<string>): string {
     const h = this._hashKey ? createHmac('sha256', this._hashKey) : createHash('sha256');
     for (const p of parts) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
