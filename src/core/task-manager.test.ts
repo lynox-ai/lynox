@@ -861,6 +861,19 @@ describe('a bulk run\'s trigger', () => {
     expect(row()).toEqual(before);
   });
 
+  it('holds for a preview trigger too, whose id is its own', async () => {
+    const previewId = new TriggerStore(engine).armBulkEffect({ runId: 'run-2', effect: 'bulk_preview', title: 'Bulk preview', nextRunAt: '2026-09-30T10:00:00.000Z' });
+    expect(previewId).toBe('bulk-preview-run-2');
+    const before = tm.getTrigger(previewId)!;
+    expect(before.effect).toBe('bulk_preview');
+    expect(() => tm.update(previewId, { scheduleCron: '1h' })).toThrow(BulkTriggerLockedError);
+    expect(() => tm.setEnabled(previewId, false)).toThrow(BulkTriggerLockedError);
+    expect(() => tm.complete(previewId)).toThrow(BulkTriggerLockedError);
+    const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
+    expect(await taskUpdateTool.handler({ task_id: previewId, status: 'completed' }, agent)).toBe(`Error: ${new BulkTriggerLockedError().message}`);
+    expect(tm.getTrigger(previewId)).toEqual(before);
+  });
+
   it('is refused to the model\'s task_update, which says why', async () => {
     const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
     const before = row();

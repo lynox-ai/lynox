@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type { DataStore } from './data-store.js';
-import type { BulkTriggerEffect } from '../types/index.js';
+import type { BulkWriteEffect } from '../types/index.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, canonicalJson,
@@ -25,7 +25,7 @@ import {
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, resolveBulkFilePath } from './bulk-plan.js';
 
-export type BulkEffect = BulkTriggerEffect;
+export type BulkEffect = BulkWriteEffect;
 
 /**
  * How the loop reaches a target system. `read` returns the target's current state;

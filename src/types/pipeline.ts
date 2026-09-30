@@ -277,10 +277,16 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
  *  `bulk_apply` / `bulk_undo` are deterministic too: they write an APPROVED bulk run's
  *  targets (PRD bulk-changes-reversible §3.4/§3.5) and mint no Run. Only the bulk
  *  approval route creates them — `deriveSourceEffect` never yields them, so no
- *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them. */
-export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo';
-/** The two bulk-run effects. */
-export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo'>;
+ *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them.
+ *  `bulk_preview` reads an external run's targets and mints no Run either; the ledger's
+ *  external plan and the owner's resume of a halted preview are what arm it. */
+export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo' | 'bulk_preview';
+/** The bulk-run effects. `bulk_preview` reads an external run's targets into its ledger
+ *  (build plan B §3) and writes nothing to them; an external `bulk_plan` arms it, and the
+ *  owner's resume re-arms it after a halt. */
+export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo' | 'bulk_preview'>;
+/** The bulk effects that write targets. */
+export type BulkWriteEffect = Exclude<BulkTriggerEffect, 'bulk_preview'>;
 
 /** An AGENT-TRIGGER — a rule the WorkerLoop fires to DO work for the user (the
  *  "act" side of the agent loop). Lives in the `triggers` table. Split from
@@ -335,7 +341,8 @@ export interface TriggerRecord {
    *  exempt). Fail-closed: a trigger created by anything other than an explicit
    *  human action lands unconfirmed. */
   confirmed_at?: string | undefined;
-  /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes, from
-   *  `condition_json.run_id`. Set only by the bulk approval route. */
+  /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes (or a `bulk_preview`
+   *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
+   *  and, for a preview, the external bulk plan. */
   bulk_run_id?: string | undefined;
 }

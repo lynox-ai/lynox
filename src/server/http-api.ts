@@ -6308,6 +6308,7 @@ export class LynoxHTTPApi {
       not_undoable: [409, 'Only a finished, aborted or halted bulk run can be undone.'],
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
+      external_not_writable: [409, 'Writing to an external system is not available yet. This run can be reviewed, not applied.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
@@ -6365,6 +6366,13 @@ export class LynoxHTTPApi {
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const checksum = checksumOf(body);
+      // A halted external preview has nothing approved to confirm: resuming it reads on.
+      if (ledger.getStatus(params['id']!)?.phase === 'planned') {
+        const read = ledger.resumePreview(params['id']!);
+        if (!read.ok) { refuse(res, read.reason); return; }
+        jsonResponse(res, 200, withBinding(read.status));
+        return;
+      }
       if (!checksum) { errorResponse(res, 400, 'Missing "checksum".'); return; }
       const out = ledger.resume(params['id']!, { checksum });
       if (!out.ok) { refuse(res, out.reason); return; }

@@ -266,6 +266,12 @@ function likePrefix(id: string): string {
   return `${id.replace(/[\\%_]/g, '\\$&')}%`;
 }
 
+/** The trigger id of a bulk run's preview effect — its own, beside `bulk-<id>` of the
+ *  write effect, so the two are never one row (build plan B §6 Q6). */
+export function bulkPreviewTriggerId(runId: string): string {
+  return `bulk-preview-${runId}`;
+}
+
 export class TriggerStore {
   private readonly db: Database.Database;
 
@@ -442,14 +448,15 @@ export class TriggerStore {
 
   /**
    * Arm the trigger that writes an approved bulk run (PRD bulk-changes-reversible §3.4):
-   * effect `bulk_apply` or `bulk_undo`, `condition_json.run_id`, due at `nextRunAt`. One
+   * effect `bulk_apply` or `bulk_undo` (or `bulk_preview`, which READS an external run's
+   * targets, under its own id {@link bulkPreviewTriggerId}), `condition_json.run_id`, due at `nextRunAt`. One
    * trigger per run — id `bulk-<runId>` — so approving, resuming or re-approving re-arms
    * the same row instead of starting a second loop. The only path that CREATES a bulk
    * effect: {@link insert} takes its effect from `deriveSourceEffect`, which never
    * yields one, and {@link updateFields} cannot change `effect` or `run_id`.
    */
   armBulkEffect(params: { runId: string; effect: BulkTriggerEffect; title: string; nextRunAt: string }): string {
-    const id = `bulk-${params.runId}`;
+    const id = params.effect === 'bulk_preview' ? bulkPreviewTriggerId(params.runId) : `bulk-${params.runId}`;
     this.upsert({
       id,
       title: params.title,

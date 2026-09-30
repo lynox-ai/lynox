@@ -1,5 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { BulkRunStatus, BulkTargetSystem, PlannedTarget } from '../../core/bulk-ledger.js';
+import { canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
+import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
   parseSourceText, planDataStore, planWorkspace, readBulkImage, resolveBulkFilePath, rowsToSource,
@@ -7,16 +9,18 @@ import {
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
- * §3.8). `bulk_plan` reads targets and their before-images into the ledger;
- * `bulk_status` reads counters back. Neither writes to a target, and neither returns
+ * §3.8). `bulk_plan` reads targets and their before-images into the ledger — for an
+ * external target system it records the plan and leaves the reads to the engine's
+ * preview effect; `bulk_status` reads counters back. Neither writes to a target, and neither returns
  * a target's key, value or diff: before-images are customer data, and a source file
  * may be externally authored — echoing its strings would put them into the model's
  * context. What the model gets is counts and a fixed vocabulary of reasons.
  */
 
 interface BulkPlanInput {
-  target_system: BulkTargetSystem;
+  target_system: BulkTargetSystem | 'http';
   target_collection?: string | undefined;
+  target_host?: string | undefined;
   source_file?: string | undefined;
   source_format?: 'json' | 'csv' | undefined;
   source_collection?: string | undefined;
@@ -38,6 +42,10 @@ function formatStatus(s: BulkRunStatus): string {
       `unchanged ${String(s.changes.unchanged)}, invalid ${String(s.changes.invalid)}${invalid ? ` (${invalid})` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
+  if (s.phase === 'planned') {
+    lines.push(`Reading targets: ${String(s.unread)} of ${String(s.total - s.changes.invalid)} not read yet — ` +
+      'the counts above are final once the phase is previewed.');
+  }
   if (s.applied > 0 || s.failed > 0 || s.conflicts > 0 || s.undone > 0) {
     lines.push(`Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
   }
@@ -78,12 +86,14 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'Dry-run a change to many targets at once: record, per target, its current state and the state the change would produce — without writing anything. ' +
       'Targets and new states come from a source you prepared: a JSON or CSV file in the workspace (rows with a "target" field and either an "after" field or the new column values), or a data-store collection holding such rows. ' +
       'target_system "workspace": each target is a file path, "after" its full new text. target_system "data_store": each target is a key value of target_collection\'s unique key, the other fields the new column values. ' +
+      'target_system "http": each target is the https URL of one JSON resource on target_host, "after" a JSON object of the fields to set (text, number, true/false or null — no lists or nested objects); the engine then reads every target in the background with the host\'s stored API credential, so the counts are final only once bulk_status shows phase previewed. One external dry run at a time. ' +
       'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it, and there is no screen or button for it you could point them to. ' +
       'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        target_system: { type: 'string', enum: ['workspace', 'data_store'], description: 'What the targets are: workspace files or rows of one data-store collection.' },
+        target_system: { type: 'string', enum: ['workspace', 'data_store', 'http'], description: 'What the targets are: workspace files, rows of one data-store collection, or JSON resources on one web API host.' },
+        target_host: { type: 'string', description: 'For target_system "http": the API host name, e.g. api.example.com — every target URL must be on it.' },
         target_collection: { type: 'string', description: 'For target_system "data_store": the collection whose rows change. It needs a single-column unique key.' },
         source_file: { type: 'string', description: 'Workspace path of the JSON or CSV source. Give this or source_collection.' },
         source_format: { type: 'string', enum: ['json', 'csv'], description: 'Format of source_file. Default: csv for a .csv path, json otherwise.' },
@@ -135,8 +145,27 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         if (!input.target_collection) throw new BulkSourceError('target_system "data_store" needs target_collection.');
         targets = planDataStore(source, store, input.target_collection);
         scope = `data_store:${input.target_collection}`;
+      } else if (input.target_system === 'http') {
+        const host = input.target_host === undefined ? null : canonicalHost(input.target_host);
+        if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
+        const external = planExternal(source, host, detectSecretInContent);
+        const keys = external.filter((t) => !('invalid' in t)).map((t) => t.key);
+        const out = ledger.recordExternalPlan({
+          createdBy: agent.currentThreadId, host, targets: external, contract: mintBulkContract(host, keys),
+        });
+        if (!out.ok) {
+          return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
+        }
+        return [
+          out.status.phase === 'planned'
+            ? 'External dry run queued — nothing was written. The engine now reads each target in the background.'
+            : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
+          formatStatus(out.status),
+          'Poll bulk_status with the run id until the phase is previewed. The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
+            'Only the user can approve it, outside this chat.',
+        ].join('\n');
       } else {
-        throw new BulkSourceError('target_system must be "workspace" or "data_store".');
+        throw new BulkSourceError('target_system must be "workspace", "data_store" or "http".');
       }
 
       const status = ledger.recordDryRun({
