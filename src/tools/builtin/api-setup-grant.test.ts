@@ -56,14 +56,30 @@ interface MockVault {
   peek(name: string): string | undefined;
 }
 
-/** The slice of a secret store fetch_token and delete use, over a plain map. */
-function makeVault(initial: Record<string, string>, opts: { canDelete?: boolean } = {}): MockVault {
+/**
+ * The slice of a secret store fetch_token and delete use, over a plain map.
+ *
+ * `opts.reads` makes it a MEASURING instrument as well as a stub, and that is not
+ * a convenience. Without it this vault resolves silently, so a mutant that adds
+ * vault reads on a path that should touch none changes nothing this file can
+ * output — which is exactly how the revoked-order mutant below was first
+ * mis-scored as equivalent. The real `SecretStore` publishes a `secretAccess`
+ * event per resolve; an array is the cheapest stand-in that has the same
+ * granularity, and it records the name whether or not the slot exists, because
+ * "asked for the client secret" is the event, not "got one".
+ */
+function makeVault(
+  initial: Record<string, string>,
+  opts: { canDelete?: boolean; reads?: string[] } = {},
+): MockVault {
   const store: Record<string, string> = { ...initial };
+  const note = (name: string): void => { opts.reads?.push(name); };
   const vault: MockVault = {
-    resolve: (name) => store[name] ?? null,
+    resolve: (name) => { note(name); return store[name] ?? null; },
     resolveSecretRefs: (input: unknown): unknown => {
       const text = JSON.stringify(input);
       const resolved = text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (_m, name: string) => {
+        note(name);
         const v = store[name];
         return v !== undefined ? v.replace(/["\\]/g, (c) => `\\${c}`) : `secret:${name}`;
       });
@@ -1353,7 +1369,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
   };
 
-  async function run(profile: ApiProfile): Promise<{ calls: string[]; out: string }> {
+  async function run(profile: ApiProfile, vault?: MockVault): Promise<{ calls: string[]; out: string }> {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);
     const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
@@ -1362,7 +1378,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     const { httpRequestTool } = await import('./http.js');
     const out = await httpRequestTool.handler(
       { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
-      makeAgent(apiStore, makeVault(SEED)),
+      makeAgent(apiStore, vault ?? makeVault(SEED)),
     );
     return { calls, out: String(out) };
   }
@@ -1389,11 +1405,10 @@ describe('the two properties the comments claim, which nothing was checking', ()
    * is worth pinning for that: this path checks before renewing, and
    * `fetch_token` short-circuits on a revoked grant before it posts anything.
    *
-   * ⚠ It therefore does NOT pin the order. Moving the renewal above the
-   * revoked-grant check leaves this green, measured by mutation. That mutant is
-   * equivalent in behaviour, and the comment in `http.ts` was corrected to say
-   * so rather than a test being invented to defend a claim the code does not
-   * make. The order is a cost and clarity choice.
+   * ⚠ This one does NOT pin the order, and the next one does. An earlier note
+   * here said the order was not worth pinning because the swap mutant survived.
+   * It survived this assertion because an exchange is refused either way; what it
+   * changes is which SECRETS get read first, and that is the test below.
    */
   it('refuses a revoked grant without spending an exchange on it', async () => {
     const past = Date.now() - 1000;
@@ -1420,5 +1435,53 @@ describe('the two properties the comments claim, which nothing was checking', ()
     }
     expect(refusal).toMatch(/revoked or expired/);
     expect(calls.some((u) => u.includes('/oauth/token')), 'an exchange was spent on a grant already known to be revoked').toBe(false);
+  });
+
+  /**
+   * The ORDER, pinned by the only thing it changes: which secrets a refused
+   * request reads.
+   *
+   * This test exists because the claim it checks was first measured wrong and
+   * written into three comments as settled. `fetch_token` returns before it
+   * POSTs when the grant is revoked, so no test that counts requests can tell
+   * the two orders apart. But it returns AFTER resolving client_id, client_secret
+   * and the refresh token — so with the renewal placed above the revoked-grant
+   * check, a request that is going to be refused pulls the client secret out of
+   * the vault first, and in the real store that is three `secretAccess` audit
+   * events for a credential on a request that was never sent.
+   *
+   * So the order is least-secret-exposure, a correctness property, and the
+   * mutation that proves it is: move the `token_expires_at` block in `http.ts`
+   * above the `hasRevokedGrant` block. The refresh key IS expected here — the
+   * attach reads it itself to decide whether the revocation still applies —
+   * which is why the assertion names the client secret rather than counting.
+   */
+  it('does not read the client secret on a request it is going to refuse', async () => {
+    const past = Date.now() - 1000;
+    const reads: string[] = [];
+    let refusal = '';
+    try {
+      await run(
+        crmProfile({
+          auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+          oauth_grant: {
+            state: 'revoked',
+            revoked_fp: tokenFingerprint('REFRESH'),
+            revoked_at: '2026-09-30T00:00:00.000Z',
+          },
+        }),
+        makeVault(SEED, { reads }),
+      );
+      expect.unreachable('a revoked grant was not refused');
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+    }
+    expect(refusal).toMatch(/revoked or expired/);
+    expect(reads, 'a refused request resolved the client secret out of the vault').not.toContain('CRM_CLIENT_SECRET');
+    expect(reads, 'a refused request resolved the client id out of the vault').not.toContain('CRM_CLIENT_ID');
+    // The positive control: without this the assertions above would also pass if
+    // the recorder were simply not wired up, which is the failure that produced
+    // the wrong verdict in the first place.
+    expect(reads, 'the read recorder captured nothing at all, so the two assertions above prove nothing').toContain('CRM_API_REFRESH_TOKEN');
   });
 });

@@ -668,14 +668,26 @@ async function attachEngineManagedAuth(
     // for a 24-hour token that is a daily exchange, and a daily secret write, for
     // a shop untouched for months. This runs only for a token about to be used.
     //
-    // Ordered after the revoked-grant check, and the honest reason is smaller
-    // than it looks: `fetch_token` short-circuits on a revoked grant BEFORE it
-    // posts anything (`api-setup.ts`, "posting the very token the provider
-    // already rejected only repeats the rejection"), so swapping the two changes
-    // no observable behaviour — measured by mutation, which survived. What the
-    // order buys is a dynamic import and a handler call not spent on a case
-    // already decided, and one place the refusal is phrased. A cost and clarity
-    // choice, not a correctness property; do not cite it as one.
+    // Ordered after the revoked-grant check, and that order is LOAD-BEARING:
+    // it is least-secret-exposure. A path that is going to refuse must not read
+    // the client secret.
+    //
+    // ⚠ The first draft of this comment claimed the opposite — that the order was
+    // "a cost and clarity choice, not a correctness property" — on the strength of
+    // a mutation that survived. The mutation survived because the test vault's
+    // `resolve` is silent and publishes nothing, so the quantity the swap changes
+    // was not one the instrument could report. Measured properly, by recording
+    // what `resolveSecretRefs` is asked for: in this order a refused request
+    // resolves NOTHING; with the two swapped it resolves client_id, client_secret
+    // and the refresh token.
+    //
+    // `fetch_token` does short-circuit on a revoked grant before it POSTs and
+    // before any secret WRITE (`api-setup.ts`, "posting the very token the
+    // provider already rejected only repeats the rejection"). What it does not sit
+    // before is the READS: client_id and client_secret are resolved first, then
+    // the refresh token, and only then does it return. Each resolve publishes a
+    // `secretAccess` audit event in the real store, so the swap buys three vault
+    // reads of a credential on a request that was never going to be sent.
     const expiresAt = profile.auth?.oauth?.token_expires_at;
     if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
       await renewExpiringOAuthToken(profile.id, agent);
