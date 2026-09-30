@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync, existsSync } from 'node:fs';
+import { mkdirSync, rmdirSync, writeFileSync, rmSync, readFileSync, readdirSync, mkdtempSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey } from './api-store.js';
 import type { ApiProfile } from './api-store.js';
+import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-api-store-test-'));
@@ -534,7 +535,34 @@ describe('ApiStore', () => {
   describe('formatSuggestedApisForSystemPrompt', () => {
     beforeEach(() => { store = new ApiStore(); });
 
-    it('renders the shipped data/suggested-apis.json catalog with auth-constraint sections', () => {
+    /**
+     * Split the rendered block into its headed sections.
+     *
+     * Exists because the assertion it replaces was `toContain('authorization_code')`
+     * over the WHOLE block — which stays green if that flow moves from "NOT
+     * supported" to "Supported", i.e. if the statement to the model inverts.
+     * A guard that counts a string cannot see the heading it lives under, and
+     * the heading is the entire meaning here.
+     */
+    function sectionsOf(block: string): Map<string, string[]> {
+      const headings = new Map<string, string>([
+        ['Supported auth flows:', 'supported'],
+        ['NOT supported (cannot be bootstrapped today — do not offer):', 'not-supported'],
+        ['Do NOT proactively suggest bootstrapping:', 'do-not-suggest'],
+      ]);
+      const out = new Map<string, string[]>();
+      let current: string | null = null;
+      for (const line of block.split('\n')) {
+        const key = headings.get(line.trim());
+        if (key !== undefined) { current = key; out.set(key, []); continue; }
+        // A section runs until the blank line the renderer pushes after it.
+        if (line.trim() === '') { current = null; continue; }
+        if (current !== null && line.startsWith('- ')) out.get(current)!.push(line.slice(2));
+      }
+      return out;
+    }
+
+    it('renders the compiled catalogue with auth-constraint sections', () => {
       const out = store.formatSuggestedApisForSystemPrompt();
 
       // Wrapper tags so the agent can locate the block.
@@ -547,18 +575,84 @@ describe('ApiStore', () => {
       expect(out).toContain('NOT supported');
       expect(out).toContain('Do NOT proactively suggest');
 
-      // Concrete auth constraints derived from api-store.ts ApiAuth.type:
-      // oauth2 authorization_code is NOT in the union, so the agent must
-      // know it cannot bootstrap browser-redirect-callback OAuth APIs.
-      expect(out.toLowerCase()).toContain('authorization_code');
-
-      // Don't-suggest list must include payment + infra providers.
-      expect(out.toLowerCase()).toContain('payment');
-      expect(out.toLowerCase()).toContain('hosting');
-
       // At least one curated API entry renders with its docs URL.
       expect(out).toContain('Open-Meteo');
       expect(out).toContain('https://open-meteo.com/en/docs');
+    });
+
+    it('places authorization_code under NOT-supported, and an inversion fails the test', () => {
+      const sections = sectionsOf(store.formatSuggestedApisForSystemPrompt());
+
+      const notSupported = sections.get('not-supported') ?? [];
+      const supported = sections.get('supported') ?? [];
+      expect(notSupported.length).toBeGreaterThan(0);
+      expect(supported.length).toBeGreaterThan(0);
+
+      // The claim, tied to its heading: oauth2 authorization_code is NOT in
+      // ApiAuth.type, so the agent must be told it cannot bootstrap
+      // browser-redirect-callback OAuth APIs.
+      expect(notSupported.some((l) => l.toLowerCase().includes('authorization_code'))).toBe(true);
+      expect(supported.some((l) => l.toLowerCase().includes('authorization_code'))).toBe(false);
+
+      // Mutation witness for the splitter itself: were `sectionsOf` to return
+      // every line under every key, the two asserts above would contradict each
+      // other and could not both hold. This pins that the sections are disjoint.
+      for (const line of notSupported) expect(supported).not.toContain(line);
+    });
+
+    /**
+     * The two sentences that tell the model HOW to use the tool, and the one
+     * that tells it to ask first. They survived a mutation round untouched:
+     * the whole closing instruction could be inverted to "bootstrap
+     * immediately without asking" with every assertion green, because the only
+     * thing pinned was the substring `api_setup`, which also occurs elsewhere
+     * in the block. An instruction in the briefing is a rule the model learns;
+     * it needs an assert of its own.
+     */
+    it('keeps the instructions the block exists to give', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+      expect(out).toContain('do NOT hand-write a profile from memory');
+      expect(out).toContain('extracted from the live docs at bootstrap time');
+      expect(out).toContain('ask first');
+      expect(out).toContain('never silently bootstrap');
+    });
+
+    it('keeps the sections in order: supported, then not-supported, then do-not-suggest', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+      const at = (heading: string): number => {
+        const i = out.indexOf(heading);
+        expect(i, `heading not found: ${heading}`).toBeGreaterThan(-1);
+        return i;
+      };
+      const supported = at('Supported auth flows:');
+      const notSupported = at('NOT supported (cannot be bootstrapped today');
+      const doNot = at('Do NOT proactively suggest bootstrapping:');
+      const curated = at('Curated free APIs you can offer to bootstrap');
+      expect(supported).toBeLessThan(notSupported);
+      expect(notSupported).toBeLessThan(doNot);
+      expect(doNot).toBeLessThan(curated);
+
+      // The blank line before a heading is not layout. Without it the heading
+      // follows a `- ` bullet directly, which markdown reads as a lazy
+      // continuation OF that bullet — so "Do NOT proactively suggest" would
+      // arrive as part of the last not-supported item, and the offer list as
+      // part of the last prohibition. Reported as a harmless survivor in the
+      // first mutation round; it is not.
+      expect(out).toContain('\n\nSupported auth flows:');
+      expect(out).toContain('\n\nNOT supported (cannot be bootstrapped today');
+      expect(out).toContain('\n\nDo NOT proactively suggest bootstrapping:');
+      expect(out).toContain('\n\nCurated free APIs you can offer to bootstrap');
+    });
+
+    it('names payment and hosting in the do-not-suggest section specifically', () => {
+      const doNot = sectionsOf(store.formatSuggestedApisForSystemPrompt()).get('do-not-suggest') ?? [];
+      expect(doNot.length).toBe(SUGGESTED_API_CATALOG.do_not_proactively_suggest.length);
+      expect(doNot.some((l) => l.toLowerCase().includes('payment'))).toBe(true);
+      expect(doNot.some((l) => l.toLowerCase().includes('hosting'))).toBe(true);
+      // The third clause is the general one, and it is the one that covers a
+      // provider nobody thought to name. Two substrings left it droppable.
+      expect(doNot.some((l) => l.toLowerCase().includes('billing'))).toBe(true);
+      expect(doNot.some((l) => l.toLowerCase().includes('customer records'))).toBe(true);
     });
 
     it('returns empty string when LYNOX_SKIP_SUGGESTED_APIS=1', () => {
@@ -572,28 +666,13 @@ describe('ApiStore', () => {
       }
     });
 
-    it('catalog JSON validates: every suggested_apis entry has id + name + docs_url + auth_type + value_prop', () => {
-      const here = dirname(fileURLToPath(import.meta.url));
-      const catalogPath = resolve(here, '../../data/suggested-apis.json');
-      const raw = readFileSync(catalogPath, 'utf-8');
-      const parsed = JSON.parse(raw) as {
-        schema_version: number;
-        supported_auth_flows: string[];
-        not_supported_auth_flows: string[];
-        do_not_proactively_suggest: string[];
-        suggested_apis: Array<{
-          id: string; name: string; category: string;
-          docs_url: string; auth_type: string; value_prop: string;
-        }>;
-      };
-
-      expect(parsed.schema_version).toBe(1);
-      expect(parsed.supported_auth_flows.length).toBeGreaterThan(0);
-      expect(parsed.do_not_proactively_suggest.length).toBeGreaterThan(0);
-      expect(parsed.suggested_apis.length).toBeGreaterThan(0);
+    it('catalogue validates: every entry has id + name + category + docs_url + auth_type + value_prop', () => {
+      expect(SUGGESTED_API_CATALOG.supported_auth_flows.length).toBeGreaterThan(0);
+      expect(SUGGESTED_API_CATALOG.do_not_proactively_suggest.length).toBeGreaterThan(0);
+      expect(SUGGESTED_API_CATALOG.suggested_apis.length).toBeGreaterThan(0);
 
       const ids = new Set<string>();
-      for (const api of parsed.suggested_apis) {
+      for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
         expect(api.id).toMatch(/^[a-z0-9][a-z0-9_-]{0,63}$/);
         expect(api.name).toBeTruthy();
         expect(api.category).toBeTruthy();
@@ -602,6 +681,184 @@ describe('ApiStore', () => {
         expect(api.value_prop).toBeTruthy();
         expect(ids.has(api.id)).toBe(false);
         ids.add(api.id);
+      }
+    });
+
+    /**
+     * The catalogue, written out rather than derived — and not just the ids.
+     *
+     * Deriving the expectation from SUGGESTED_API_CATALOG is the comfortable
+     * version and it is worthless: delete an entry and the expectation shrinks
+     * with it. Measured, not assumed — removing `vatcomply` left every
+     * assertion in this suite green until this list existed.
+     *
+     * Two fields, because those two carry a claim about a third party rather
+     * than prose about it:
+     *   `docs_url`   — load-bearing. `api_setup` action=bootstrap extracts the
+     *                  auth shape and endpoints from THIS page at run time, so
+     *                  a wrong URL is a wrong profile, not a cosmetic slip.
+     *   `auth_type`  — what the model is told the provider wants.
+     * `name`, `category` and `value_prop` stay unpinned on purpose: they are
+     * prose, and pinning prose in a test buys churn, not safety.
+     */
+    const EXPECTED_ENTRIES: ReadonlyArray<readonly [string, string, string]> = [
+      ['hackernews', 'https://hn.algolia.com/api', 'none'],
+      ['github', 'https://docs.github.com/en/rest', 'none'],
+      ['npm', 'https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md', 'none'],
+      ['wikipedia', 'https://www.mediawiki.org/wiki/API:Main_page', 'none'],
+      ['arxiv', 'https://info.arxiv.org/help/api/index.html', 'none'],
+      ['open-meteo', 'https://open-meteo.com/en/docs', 'none'],
+      ['frankfurter', 'https://frankfurter.dev/', 'none'],
+      ['restcountries', 'https://restcountries.com/', 'none'],
+      ['nager-date', 'https://date.nager.at/Api', 'none'],
+      ['vatcomply', 'https://www.vatcomply.com/documentation', 'none'],
+    ];
+    const EXPECTED_IDS = EXPECTED_ENTRIES.map(([id]) => id);
+
+    it('carries exactly the catalogue entries this test names, with their docs URL and auth type', () => {
+      const actual = SUGGESTED_API_CATALOG.suggested_apis
+        .map((a) => [a.id, a.docs_url, a.auth_type] as const)
+        .slice()
+        .sort((x, y) => x[0].localeCompare(y[0]));
+      const expected = EXPECTED_ENTRIES.slice().sort((x, y) => x[0].localeCompare(y[0]));
+      expect(actual).toEqual(expected);
+    });
+
+    /**
+     * Every field lands in a one-line list entry inside the fence. `renderFence`
+     * neutralises a closing tag, and nothing else — a newline inside a field
+     * opens a fresh paragraph in the briefing, which reads as text of its own
+     * rather than as part of an entry. Matters most for entries describing a
+     * third party, where the wording is copied from somewhere else.
+     */
+    it('no catalogue field contains a line break', () => {
+      for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
+        for (const [field, value] of Object.entries(api)) {
+          expect(value, `${api.id}.${field} contains a line break`).not.toMatch(/[\r\n]/);
+        }
+      }
+      for (const s of [
+        ...SUGGESTED_API_CATALOG.supported_auth_flows,
+        ...SUGGESTED_API_CATALOG.not_supported_auth_flows,
+        ...SUGGESTED_API_CATALOG.do_not_proactively_suggest,
+      ]) {
+        expect(s).not.toMatch(/[\r\n]/);
+      }
+    });
+
+    it('renders every catalogue entry, in the order the table names, and nothing else', () => {
+      const out = store.formatSuggestedApisForSystemPrompt();
+      const rendered = out.split('\n').filter((l) => l.includes(', auth=') && l.startsWith('- '));
+      expect(rendered.length).toBe(EXPECTED_IDS.length);
+      for (const api of SUGGESTED_API_CATALOG.suggested_apis) {
+        expect(out).toContain(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
+
+      // Order, which was left unpinned on the argument that it carries salience
+      // and no statement. Salience IS what this block spends: a list the model is
+      // told to offer "when relevant" is read top-down, so the order is a weak
+      // recommendation whether anyone decided it or not. Unpinned, reversing all
+      // ten passed. Pinned here rather than in the constant, so that adding an
+      // entry means choosing where it goes.
+      const renderedIds = rendered.map((line) => {
+        const entry = SUGGESTED_API_CATALOG.suggested_apis.find((a) => line.startsWith(`- ${a.name} (`));
+        expect(entry, `rendered line matches no catalogue entry: ${line}`).toBeDefined();
+        return entry!.id;
+      });
+      expect(renderedIds).toEqual(EXPECTED_IDS);
+    });
+
+    /**
+     * The point of moving the catalogue into code, as a behaviour rather than
+     * a claim: a file at the path the old reader used must not reach the
+     * briefing. Without this, "it comes from the constant now" is only true
+     * until someone reinstates a fallback, and a fallback is exactly what hid
+     * the shipping gap for a year.
+     *
+     * Two things this had to get right, both found by review:
+     *  • It plants a file inside the repository. The first cut removed the
+     *    whole `data/` directory in its `finally` while only checking that the
+     *    FILE was absent beforehand — so a developer's own untracked `data/`,
+     *    or a future one holding something else, would have been wiped by
+     *    running the tests. It now removes what it created and nothing else.
+     *  • Rendering once and comparing proves only that nothing is read at CALL
+     *    time. A reader that ran at module load would have passed, because the
+     *    module was already loaded when the file appeared. So the second half
+     *    resets the module registry and imports again with the file in place.
+     */
+    it('ignores a catalogue file planted at the old path, at call time and at load time', async () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const oldPath = resolve(here, '../../data/suggested-apis.json');
+      const oldDir = dirname(oldPath);
+      // Loud rather than skipped: if this exists, the deletion was undone and
+      // the test below would be measuring the wrong thing.
+      expect(existsSync(oldPath)).toBe(false);
+      const dirExisted = existsSync(oldDir);
+
+      const before = store.formatSuggestedApisForSystemPrompt();
+      if (!dirExisted) mkdirSync(oldDir, { recursive: true });
+      try {
+        writeFileSync(oldPath, JSON.stringify({
+          supported_auth_flows: ['planted flow'],
+          not_supported_auth_flows: [],
+          do_not_proactively_suggest: ['planted restriction'],
+          suggested_apis: [{
+            id: 'planted', name: 'Planted API', category: 'planted',
+            docs_url: 'https://planted.example/docs', auth_type: 'bearer',
+            value_prop: 'Should never reach the briefing.',
+          }],
+        }), 'utf-8');
+
+        // Call time.
+        const atCallTime = new ApiStore().formatSuggestedApisForSystemPrompt();
+        expect(atCallTime).toBe(before);
+
+        // Load time — the module graph is re-evaluated with the file present.
+        vi.resetModules();
+        const reloaded = await import('./api-store.js');
+        const atLoadTime = new reloaded.ApiStore().formatSuggestedApisForSystemPrompt();
+        expect(atLoadTime).toBe(before);
+        expect(atLoadTime).not.toContain('Planted API');
+        expect(atLoadTime).not.toContain('planted flow');
+        expect(atLoadTime).not.toContain('planted restriction');
+      } finally {
+        rmSync(oldPath, { force: true });
+        // Only the directory this test created, and only while it is empty.
+        // `rmdirSync`, not `rmSync`: it refuses a non-empty directory, so the
+        // emptiness check has a second opinion that is not this test's own.
+        if (!dirExisted && existsSync(oldDir) && readdirSync(oldDir).length === 0) {
+          rmdirSync(oldDir);
+        }
+        vi.resetModules();
+      }
+    });
+
+    /**
+     * All five collections and an entry, not the outer object and one array:
+     * a review pointed out that dropping `Object.freeze` from the three
+     * auth-flow lists and from each entry left the suite green.
+     */
+    it('no part of the catalogue constant can be rewritten at runtime', () => {
+      expect(() => {
+        (SUGGESTED_API_CATALOG as { suggested_apis: unknown }).suggested_apis = [];
+      }).toThrow(TypeError);
+
+      const arrays: ReadonlyArray<readonly [string, readonly unknown[]]> = [
+        ['suggested_apis', SUGGESTED_API_CATALOG.suggested_apis],
+        ['supported_auth_flows', SUGGESTED_API_CATALOG.supported_auth_flows],
+        ['not_supported_auth_flows', SUGGESTED_API_CATALOG.not_supported_auth_flows],
+        ['do_not_proactively_suggest', SUGGESTED_API_CATALOG.do_not_proactively_suggest],
+      ];
+      for (const [name, arr] of arrays) {
+        expect(Object.isFrozen(arr), `${name} is not frozen`).toBe(true);
+        expect(() => (arr as unknown[]).push('x'), name).toThrow(TypeError);
+      }
+
+      for (const entry of SUGGESTED_API_CATALOG.suggested_apis) {
+        expect(Object.isFrozen(entry), `entry ${entry.id} is not frozen`).toBe(true);
+        expect(() => {
+          (entry as { docs_url: string }).docs_url = 'https://evil.example/';
+        }, entry.id).toThrow(TypeError);
       }
     });
   });

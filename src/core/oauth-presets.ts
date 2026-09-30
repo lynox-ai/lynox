@@ -6,14 +6,23 @@
  * from here, a frozen constant compiled into the engine, and from nothing else.
  * A profile names a preset id and its parameters; it does NOT name a host.
  *
- * ⚠ Deliberately NOT like its neighbour. The suggested-APIs catalogue is read
- * at runtime from `data/suggested-apis.json` in the package root and can be
- * switched off with an env var (`api-store.ts`, `formatSuggestedApis`). That is
- * right for a list of hints the model may read, and wrong here: a file is an
- * operator-editable input, and on a compromised instance an attacker-editable
- * one. There is no file, no env var and no registration function for presets —
- * if you are adding one, you are moving the boundary, and that belongs in a
- * decision, not in a patch.
+ * ⚠ Deliberately NOT like its neighbour. The suggested-APIs catalogue can be
+ * switched off with an env var (`api-store.ts`,
+ * `formatSuggestedApisForSystemPrompt`). That is right for a list of hints the
+ * model may read, and wrong here: a file is an operator-editable input, and on
+ * a compromised instance an attacker-editable one. There is no file, no env var
+ * and no registration function for presets — if you are adding one, you are
+ * moving the boundary, and that belongs in a decision, not in a patch.
+ *
+ * ⚠ Until 2026-09-30 the sentence above named the catalogue's own file as the
+ * contrast, because it had one: `data/suggested-apis.json`, read at boot. It is
+ * a compiled constant now ({@link ./suggested-apis.ts}) — but it moved because
+ * that file never reached the container, NOT because anyone showed a file was
+ * unsafe for it. So do not read the move as this paragraph's argument winning a
+ * second case. The argument itself is unchanged, and so is the ranking it
+ * draws, which is the part that matters here: a preset decides which site a
+ * user is sent to and hands consent to, enforced by host validation below; a
+ * hint is text the model must ask about before acting on.
  *
  * Every function here takes the register as a parameter with the constant as
  * its default, so tests can hand in their own. That is a test seam, not an
