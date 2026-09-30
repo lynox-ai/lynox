@@ -21,7 +21,7 @@ import type { LynoxConfig, ToolEntry } from '../types/index.js';
 
 /**
  * Registered with no flag, no integration and no best-effort guard around them:
- * `engine.ts` registers the first five in the opening chain and the last two from
+ * `engine.ts` registers four of the six in its opening chain and the other two from
  * `registerPipelineTools()`. `data_store_query`/`data_store_list` are deliberately
  * NOT here — they come from `registerDataStoreTools()` inside the DataStore's
  * best-effort try, so a store that fails to initialise legitimately has neither.

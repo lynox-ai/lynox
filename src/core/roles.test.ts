@@ -163,6 +163,23 @@ describe('read-only roles are granted by an allowlist', () => {
     expect(READ_ONLY_TOOL_SURFACE.length).toBeGreaterThan(5);
   });
 
+  it('a readOnly role that also names allowTools is narrowed to the intersection', () => {
+    // No built-in role has this shape, which is why the direction matters more than
+    // the occurrence: widening to the whole surface would hand a role more than its
+    // own list asks for, and the ceiling would still hold while the role's stated
+    // grant no longer did.
+    const both = roleToolProfile({
+      model: 'fast', effort: 'high', autonomy: 'guided', readOnly: true,
+      allowTools: ['read_file', 'bash'],
+      description: 'Narrow reader. Read-only.',
+    });
+    expect(both.allowedTools).toEqual(['read_file']);
+    // `bash` is dropped because it is not in the surface, `read_file` survives because
+    // it is in both — so the assert above is an intersection, not either input.
+    expect(READ_ONLY_TOOL_SURFACE).toContain('read_file');
+    expect(READ_ONLY_TOOL_SURFACE).not.toContain('bash');
+  });
+
   it('roleToolProfile turns readOnly into the surface, and leaves other roles alone', () => {
     const operator = roleToolProfile(BUILTIN_ROLES['operator']!);
     expect(operator.allowedTools).toEqual([...READ_ONLY_TOOL_SURFACE]);

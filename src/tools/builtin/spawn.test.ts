@@ -1077,20 +1077,22 @@ describe('spawn_agent tool', () => {
   });
 
   /**
-   * `spec.tools` is tier 1 in `resolveTools` and returns before the profile is read,
-   * so for a role whose grant is a CEILING it has to be clamped at the single exit.
+   * The invariant: for a role whose grant is a CEILING, an explicit `spec.tools` may
+   * select WITHIN it and never beyond it. Both directions are asserted, because a
+   * clamp that also broke narrowing would pass a one-sided test while making the
+   * explicit list useless. `resolveTools` applies the ceiling at its single exit, so
+   * tier 1 returning first cannot route around it.
    *
-   * Both directions matter. Narrowing must keep working — that is what an explicit
-   * list is for — and widening must not, or the role's stated shape is a label the
-   * caller can remove by naming a tool. The precedence itself is unchanged for every
-   * other role; `spec.tools overrides role tool scoping` below still pins that.
+   * The precedence itself is untouched for every other role; `spec.tools overrides
+   * role tool scoping` below still pins that.
    */
   it('an explicit tool list narrows a readOnly role and cannot widen it', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const parentTools = [makeTool('read_file'), makeTool('task_list'), makeTool('bash'), makeTool('write_file')];
+    // No `allowTools` on the fixture: for a `readOnly` role the ceiling IS the
+    // surface, so listing one here would imply a narrowing this test does not exercise.
     const readOnlyRole = {
       model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
-      allowTools: ['read_file', 'task_list'],
       description: 'Fast status checks, concise reporting. Read-only.',
     } as RoleConfig;
     const childToolsOfCall = (i: number): string[] => {

@@ -289,10 +289,10 @@ describe('spawnInline with role', () => {
 
   /**
    * The THIRD grant path. `spawnViaAgent` grants the agent definition's own tools —
-   * module-provided functions, not registry entries — and never consulted `step.role`
-   * for them. A read-only role there was a label with nothing behind it, so it is
-   * refused rather than ignored: silently dropping the tools would leave a step that
-   * runs with none, and silently keeping them is the shape the surface removes.
+   * module-provided functions rather than registry entries — which the read-only
+   * surface cannot bound. Refusing is the only response that leaves the author
+   * informed; the two alternatives are a label the grant does not support, and a step
+   * that runs with nothing.
    */
   it('refuses a readOnly role on the agent runtime instead of ignoring it', async () => {
     mockGetRole.mockReturnValue({
@@ -324,6 +324,44 @@ describe('spawnInline with role', () => {
     };
     await expect(spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1'))
       .resolves.toBeDefined();
+  });
+
+  /**
+   * The same rule on the inline runtime, where it can bite with EXISTING tools:
+   * `ask_user` is in `INLINE_CORE_TOOLS` and outside the read-only surface, so a step
+   * that declares only tools like it resolves to an empty grant. An empty grant on a
+   * step that named tools is the "runs and does nothing" state, so it is refused here
+   * too rather than left silent.
+   */
+  it('refuses an inline readOnly step whose declared tools are all outside the ceiling', async () => {
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'empty-ro-step', agent: 'empty-ro-step', runtime: 'inline', role: 'operator',
+      tools: ['ask_user'],
+    };
+    await expect(spawnInline(step, {}, mockConfig, mockParentTools))
+      .rejects.toThrow(/would run with no tools at all/);
+  });
+
+  it('does NOT refuse an inline readOnly step that keeps at least one declared tool', async () => {
+    // The other direction: a partial narrowing is the point of an explicit list and
+    // must stay silent. Without this, the refusal above could be widened to "any tool
+    // was dropped" and nothing would notice.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'high', autonomy: 'autonomous', readOnly: true,
+      denyTools: ['write_file'], description: 'Fast status checks, concise reporting. Read-only.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'partial-ro-step', agent: 'partial-ro-step', runtime: 'inline', role: 'operator',
+      tools: ['ask_user', 'read_file'],
+    };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const call = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const names = (call['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(names).toEqual(['read_file']);
   });
 
   it('role defaults to maxIterations 10', async () => {

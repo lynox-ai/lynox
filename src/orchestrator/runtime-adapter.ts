@@ -630,17 +630,15 @@ export async function spawnViaAgent(
   let tokensOut = 0;
   const startTime = Date.now();
 
-  // A read-only role cannot be honoured on THIS runtime, so it is refused rather
-  // than ignored.
+  // A read-only role cannot be honoured on THIS runtime, so it is refused.
   //
-  // `role` is allowed on any `ManifestStep`, and this path never consulted it for
-  // tools: the grant is `convertAgentTools(agentDef.tools)` — module-provided
-  // functions, not registry entries, so `READ_ONLY_TOOL_SURFACE` cannot speak about
-  // them at all. Keeping the role's label while granting that set is exactly the
-  // shape the surface exists to remove, and silently dropping the tools instead
-  // would leave a step that runs with nothing. Refusing says which of the two the
-  // author meant to write. No manifest in this repo declares a role on
-  // `runtime: 'agent'`.
+  // The grant here is `convertAgentTools(agentDef.tools)` — module-provided
+  // functions rather than registry entries, so `READ_ONLY_TOOL_SURFACE` has nothing
+  // to say about them and cannot bound them. Of the three ways to respond, refusing
+  // is the only one that leaves the author informed: granting the definition's tools
+  // would carry a label the grant does not support, and withholding them would leave
+  // a step that runs and does nothing. `role` is permitted on any `ManifestStep`, and
+  // no manifest in this repo declares one on `runtime: 'agent'`.
   const declaredRole = step.role ? getRole(step.role) : undefined;
   if (declaredRole?.readOnly === true) {
     throw new Error(
@@ -920,6 +918,21 @@ export async function spawnInline(
   // surface, which is the safe side of the asymmetry.
   const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
+  // Symmetry with the agent runtime's refusal above, and the reason it is needed
+  // here: a step that NAMES tools and resolves to none runs and does nothing, which
+  // is the one outcome both runtimes should reach loudly or not at all. Only the
+  // role's ceiling can produce it at this point — the filters below (human-in-the-
+  // loop, user-disabled tools) are the operator's own choices and may legitimately
+  // empty a step.
+  if (resolved?.readOnly === true && step.tools !== undefined && step.tools.length > 0
+      && tools.length === 0) {
+    throw new Error(
+      `Step "${step.id}" declares the read-only role "${step.role ?? ''}" together with `
+      + `[${step.tools.join(', ')}] — a read-only role holds none of those, so the step `
+      + `would run with no tools at all. Name tools a read-only role can hold, or drop `
+      + `the role from this step.`,
+    );
+  }
   // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
   // Belt-and-suspenders: validator/scheduler should already block this path,
   // but a registry drift here would silently throw at tool dispatch time.

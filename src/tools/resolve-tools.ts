@@ -47,7 +47,12 @@ export function resolveTools(
   // ceiling, not an absent one.
   if (profile?.readOnly !== true) return selected;
   const ceiling = new Set(profile.allowedTools ?? []);
-  return selected.filter(t => ceiling.has(t.definition.name));
+  // `deniedTools` is subtracted HERE as well, not only inside tier 2: tier 1 never
+  // applied it, so a name the role denies would otherwise survive an explicit list
+  // that happened to sit inside the ceiling. No current role denies a tool its own
+  // ceiling holds; the exit is where that stays true without anyone checking.
+  const denied = new Set(profile.deniedTools ?? []);
+  return selected.filter(t => ceiling.has(t.definition.name) && !denied.has(t.definition.name));
 }
 
 /** The three tiers, unchanged. The ceiling above is the only thing outside them. */

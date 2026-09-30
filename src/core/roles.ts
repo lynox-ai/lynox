@@ -124,8 +124,14 @@ export type RoleToolProfile = ToolResolutionProfile;
  * inline from `allowTools`/`denyTools`, which is two places to keep in step.
  */
 export function roleToolProfile(role: RoleConfig): RoleToolProfile {
+  // A role carrying BOTH is narrowed to the intersection, not widened to the whole
+  // surface. No built-in role has that shape; the direction is what matters — the
+  // alternative silently grants a role more than its own list asks for, and the
+  // ceiling would still hold while the role's stated grant no longer did.
   const allowed = role.readOnly
-    ? [...READ_ONLY_TOOL_SURFACE]
+    ? (role.allowTools
+      ? READ_ONLY_TOOL_SURFACE.filter(n => role.allowTools!.includes(n))
+      : [...READ_ONLY_TOOL_SURFACE])
     : role.allowTools ? [...role.allowTools] : undefined;
   return {
     allowedTools: allowed,
