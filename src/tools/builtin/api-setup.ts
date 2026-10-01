@@ -604,16 +604,15 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Second-level labels that, under a two-letter country code, form a public
- *  suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line to cover
- *  another. */
+/** Second-level labels that, under a two-letter country code, are treated as
+ *  a public suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line
+ *  to cover another. */
 const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
   'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'ne', 'or', 'go', 'ltd', 'plc',
 ];
 
-/** The parent a candidate host must sit under. A candidate must sit under the
- *  docs host's registrable parent: the docs host without its first label when
- *  it has more than two labels, otherwise the docs host itself. A parent of the
+/** The parent a candidate host must sit under: the docs host without its first
+ *  label when it has more than two labels, otherwise the docs host itself. A parent of the
  *  form `<label from PUBLIC_SECOND_LEVEL_LABELS>.<two-letter country code>` is
  *  treated as a public suffix, so only hosts under the docs host itself qualify.
  *  A single-label docs host has no parent: no candidate qualifies. */

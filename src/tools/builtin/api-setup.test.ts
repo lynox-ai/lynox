@@ -1542,7 +1542,7 @@ describe('api_setup tool', () => {
     });
 
     it('surfaces nothing for a docs host without a parent', async () => {
-      const fetchSpy = mockFetchOk('<html><a href="https://api.service.localhost/v1">a</a></html>');
+      const fetchSpy = mockFetchOk('<html><a href="https://api.service.localhost/v1">a</a> <a href="https://api.service.null/v1">b</a></html>');
       stubExtraction({ description: 'Local API', auth: { type: 'bearer' } });
 
       try {
