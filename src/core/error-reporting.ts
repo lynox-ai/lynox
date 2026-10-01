@@ -145,6 +145,11 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
           if (typeof event.request.query_string === 'string') {
             event.request.query_string = maskSecretText(event.request.query_string);
           }
+          // The URL carries the same query string a second time. Masking one
+          // copy and shipping the other unmasked protects nothing.
+          if (typeof event.request.url === 'string') {
+            event.request.url = maskSecretText(event.request.url);
+          }
         }
 
         // Scrubbing here is a DENYLIST over named fields, and `captureException`
