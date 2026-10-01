@@ -4,8 +4,9 @@
  * After a deploy, an already-open tab keeps running yesterday's JS whose
  * content-hashed dynamic-import chunks 404 against the new server. Vite fires
  * a `vite:preloadError` event for every such failed dynamic import (Mermaid's
- * lazy chunk, route chunks, …). The root layout listens for it and calls
- * `triggerStaleReload()` to hard-reload onto the fresh build, and the Mermaid
+ * lazy chunk, route chunks, …), and also for a chunk that loaded but failed to
+ * parse or run. The root layout listens via `onPreloadError`, which calls
+ * `triggerStaleReload()` only for the load failures, and the Mermaid
  * renderer reuses `isChunkLoadError` so a stale-chunk failure is not masked as
  * a diagram-syntax error.
  *
