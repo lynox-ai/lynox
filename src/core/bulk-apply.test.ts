@@ -440,6 +440,35 @@ describe('stop at ~80 % and resume (§7 c)', () => {
     expect(ledger.getStatus(runId)!.applied).toBe(210);
     expect(ledger.getStatus(runId)!.phase).toBe('done');
   });
+
+  // The interleaving above, forced: while this loop writes its first target, a second loop
+  // writes and records the rest, so the approved maximum (here the default: every target)
+  // is reached with targets still on this loop's stale list.
+  // MUTATION: drop the `listPending(...).length === 0` exit before the maxTargets halt →
+  // a fully written run ends halted instead of done.
+  it('a run finished by another loop at the approved maximum closes as done, not halted', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId);
+    const { writer: inner, state } = memory(initial);
+    const writer: TargetWriter = {
+      read: (key) => inner.read(key),
+      async write(key, after) {
+        if (key === 'k000') {
+          for (const seq of [1, 2]) {
+            expect(ledger.claimTarget(runId, seq, Date.now())).toBe(true);
+            state.set(`k00${String(seq)}`, `w${String(seq)}`);
+            ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, seq, 'ok');
+          }
+        }
+        return inner.write(key, after);
+      },
+    };
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(out.status, JSON.stringify(out)).toBe('done');
+    expect(ledger.getStatus(runId)!.haltReason).toBeNull();
+    expect(ledger.getStatus(runId)!.phase).toBe('done');
+    expect(ledger.getStatus(runId)!.applied).toBe(3);
+  });
 });
 
 describe('the owner view', () => {
