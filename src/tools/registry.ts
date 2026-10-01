@@ -1,5 +1,4 @@
 import type { ToolEntry, ToolScopeConfig } from '../types/index.js';
-import { resolveTools } from './resolve-tools.js';
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolEntry>();
@@ -22,18 +21,36 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /**
+   * ⚠ A SECOND resolution of the same allow/deny vocabulary, and it stays one on purpose.
+   *
+   * Routing it through `resolveTools` — the single bounding exit every live grant route uses —
+   * was built and then pulled back out of the hardening change, for a reason worth keeping:
+   * the two are equivalent in all four shapes (`[]` admits nothing in both, `undefined`
+   * filters in neither, same for the denylist), so **no test can tell them apart** and a
+   * mutant reverting the routing survives by construction. An unobservable change in a
+   * security diff is a liability rather than an improvement — nobody can review what nothing
+   * can witness.
+   *
+   * Deleting it instead is the other honest answer and is NOT available here: `ToolRegistry`
+   * is public API (`src/index.ts`, and `package.json` exports `.`), so a method nothing in
+   * this repo calls may still have a consumer outside it.
+   *
+   * What remains is the shape this duplication has: a template for the next route that
+   * forgets the bound. Filed as `DEF-registry-scopedview-duplicates-grant-semantics`, where
+   * the delete-or-route decision belongs — it needs an answer about external consumers that
+   * this repo cannot give.
+   */
   scopedView(config: ToolScopeConfig): ToolEntry[] {
-    // Routed through `resolveTools` rather than resolving here a second time. An allow/deny
-    // pair becoming a tool list is one operation, and it has one home that bounds at a single
-    // exit; a copy of the vocabulary beside it is a template for the next route that forgets
-    // the bound — which is the whole reason to route a method nobody calls.
-    //
-    // Faithful in all four shapes, checked one by one: `allowedTools: []` admits nothing in
-    // both (an empty array is truthy, so each takes its filter branch), `undefined` filters
-    // nothing in both, and the same for `deniedTools`. The profile literal carries no
-    // `allowedTools` key, so no ceiling is added. ⚠ "No caller sees a different answer" would
-    // be true and empty: there is no production caller at all. The equivalence is asserted
-    // against the TESTS, not against a user.
-    return resolveTools(config.allowedTools, { deniedTools: config.deniedTools }, this.getEntries());
+    let entries = this.getEntries();
+    if (config.allowedTools) {
+      const allowed = new Set(config.allowedTools);
+      entries = entries.filter(e => allowed.has(e.definition.name));
+    }
+    if (config.deniedTools) {
+      const denied = new Set(config.deniedTools);
+      entries = entries.filter(e => !denied.has(e.definition.name));
+    }
+    return entries;
   }
 }
