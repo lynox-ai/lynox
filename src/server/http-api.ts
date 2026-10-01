@@ -22,7 +22,7 @@ import {
 } from '../core/oauth-state-cookie.js';
 import { createPkcePair } from '../core/oauth-pkce.js';
 import {
-  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused,
+  exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey } from '../core/api-store.js';
@@ -7713,7 +7713,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -7741,10 +7741,72 @@ export class LynoxHTTPApi {
       //
       // Without this the exception reaches the dispatch's catch-all, which
       // answers JSON while every other answer from this route is a page.
+      //
+      // The expiry rides in the same try for the same reason. This route is the
+      // SECOND writer of `auth.oauth.token_expires_at`; `api_setup fetch_token` is
+      // the first. Until this line it wrote the token and said nothing about its
+      // lifetime, so a profile that had been through a `fetch_token` kept that
+      // older token's stamp — and a reader of the field takes a stamp in the past
+      // for "renew now", on every request, forever. `tokenExpiryFrom` returns
+      // `'unknown'` when the provider omitted `expires_in`, and the stamp is then
+      // REMOVED rather than left standing, because "we do not know" is true and
+      // "it died at 14:02" is not.
+      //
+      // Written after the tokens, not before: the stamp describes the token that
+      // was just stored. If this save is the one that throws, the page below
+      // already says the connection is incomplete and that a new link heals it —
+      // the save is an upsert, so the retry overwrites whatever was left behind.
       try {
         secretStore.set(accessTokenKey(signed.profileId), accessToken);
         if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
           secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
+        }
+        // RE-READ, never the snapshot. `profile` was fetched before
+        // `exchangeToken`, which can take fifteen seconds while the user is on
+        // the provider's consent screen — and a `fetch_token` or an
+        // `api_setup update` can complete inside that window. Saving the
+        // pre-exchange copy would write its `oauth_grant` back over the newer
+        // one, and `oauth_grant.written` is the list a later delete uses to
+        // purge tokens: lose it and the delete stops purging what the concurrent
+        // exchange wrote. Worse, if the profile was DELETED meanwhile, `save`
+        // would bring it back, because `_admit` validates shape and says nothing
+        // about existence.
+        //
+        // This is the same reason `persistGrant` re-reads and answers `'gone'`
+        // (`tools/builtin/api-setup.ts › persistGrant`). The first version of
+        // this block spread the stale snapshot and a review caught it.
+        const fresh = apiStore.get(signed.profileId);
+        if (fresh !== undefined) {
+          const expiry = tokenExpiryFrom(parsed.expires_in);
+          const oauthNext = { ...fresh.auth?.oauth };
+          if (expiry === 'unknown') delete oauthNext.token_expires_at;
+          else oauthNext.token_expires_at = expiry;
+          // `apisDir` for the same reason `api_setup` passes it: an engine
+          // without an `engine.db` has no ConnectionStore, and `save` then
+          // persists only when it is told where to.
+          const { getLynoxDir } = await import('../core/config.js');
+          const saved = apiStore.save(
+            { ...fresh, auth: { ...fresh.auth, oauth: oauthNext } } as typeof fresh,
+            join(getLynoxDir(), 'apis'),
+          );
+          // The result is READ. `save` does not throw when `_admit` refuses — it
+          // returns `{ok:false}` — so ignoring it meant the tokens were stored,
+          // the stamp was not, and the page still said Connected. With a stale
+          // stamp left standing that is the every-request renewal latch this
+          // change exists to remove, so it is said out loud instead.
+          if (!saved.ok) {
+            process.stderr.write(
+              `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but its token lifetime could not be recorded: ${saved.reason}\n`,
+            );
+          }
+        } else {
+          // Deleted while the exchange was out. The tokens are already in the
+          // vault with no profile left to remove them — an orphan this route has
+          // always been able to leave, and not one this block should answer by
+          // recreating the profile.
+          process.stderr.write(
+            `[lynox:oauth] api_profile "${signed.profileId}" was deleted while its authorization was in flight; tokens were written and are now orphaned in the vault.\n`,
+          );
         }
       } catch {
         sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');

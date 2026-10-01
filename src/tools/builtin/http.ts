@@ -491,6 +491,340 @@ interface HintContext {
  *                 hint anyway. A shape the engine will never attach is precisely
  *                 the one whose 401 the model cannot explain on its own.
  */
+/**
+ * How far before expiry an oauth2 access token is renewed.
+ *
+ * Derived, not chosen. The token has to stay valid through everything that
+ * happens after the check:
+ *   · the exchange itself — `TOKEN_EXCHANGE_TIMEOUT_MS` is 15 s
+ *     (`core/oauth-token-exchange.ts`);
+ *   · then the request it is attached to — `http_request` caps `timeout_ms`
+ *     at 60 s and defaults to 30 s (see the tool's schema below).
+ * So anything under 75 s can hand a provider a token that dies mid-call, and
+ * the failure would look like a revocation rather than a race. Five minutes is
+ * four times the hard cap, and it is the value the Google path has used since
+ * it was written (`integrations/google/google-auth.ts`) — the one constant a
+ * review of that file classified as provider-neutral rather than Google-shaped.
+ *
+ * ⚠ Degenerate case, named because the arithmetic hides it: a provider issuing
+ * tokens shorter than this buffer would be refreshed on every single call. None
+ * of the providers this engine connects does — Shopify's client-credentials
+ * token lives 24 h — but a profile pointed at one would burn an exchange per
+ * request rather than fail, which is the safer of the two wrong behaviours and
+ * the reason there is no floor here.
+ */
+export const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+/**
+ * The name `api_setup` registers under. A literal, because a static import of
+ * `api-setup.ts` from this module is a cycle — the same reason the renewal below
+ * imports it dynamically. Pinned by a test against `apiSetupTool.definition.name`
+ * rather than trusted, since a rename here fails open: the gate would stop finding
+ * the tool and every renewal would quietly refuse.
+ */
+const API_SETUP_TOOL_NAME = 'api_setup';
+
+/**
+ * Whether a token may be renewed on THIS caller's behalf.
+ *
+ * Pure and exported so a test can assert the decision without performing it. The
+ * renewal writes secrets and posts a client secret; a test that could only reach
+ * this judgement by running it would have to run that too.
+ *
+ * TWO conditions, answering two different questions, and an agent can pass one
+ * and fail the other:
+ *
+ * **1. The right.** Tool scoping in this engine is keyed on `definition.name`
+ * (`tools/registry.ts › scopedView`, `tools/resolve-tools.ts › selectByTier`), so
+ * calling another tool's handler directly walks past it. Without this check an
+ * `http_request` would carry out the write side of `api_setup` for a caller that
+ * does not hold `api_setup` — and two populations are exactly in that state:
+ * `roles.ts`'s `collector` (which describes itself as writing only to memory), and
+ * every workflow step, because `INLINE_CORE_TOOLS` never admits `api_setup` and
+ * the step's tools are filtered to that set. So the renewal is allowed only where
+ * the caller could have run `fetch_token` itself, which means it adds no right.
+ * That is also why it is not enough to read `toolContext.tools`: `session.ts`
+ * fills that with the UNSCOPED registry.
+ *
+ * **2. The guards.** `fetch_token` dereferences two things it is handed:
+ * `agent.sessionCounters.httpRequests`, the per-session HTTP budget, and
+ * `agent.toolContext`, which it passes to `exchangeToken` as the carrier of the
+ * egress controls. A fabricated agent — `{ secretStore } as IAgent` is one that
+ * exists — satisfies the compiler and neither of those.
+ *
+ * ⚠ The runtime checks below look redundant against the types, and are not:
+ * `IAgent` declares both fields non-optional, so an `as IAgent` cast is a promise
+ * the type system then stops questioning. This is the one place that has to
+ * distrust it.
+ *
+ * ⚠ Condition 2 is UNREACHABLE through `http_request`, and that is the honest
+ * description of what it is for. The handler dereferences `agent.toolContext`
+ * and `agent.sessionCounters.httpRequests` itself, both before it ever calls the
+ * attach — so an agent missing either cannot arrive here by that route. The only
+ * other caller is `attachStoredCredential`, the bulk worker effect's entry
+ * point, and its fabricated agent is missing BOTH at once. So no behavioural
+ * test can separate the two halves, and the predicate tests are the only
+ * witnesses that can exist for them. That was measured, after a count of killed
+ * mutants said "2" and a count of distinct WITNESSES said "2, both of one kind":
+ * the attempt to add an effect-level witness failed on unmutated code, at the
+ * handler's own counter check, which is how the unreachability was found.
+ *
+ * It stays because it is the barrier for the next caller that does not come
+ * through the handler — and one exists today.
+ *
+ * ⚠ The paragraph above is a claim about code that can move, and it is anchored
+ * on SYMBOLS rather than line numbers for that reason — but it is NOT pinned by
+ * a test, and a reader should know which of the two it is. It cannot be. If the
+ * handler's two reads were moved BELOW the attach, the renewal would become
+ * reachable for such an agent and this condition would then decline it
+ * silently: no exchange, no log, which is observably identical to the handler
+ * having thrown first. The only difference would be where the throw comes from,
+ * and asserting that pins an unguarded dereference a future cleanup should be
+ * free to fix. So the same masking that makes the witness impossible makes the
+ * detector impossible, and this is prose on purpose rather than prose for want
+ * of effort.
+ *
+ * ⚠ And condition 2 is NECESSARY, not SUFFICIENT — said plainly because the
+ * cheap reading of it is that a caller which passes carries real guards. It
+ * refuses a dereference that would throw, and it refuses the fabricated agent
+ * that exists today. It cannot certify that a `toolContext` it was handed
+ * actually holds a network policy or a rate-limit provider, because a real agent
+ * may legitimately have neither set. Nothing here can close that; the durable
+ * answer is an authorization recorded when the work is PLANNED and carried by
+ * the effect, rather than inferred at runtime from an object's shape.
+ */
+export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IAgent): boolean {
+  // Condition 2 reads first for legibility only. An earlier comment claimed
+  // that asking condition 1 first would throw a TypeError on a fabricated
+  // agent; it would not, because condition 1 carries its own `typeof` guard
+  // before it calls anything. Both orders are safe, and saying otherwise
+  // invented a correctness reason for a formatting choice.
+  const counters: unknown = agent.sessionCounters;
+  if (typeof counters !== 'object' || counters === null) return false;
+  if (typeof (counters as { httpRequests?: unknown }).httpRequests !== 'number') return false;
+  const toolContext: unknown = agent.toolContext;
+  if (typeof toolContext !== 'object' || toolContext === null) return false;
+
+  if (typeof agent.getAvailableTools !== 'function') return false;
+  return agent.getAvailableTools().some((t) => t.definition.name === API_SETUP_TOOL_NAME);
+}
+
+/**
+ * Whether this PROFILE may be renewed unattended — a different question from
+ * whether the CALLER may trigger one, which is why it is a second predicate and
+ * not another condition in the first.
+ *
+ * Refuses exactly one shape: a stored refresh token with no explicit
+ * `grant_type`. That combination is ambiguous, and automating it makes the
+ * ambiguity destructive.
+ *
+ * `auth.oauth.grant_type` is OPTIONAL on a profile — the validator checks it
+ * only when present — and `fetch_token` defaults it to `client_credentials`.
+ * The authorization-code flow sends `grant_type: 'authorization_code'` in the
+ * token REQUEST and never writes one onto the profile, so a profile created by
+ * `connect` carries a user-delegated refresh token and no grant type at all.
+ * Renew that and `fetch_token` posts a CLIENT-CREDENTIALS grant: it either fails,
+ * or it succeeds and replaces the token the user consented to with an app-level
+ * one that can see different data.
+ *
+ * A model calling `fetch_token` by hand has always been able to do that. What
+ * this change would add is doing it BY ITSELF, on expiry, with nobody choosing
+ * it — so the automated path declines and leaves the decision where it was.
+ *
+ * What it does NOT refuse, because these are unambiguous:
+ *   · `grant_type: 'refresh_token'` — the intended case;
+ *   · no refresh token at all — `client_credentials` is then the only thing the
+ *     profile can mean, which is the Shopify shape this piece exists for;
+ *   · `grant_type: 'client_credentials'`, explicitly chosen.
+ *
+ * ⚠ The refusal is not a workaround for the missing piece, it is a pointer at
+ * it: nothing switches a profile to `refresh_token` after an authorization-code
+ * exchange, which is the other half of the row this branch closes. Until that
+ * lands, such a profile has to be given its grant type before it can renew, and
+ * the log line says which profile.
+ */
+export function oauthProfileMayBeRenewedUnattended(
+  profile: { auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined },
+  hasStoredRefreshToken: boolean,
+): boolean {
+  const grantType = profile.auth?.oauth?.grant_type;
+  if (grantType !== undefined) return true;
+  return !hasStoredRefreshToken;
+}
+
+/**
+ * One renewal per profile at a time.
+ *
+ * Not a nicety: `api_setup` has no in-flight guard of its own — the comment at
+ * its concurrency re-read says so, and what it guarantees is that an overlapping
+ * exchange cannot record a FALSE revocation, not that overlap does not happen.
+ * Before this, N concurrent `http_request` calls against one expiring profile
+ * started N exchanges, each presenting the same refresh token. A provider that
+ * rotates rejects all but one; on a provider with reuse detection, the whole
+ * grant dies. The in-repo precedent is `integrations/google/google-auth.ts ›
+ * refreshInFlight`, and this is that shape.
+ *
+ * Keyed by profile id, so it bounds by the number of profiles. The entry is
+ * removed when the renewal settles, which makes the map a coalescer and not a
+ * cache: a later request renews again.
+ */
+const oauthRenewalsInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Renew an oauth2 access token that is about to expire, by running the SAME
+ * exchange the `api_setup` tool runs — deliberately by calling that handler
+ * rather than by extracting its body into a shared function.
+ *
+ * The exchange carries a guarantee this path must not re-implement: when two
+ * exchanges for one profile overlap, the provider rejects the one that lost as
+ * spent, and `api_setup` re-reads the slot before recording anything — "if the
+ * slot no longer holds what went out, the rejection says nothing about what it
+ * holds now, so it is no revocation". An extracted copy would be identical
+ * today and would hold that line in one of two places tomorrow. A call IS the
+ * same code.
+ *
+ * The import is dynamic because `api-setup.ts` imports this module, so a static
+ * one is a cycle. That moves a load failure from build time to the first
+ * refresh — which is why a test drives this path for real rather than mocking
+ * the module.
+ *
+ * Returns nothing and throws nothing: a failed renewal leaves the vault as it
+ * was and the caller attaches whatever is there. That is deliberate. The buffer
+ * means the stored token is still valid at this moment, so a provider hiccup
+ * must not turn into a refusal — and the existing 401 path already says what to
+ * do if it really is dead. This path records no verdict of its own; the handler
+ * it calls is the only thing that writes state, and it writes no revocation it
+ * has not proven.
+ *
+ * ⚠ Residue, named rather than left for a reader to discover — and LARGER than
+ * a first version of this note said. There is no back-off after a failure, so a
+ * profile whose renewal keeps failing is retried on every request that reaches
+ * the buffer, at up to sixteen seconds each.
+ *
+ * That first note called the cost "bounded by the session budget". It is not.
+ * The budget is charged by the exchange's callback AFTER a response arrives, so
+ * a token endpoint that HANGS is never charged at all: the ceiling of a hundred
+ * requests bounds the triggering calls, not the renewals that time out. State is
+ * still not corrupted, so this stays a cost rather than a cache that would also
+ * refuse a provider that has recovered — but anyone deciding whether to add
+ * back-off should know which of the two numbers actually binds.
+ */
+async function renewExpiringOAuthToken(
+  profileId: string,
+  agent: import('../../types/index.js').IAgent,
+): Promise<void> {
+  if (!mayRenewOAuthUnattended(agent)) {
+    // Silent on purpose, and this is the one refusal that should be: it is the
+    // ordinary state of a scoped caller, not a fault. The request goes out with
+    // the stored token and the existing 401 path says what to do — which is what
+    // happened before this renewal existed at all.
+    return;
+  }
+
+  const running = oauthRenewalsInFlight.get(profileId);
+  if (running !== undefined) return running;
+
+  const run = runOAuthRenewal(profileId, agent).finally(() => {
+    oauthRenewalsInFlight.delete(profileId);
+  });
+  oauthRenewalsInFlight.set(profileId, run);
+  return run;
+}
+
+/** The renewal itself. Never rejects — see the contract on the caller above. */
+async function runOAuthRenewal(
+  profileId: string,
+  agent: import('../../types/index.js').IAgent,
+): Promise<void> {
+  // TWO catches, not one, and the split is the point. A first draft wrapped both
+  // steps together — which would have swallowed a failing import as if it were a
+  // provider hiccup, leaving a packaging defect invisible for as long as nobody
+  // looked. That is the same silent fallback that let a shipping gap live in this
+  // repo for four months; it does not get rebuilt here.
+  let mod: typeof import('./api-setup.js');
+  try {
+    mod = await import('./api-setup.js');
+  } catch (err) {
+    // A module that will not load is a build or packaging defect, not a
+    // transient. It cannot be retried into working and it must not be quiet.
+    process.stderr.write(
+      `[lynox:http] oauth token renewal unavailable: api_setup did not load (${err instanceof Error ? err.message : String(err)}). `
+      + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.
+`,
+    );
+    return;
+  }
+
+  // The RETURN VALUE is read, because almost every failure IS one. Discarding it
+  // made every refusal silent while a comment claimed the two catches above
+  // meant a non-transient failure "must not be quiet".
+  //
+  // ⚠ Two things that comment got wrong, both found by review rather than by a
+  // measurement of mine:
+  //
+  //   · It said the branch "throws nowhere". It does: `secretStore.set` is
+  //     called unguarded for the access token, and again for a rotated refresh
+  //     token, in the `fetch_token` success path. The count behind the wrong
+  //     claim was of `throw` STATEMENTS, which is not the same question as what
+  //     can throw — and a failing vault write after the provider has already
+  //     rotated is the worst outcome this path has, because the presented
+  //     refresh token is spent and the new one was not stored. So the catch
+  //     logs rather than swallowing.
+  //   · It filtered on `Error:`, and nine of this branch's returns do not start
+  //     that way — including every `Token exchange failed with HTTP …`, which is
+  //     the provider rejecting the refresh token and therefore the LIKELIEST
+  //     renewal failure of all. The success shape is the narrow one, so that is
+  //     what gets matched instead.
+  try {
+    const answer = await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+    if (typeof answer !== 'string' || !answer.startsWith('Token exchange OK')) {
+      // stderr, not a refusal to the model: the stored token is still valid for
+      // at least the buffer, so the request continues. This is what lets an
+      // operator tell a renewal that was refused from one that never ran.
+      writeRenewalFailure(profileId, 'refused', typeof answer === 'string' ? answer : String(answer), agent);
+    }
+  } catch (err) {
+    // A throw here is a vault write that failed, or something under the exchange
+    // that it does not convert. Either way it must not be silent: the request
+    // continues on the stored token, but the grant may now be broken in a way
+    // only a log will show.
+    writeRenewalFailure(profileId, 'threw', err instanceof Error ? err.message : String(err), agent);
+  }
+}
+
+/**
+ * One sink for a failed renewal, so the two shapes cannot drift apart.
+ *
+ * The detail is MASKED and stripped of control characters, and neither is
+ * decoration:
+ *   · `exchangeToken` puts the RAW `token_url` into its failure message, and
+ *     `vetTokenEndpoint` in that same file says why that matters — "the raw
+ *     value can hold anything somebody pasted, including a credential". Nothing
+ *     masks `process.stderr.write`, so masking has to happen at the call.
+ *   · the same string can carry a provider's own text, and a newline in it would
+ *     forge a log line.
+ */
+function writeRenewalFailure(
+  profileId: string,
+  kind: 'refused' | 'threw',
+  detail: string,
+  agent: import('../../types/index.js').IAgent,
+): void {
+  let masked = detail;
+  try {
+    masked = agent.secretStore?.maskAll?.(detail) ?? detail;
+  } catch {
+    // A masker that throws must not turn a log line into a failed request; the
+    // unmasked string is then NOT written, because the whole point of this step
+    // is that the raw value may hold a credential.
+    masked = '<detail withheld: masking failed>';
+  }
+  const oneLine = masked.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ').slice(0, 300);
+  process.stderr.write(
+    `[lynox:http] oauth token renewal ${kind} for profile "${profileId}": ${oneLine}\n`,
+  );
+}
+
 async function attachEngineManagedAuth(
   url: string,
   headers: Record<string, string>,
@@ -581,6 +915,56 @@ async function attachEngineManagedAuth(
     // written SHOPIFY_SEO_ACCESS_TOKEN, the agent kept reaching for
     // SHOPIFY_ACCESS_TOKEN → 401 forever), and rotation, where every later request
     // should pick up a freshly minted token automatically.
+    // Renew before attaching, not after a 401 comes back. Two reasons it has to
+    // be here rather than in a worker: a worker would have to know every profile
+    // and guess a frequency, and it would keep alive connections nobody uses —
+    // for a 24-hour token that is a daily exchange, and a daily secret write, for
+    // a shop untouched for months. This runs only for a token about to be used.
+    //
+    // Ordered after the revoked-grant check, and that order is LOAD-BEARING:
+    // it is least-secret-exposure. A path that is going to refuse must not read
+    // the client secret.
+    //
+    // ⚠ The first draft of this comment claimed the opposite — that the order was
+    // "a cost and clarity choice, not a correctness property" — on the strength of
+    // a mutation that survived. The mutation survived because the test vault's
+    // `resolve` is silent and publishes nothing, so the quantity the swap changes
+    // was not one the instrument could report. Measured properly, by recording
+    // what `resolveSecretRefs` is asked for: in this order a refused request
+    // reads neither the client id nor the client secret; with the two swapped it
+    // reads both.
+    //
+    // ⚠ NOT "resolves nothing", which an earlier wording claimed and this file's
+    // own test contradicts — the revoked-grant check above reads the refresh key
+    // itself, deliberately, to decide whether the recorded revocation still
+    // applies. The property is about the CLIENT SECRET, and it is narrower than
+    // the first wording: inside `fetch_token` several other refusals do come
+    // after those reads, so this order buys the revoked case and not a general
+    // rule.
+    //
+    // `fetch_token` does short-circuit on a revoked grant before it POSTs and
+    // before any secret WRITE (`api-setup.ts`, "posting the very token the
+    // provider already rejected only repeats the rejection"). What it does not sit
+    // before is the READS: client_id and client_secret are resolved first, then
+    // the refresh token, and only then does it return. Each resolve publishes a
+    // `secretAccess` audit event in the real store, so the swap buys three vault
+    // reads of a credential on a request that was never going to be sent.
+    const expiresAt = profile.auth?.oauth?.token_expires_at;
+    if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
+      // Asked HERE rather than inside the renewal because only this scope can
+      // answer the second argument: whether the vault actually holds a refresh
+      // token for this profile. The profile can NAME a slot that is empty.
+      const refreshSlot = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+      const holdsRefresh = secretStore.resolve(refreshSlot) !== null;
+      if (oauthProfileMayBeRenewedUnattended(profile, holdsRefresh)) {
+        await renewExpiringOAuthToken(profile.id, agent);
+      } else {
+        process.stderr.write(
+          `[lynox:http] oauth token renewal declined for profile "${profile.id}": it holds a refresh token but names no auth.oauth.grant_type, and the default would post a client-credentials grant that replaces the user's delegated token. Set grant_type to "refresh_token" with api_setup update.\n`,
+        );
+      }
+    }
+
     const tokenKey = accessTokenKey(profile.id);
     const resolved = secretStore.resolve(tokenKey);
     if (!resolved) {

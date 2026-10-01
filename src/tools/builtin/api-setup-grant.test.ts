@@ -54,24 +54,52 @@ interface MockVault {
   set(name: string, value: string): void;
   deleteSecret?(name: string): boolean;
   peek(name: string): string | undefined;
+  /** Optional, as on the real store — the renewal's log sink calls it if present. */
+  maskAll?(text: string): string;
 }
 
-/** The slice of a secret store fetch_token and delete use, over a plain map. */
-function makeVault(initial: Record<string, string>, opts: { canDelete?: boolean } = {}): MockVault {
+/**
+ * The slice of a secret store fetch_token and delete use, over a plain map.
+ *
+ * `opts.reads` makes it a MEASURING instrument as well as a stub, and that is not
+ * a convenience. Without it this vault resolves silently, so a mutant that adds
+ * vault reads on a path that should touch none changes nothing this file can
+ * output — which is exactly how the revoked-order mutant below was first
+ * mis-scored as equivalent. The real `SecretStore` publishes a `secretAccess`
+ * event per resolve; an array is the cheapest stand-in that has the same
+ * granularity, and it records the name whether or not the slot exists, because
+ * "asked for the client secret" is the event, not "got one".
+ */
+function makeVault(
+  initial: Record<string, string>,
+  opts: { canDelete?: boolean; reads?: string[]; mask?: string; failSet?: string } = {},
+): MockVault {
   const store: Record<string, string> = { ...initial };
+  const note = (name: string): void => { opts.reads?.push(name); };
   const vault: MockVault = {
-    resolve: (name) => store[name] ?? null,
+    resolve: (name) => { note(name); return store[name] ?? null; },
     resolveSecretRefs: (input: unknown): unknown => {
       const text = JSON.stringify(input);
       const resolved = text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (_m, name: string) => {
+        note(name);
         const v = store[name];
         return v !== undefined ? v.replace(/["\\]/g, (c) => `\\${c}`) : `secret:${name}`;
       });
       try { return JSON.parse(resolved) as unknown; } catch { return input; }
     },
-    set: (name, value) => { store[name] = value; },
+    set: (name, value) => {
+      // `failSet` models the one failure `fetch_token` cannot convert: the vault
+      // write itself throwing, which happens AFTER the provider has already
+      // rotated the refresh token.
+      if (opts.failSet !== undefined) throw new Error(opts.failSet);
+      store[name] = value;
+    },
     peek: (name) => store[name],
   };
+  if (opts.mask !== undefined) {
+    const mask = opts.mask;
+    vault.maskAll = (text) => text.split(mask).join('[redacted]');
+  }
   if (opts.canDelete !== false) {
     vault.deleteSecret = (name) => {
       const had = name in store;
@@ -82,10 +110,29 @@ function makeVault(initial: Record<string, string>, opts: { canDelete?: boolean 
   return vault;
 }
 
-function makeAgent(apiStore: ApiStore, vault: MockVault, promptUser?: () => Promise<string>): never {
+/**
+ * `granted` models the agent's TOOL SURFACE, and it has to be modelled because
+ * the renewal is gated on it.
+ *
+ * The default holds `api_setup`, which is what an ordinary session has: the tool
+ * is registered unconditionally and a session with no role gets the whole
+ * registry. Passing `[]` (or a list without it) builds the other real case — a
+ * role-scoped child or a workflow step, neither of which can hold `api_setup`.
+ *
+ * ⚠ Without this the fixture had no tool surface at all, so every "does NOT
+ * renew" test would have gone green for the wrong reason: the gate would have
+ * refused everything and the assertions would have proved nothing.
+ */
+function makeAgent(
+  apiStore: ApiStore,
+  vault: MockVault,
+  promptUser?: () => Promise<string>,
+  granted: readonly string[] = ['http_request', 'api_setup'],
+): never {
   return {
     sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
     secretStore: vault,
+    getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
     promptUser,
     toolContext: {
       apiStore,
@@ -378,6 +425,58 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(JSON.stringify(store.get('crm-api'))).not.toContain('client-1');
     expect(grant?.minted_for).toBe(tokenFingerprint('rt-2'));
     expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeGreaterThan(Date.now());
+  });
+
+  /**
+   * A response with no usable `expires_in` must CLEAR the stored expiry, not keep
+   * the previous one.
+   *
+   * This is a latch if it keeps it, and the latch is what makes it worth a test
+   * rather than a comment. The old value describes a token that has just been
+   * replaced. Leave it in place and the profile permanently claims an expiry in
+   * the past — so a lazy refresh, which reads exactly this field, exchanges a
+   * token on every single request from then on: one secret write, one profile
+   * save and one outbound POST each time, against a session budget of 100, and on
+   * a provider that rotates its refresh token, a burned refresh token per request.
+   *
+   * `expires_in` is RECOMMENDED, not REQUIRED, in RFC 6749 §5.1, so a provider
+   * that omits it is conformant and this is not an exotic response. The absent
+   * field is the honest state: the reader in `http.ts` renews only for a numeric
+   * expiry, so "unknown" correctly means "do not plan against this".
+   */
+  it('clears a stale expiry when the response carries no expires_in', async () => {
+    const store = new ApiStore();
+    const past = Date.now() - 60_000;
+    store.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-2' }));
+
+    await fetchToken(agent);
+
+    const vaulted = (agent as unknown as { secretStore: MockVault }).secretStore;
+    expect(vaulted.peek('CRM_API_ACCESS_TOKEN'), 'the new token was not stored, so this says nothing about the expiry').toBe('at-2');
+    expect(store.get('crm-api')?.auth?.oauth?.token_expires_at, 'the expiry of the REPLACED token was kept, which reads as "already expired" forever').toBeUndefined();
+  });
+
+  /**
+   * The same, for a value that is present but unusable. `expires_in` arriving as
+   * the JSON string `"3600"` is the shape that made this worth splitting out: it
+   * is truthy, it looks right in a log, and it fails `Number.isSafeInteger`, so it
+   * takes the identical path as a missing field.
+   */
+  it('clears a stale expiry when expires_in is present but not a usable number', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: Date.now() - 60_000 } },
+    }));
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-3', expires_in: '3600' }));
+
+    await fetchToken(agent);
+
+    expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeUndefined();
   });
 
   it('stamps nothing when no refresh token is in play', async () => {
@@ -1171,5 +1270,783 @@ describe('fetch_token — the wall-clock ceiling on a dripping body', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('an expiring oauth2 token is renewed before the request that needs it', () => {
+  /**
+   * The renewal runs `api_setup` action=fetch_token through a DYNAMIC import,
+   * because `api-setup.ts` imports `http.ts` and a static back-import is a
+   * cycle. A dynamic import moves a load failure out of the build and into the
+   * first renewal — at a customer, a day after a deploy, in a path that writes
+   * secrets.
+   *
+   * So this asserts the import itself, not a mock of it. A test that mocks
+   * `api-setup` proves that the caller makes a call; it cannot prove the module
+   * resolves or still exports what the caller reaches for.
+   */
+  it('the module the renewal imports resolves, and exports the handler it calls', async () => {
+    const mod = await import('./api-setup.js');
+    expect(mod.apiSetupTool).toBeDefined();
+    expect(typeof mod.apiSetupTool.handler).toBe('function');
+  });
+
+  /**
+   * The buffer is derived rather than chosen, so it is pinned against the two
+   * numbers it was derived from. If either grows past it, a token can die
+   * between the check and its use and the failure reads as a revocation.
+   */
+  it('the refresh buffer outlasts a maximum request plus an exchange', async () => {
+    const { OAUTH_REFRESH_BUFFER_MS } = await import('./http.js');
+    const HTTP_TIMEOUT_HARD_CAP_MS = 60_000; // http_request's documented ceiling
+    expect(OAUTH_REFRESH_BUFFER_MS).toBeGreaterThan(HTTP_TIMEOUT_HARD_CAP_MS + TOKEN_EXCHANGE_TIMEOUT_MS);
+  });
+
+  /**
+   * The property the design rests on: the renewal cannot trigger itself. The
+   * exchange runs through `exchangeToken` → `fetchWithValidatedRedirects` rather
+   * than through the `http_request` handler, so it cannot come back round to the
+   * attach.
+   *
+   * ⚠ An earlier version of this test counted mentions of
+   * `attachEngineManagedAuth` in the SOURCE and required exactly three. It was
+   * labelled a proxy, and it behaved like one: `core#1407` added a second,
+   * entirely legitimate caller (`attachStoredCredential`, the bulk worker
+   * effect's entry point) and the count went to four. **The test went red for a
+   * change that is not the defect it exists to catch, and it would have stayed
+   * green for one that is** — re-entry through `httpRequestTool.handler` reaches
+   * the attach without ever naming it.
+   *
+   * So it counts EXCHANGES now, which is the property itself. Recursion would
+   * mint more than one token for one request; nothing else would.
+   */
+  it('one renewed request mints exactly one token, so the renewal cannot re-enter', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const { httpRequestTool } = await import('./http.js');
+    await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault({
+        CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+        CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+      })),
+    );
+
+    const exchanges = calls.filter((u) => u.includes('/oauth/token')).length;
+    expect(exchanges, `one request minted ${String(exchanges)} tokens — the renewal re-entered the attach`).toBe(1);
+  });
+});
+
+describe('the renewal fires on expiry and not otherwise', () => {
+  /** One fetch spy that answers the token endpoint and the API separately. */
+  function stubBoth(newAccessToken: string): { calls: string[] } {
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: newAccessToken, expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { calls };
+  }
+
+  async function callApi(profile: ApiProfile, vaultSeed: Record<string, string>): Promise<{ calls: string[]; vault: MockVault }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(profile);
+    const vault = makeVault(vaultSeed);
+    const { calls } = stubBoth('MINTED_BY_RENEWAL');
+    const { httpRequestTool } = await import('./http.js');
+    await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault),
+    );
+    return { calls, vault };
+  }
+
+  const SEED = {
+    CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+    CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+  };
+
+  it('renews a token inside the buffer, through the real dynamic import', async () => {
+    const past = Date.now() - 1000; // already expired
+    const { calls, vault } = await callApi(
+      crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } } }),
+      SEED,
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), `no token POST went out; calls were ${calls.join(', ')}`).toBe(true);
+    // The exchange ran for real: the vault holds what the stub minted.
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('MINTED_BY_RENEWAL');
+  });
+
+  it('leaves a token alone while it is outside the buffer', async () => {
+    const farFuture = Date.now() + 24 * 60 * 60 * 1000;
+    const { calls, vault } = await callApi(
+      crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: farFuture } } }),
+      SEED,
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a token POST went out for a token that is nowhere near expiry').toBe(false);
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('OLD_TOKEN');
+  });
+
+  it('carries no expiry at all the way it always did — no renewal, no refusal', async () => {
+    const { calls } = await callApi(crmProfile(), SEED);
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(false);
+    expect(calls.some((u) => u.includes('/v1/contacts'))).toBe(true);
+  });
+
+  /**
+   * The fall-through contract. A provider hiccup during renewal must not fail a
+   * request whose stored token is still valid — the buffer exists precisely so
+   * that it is. Nothing is recorded either: this path writes no verdict, and the
+   * handler it calls writes no revocation it has not proven.
+   */
+  it('attaches the stored token when the renewal itself fails', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } } }));
+    const vault = makeVault(SEED);
+
+    const seen: { authorization?: string } = {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) return new Response('{"error":"server_error"}', { status: 500 });
+      const h = new Headers(init?.headers);
+      seen.authorization = h.get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault),
+    );
+    expect(String(out)).not.toMatch(/^Error:/);
+    expect(seen.authorization, 'the stored token was not attached after a failed renewal').toBe('Bearer OLD_TOKEN');
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('OLD_TOKEN');
+  });
+});
+
+describe('who may have a token renewed on their behalf', () => {
+  /**
+   * The gate is asserted DIRECTLY, on the exported predicate, because the effect
+   * it guards writes secrets and posts a client secret. A test that could only
+   * reach this judgement by running the renewal would have to run that too.
+   */
+  function agentWith(over: Record<string, unknown>): never {
+    return {
+      sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+      toolContext: { apiStore: null },
+      getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
+      ...over,
+    } as never;
+  }
+
+  it('permits a caller that holds api_setup and carries both guards', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    expect(mayRenewOAuthUnattended(agentWith({}))).toBe(true);
+  });
+
+  it('refuses a caller that does not hold api_setup', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // The two real populations: a role-scoped child, and a workflow step whose
+    // tools are filtered to a set that never admits `api_setup`.
+    expect(mayRenewOAuthUnattended(agentWith({
+      getAvailableTools: () => [{ definition: { name: 'http_request' } }],
+    }))).toBe(false);
+    expect(mayRenewOAuthUnattended(agentWith({ getAvailableTools: () => [] }))).toBe(false);
+  });
+
+  it('pins the literal tool name against the tool itself', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // `http.ts` cannot import `api-setup.ts` statically — that is a cycle — so it
+    // carries the name as a literal. A rename would fail OPEN: the gate would
+    // stop finding the tool and every renewal would quietly refuse. This is the
+    // only thing tying the two together, and it does it behaviourally rather
+    // than by exporting the constant.
+    expect(mayRenewOAuthUnattended(agentWith({
+      getAvailableTools: () => [{ definition: { name: apiSetupTool.definition.name } }],
+    }))).toBe(true);
+  });
+
+  it('refuses a caller with no session counters, and does not throw reaching that answer', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // `fetch_token` dereferences `agent.sessionCounters.httpRequests` with no
+    // guard, so this is the difference between a clean refusal and a TypeError.
+    expect(mayRenewOAuthUnattended(agentWith({ sessionCounters: undefined }))).toBe(false);
+    expect(mayRenewOAuthUnattended(agentWith({ sessionCounters: {} }))).toBe(false);
+  });
+
+  it('refuses a caller with no tool context', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    // `toolContext` is what `exchangeToken` is handed as the carrier of the
+    // egress controls. Absent, the POST would go out past them.
+    expect(mayRenewOAuthUnattended(agentWith({ toolContext: undefined }))).toBe(false);
+  });
+
+  /**
+   * The fabricated agent that actually exists: a bulk run's worker effect builds
+   * `{ secretStore } as IAgent` and hands it to the attach. It satisfies the
+   * compiler and carries neither guard nor tool surface.
+   *
+   * ⚠ This is the test that catches a revert. The temptation on the other side
+   * is to make the fake MORE complete so the renewal works — and each field
+   * added there removes one barrier here, in an order that matters: without
+   * `sessionCounters` the exchange throws BEFORE its POST, so the missing field
+   * is currently what stops an unguarded egress. A fake that gained
+   * `sessionCounters` would post past the egress controls instead of failing.
+   */
+  it('refuses a fabricated agent that carries only a secret store', async () => {
+    const { mayRenewOAuthUnattended } = await import('./http.js');
+    const fabricated = { secretStore: makeVault({}) } as never;
+    expect(() => mayRenewOAuthUnattended(fabricated)).not.toThrow();
+    expect(mayRenewOAuthUnattended(fabricated)).toBe(false);
+  });
+});
+
+describe('which profiles may be renewed unattended', () => {
+  /**
+   * The second predicate, asserted directly. It answers a different question
+   * from the caller gate — not "may this actor renew" but "does renewing this
+   * profile mean what we think it means".
+   */
+  it('permits an explicit refresh_token grant', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { grant_type: 'refresh_token' } } }, true)).toBe(true);
+  });
+
+  it('permits a profile with no refresh token, which is the client-credentials shape', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // Shopify: `client_credentials`, 24-hour token, nothing to rotate. This is
+    // the case the whole piece exists for, so it must not be caught.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: {} } }, false)).toBe(true);
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { grant_type: 'client_credentials' } } }, false)).toBe(true);
+  });
+
+  it('refuses a stored refresh token with no declared grant type', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // The shape `connect` produces: a user-delegated refresh token and no
+    // `grant_type`, because the authorization-code flow sends that value in the
+    // token REQUEST and never writes it onto the profile. `fetch_token` would
+    // default to client_credentials and replace the delegated token with an
+    // app-level one.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: {} } }, true)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended({ auth: {} }, true)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended({}, true)).toBe(false);
+  });
+});
+
+describe('the two properties the comments claim, which nothing was checking', () => {
+  // Module-scoped so a THROWN refusal does not take the record with it: `run`
+  // never returns in that case, and the calls are exactly what has to be
+  // asserted then.
+  let lastCalls: string[] = [];
+
+  function stubBoth(): { calls: string[] } {
+    const calls: string[] = [];
+    lastCalls = calls;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { calls };
+  }
+
+  const SEED = {
+    CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+    CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+  };
+
+  async function run(
+    profile: ApiProfile,
+    vault?: MockVault,
+    granted?: readonly string[],
+  ): Promise<{ calls: string[]; out: string }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(profile);
+    const { calls } = stubBoth();
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault ?? makeVault(SEED), undefined, granted),
+    );
+    return { calls, out: String(out) };
+  }
+
+  /**
+   * The BUFFER, not merely expiry. A token two minutes from dying is still
+   * valid, and renewing it is the whole point: the request it is about to carry
+   * may run for a minute, and the exchange before it for fifteen seconds.
+   *
+   * Without this, setting the buffer to zero was caught only by the test that
+   * pins the constant — so changing the number and that test together would
+   * have removed the behaviour invisibly.
+   */
+  it('renews a token that is inside the buffer but has NOT expired yet', async () => {
+    const twoMinutesLeft = Date.now() + 2 * 60 * 1000;
+    const { calls } = await run(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: twoMinutesLeft } },
+    }));
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a still-valid token inside the buffer was not renewed').toBe(true);
+  });
+
+  /**
+   * That a revoked grant costs no exchange — which holds for BOTH reasons and
+   * is worth pinning for that: this path checks before renewing, and
+   * `fetch_token` short-circuits on a revoked grant before it posts anything.
+   *
+   * ⚠ This one does NOT pin the order, and the next one does. An earlier note
+   * here said the order was not worth pinning because the swap mutant survived.
+   * It survived this assertion because an exchange is refused either way; what it
+   * changes is which SECRETS get read first, and that is the test below.
+   */
+  it('refuses a revoked grant without spending an exchange on it', async () => {
+    const past = Date.now() - 1000;
+    const grant: OAuthGrantRecord = {
+      state: 'revoked',
+      revoked_fp: tokenFingerprint('REFRESH'),
+      revoked_at: '2026-09-30T00:00:00.000Z',
+    };
+    // The refusal is THROWN as a soft failure, not returned — so the assertion
+    // has to catch it. Getting that wrong is how this test first failed, and the
+    // failure was the harness rather than the behaviour.
+    let refusal = '';
+    let calls: string[] = [];
+    try {
+      const r = await run(crmProfile({
+        auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+        oauth_grant: grant,
+      }));
+      calls = r.calls;
+      expect.unreachable('a revoked grant was not refused');
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+      calls = lastCalls;
+    }
+    expect(refusal).toMatch(/revoked or expired/);
+    expect(calls.some((u) => u.includes('/oauth/token')), 'an exchange was spent on a grant already known to be revoked').toBe(false);
+  });
+
+  /**
+   * Through the REAL seam, not a hand-made fake: `attachStoredCredential` is the
+   * bulk run's worker-effect entry point (core#1407), and it builds
+   * `{ secretStore } as IAgent` by design — a worker effect has no agent to hand
+   * over. It therefore reaches the attach with no tool surface and no session
+   * counters.
+   *
+   * ⚠ WHAT THIS DOES AND DOES NOT PROVE, because a first version of this
+   * comment called it "the test that catches a revert" and a review measured
+   * that it does not. With the gate replaced by `if (false)` this test STILL
+   * PASSES: the fabricated agent has no `toolContext`, so `fetch_token` returns
+   * "profile not found" before it posts anything — for a reason that has nothing
+   * to do with the gate. Two different mechanisms produce the same green, which
+   * is precisely the shape of evidence that cannot be trusted.
+   *
+   * So this test pins the OUTCOME at the real seam: a bulk run mints no token
+   * and still gets its stored credential. That is worth having, because it is
+   * the behaviour the other track depends on. The GATE itself is pinned by
+   * `spends no exchange for a caller that does not hold api_setup` below, which
+   * was measured to fail when the gate is removed, and by the predicate tests
+   * above.
+   *
+   * The temptation on the other side is to make the fabricated agent MORE
+   * complete so the renewal works. Each field added there removes one barrier,
+   * and the ORDER matters: without `sessionCounters` the exchange throws before
+   * its POST, so today the missing field is what stops an unguarded egress. A
+   * fake that gained `sessionCounters` while still carrying a partial
+   * `toolContext` would POST past the egress controls instead of failing —
+   * unverified, since nothing exercises that shape. The durable answer is an
+   * authorization recorded when the run is PLANNED, not inferred at runtime
+   * from an object's shape.
+   */
+  it('spends no exchange for the bulk worker effect, which has no agent at all', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const { calls } = stubBoth();
+    const { attachStoredCredential } = await import('./http.js');
+
+    const headers: Record<string, string> = {};
+    const attached = await attachStoredCredential(
+      'https://api.crm.example/v1/contacts',
+      headers,
+      { apiStore, secretStore: makeVault(SEED) as never },
+    );
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a caller with no agent had a token minted on its behalf').toBe(false);
+    // It still attaches the stored token — the run continues and a dead token
+    // shows up as the provider's own 401, which is what that path reports.
+    expect(attached, 'the stored credential was not attached, so the run lost a capability rather than a renewal').toBe(true);
+    expect(headers['Authorization']).toBe('Bearer OLD_TOKEN');
+  });
+
+  /**
+   * The gate at the EFFECT level, not only on the predicate: a caller without
+   * `api_setup` spends no exchange, and still gets its stored token attached.
+   *
+   * The second half is what makes this a degradation rather than a regression —
+   * the request goes out exactly as it did before the renewal existed, and the
+   * existing 401 path says what to do if the token is truly dead.
+   */
+  it('spends no exchange for a caller that does not hold api_setup', async () => {
+    const past = Date.now() - 1000;
+    const { calls, out } = await run(
+      crmProfile({
+        auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+      }),
+      undefined,
+      ['http_request'],
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a caller without api_setup had a token minted on its behalf').toBe(false);
+    expect(calls.some((u) => u.includes('/v1/contacts')), 'the request itself did not go out, so this is a regression rather than a degradation').toBe(true);
+    expect(out).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * The profile guard at the EFFECT level: a connect-shaped profile spends no
+   * exchange, and says why in the log.
+   *
+   * `crmProfile` declares `grant_type: 'refresh_token'`, so the shape has to be
+   * built by removing it — which is exactly what a profile created through
+   * `connect` looks like, since that flow writes the grant type into the token
+   * request and never onto the profile.
+   */
+  it('declines a connect-shaped profile whose grant type is undeclared', async () => {
+    const past = Date.now() - 1000;
+    const base = crmProfile();
+    const oauthNoGrant = { ...base.auth!.oauth! } as Record<string, unknown>;
+    delete oauthNoGrant['grant_type'];
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+
+    const { calls, out } = await run(crmProfile({
+      auth: { ...base.auth!, oauth: { ...oauthNoGrant, token_expires_at: past } as never },
+    }));
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'a client-credentials grant was posted for a profile holding a delegated refresh token').toBe(false);
+    expect(written.join(''), 'the decision was silent, so nobody can find out why the token stopped renewing').toMatch(/renewal declined for profile "crm-api"/);
+    // The request still goes out on the stored token.
+    expect(out).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * ONE exchange for N concurrent requests on one expiring profile.
+   *
+   * `api_setup` has no in-flight guard: what its concurrency re-read guarantees
+   * is that an overlapping exchange cannot record a FALSE revocation, not that
+   * overlap does not happen. Without coalescing, three requests present the same
+   * refresh token three times; a rotating provider rejects two, and one with
+   * reuse detection kills the grant. Precedent: `google-auth.ts › refreshInFlight`.
+   *
+   * The token endpoint is made slow on purpose so the three overlap; with the
+   * coalescer removed this sees three POSTs.
+   */
+  it('coalesces concurrent renewals for one profile into a single exchange', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      if (url.includes('/oauth/token')) {
+        await new Promise((r) => setTimeout(r, 60));
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const agent = makeAgent(apiStore, makeVault(SEED));
+    await Promise.all([1, 2, 3].map(() => httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      agent,
+    )));
+
+    const exchanges = calls.filter((u) => u.includes('/oauth/token'));
+    expect(exchanges.length, `three overlapping requests minted ${String(exchanges.length)} tokens instead of one`).toBe(1);
+    expect(calls.filter((u) => u.includes('/v1/contacts')).length, 'all three requests still went out').toBe(3);
+  });
+
+  /**
+   * A REFUSED renewal reaches stderr.
+   *
+   * This is a correction, not an addition. The first version discarded the
+   * handler's return value while a comment claimed the two catches meant a
+   * non-transient failure "must not be quiet". The `fetch_token` branch throws
+   * nowhere — every failure is a returned string — so discarding it made every
+   * real refusal silent, including "the per-session HTTP budget is exhausted".
+   */
+  it('writes a refused renewal to stderr instead of discarding it', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    // No client_secret in the vault: `fetch_token` RETURNS a refusal naming the
+    // missing key and never posts.
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    const { calls } = stubBoth();
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault({ CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' })),
+    );
+
+    expect(calls.some((u) => u.includes('/oauth/token')), 'the refusal came from the provider rather than from fetch_token').toBe(false);
+    expect(written.join(''), 'a refused renewal left no trace at all').toMatch(/oauth token renewal refused for profile "crm-api"/);
+    expect(String(out)).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * A PROVIDER refusal reaches stderr too, and this is the case the first
+   * version missed.
+   *
+   * That version matched `Error:`. Nine of this branch's returns do not start
+   * that way, and `Token exchange failed with HTTP …` is among them — the
+   * provider rejecting the refresh token, which is the likeliest renewal failure
+   * there is. So the filter matches the SUCCESS shape instead, which is the
+   * narrow one.
+   */
+  it('writes a provider refusal to stderr, not only the ones prefixed Error', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) {
+        // 502, not 400. A 400 with `invalid_grant` classifies as `grant-revoked`
+        // and returns `revokedGrantMessage`, which DOES begin with "Error:" —
+        // so the first version of this test passed even with the old
+        // Error-prefix filter in place, measured by mutation. A 5xx classifies
+        // as transient and returns the generic `Token exchange failed with
+        // HTTP …`, which is the shape the old filter actually dropped.
+        return new Response('{"error":"temporarily_unavailable"}', { status: 502, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault(SEED)),
+    );
+
+    const log = written.join('');
+    expect(log, 'a provider rejection left no trace, which is the failure the Error-prefix filter caused').toMatch(/oauth token renewal refused for profile "crm-api"/);
+    expect(String(out)).not.toMatch(/^Error:/);
+  });
+
+  /**
+   * The detail is MASKED and flattened before it is written.
+   *
+   * Not hygiene. `exchangeToken` interpolates the RAW `token_url` into its
+   * failure message, and `vetTokenEndpoint` in that same file says why that
+   * matters: "the raw value can hold anything somebody pasted, including a
+   * credential". Nothing masks `process.stderr.write` — it is called directly in
+   * roughly twenty modules — so the masking has to happen at this call or not at
+   * all. The newline is stripped for a second reason: a provider's text in a log
+   * line can forge one.
+   */
+  it('masks the failure detail and keeps it on one line', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    // A transport failure is the path that carries the raw endpoint string.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) throw new Error('connect ECONNREFUSED s3cr3t-v4lue\nforged: log line');
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, makeVault(SEED, { mask: 's3cr3t-v4lue' })),
+    );
+
+    const renewalLines = written.filter((w) => w.includes('oauth token renewal'));
+    expect(renewalLines.length, 'the renewal failure was not logged at all, so this proves nothing about masking').toBeGreaterThan(0);
+    const log = renewalLines.join('');
+    expect(log, 'an unmasked value reached stderr').not.toContain('s3cr3t-v4lue');
+    expect(log).toContain('[redacted]');
+    // Exactly one line: the trailing newline and no other.
+    expect(log.split('\n').filter((l) => l !== '').length, 'the detail forged a second log line').toBe(1);
+  });
+
+  /**
+   * The THROWN failure, which is the worst one this path has and was the one
+   * left untested.
+   *
+   * `fetch_token` writes the access token with an unguarded `secretStore.set`,
+   * and again for a rotated refresh token. If that write throws, the provider
+   * has ALREADY rotated: the refresh token just presented is spent and the new
+   * one was not stored, so the grant is dead. An earlier version of this code
+   * swallowed that in an empty catch, under a comment asserting the branch
+   * "throws nowhere" — a claim that came from counting `throw` statements rather
+   * than asking what can throw.
+   *
+   * ⚠ This branch needed its own test because the obvious candidate does not
+   * reach it: a network failure at the token endpoint is CAUGHT by
+   * `exchangeToken` and comes back as a returned string, so the masking test
+   * above exercises the refused path, not this one. Measured — with the catch's
+   * log removed, every test in this file still passed.
+   */
+  it('logs a renewal that THREW rather than swallowing it', async () => {
+    const past = Date.now() - 1000;
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+    }));
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    const seen: { authorization?: string } = {};
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', refresh_token: 'ROTATED', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      seen.authorization = new Headers(init?.headers).get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const { httpRequestTool } = await import('./http.js');
+    const vault = makeVault(SEED, { failSet: 'SQLITE_BUSY: database is locked' });
+    const out = await httpRequestTool.handler(
+      { url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never,
+      makeAgent(apiStore, vault),
+    );
+
+    const log = written.join('');
+    expect(log, 'a thrown renewal was swallowed — the grant may be dead and nothing says so').toMatch(/oauth token renewal threw for profile "crm-api"/);
+    expect(log).toContain('SQLITE_BUSY');
+    // And the request still went out on the token that was there.
+    expect(String(out)).not.toMatch(/^Error:/);
+    expect(seen.authorization).toBe('Bearer OLD_TOKEN');
+  });
+
+  /**
+   * The ORDER, pinned by the only thing it changes: which secrets a refused
+   * request reads.
+   *
+   * This test exists because the claim it checks was first measured wrong and
+   * written into three comments as settled. `fetch_token` returns before it
+   * POSTs when the grant is revoked, so no test that counts requests can tell
+   * the two orders apart. But it returns AFTER resolving client_id, client_secret
+   * and the refresh token — so with the renewal placed above the revoked-grant
+   * check, a request that is going to be refused pulls the client secret out of
+   * the vault first, and in the real store that is three `secretAccess` audit
+   * events for a credential on a request that was never sent.
+   *
+   * So the order is least-secret-exposure, a correctness property, and the
+   * mutation that proves it is: move the `token_expires_at` block in `http.ts`
+   * above the `hasRevokedGrant` block. The refresh key IS expected here — the
+   * attach reads it itself to decide whether the revocation still applies —
+   * which is why the assertion names the client secret rather than counting.
+   */
+  it('does not read the client secret on a request it is going to refuse', async () => {
+    const past = Date.now() - 1000;
+    const reads: string[] = [];
+    let refusal = '';
+    try {
+      await run(
+        crmProfile({
+          auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+          oauth_grant: {
+            state: 'revoked',
+            revoked_fp: tokenFingerprint('REFRESH'),
+            revoked_at: '2026-09-30T00:00:00.000Z',
+          },
+        }),
+        makeVault(SEED, { reads }),
+      );
+      expect.unreachable('a revoked grant was not refused');
+    } catch (err) {
+      refusal = err instanceof Error ? err.message : String(err);
+    }
+    expect(refusal).toMatch(/revoked or expired/);
+    expect(reads, 'a refused request resolved the client secret out of the vault').not.toContain('CRM_CLIENT_SECRET');
+    expect(reads, 'a refused request resolved the client id out of the vault').not.toContain('CRM_CLIENT_ID');
+    // The positive control: without this the assertions above would also pass if
+    // the recorder were simply not wired up, which is the failure that produced
+    // the wrong verdict in the first place.
+    expect(reads, 'the read recorder captured nothing at all, so the two assertions above prove nothing').toContain('CRM_API_REFRESH_TOKEN');
   });
 });

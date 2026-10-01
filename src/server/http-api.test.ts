@@ -9792,18 +9792,11 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
   const VERIFIER = 'v'.repeat(43);
 
-  async function arrange(): Promise<string> {
-    const { ApiStore } = await import('../core/api-store.js');
+  async function arrange(opts: { expiresAt?: number; tokenBody?: string } = {}): Promise<{
+    cookie: string; store: Awaited<ReturnType<typeof makeStore>>;
+  }> {
+    const store = await makeStore(opts.expiresAt);
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
-    const store = new ApiStore();
-    store.register({
-      id: PROFILE, name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
-      auth: {
-        type: 'oauth2',
-        vault_keys: ['CRM_CLIENT_ID'],
-        oauth: { client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' },
-      },
-    });
     mockGetApiStore.mockReturnValue(store);
     mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_CLIENT_ID' ? 'id-1' : 'sec-1'));
     mockDerivePresetEndpoints.mockReturnValue({
@@ -9813,24 +9806,70 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     });
     mockExchangeToken.mockResolvedValue({
       ok: true, status: 200, responseOk: true,
-      text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
+      text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
     });
     const signed = signProfileOAuthState(
       { state: STATE, profileId: PROFILE, verifier: VERIFIER },
       TEST_SECRET, Math.floor(Date.now() / 1000),
     );
     if (signed === null) throw new Error('fixture could not be signed');
-    return `lynox_profile_oauth_state=${encodeURIComponent(signed)}`;
+    return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(signed)}`, store };
   }
 
+  async function makeStore(expiresAt?: number): Promise<InstanceType<
+    Awaited<typeof import('../core/api-store.js')>['ApiStore']
+  >> {
+    const { ApiStore } = await import('../core/api-store.js');
+    const store = new ApiStore();
+    store.register({
+      id: PROFILE, name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+      auth: {
+        type: 'oauth2',
+        vault_keys: ['CRM_CLIENT_ID'],
+        oauth: {
+          client_id_key: 'CRM_CLIENT_ID',
+          client_secret_key: 'CRM_CLIENT_SECRET',
+          ...(expiresAt === undefined ? {} : { token_expires_at: expiresAt }),
+        },
+      },
+    });
+    return store;
+  }
+
+  // Its OWN data directory, per test, and that is not tidiness.
+  //
+  // Completing a callback now SAVES the profile, to record the expiry of the
+  // token it just stored. An engine with an `engine.db` persists that through the
+  // ConnectionStore, but this harness's store has none, so the save lands as a
+  // JSON file under `<LYNOX_DATA_DIR>/apis`. The mocked `getLynoxDir` falls back
+  // to one fixed path shared by every run, so without this the FIRST run leaves a
+  // profile behind and the SECOND one fails — measured, not feared: correct code
+  // and a clean directory gave 4 passed, the identical code run again against the
+  // directory the first run left gave 4 failed, every one of them a 409 raised
+  // before the exchange.
+  //
+  // That shape is the dangerous one: it is green when written, green in a fresh
+  // container, and red on a re-run, which reads as flake rather than as pollution.
+  let dataDir = '';
+  let previousDataDir: string | undefined;
+
+  beforeEach(() => {
+    previousDataDir = process.env['LYNOX_DATA_DIR'];
+    dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-callback-'));
+    process.env['LYNOX_DATA_DIR'] = dataDir;
+  });
+
   afterEach(() => {
+    if (previousDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = previousDataDir;
+    if (dataDir !== '') rmSync(dataDir, { recursive: true, force: true });
     mockGetApiStore.mockReturnValue(null);
     mockSecretResolve.mockReset();
     mockSecretSet.mockReset();
   });
 
   it('stores both tokens on the ordinary path', async () => {
-    const cookie = await arrange();
+    const { cookie } = await arrange();
     const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
       redirect: 'manual', headers: { cookie },
     });
@@ -9847,7 +9886,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     // traces back. Unguarded, the throw reached the dispatch's catch-all, which
     // answers JSON while every other answer from this route is a page, and the
     // user read "Internal server error" without learning to retry.
-    const cookie = await arrange();
+    const { cookie } = await arrange();
     let call = 0;
     mockSecretSet.mockImplementation(() => {
       call++;
@@ -9866,5 +9905,95 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(body).not.toContain('Nothing was stored');
     // And the first write really did land, which is why the sentence differs.
     expect(call).toBe(2);
+  });
+
+  /**
+   * This route is the SECOND writer of `auth.oauth.token_expires_at`, and until
+   * now it wrote the token and said nothing about its lifetime.
+   *
+   * That is a latch, not a gap. `api_setup fetch_token` stamps the field; a user
+   * who later re-authorises through `connect` gets a fresh token here and keeps
+   * the OLD token's stamp, which by then is in the past. Anything that reads the
+   * field to decide whether to renew — which is the whole reason the field
+   * exists — then decides "renew" on every single request, forever, for a token
+   * that is in fact brand new.
+   */
+  it('clears a stale expiry belonging to the token it just replaced', async () => {
+    const stale = Date.now() - 60_000;
+    const { cookie, store } = await arrange({ expiresAt: stale });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.get(PROFILE)?.auth?.oauth?.token_expires_at,
+      'the replaced token\'s expiry survived, so a reader sees "expired" forever').toBeUndefined();
+  });
+
+  /**
+   * The other direction, and it is worth its own test because the two are
+   * different code paths in `tokenExpiryFrom`: a provider that DOES send
+   * `expires_in` must have it recorded, or the renewal this field exists for can
+   * never be planned at all. Before this change the callback recorded neither.
+   */
+  /**
+   * A profile DELETED while its authorization was in flight must not come back.
+   *
+   * The route reads the profile before `exchangeToken`, which can take fifteen
+   * seconds while the user is on the provider's consent screen. Saving that
+   * pre-exchange snapshot afterwards re-registers whatever it held: `save`
+   * validates shape and says nothing about existence, so a profile the user had
+   * deleted — possibly as an erasure request — would be live again with fresh
+   * tokens. `persistGrant` re-reads for exactly this reason and answers
+   * `'gone'`; the first version of this block did not, and a review caught it.
+   *
+   * The deletion is triggered from inside the exchange, which is the only place
+   * that reproduces the real window.
+   */
+  it('does not resurrect a profile deleted while the exchange was in flight', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      store.remove(PROFILE);
+      return {
+        ok: true, status: 200, responseOk: true,
+        text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+      };
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.get(PROFILE), 'a profile deleted mid-exchange was brought back by the callback save').toBeUndefined();
+    expect(existsSync(join(dataDir, 'apis', `${PROFILE}.json`)), 'the deleted profile was written back to disk').toBe(false);
+  });
+
+  it('records the expiry when the provider says how long the token lives', async () => {
+    const before = Date.now();
+    const { cookie, store } = await arrange({
+      tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+
+    expect(res.status).toBe(200);
+    const at = store.get(PROFILE)?.auth?.oauth?.token_expires_at;
+    expect(at, 'the provider stated a lifetime and nothing recorded it').toBeGreaterThanOrEqual(before + 3600_000);
+    expect(at).toBeLessThanOrEqual(Date.now() + 3600_000);
+
+    // ON DISK, not only in the map. `save` registers in memory before it
+    // persists, so every assertion above passes even with the `apisDir`
+    // argument removed — measured, by removing it: all four callback tests
+    // stayed green. A stamp that lives until the next restart is exactly the
+    // shape of a fix that works in a test and not in production, and this is
+    // the only assertion that can tell the difference.
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'apis', `${PROFILE}.json`), 'utf-8')) as {
+      auth?: { oauth?: { token_expires_at?: number } };
+    };
+    expect(onDisk.auth?.oauth?.token_expires_at, 'the expiry was never persisted, only held in memory').toBe(at);
   });
 });

@@ -23,7 +23,7 @@ import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, to
 import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
-import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused } from '../../core/oauth-token-exchange.js';
+import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
@@ -1111,20 +1111,44 @@ function purgeMessage(purge: TokenPurge): string {
  *
  * Returns `'gone'` when the profile no longer exists, so a caller that just
  * wrote tokens for it can take them out again.
+ *
+ * `tokenExpiresAt` has THREE states, and collapsing two of them into `undefined`
+ * was a defect:
+ *   · a number — the new access token's absolute expiry;
+ *   · `'unknown'` — a new access token was written, but the response did not say
+ *     how long it lives, so any stored expiry now describes a token that is gone
+ *     and has to go with it;
+ *   · `undefined` — this save does not touch the access token at all (the
+ *     revocation record), and an existing expiry stays as it is.
+ *
+ * Before the split, `undefined` meant both "did not touch the token" and "wrote a
+ * token, do not know its lifetime", and the second case kept the OLD number. That
+ * is a latch: `expires_in` is RECOMMENDED, not REQUIRED, in RFC 6749 §5.1, so one
+ * conformant response without it left a past expiry in place permanently. Nothing
+ * read the field when it was written, which is why it went unnoticed; a lazy
+ * refresh reads it, and would then have exchanged a token on every single request.
  */
 function persistGrant(
   apiStore: ApiStore | null | undefined,
   id: string,
   apisDir: string,
   update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
-  tokenExpiresAt?: number,
+  tokenExpiresAt?: number | 'unknown',
 ): 'saved' | 'gone' | 'not-saved' {
   if (!apiStore) return 'not-saved';
   const fresh = apiStore.get(id);
   if (!fresh) return 'gone';
-  const next: ApiProfile = tokenExpiresAt === undefined
-    ? { ...fresh }
-    : { ...fresh, auth: { ...fresh.auth, oauth: { ...fresh.auth?.oauth, token_expires_at: tokenExpiresAt } } } as ApiProfile;
+  let next: ApiProfile;
+  if (tokenExpiresAt === undefined) {
+    next = { ...fresh };
+  } else {
+    const oauth = { ...fresh.auth?.oauth };
+    // `'unknown'` DELETES rather than writes. Keeping the old number would leave
+    // the profile describing the lifetime of a token that is no longer there.
+    if (tokenExpiresAt === 'unknown') delete oauth.token_expires_at;
+    else oauth.token_expires_at = tokenExpiresAt;
+    next = { ...fresh, auth: { ...fresh.auth, oauth } } as ApiProfile;
+  }
   next.oauth_grant = update(fresh.oauth_grant);
   try {
     return apiStore.save(next, apisDir).ok ? 'saved' : 'not-saved';
@@ -2093,6 +2117,15 @@ Next steps before calling create:
       // sent. A provider that does not rotate can answer with the very token it was
       // sent; writing that again and putting it on the record would make the
       // user's own grant look like the exchange's, and a delete would take it.
+      // Computed HERE, above the write of the access token, rather than below the
+      // refresh write where it used to sit. Two saves follow a token write — the
+      // success save and the protected-refresh-name refusal — and only one of them
+      // could reach the value from down there. The other one silently kept the
+      // previous token's expiry.
+      //
+      // The bound itself lives in `tokenExpiryFrom` because the callback in
+      // `server/http-api.ts` is the second writer of this same field.
+      const tokenExpiresAt = tokenExpiryFrom(parsed.expires_in);
       const refreshName = refreshTokenKey(input.id);
       const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' && parsed.refresh_token !== presentedRefresh
         ? parsed.refresh_token
@@ -2111,7 +2144,7 @@ Next steps before calling create:
           const saved = persistGrant(apiStore, input.id, apisDir, (current) => ({
             ...current,
             written: mergeWrites(current, accessWrite),
-          }));
+          }), tokenExpiresAt);
           if (saved === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, accessWrite, secretStore);
           return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
         }
@@ -2130,17 +2163,6 @@ Next steps before calling create:
       // whereas the same second write for the refresh key would have reproduced
       // the very orphan this change removes, which is why THAT one is derived at
       // read time instead.
-      // Bounded: `expires_in` comes from the token endpoint, and an absurd value
-      // is not merely wrong — `1e308 * 1000` is `Infinity`, which `JSON.stringify`
-      // writes as `null` into both backing stores, i.e. a null in a `number |
-      // undefined` field that a future scheduler would read as "already expired".
-      // One year is far past any real token and still a finite integer.
-      const MAX_TOKEN_LIFETIME_S = 366 * 24 * 60 * 60;
-      const lifetimeS = parsed.expires_in;
-      const tokenExpiresAt = typeof lifetimeS === 'number' && Number.isSafeInteger(lifetimeS)
-        && lifetimeS > 0 && lifetimeS <= MAX_TOKEN_LIFETIME_S
-        ? Date.now() + lifetimeS * 1000
-        : undefined;
       // The grant record rides in the same save as the expiry. The client that
       // just succeeded is stamped as the one the stored refresh token belongs to —
       // the comparison `reclassifyForeignGrant` needs on the next `invalid_grant`.
