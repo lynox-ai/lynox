@@ -315,6 +315,18 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'enumerates no tree: `strip` takes a commit-message file and `check` takes a commit range, both as arguments, and a call with neither is refused — which is what this probe exercises. It is NOT exempt from the class: the range door is covered by tests/no-ai-attribution.test.ts, where an unreadable range exits 2 instead of reporting clean',
     expectStrippedExit: 2,
   },
+  // Its input is git's own: the remote and URL as arguments, the ref lines on stdin. There is no
+  // tree to starve. Without a remote URL it refuses with 2 rather than guess the repository. An
+  // EMPTY ref list is a real state (git runs pre-push with none on an "Everything up-to-date"
+  // push) and exits 0 saying it had nothing to check; that and the fail-closed paths (no gh, a
+  // failing gh, an unparseable GitHub URL, a run without its verdict line) are covered in
+  // tests/push-lands-guard.test.ts.
+  'push-lands-guard': {
+    kind: 'exempt',
+    reason:
+      'reads the remote from its arguments and the refs from stdin, not a tree; without a remote URL it refuses (exit 2) instead of guessing, and its fail-closed paths are covered in tests/push-lands-guard.test.ts',
+    expectStrippedExit: 2,
+  },
   'hex-guard': {
     kind: 'exempt',
     reason: 'staged-mode only, where an empty candidate set is the normal case (most commits stage no component)',
@@ -388,6 +400,7 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
+  'push-lands-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/push-lands-guard.mjs'), 'hook'] },
   'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },
   'gitleaks-config-canary': { cmd: 'bash', args: [join(repoRoot, 'scripts/gitleaks-config-canary.sh')] },
 };
@@ -424,7 +437,11 @@ describe('gate coverage', () => {
     // `.mjs` gates, the third-party binary, or the inline blocks, and they were
     // silently unaccounted for while the test reported full coverage.
     const lefthook = readFileSync(join(repoRoot, 'lefthook.yml'), 'utf8');
-    const steps = [...lefthook.matchAll(/^ {4}([a-z0-9][a-z0-9-]*):$/gm)].map((m) => m[1] as string);
+    // Commands are bare keys; SCRIPTS are quoted file names (`"public-repo-guard-meta.sh":`),
+    // keyed here by the name without the extension. Reading only the first shape made every check
+    // that moved to `scripts:` silently leave this inventory, and a stale entry then read as dead.
+    const steps = [...lefthook.matchAll(/^ {4}(?:([a-z0-9][a-z0-9-]*)|"([a-z0-9][a-z0-9-]*)\.(?:sh|mjs)"):$/gm)]
+      .map((m) => (m[1] ?? m[2]) as string);
     const unique = [...new Set(steps)].sort();
 
     expect(unique.length, 'no gate steps parsed out of lefthook.yml — the file shape changed').toBeGreaterThan(5);

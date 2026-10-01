@@ -1,0 +1,67 @@
+# Sweep — branches whose head no pull request will ever carry.
+#
+# WHY: a push to a branch whose PR is already merged or closed lands nowhere, and `git push`
+# reports success (twice on 2026-09-30/10-01; one of the two was rescued only because its
+# author re-measured). The pre-push hook
+# (`.lefthook/pre-push/push-lands-guard.sh`) blocks that at the source. This is its backstop
+# for everything the hook cannot see: a `--no-verify` push, a clone without lefthook, a merge
+# landing in the second between the hook's check and the transport.
+#
+# WHY A SCHEDULE AND NOT `on: push`: GitHub takes a push-triggered workflow from the PUSHED
+# commit. A branch cut before this file existed would not carry it, and a revived old branch
+# is exactly the case here. A schedule always runs main's copy, so no branch content can turn
+# it off.
+#
+# It goes red while any orphaned head exists, and the red reaches its alert issue through
+# run-alert.yml. There is no baseline/allow list on purpose: an exception list takes the
+# pressure off resolving the branch, and resolving it is the point (rescue into a new PR, or —
+# where ancestry proves the content landed — delete the branch).
+#
+# Cost: one API-only job (no install), every three hours.
+name: Push lands — orphaned branch sweep
+
+on:
+  schedule:
+    - cron: '23 */3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: push-lands-sweep
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    # A dispatch from another branch would run that branch's copy of the script.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # read: lists every pull request with its head branch and last head sha.
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          sparse-checkout: scripts/push-lands-guard.mjs
+          sparse-checkout-cone-mode: false
+      - name: Sweep for heads that no pull request will land
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/push-lands-guard.mjs sweep "$GITHUB_REPOSITORY"
+
+  # Report this run's outcome to the workflow's one alert issue. How and why:
+  # run-alert.yml. The rule that every unattended workflow carries this job:
+  # tests/unattended-run-alert.test.ts.
+  alert:
+    needs: [sweep]
+    if: always()
+    permissions:
+      # justified: run-alert.yml only opens, edits and closes this workflow's alert
+      # issue; it checks nothing out and holds no secrets.
+      issues: write
+    uses: ./.github/workflows/run-alert.yml
+    with:
+      results: ${{ toJSON(needs.*.result) }}
