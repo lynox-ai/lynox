@@ -936,11 +936,18 @@ describe('Config', () => {
 
     it('changeset_review in a PROJECT config is IGNORED — whether writes are staged for review is a user-config decision', async () => {
       // Off the allowlist since 2026-10-01, and the reason is NOT the one above.
-      // This is REVERSIBLE: it destroys nothing, it removes a bar in front of
-      // local writes (`session.ts`: a project `false` drops changeset review on
-      // non-autonomous runs). The decision rests only on where the setting may
-      // come from — a cloned repo must not decide whether a write is staged for
-      // review before it lands.
+      // This is REVERSIBLE: it destroys nothing.
+      //
+      // ⚠ And it does not "stage writes for review before they land" — that was
+      // wrong, and a review round measured it. Changeset mode is
+      // backup-before-write: the write happens at once, the diff preview and the
+      // permission prompt are deliberately skipped for the two mutating tools,
+      // and the review is a POST-run diff with a rollback. A project `false`
+      // therefore trades the post-run rollback for the write-time guard — it
+      // shifts when review happens rather than removing it.
+      //
+      // The decision rests on origin alone: a cloned repo must not decide
+      // whether rollbackability exists for the writes it causes.
       const userDir = join(fakeHome, '.lynox');
       const projectDir = join(fakeProject, '.lynox');
       mkdirSync(userDir, { recursive: true });

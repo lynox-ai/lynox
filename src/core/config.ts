@@ -225,11 +225,21 @@ export function loadConfig(): LynoxUserConfig {
   // Any reasoning about which selection wins has to account for both.
     'organization_id', 'client_id',
     // `changeset_review` is NOT here, since 2026-10-01, and the reason is NOT
-  // the one above: this is REVERSIBLE. It destroys nothing — it removes a bar
-  // in front of local writes (a project `false` drops changeset review on
-  // non-autonomous runs). The decision rests only on where the setting may
-  // come from: a cloned repo must not decide whether a write is staged for
-  // review before it lands.
+  // the one above: this is REVERSIBLE. It destroys nothing.
+  //
+  // ⚠ And it is NOT "a bar in front of writes" — that description was wrong and
+  // a review round measured it. Changeset mode is backup-BEFORE-write: the write
+  // lands immediately, `agent.ts` explicitly skips the diff preview, the
+  // permission prompt and `isDangerousDetailed` for `write_file`/`edit_file`
+  // ("review happens post-run"), and the review is a post-run diff with a
+  // rollback. So a project `false` removes the post-run diff and the
+  // rollbackability, and in exchange RESTORES the write-time guard. It shifts
+  // the moment of review; it does not simply remove one.
+  //
+  // The decision stands on origin alone: a cloned repo must not decide whether
+  // rollbackability exists for the writes it causes. Note it is inert on
+  // autonomous runs (`isAutonomous ||`) and without an active workspace, and it
+  // never covered bash write paths (`sed -i`, `tee`) at all.
   'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
     'max_http_requests_per_hour', 'max_http_requests_per_day',
