@@ -11,7 +11,7 @@ sidebar:
   - [Claude (Anthropic)](https://console.anthropic.com/settings/keys) — recommended primary, direct API. Prompt caching makes cache-heavy workflows the cheapest option per token of real work. Tested on every release.
   - [Mistral](https://console.mistral.ai/api-keys/) — France/EU, OpenAI-compatible adapter pinned to `api.mistral.ai`. Lower list prices than Claude; pick it for sovereignty or for uncached workloads where the lower per-token rate dominates. Tested on every release.
 
-  Other endpoints — OpenAI itself, Ollama, LM Studio, Groq, vLLM, Gemini, the Anthropic-compatible "custom" proxy path (e.g. a LiteLLM proxy exposing the Anthropic Messages route), and Google Vertex AI — are **wired but not regularly tested**. They work in principle and you can configure them via `~/.lynox/config.json` or environment variables, but expect rough edges around tool-calling reliability. See [LLM Providers](/setup/llm-providers/).
+  Other endpoints — OpenAI itself, Ollama, LM Studio, Groq, vLLM, Gemini, the Anthropic-compatible "custom" proxy path (e.g. a LiteLLM proxy exposing the Anthropic Messages route), and Google Vertex AI (not usable in the Docker image) — are **wired but not regularly tested**. They work in principle and you can configure them via `~/.lynox/config.json` or environment variables, but expect rough edges around tool-calling reliability. See [LLM Providers](/setup/llm-providers/).
 
 The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Config**.
 

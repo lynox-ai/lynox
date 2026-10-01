@@ -565,7 +565,7 @@ export async function runDockerInstaller(): Promise<void> {
     // README/docs promise lines up with what `npx @lynox-ai/core` actually
     // shows). Vertex is no longer offered at install time; its engine code
     // path remains, but the image this installer sets up does not include
-    // the optional packages it needs, so it cannot run there.
+    // the optional package it needs, so it cannot run there.
     stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
     stdout.write(`  ${DIM}Where should AI requests be sent?${RESET}\n\n`);
 

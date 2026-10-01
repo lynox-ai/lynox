@@ -224,7 +224,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider). Anthropic-only — does NOT serve `provider: openai`. |
 | `ANTHROPIC_BASE_URL` | Base URL for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental, not usable in the Docker image) |
 | `LYNOX_BALANCED_MODEL` | Which Claude Sonnet build serves the **balanced** tier. Set `claude-sonnet-5` to opt into the 1M-token context window; unset keeps the default. |
 
 ### OpenAI-Compatible
@@ -238,7 +238,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 ### Legacy: Google Vertex AI (experimental)
 
-`provider: vertex` is no longer offered by the installer. The env vars below are still read, but Vertex needs two optional packages, `@anthropic-ai/vertex-sdk` and `google-auth-library`, that the **Docker image does not include**. In the image a Vertex setup fails on the first LLM call; it only works in an npm install where you add both packages yourself, and that path is not regularly tested. New installs should use Anthropic direct or Mistral.
+`provider: vertex` is no longer offered by the installer. The env vars below are still read, but Vertex needs the optional package `@anthropic-ai/vertex-sdk`, which the **Docker image does not include**. In the image a Vertex setup fails when the engine starts; it only works in an npm install where you add the package yourself, and that path is not regularly tested. New installs should use Anthropic direct or Mistral.
 
 | Variable | Purpose |
 |----------|---------|
