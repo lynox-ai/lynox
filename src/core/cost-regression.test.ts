@@ -94,15 +94,26 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
 // double-counts a set that is never on the wire alongside the legacy one.
 const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search']);
 
+// Same reason, different shape: `calendar_read` is registered only when `calendar_enabled` is
+// on (engine.ts), and that flag ships OFF. The barrel exports it so the flag can turn it on, but
+// the prefix a default tenant pays does not carry it — measuring it here would budget for a cost
+// nobody is charged, and would quietly hide the real growth of the tools that ARE always on.
+// When the flag becomes the default, move this name out and re-baseline in the same commit.
+// `bulk_plan`/`bulk_status` are the same case behind `bulk_runs_enabled` (ships OFF): the dry
+// run lands before the approval and apply slices, so no default tenant is offered a tool that
+// can only ever preview.
+const FLAG_GATED_TOOL_NAMES = new Set(['calendar_read', 'bulk_plan', 'bulk_status']);
+
 /** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
- *  swap tools — see above; they replace the legacy set at runtime, never co-exist with it). */
+ *  swap tools and the flag-gated ones — see above; neither is on a default turn's wire). */
 const BUILTIN_TOOLS: readonly ToolEntry[] = Object.values(builtinTools).filter(
   (v): v is ToolEntry =>
     typeof v === 'object' &&
     v !== null &&
     'definition' in v &&
     typeof (v as { definition: unknown }).definition === 'object' &&
-    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name),
+    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name) &&
+    !FLAG_GATED_TOOL_NAMES.has((v as ToolEntry).definition.name),
 );
 
 /**
@@ -123,12 +134,25 @@ function measureStaticPrefixTokens(): number {
 
 // ── Budget constants ─────────────────────────────────────────────────────
 //
-// Each budget = measured baseline + ~15 % headroom. The headroom is wide
-// enough that an ordinary small prompt tweak (a sentence, a clarifying
-// clause, a tightened tool description) does NOT trip the guard, but tight
-// enough that a real bloat — a new heavy tool, a multi-KB prompt section,
-// a verbose schema — does. Bumping a budget is an intentional, one-line,
-// reviewable change.
+// STATIC_PREFIX_BUDGET is a RATCHET, not a ceiling with slack: it carries the
+// exact current measurement, so ANY growth of the static prefix trips it and
+// has to be bumped deliberately. That is the "intentional, one-line,
+// reviewable change" below, and it is what the values in this file have
+// actually done — on origin/main the budget was 23634 against a measured
+// 23634, to the token.
+//
+// This paragraph used to open "measured baseline + ~15 % headroom … an
+// ordinary small prompt tweak does NOT trip the guard", which contradicted
+// both the next sentence and every value under it. Corrected 2026-08-23 to
+// describe the guard that exists. (The value below does move in the same
+// commit, from 23634 to 23817 — for the prompt edit that commit ships, not
+// for this correction.) If the ratchet is
+// ever the wrong design, that is a deliberate change to make, and the fix is
+// to widen the values, not to keep prose that tells the next reader their
+// prompt edit will sail through when it will not.
+//
+// The per-tool budget below is a different shape and does carry slack —
+// it bounds the largest single tool definition, not a sum.
 //
 // Baselines measured on origin/main @ 8560d3b3, 2026-05-21, via
 // `estimateTokens` (≈3.5 chars/token):
@@ -254,7 +278,193 @@ function measureStaticPrefixTokens(): number {
 // 2026-07-18: +214 for the Session-Start task-proactivity rewrite (prompts.ts) —
 // the guardrail against the agent autonomously sending mail / mutating tasks from
 // a briefing nudge. Cached (paid once per session); the safety fix justifies it.
-const STATIC_PREFIX_BUDGET = 23350;
+// 2026-08-06: +4 (measured 23354) for `auth.username_key` / `auth.password_key` on
+// api_setup's input schema — the two fields that make `basic_format: 'user_pass_split'`
+// an implemented auth path instead of a schema value that silently 401s. The PROSE
+// explaining it deliberately went to `detailedGuidance` (paid on use) rather than the
+// cached description, so what lands here is only the two property declarations.
+// 2026-08-07: `calendar_read` costs this budget NOTHING, and the number moved DOWN
+// because it is excluded above rather than counted. It ships behind `calendar_enabled`,
+// default off, so a default tenant's prefix does not carry it — measured both ways:
+// counted it was +148, gated it is 0.
+//
+// Two things this is not. It is not a free pass: turning the flag on costs those 148 tokens on
+// every turn of that tenant, and flipping the default means moving the name out of
+// FLAG_GATED_TOOL_NAMES and re-baselining here, in the same commit. And it is not a reason to
+// gate tools for cost — a capability nobody can reach is worth nothing; this one is gated
+// because a calendar feed is externally authored and only a real one proves the read is right.
+// 2026-08-09 (F2/D2, cost-controls v2): +~120 tokens total for the `tools`
+// declaration on BOTH generator surfaces — required on plan_task phases, and
+// declarable (with `model`) on run_workflow ad-hoc steps, which previously had
+// no way to opt into bash at all post-F2. Deliberate: the field is the
+// mechanism that keeps bash (and its approval dialogs) out of every generated
+// workflow step, which buys back far more than the prefix pays. Descriptions
+// were tightened before bumping — neither names a tool list (the caller's own
+// toolset is in context; an invalid name fails loudly at save).
+// 2026-08-18: +125 tokens for the http_request session cap and the task_create
+// `params` field — the two halves of one change, so the bump is one entry.
+//
+// What it buys, measured rather than argued: the 100-request cap appeared in no
+// tool description and no prompt, so the model learned it by HITTING it. A live
+// bulk on 2026-08-18 asked for 130 records, got exactly 100, and stopped at id
+// 101 — correctly reported, but it had no way to have batched differently,
+// because it could not know the ceiling existed.
+//   The escape it named alongside — a saved workflow fired per batch, with
+// `params` re-targeting each firing — was removed on 2026-09-22 and the entry
+// below records what that cost. The CAP half of this bump stands; the escape
+// half stopped being true when a saved workflow stopped confirming itself, and
+// a route that ends in a refusal is worse to name than to leave unnamed.
+//
+// The alternative was leaving the model to discover a hard wall mid-job on a
+// customer's 2000-record import. 125 tokens a turn is the cheaper failure.
+// Both descriptions were tightened before this bump (176 → 125) — the first
+// draft spelled out what the shorter one implies.
+// 2026-08-20: +9 (measured 23634) for one clause on `subjects_merge`'s description —
+// "It cannot be undone from chat." The tool used to promise the opposite ("This is
+// reversible"), which was false three ways, and the honest correction cannot live in
+// `detailedGuidance` alone: that carrier is injected AFTER the first call
+// (`agent.ts:1774-1785`), so on the first merge in a thread the model composes its message
+// to the user having read only the cached description. Paying 9 tokens a turn is the
+// price of the model not telling a user something untrue at the one moment it matters.
+// WHO pays it, stated precisely rather than as "the fleet": `subjects_merge` is registered
+// only when `subject_graph_enabled` is true (`engine.ts:1786`), so a tenant with the flag
+// off pays ZERO — this guard counts it worst-case, as it does `set_thread_context`. The
+// four prod instances run with the flag on (measured, not assumed), so there it is real.
+// Not claimed to be minimal: "No undo from chat." would be ~4 tokens cheaper and is
+// equally true; the fuller sentence was kept because this text is parsed by a model
+// deciding whether to call a destructive tool.
+// The MECHANISM (ledger path, absent from backup and migration) stays on
+// `detailedGuidance` where the on-use split puts it — the full-mechanism wording in the
+// description measured 23649, i.e. +15 more for prose the model does not need to decide.
+// +183 (23634 → 23817): the no-install policy in `## Tools`, plus the bash
+// description losing "package management" and gaining the rule that replaces
+// it. Measured, not estimated.
+// WHAT IT BUYS, measured rather than argued — the chain is a `read this PDF`
+// task followed by three distinct missing-tool failures (pdftotext, PyPDF2,
+// pdf-parse), n=4 per arm:
+//   Anthropic Haiku 4.5 — install attempts 2/4 → 0/4 (`apt-get update &&
+//     apt-get install -y poppler-utils`), still calling tools 4/4 → 0/4.
+//   Mistral large-2512  — 0/4 → 0/4 on both. It already stopped and reported,
+//     so this text is a no-op there. The failure is model-dependent, and the
+//     honest claim is "buys something on one of the two", not "on both".
+// The reference case is a real thread: 41 bash calls spent on installs and five
+// hand-written PDF extractors before giving up. One avoided thread of that shape
+// costs far more than 184 cached-prefix tokens across the turns it would take to
+// repay — which is the whole trade, since bash is registered for EVERY tenant
+// (unlike `subjects_merge` above, which a flag can switch off).
+// NOT claimed to be minimal, and one part is unmeasured: the first draft cost
+// +291 and was cut to +184 with the effect re-verified on the exact shipped text.
+// Whether the "offer what exists" half earns its share is pinned by tests but has
+// no behaviour measurement of its own.
+// +77 (2026-09-06): "Cite what you fetched" in GROUNDING_PROMPT_BLOCK.
+// The FINDING is measured, the EFFECT is not, and the difference matters here.
+// Measured: one prod thread made 39 `web_research` calls and the answers carried
+// zero markdown links and one bare URL. The tool results hold the URLs; the user
+// never sees tool results. So every researched price and address arrived
+// unattributable — indistinguishable, from where the reader sits, from a fact
+// the model made up, which the rest of this same block spends paragraphs
+// forbidding. It also decides whether the UI half of that fix does anything: a
+// renderer that styles links cannot style links the model does not write.
+// NOT measured: that a model in fact emits more links because of this sentence.
+// That needs a cross-provider eval, not a unit test, and none was run — unlike
+// the bash entry above, which carries a real before/after.
+// Cut from +187 to +77 across two rewrites, on the exact shipped text: the
+// examples went, the rationale stayed, because the rationale is the half a model
+// can generalise from.
+// +19 (23894 → 23913): `waiting` joins task_list's status enum, with a sentence
+// saying what it means. Measured in halves rather than claimed: the enum VALUE
+// alone is +3, the sentence is the other +16.
+//
+// Why the +16 is bought and not cut. A parked trigger renders as `[waiting]` in
+// the lines task_list returns (`formatTaskLine`), so the model meets the value
+// whether or not the schema explains it — and an enum member with no gloss is
+// one a model narrates by guessing. The value it would guess wrong about is one
+// a user is asking after ("why hasn't my report run?"). Keeping the filterable
+// value without the sentence saves 16 tokens by making the other 3 misleading.
+//
+// What was cut, on the same reasoning applied honestly: the first draft added
+// "you cannot set it, only filter by it" — 21 more tokens spent forbidding
+// something the model cannot express, because `task_update`'s enum does not
+// offer the value and TaskManager.update throws on it. A refusal the schema
+// already makes unreachable is not worth a per-turn line.
+// +35 (23913 → 23948): `connect` joins api_setup's action enum, with a line in
+// the tool's action list. Measured in halves, like the entry above: the enum
+// VALUE alone is +3, the line is the other +32.
+//
+// Why the +32 is bought. The value alone would have shipped an action name the
+// model has no reading for — and the reading is the whole point of the action:
+// it is the one place that says a provider is connected by handing the USER a
+// link, instead of asking them to paste a token. A model that does not know
+// that asks for the token, which is the behaviour the action exists to replace.
+// An enum member whose gloss is missing is narrated by guessing, and here the
+// guess is the status quo.
+//
+// What was cut, measured rather than asserted: the first draft ran +40 — it
+// spelled out "to authorize a provider" and "show it to them". Naming the
+// provider is redundant inside a tool that is entirely about one API profile,
+// and the second clause repeated the verb. Same rule, eight tokens less.
+// 2026-09-24: −109 (23948 → 23839, measured) — FIVE strings deleted, not rewritten, all of
+// them advertising a route that now ends at a consent step the model cannot grant
+// (`save_workflow` no longer stamps the workflow as confirmed). Two in this prompt
+// ("scheduled via `task_create(workflow_id, schedule)`", "a `workflow_id` for
+// `run_workflow` / `task_create`") and three in tool definitions, which count toward this
+// measurement too: `task_create`'s `params` description (firing one workflow per batch),
+// `http_request`'s batch advice, and `save_workflow`'s "you can pass to run_workflow or
+// task_create". Naming a DIFFERENT route would be a decision about who may consent, so
+// they are gone rather than replaced. 380 characters in total.
+// The same deletion measured −108 against the pre-`connect` prefix (23913) and −109
+// against this one, and the reason is arithmetic rather than linguistic: this measure is
+// `Math.ceil(length / 3.5)` (`estimateTokens`), and 380 / 3.5 = 108.57, so which side of
+// the ceiling the two endpoints fall on depends on the base length. THE DIFFERENCE OF TWO
+// ROUNDED NUMBERS IS NOT THE ROUNDING OF THEIR DIFFERENCE. Rebasing this entry past
+// another one is therefore a RE-MEASUREMENT, never an arithmetic — 23948 − 108 would have
+// written 23840 here, and nothing in the guard can detect a budget that is one too high.
+// (An earlier version of this note blamed a tokenizer merging across text boundaries.
+// There is no tokenizer here; that was a mechanism fitted to the gap, and a refuter
+// caught it by reading `estimateTokens`. The conclusion survived, the reason did not.)
+// 2026-09-25: +76 (23839 → 23915, measured) — one new parameter on `spawn_agent`,
+// `secret_scope`, which bounds which vault keys a sub-agent may resolve. The cost is
+// the schema entry itself (an `oneOf` with two branches) plus a one-line description;
+// the reasoning behind the parameter lives in a code comment, which ships nowhere.
+// The first draft of that description cost 140 and was cut to 76 by moving three
+// sentences of explanation out of the prompt and into the source — a reminder that
+// this budget is a price list for PROSE, and that the audience for an explanation is
+// usually the next reader of the file, not the model on every turn.
+// Measured after the cut, not derived from it: 23979 (first draft) − 64 (the cut) would
+// have written 23915 here by luck, and the note above this one exists because that
+// arithmetic is not sound.
+// 2026-10-01: +24 (23915 → 23939, measured) — a description on `spawn_agent`'s `tools`
+// parameter, which had none. It narrows a child's tool set and cannot widen a grant, and
+// the outcome of naming something outside the grant is silent: without the sentence, the
+// model's only way to learn the rule is a child that cannot do its task.
+//
+// Four wordings were measured, not derived, and the cheapest that carries the rule won:
+// 23939 for the one that shipped, 23950 and 23952 for two that also spell out what gets
+// dropped, 23954 for a first draft that instead said a role's promise "still binds".
+// That draft was cut for being TOO STRONG rather than too long: it reads as a claim about
+// everything the child can reach, and one parameter description is not the place to make
+// a claim that wide. The baseline was re-measured in the same run (23915, no description),
+// so the +24 is a difference between two measurements and not an arithmetic guess.
+//
+// How the numbers were taken, since the guard only prints them when it fails: the budget
+// was set to 1 for the measuring runs, which makes each run report `prefix is N tokens`.
+// The slack ratchet above pins the result from the other side — budget minus measurement
+// must stay under 50, so a budget left at 23954 over a 23939 prefix would still pass
+// this test and fail that one.
+const STATIC_PREFIX_BUDGET = 23939;
+
+/**
+ * How far ABOVE the measurement the budget may sit before the ratchet is a
+ * fiction. Without this, the guard has a silent escape hatch: bumping the
+ * budget to a round number well past the measurement keeps every test green
+ * while banking headroom nobody reviewed — the exact mutation this file's
+ * comment claims cannot happen ("ANY growth trips it"). A claim in prose that
+ * nothing enforces is not a rule, so it is enforced here.
+ *
+ * 50 tokens ≈ 0.2 % — room for a one-word edit landing between a measurement
+ * and its commit, not room for a paragraph.
+ */
+const STATIC_PREFIX_SLACK = 50;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
@@ -271,6 +481,18 @@ describe('Tier-1 cost-regression guard', () => {
   });
 
   // Guard A — static cacheable-prefix budget.
+  it('keeps STATIC_PREFIX_BUDGET pinned to the measurement, not parked above it', () => {
+    const measured = measureStaticPrefixTokens();
+    expect(
+      STATIC_PREFIX_BUDGET - measured,
+      `STATIC_PREFIX_BUDGET is ${STATIC_PREFIX_BUDGET} against a measured ${measured} — ` +
+        `${STATIC_PREFIX_BUDGET - measured} tokens of unused headroom. ` +
+        `If you SHRANK the prefix, lower the budget to ${measured}. ` +
+        `If you raised the budget, set it to the measurement instead: ` +
+        `the guard is a ratchet, not a ceiling with slack.`,
+    ).toBeLessThanOrEqual(STATIC_PREFIX_SLACK);
+  });
+
   it('keeps the static cacheable prefix within STATIC_PREFIX_BUDGET', () => {
     const measured = measureStaticPrefixTokens();
     expect(
@@ -314,6 +536,7 @@ describe('extended-tool-description-on-use split invariants', () => {
     { name: 'ask_secret', movedPhrase: 'dead end' },
     { name: 'memory_recall', movedPhrase: 'may be stale' },
     { name: 'api_setup', movedPhrase: 'auto-attached' },
+    { name: 'subjects_merge', movedPhrase: 'Never tell the user a merge is reversible' },
   ] as const;
 
   for (const { name, movedPhrase } of TARGETS) {

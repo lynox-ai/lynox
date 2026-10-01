@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS } from './validate.js';
+import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS, ABSOLUTE_MAX_STEPS, maxStepsFor, parallelStepCapFor } from './validate.js';
 import type { InlinePipelineStep, PlannedPipeline } from '../types/index.js';
 
 const validManifest = {
@@ -72,11 +72,15 @@ describe('validateManifest', () => {
       .not.toThrow();
   });
 
-  it('throws when agents array exceeds the MAX_STEPS ceiling', () => {
-    const overCeiling = Array.from({ length: MAX_STEPS + 1 }, (_, i) => ({
+  it('throws when agents array exceeds the absolute sanity ceiling (schema backstop)', () => {
+    // The policy cap (MAX_STEPS=20, config-overridable via max_workflow_steps) is
+    // enforced on the run paths in pipeline.ts, NOT in the zod schema — so 21
+    // agents no longer throws here. The schema keeps ABSOLUTE_MAX_STEPS as a
+    // sanity backstop against pathological manifests regardless of config.
+    const overSanity = Array.from({ length: ABSOLUTE_MAX_STEPS + 1 }, (_, i) => ({
       id: `step-${String(i)}`, agent: 'my-agent', runtime: 'mock' as const,
     }));
-    expect(() => validateManifest({ ...validManifest, agents: overCeiling }))
+    expect(() => validateManifest({ ...validManifest, agents: overSanity }))
       .toThrow('Invalid manifest');
   });
 
@@ -340,5 +344,160 @@ describe('assertPlannedPipelineIsValid', () => {
       steps: [{ id: 'q', task: 'ask_user something' }],
       mode: 'interactive',
     })).not.toThrow();
+  });
+});
+
+describe('assertDeclaredToolsAreValid (F2/D2 save-time gate)', () => {
+  const basePipeline: Omit<PlannedPipeline, 'mode' | 'steps'> = {
+    id: 'p2',
+    name: 'test-tools',
+    goal: 'goal',
+    reasoning: 'r',
+    estimatedCost: 0,
+    createdAt: new Date().toISOString(),
+    executed: false,
+    executionMode: 'orchestrated',
+    template: false,
+  };
+
+  it('rejects a declared tool name outside the inline pool, naming the step', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 'bad-step', task: 'do', tools: ['htp_request'] }],
+      mode: 'autonomous',
+    })).toThrow(/bad-step.*htp_request/);
+  });
+
+  it('accepts a declared set drawn from the pool (incl. bash)', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 's', task: 'do', tools: ['http_request', 'bash'] }],
+      mode: 'autonomous',
+    })).not.toThrow();
+  });
+
+  it('accepts steps that declare nothing (legacy manifests)', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 's', task: 'do' }],
+      mode: 'autonomous',
+    })).not.toThrow();
+  });
+});
+
+describe('validateManifest preserves step.tools (zod strips unknown keys)', () => {
+  it('keeps the declared tool set on the validated result', () => {
+    const manifest = validateManifest({
+      manifest_version: '1.0',
+      name: 'm',
+      triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'do', tools: ['http_request'] }],
+    });
+    expect(manifest.agents[0]!.tools).toEqual(['http_request']);
+  });
+});
+
+describe('validateManifest applies the declared-tools gate (F2 fix round)', () => {
+  it('rejects a typo\'d declared tool on an inline manifest step', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'do', tools: ['htp_request'] }],
+    })).toThrow(/htp_request/);
+  });
+
+  it('rejects a typo\'d declared tool on a NESTED pipeline step', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.1',
+      name: 'm', triggered_by: 't',
+      agents: [{
+        id: 'outer', agent: 'outer', runtime: 'pipeline',
+        pipeline: [{ id: 'inner', task: 'do', tools: ['no_such_tool'] }],
+      }],
+    })).toThrow(/no_such_tool/);
+  });
+
+  it('rejects a declaration that excludes the step\'s own replay tool', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'replay', tools: ['read_file'], tool: 'bash', input_template: {} }],
+    })).toThrow(/replays tool "bash"/);
+  });
+
+  it('accepts an UNDECLARED replay step with a non-pool tool (captured workflows degrade gracefully)', () => {
+    // Captured workflows legitimately carry non-pool tools; the runtime falls
+    // back to the prose task when the replay tool is not granted. The gate
+    // must not reject stored data that works today.
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'replay artifact save', tool: 'artifact_save', input_template: {} }],
+    })).not.toThrow();
+  });
+
+  it('accepts a declared empty array (a "no tools" declaration)', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'reason', tools: [] }],
+    })).not.toThrow();
+  });
+});
+
+describe('maxStepsFor', () => {
+  it('returns the default for absent/malformed config, the override when valid, clamped to the ceiling', () => {
+    expect(maxStepsFor()).toBe(MAX_STEPS);
+    expect(maxStepsFor({})).toBe(MAX_STEPS);
+    expect(maxStepsFor({ max_workflow_steps: 0 })).toBe(MAX_STEPS);   // 0 would reject every workflow
+    expect(maxStepsFor({ max_workflow_steps: -5 })).toBe(MAX_STEPS);  // negative
+    expect(maxStepsFor({ max_workflow_steps: NaN })).toBe(MAX_STEPS); // NaN disables the cap silently
+    expect(maxStepsFor({ max_workflow_steps: 40 })).toBe(40);         // valid override
+    expect(maxStepsFor({ max_workflow_steps: 5000 })).toBe(ABSOLUTE_MAX_STEPS); // clamped to sanity ceiling
+  });
+});
+
+describe('parallelStepCapFor', () => {
+  it('keeps ABSENT meaning unbounded — the documented v1.1 phase behaviour', () => {
+    // The one case that must stay `undefined`: no limits object at all means
+    // "launch the whole phase", which the limit-less parallel test pins.
+    expect(parallelStepCapFor(undefined, 5)).toBeUndefined();
+  });
+
+  it('never lets a MALFORMED width mean "no bound at all"', () => {
+    // The regression this exists for: `cap > 0` treated every one of these as
+    // "unset" and fell through to unbounded fan-out. A present value is a
+    // REQUEST for a bound, so the malformed forms must resolve to the fallback.
+    // `null` is in the list because it is the form that actually PERSISTS:
+    // JSON.stringify turns both NaN and Infinity into null, so a stored
+    // limits blob can never carry the other two.
+    for (const bad of [0, -1, -0.5, NaN, -Infinity, null as unknown as number]) {
+      expect(parallelStepCapFor(bad, 5), `maxParallelSteps: ${String(bad)}`).toBe(5);
+    }
+  });
+
+  it('treats Infinity as the "no limit" sentinel it is, NOT as malformed', () => {
+    // The safe direction points backwards here, which is why it gets its own
+    // test. Infinity is the idiomatic JS "no bound", and the pre-clamp executor
+    // honoured it exactly (Math.min(Infinity, N) = N). Lumping it in with NaN
+    // would give the caller who asked most explicitly for NO bound the tightest
+    // one — a 180° inversion of intent, and silent.
+    expect(parallelStepCapFor(Infinity, 5)).toBeUndefined();
+    expect(parallelStepCapFor(Infinity, 1)).toBeUndefined();
+    // …while its nonsense twin still takes the fallback.
+    expect(parallelStepCapFor(-Infinity, 5)).toBe(5);
+  });
+
+  it('passes a valid width through, truncated to a whole number of workers', () => {
+    expect(parallelStepCapFor(3, 5)).toBe(3);
+    expect(parallelStepCapFor(1, 5)).toBe(1);
+    expect(parallelStepCapFor(2.9, 5)).toBe(2); // a worker pool is integral
+  });
+
+  it('honours the caller-supplied fallback, so each layer picks its own safe width', () => {
+    // The executor passes 1 (tightest bound); the in-session resolver passes its
+    // default. Same helper, different safe direction per layer.
+    expect(parallelStepCapFor(0, 1)).toBe(1);
+    expect(parallelStepCapFor(0, 5)).toBe(5);
   });
 });

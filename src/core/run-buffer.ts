@@ -8,24 +8,24 @@
  * it, the run is marked `interrupted`, and the client shows a Retry — there is
  * no SQLite event tail.
  *
- * Per-run, the buffer is a seq-numbered ring of `StreamEvent`s (the rendered
- * event stream — `text`/`tool_call`/`tool_result`/`spawn*`/…), fanned out to N
- * ephemeral subscribers. The `GET /api/runs/:runId/stream?since=<seq>` endpoint
- * replays events newer than `since`, then live-tails new appends.
+ * Per-run, the buffer is a seq-numbered ring of `EmittedStreamEvent`s (the
+ * rendered event stream — `text`/`tool_call`/`tool_result`/`spawn*`/…), fanned
+ * out to N ephemeral subscribers. The `GET /api/runs/:runId/stream?since=<seq>`
+ * endpoint replays events newer than `since`, then live-tails new appends.
  *
- * Secret safety (S1, D-S1): `append` is typed to `StreamEvent`, and
- * `secret_prompt`/`ask_secret` prompts are NOT `StreamEvent`s — they travel a
+ * Secret safety (S1, D-S1): `append` is typed to the event union, and
+ * `secret_prompt`/`ask_secret` prompts are NOT part of it — they travel a
  * separate value-free handler path and can never enter this buffer. The
  * type system is the guard; a unit test asserts the invariant holds.
  */
 
-import type { StreamEvent } from '../types/tools.js';
+import type { EmittedStreamEvent } from '../types/tools.js';
 
 /** One buffered, sequenced event. `seq` is a per-rendered-event counter (NOT
  * the persisted-row counter eager-persist uses — see PRD U9 seq-space note). */
 export interface BufferedEvent {
   seq: number;
-  event: StreamEvent;
+  event: EmittedStreamEvent;
 }
 
 type EventSubscriber = (e: BufferedEvent) => void;
@@ -53,7 +53,10 @@ export class RunBuffer {
    * Returns the assigned seq (for `id:` lines + lastPersistedSeq checkpoints).
    * No-op-safe after `end()` — a late onStream event past completion is dropped
    * rather than resurrecting a closed buffer. */
-  append(event: StreamEvent): number {
+  // Narrow in, narrow out: only core's own producers feed this, and a replay
+  // that handed back the wide union was where a re-attaching client lost the
+  // one field that says whether its turn is over.
+  append(event: EmittedStreamEvent): number {
     if (this._ended) return this._seq;
     const seq = ++this._seq;
     const entry: BufferedEvent = { seq, event };

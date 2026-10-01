@@ -15,7 +15,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { PromptSegment, TabQuestion, SecretOutcome } from '../types/index.js';
+import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,6 +46,18 @@ export interface PendingPromptRow {
    * secrets — and for every pre-v33 row. Lets a reconnect via /pending-prompt
    * restore multi-select instead of degrading to single-select. */
   multi_select: number | null;
+  /** JSON-encoded {@link PromptOrigin} — the workflow + step that raised this
+   * prompt (v52). NULL when there is no origin to record: every pre-v52 row and
+   * every prompt the main agent raises, where the thread already shows the
+   * cause. Restored by /pending-prompt so a reload keeps the provenance. */
+  origin_json: string | null;
+  /** The trigger whose run raised this prompt (v53) — the durable half of the
+   *  pairing that used to live only in a notification payload and a promise in
+   *  memory. NULL for every prompt raised in a chat turn, which is nearly all of
+   *  them, and for every pre-v53 row. A SOFT reference across a database
+   *  boundary (`triggers` is in engine.db): no FK, no JOIN, and a dangling value
+   *  reads as "no trigger is waiting on this". */
+  trigger_id: string | null;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -89,6 +101,113 @@ function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
   }
 }
 
+/**
+ * The origin fields, in ONE place, welded to the type: each one's wire name and
+ * whether it is text (a string to clamp) or a flag.
+ *
+ * `Record<keyof PromptOrigin, …>` is exhaustive, so a field added to
+ * {@link PromptOrigin} and not here is a COMPILE error rather than a field that
+ * persists and never reads back — which is what a second hand-written list
+ * would eventually produce. Everything below derives from this, so the write
+ * side, the read side and the wire cannot know different sets.
+ */
+const ORIGIN_FIELD_SET: Record<keyof PromptOrigin, { wire: string; text: boolean }> = {
+  workflowName: { wire: 'workflow_name', text: true },
+  stepId: { wire: 'step_id', text: true },
+  stepTask: { wire: 'step_task', text: true },
+  // Not text: a boolean the spawner sets. See PromptOrigin.subagent.
+  subagent: { wire: 'subagent', text: false },
+  subagentName: { wire: 'subagent_name', text: true },
+  subagentTask: { wire: 'subagent_task', text: true },
+};
+const ORIGIN_FIELDS = Object.keys(ORIGIN_FIELD_SET) as (keyof PromptOrigin)[];
+/** The text fields — everything with a length to clamp and a string to read. */
+const ORIGIN_TEXT_FIELDS = ORIGIN_FIELDS.filter(
+  (field): field is Exclude<keyof PromptOrigin, 'subagent'> => ORIGIN_FIELD_SET[field].text,
+);
+
+/**
+ * What a single origin field may carry into a row and onto the wire.
+ *
+ * NOT the display bound — the client clamps a label at 80 and a task at 160,
+ * and that number is free to change without touching anything here. This one
+ * has a different job: `spec.task` may be 16 KB (`MAX_SPAWN_TASK_LENGTH`), and
+ * without a bound at the producer every prompt row and every SSE frame carried
+ * all of it to render 160 characters. Keeping the two numbers separate is
+ * deliberate — unifying them would tie a storage bound to a design decision.
+ */
+const ORIGIN_MAX_CHARS = 512;
+
+function boundOriginText(value: string): string {
+  const points = [...value];
+  return points.length > ORIGIN_MAX_CHARS ? points.slice(0, ORIGIN_MAX_CHARS).join('') : value;
+}
+
+/**
+ * Narrow a `PromptMeta` to the origin fields worth persisting, or `undefined`
+ * when the prompt has no origin. Takes the whole meta rather than one argument
+ * per field on purpose: a call site cannot pass some of them and silently drop
+ * the workflow name.
+ */
+export function promptOriginOf(meta: PromptMeta | undefined): PromptOrigin | undefined {
+  if (!meta) return undefined;
+  // Empty counts as absent, matching the client-side parser. An `undefined`-vs-
+  // `''` split between the two would persist `{"workflowName":""}` here and then
+  // render nothing there — the row would claim an origin the dialog denies.
+  const out: PromptOrigin = {};
+  let present = false;
+  for (const field of ORIGIN_TEXT_FIELDS) {
+    const value = meta[field];
+    if (typeof value !== 'string' || value === '') continue;
+    out[field] = boundOriginText(value);
+    present = true;
+  }
+  if (meta.subagent === true) { out.subagent = true; present = true; }
+  return present ? out : undefined;
+}
+
+/**
+ * The origin as an SSE prompt event carries it — flat, snake_case, derived from
+ * the same table so a field cannot be named on one side and forgotten here.
+ *
+ * Four events used to spread these fields by hand, which is four places to
+ * forget one — and they read the meta RAW while the database row went through
+ * `promptOriginOf`, so an empty string was absent in the row and present on the
+ * wire. One derivation for both ends that.
+ */
+export function originWireFields(meta: PromptMeta | undefined): Record<string, string | true | undefined> {
+  const origin = promptOriginOf(meta);
+  const out: Record<string, string | true | undefined> = {};
+  for (const field of ORIGIN_FIELDS) out[ORIGIN_FIELD_SET[field].wire] = origin?.[field];
+  return out;
+}
+
+/**
+ * Read back a persisted origin. Malformed JSON yields `undefined` rather than
+ * throwing: the origin is a label on a prompt, and a bad label must not take
+ * down the resume of the prompt a run is blocked on.
+ */
+export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
+  if (!raw) return undefined;
+  try {
+    // Deliberately no `typeof parsed === 'object'` / not-an-array guard: the
+    // per-field string checks below already reject every non-object shape by
+    // reading `undefined` off it, and `null` throws into the catch. A guard
+    // whose removal changes no output is not a guard — it is an untestable
+    // branch that makes the function look more careful than it is.
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const meta: PromptMeta = {};
+    for (const field of ORIGIN_TEXT_FIELDS) {
+      const value = o[field];
+      if (typeof value === 'string') meta[field] = value;
+    }
+    if (o['subagent'] === true) meta.subagent = true;
+    return promptOriginOf(meta);
+  } catch {
+    return undefined;
+  }
+}
+
 export class PromptConflictError extends Error {
   constructor(sessionId: string) {
     super(`Session ${sessionId} already has a pending prompt`);
@@ -117,7 +236,7 @@ export class PromptStore {
   private _stmtGetPending: Database.Statement | undefined;
   private _stmtGetById: Database.Statement | undefined;
   private _stmtExpireOld: Database.Statement | undefined;
-  private _stmtExpireAll: Database.Statement | undefined;
+  private _stmtExpireUnparked: Database.Statement | undefined;
   private _stmtSetPartial: Database.Statement | undefined;
 
   constructor(db: Database.Database) {
@@ -139,10 +258,15 @@ export class PromptStore {
     options?: string[],
     multiSelect?: boolean,
     segments?: readonly PromptSegment[],
+    origin?: PromptOrigin,
+    /** Set only by the WorkerLoop, when the asking run belongs to a trigger.
+     *  Every other caller leaves it undefined. */
+    triggerId?: string,
   ): string {
     return this._insert({
       sessionId,
       promptType: 'ask_user',
+      triggerId,
       question,
       optionsJson: options ? JSON.stringify(options) : null,
       questionsJson: null,
@@ -153,12 +277,13 @@ export class PromptStore {
       secretKeyType: null,
       multiSelect: multiSelect === true,
       payloadJson: null,
+      origin,
     });
   }
 
   /** Insert a multi-question (tabs) ask_user prompt. All questions are
    * answered in a single reply. Throws PromptConflictError on collision. */
-  insertAskUserTabs(sessionId: string, questions: TabQuestion[]): string {
+  insertAskUserTabs(sessionId: string, questions: TabQuestion[], origin?: PromptOrigin): string {
     if (questions.length === 0) throw new Error('insertAskUserTabs: questions must be non-empty');
     return this._insert({
       sessionId,
@@ -172,10 +297,11 @@ export class PromptStore {
       secretKeyType: null,
       multiSelect: false,
       payloadJson: null,
+      origin,
     });
   }
 
-  insertAskSecret(sessionId: string, name: string, prompt: string, keyType?: string): string {
+  insertAskSecret(sessionId: string, name: string, prompt: string, keyType?: string, origin?: PromptOrigin): string {
     return this._insert({
       sessionId,
       promptType: 'ask_secret',
@@ -186,6 +312,7 @@ export class PromptStore {
       secretKeyType: keyType ?? null,
       multiSelect: false,
       payloadJson: null,
+      origin,
     });
   }
 
@@ -193,7 +320,7 @@ export class PromptStore {
    * (JSON `MailConnectPromptData`). The consent step renders it and forwards
    * the account to POST /api/mail/accounts; the password is entered there and
    * never touches this row. Throws PromptConflictError on collision. */
-  insertConnectMail(sessionId: string, question: string, payloadJson: string): string {
+  insertConnectMail(sessionId: string, question: string, payloadJson: string, origin?: PromptOrigin): string {
     return this._insert({
       sessionId,
       promptType: 'connect_mail',
@@ -204,6 +331,7 @@ export class PromptStore {
       secretKeyType: null,
       multiSelect: false,
       payloadJson,
+      origin,
     });
   }
 
@@ -240,6 +368,12 @@ export class PromptStore {
     secretKeyType: string | null;
     multiSelect: boolean;
     payloadJson: string | null;
+    origin?: PromptOrigin | undefined;
+    /** Written INSIDE the insert, not by a follow-up UPDATE: between the two
+     *  there would be a window in which the row exists without its pointer, and
+     *  that window is exactly when a concurrent boot expiry must be able to tell
+     *  a parked question apart from an ordinary one. */
+    triggerId?: string | undefined;
   }, retry = false): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
@@ -260,6 +394,8 @@ export class PromptStore {
         expiresAt,
         args.multiSelect ? 1 : null,
         args.payloadJson,
+        args.origin ? JSON.stringify(args.origin) : null,
+        args.triggerId ?? null,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -395,25 +531,154 @@ export class PromptStore {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
-  /** Transition prompts past expires_at to 'expired'. Safe to call anytime. */
+  /**
+   * Time-based housekeeping: expire pending prompts past `expires_at`, and
+   * detach an ANSWERED prompt whose answer nobody ever came for.
+   *
+   * The second half is what bounds the durable pointer. Once the re-arm pass
+   * makes a trigger due, the row is `answered` with `trigger_id` still set,
+   * waiting for the next dispatch to read it — and `waiting_until` is already
+   * gone, so the trigger side no longer bounds anything. If that dispatch never
+   * happens (the trigger is disabled, its consent revoked, or it is deleted —
+   * `deleteTrigger` does not touch this table, there is no FK across the two
+   * databases) the pointer would otherwise live forever, and the day the trigger
+   * became due again through some unrelated path, a fresh run would be handed a
+   * stale question and answer as if it had just asked them.
+   *
+   * Bounded by the row's own `expires_at`, which is the same clock everything
+   * else here uses. The row stays `answered` — it was answered — and only stops
+   * being a trigger's business.
+   */
   expireOld(): number {
     const rows = this.db
       .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND expires_at <= datetime('now')`)
       .all() as { id: string }[];
     const result = this._getExpireOldStmt().run();
+    // Detach answered-but-unclaimed pointers on the same pass and the same clock.
+    this.db
+      .prepare(
+        `UPDATE pending_prompts SET trigger_id = NULL
+         WHERE status = 'answered' AND trigger_id IS NOT NULL AND expires_at <= datetime('now')`,
+      )
+      .run();
     // Emit for each so pending waiters return promptly.
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
   }
 
-  /** Expire ALL pending prompts (used on engine restart). */
-  expireAll(): number {
+  /**
+   * Expire every pending prompt EXCEPT the ones a trigger is parked on
+   * (§0 A1/A2). Called at both process lifecycle boundaries — boot and
+   * shutdown — and the exception has to hold at both, or the one that runs
+   * first defeats the other.
+   *
+   * Named for what it does rather than for what it used to do. It was
+   * `expireAll`, and it really did expire all: a prompt is bound to a live SSE
+   * connection that a restart has already severed, so keeping one meant keeping
+   * a question nobody could answer. A trigger's question is the exception,
+   * because the answer does not have to arrive in the same process — the run
+   * that asked is gone, and the trigger is what remembers.
+   *
+   * The predicate is purely local (`trigger_id IS NULL`), which is the whole
+   * reason §0 put the pointer on this side: `triggers` lives in engine.db, this
+   * table in history.db, and there is no ATTACH anywhere in the tree.
+   *
+   * What keeps a surviving prompt from living forever is its own `expires_at`.
+   * While it is `pending`, `expireOld()` expires it on that clock and the
+   * trigger's `waiting_until` ends the wait on the tick's. Once it is ANSWERED
+   * neither of those applies — `expireOld` only expired pending rows and
+   * `endWait` has already cleared the deadline — so `expireOld` detaches the
+   * pointer on the same `expires_at`. Both states are bounded; an earlier
+   * version of this comment claimed the first bound covered the second.
+   */
+  expireUnparked(): number {
     const rows = this.db
-      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending'`)
+      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND trigger_id IS NULL`)
       .all() as { id: string }[];
-    const result = this._getExpireAllStmt().run();
+    const result = this._getExpireUnparkedStmt().run();
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
+  }
+
+  /**
+   * Settle every pending prompt a given trigger raised (§0 E6). Best-effort by
+   * design: the caller is the expiry sweep, whose job is to END a wait, and a
+   * prompt row that cannot be settled must not stop it — the alternative is a
+   * trigger that waits forever because its paperwork failed.
+   *
+   * The ORDER matters and is why this exists as its own step. `answerUser` only
+   * checks `status='pending' AND expires_at > now`, so a row left pending after
+   * its trigger was ended stays answerable, and an answer arriving then would
+   * revive a trigger the sweep had just finished. Settling first closes that.
+   * The reverse order would leave a zombie instead of a dead prompt row.
+   *
+   * Returns how many rows it settled; 0 is normal (the run may have drained its
+   * own row already).
+   */
+  expirePendingForTrigger(triggerId: string): number {
+    const rows = this.db
+      .prepare(`SELECT id FROM pending_prompts WHERE trigger_id = ? AND status = 'pending'`)
+      .all(triggerId) as { id: string }[];
+    const result = this.db
+      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE trigger_id = ? AND status = 'pending'`)
+      .run(triggerId);
+    for (const row of rows) this._emitSettled(row.id);
+    return result.changes;
+  }
+
+  /**
+   * The answered question a trigger is still parked on (§0 A10), if there is one.
+   *
+   * This single row carries everything the re-armed run needs and is the reason
+   * no third column was added for it (§0 E4 forbids a speculative resume
+   * column): `session_id` is the thread the question was asked in, `question`
+   * and `answer` are what the new run has to be told. Answering updates a
+   * database row and nothing else — `prompt-store.ts` writes to `pending_prompts`
+   * and to no other table — so a thread does NOT carry the answer by itself, and
+   * a run that only reused the thread id would see its own old question with no
+   * reply under it.
+   *
+   * Newest first. A trigger should never have two answered rows attached — every
+   * consumer releases the pointer as it reads — but "should never" is a claim
+   * about other code, and picking an arbitrary row when it turns out false would
+   * hand a run an answer to a question it did not ask.
+   */
+  getAnsweredForTrigger(triggerId: string): PendingPromptRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM pending_prompts WHERE trigger_id = ? AND status = 'answered'
+         ORDER BY answered_at DESC LIMIT 1`,
+      )
+      .get(triggerId) as PendingPromptRow | undefined;
+  }
+
+  /**
+   * Detach a prompt from its trigger — the answer has been handed to a run and
+   * is that trigger's business no longer.
+   *
+   * Conditional on the pointer still being set, so it claims the answer exactly
+   * once, the same shape `TriggerStore.endWait` uses for the same reason. Without
+   * it the row stays `answered` with a live pointer and every later scheduled run
+   * of that trigger would be handed the same stale reply. The status is left
+   * `answered` because it was answered; what changes is only whose business it is.
+   *
+   * ⚠ And conditional on the row being SETTLED, which is the half that cannot be
+   * left to the caller. The caller is a `finally`, so it runs on every exit
+   * including the ones where settling the row FAILED — the abort path drains its
+   * row with `expirePrompt` and swallows a throw, naming SQLITE_BUSY and schema
+   * drift as reasons. A detach that fired there would orphan a question that is
+   * still `pending` and still answerable: nothing would ever hand its answer to a
+   * run again, which is the exact loss §0 A2 exists to prevent. Expressed here
+   * rather than as a re-check at the call site, because a re-check is another
+   * duty a later caller can forget and has a window this does not.
+   */
+  releaseTrigger(promptId: string): boolean {
+    return this.db
+      .prepare(
+        `UPDATE pending_prompts SET trigger_id = NULL
+         WHERE id = ? AND trigger_id IS NOT NULL AND status != 'pending'`,
+      )
+      .run(promptId).changes > 0;
   }
 
   /** Expire a single pending prompt by id. Used when a /run handler is
@@ -496,8 +761,9 @@ export class PromptStore {
     return (this._stmtInsert ??= this.db.prepare(`
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
-         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select, payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select,
+         payload_json, origin_json, trigger_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 
@@ -547,11 +813,11 @@ export class PromptStore {
     `));
   }
 
-  private _getExpireAllStmt(): Database.Statement {
-    return (this._stmtExpireAll ??= this.db.prepare(`
+  private _getExpireUnparkedStmt(): Database.Statement {
+    return (this._stmtExpireUnparked ??= this.db.prepare(`
       UPDATE pending_prompts
       SET status = 'expired'
-      WHERE status = 'pending'
+      WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }
 }

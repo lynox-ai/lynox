@@ -41,7 +41,7 @@ The agent has a small catalog of free public APIs it can offer to bootstrap when
 | Nager.Date | calendar / public holidays | none |
 | VATcomply | EU VAT + IBAN + FX | none |
 
-The catalog lives in `data/suggested-apis.json` and is shipped with the npm package. It contains the API name + category + docs URL — **not** a pre-built profile. The real profile (endpoints, rate limits, response-shaping rules) is extracted by `api_setup` from the live docs at bootstrap time, so the agent doesn't rely on stale training-data assumptions about API shapes.
+The catalog is compiled into the engine (`src/core/suggested-apis.ts`), so it ships with every install — npm and container alike. It lived in `data/suggested-apis.json` until 2026-09-30; that file was listed under the npm package's `files` but was never copied into the Docker image, so containers were briefed with no catalog at all. It contains the API name + category + docs URL — **not** a pre-built profile. The real profile (endpoints, rate limits, response-shaping rules) is extracted by `api_setup` from the live docs at bootstrap time, so the agent doesn't rely on stale training-data assumptions about API shapes.
 
 ## What the agent will NOT proactively suggest
 

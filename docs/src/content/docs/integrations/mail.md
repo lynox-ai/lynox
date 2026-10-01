@@ -181,10 +181,14 @@ lynox has two ways to access Gmail:
 | | Email (IMAP/SMTP) | Google Workspace |
 |---|---|---|
 | Auth | App password | OAuth 2.0 |
-| Setup time | 2 minutes | 5 minutes |
-| Gmail access | Read + send | Read + send |
-| Calendar, Drive, Sheets, Docs | No | Yes |
+| Setup time | 2 minutes | 5 minutes, or one click on lynox.cloud |
+| Gmail access | Read + send | **Only on a *Full* connection.** The default (*Standard*) set asks for no Gmail scope at all, and a mailbox on such a connection is not registered. |
+| Calendar, Drive | No | Yes — calendar events and the Drive files lynox creates are in the default set |
+| Sheets, Docs | No | Only on *Full* |
 | Works with non-Gmail | Yes | No |
-| Best for | Gmail-only users, multi-provider setups | Full Google Workspace users |
+| Best for | Any mailbox, including Gmail; multi-provider setups | Calendar and Drive; Gmail only if you want the heavier consent |
 
-You can use both — they don't conflict. The IMAP integration is simpler if you only need email.
+You can use both — they don't conflict. **For Gmail specifically, IMAP is the lighter path:** reading
+mail over OAuth needs a restricted scope, which is the one class that costs an annual security assessment
+(see [Google Workspace](/integrations/google-workspace/#access-level)). An app password avoids it
+entirely.

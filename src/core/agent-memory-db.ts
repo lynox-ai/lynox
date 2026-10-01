@@ -434,6 +434,44 @@ export class AgentMemoryDb {
     return this.db.prepare('SELECT * FROM entities WHERE id = ?').get(id) as EntityRow | undefined ?? null;
   }
 
+  /**
+   * Whether this entity is DORMANT: it was mentioned by memories once, and none of
+   * those memories is active any more.
+   *
+   * `entities` has no `is_active` of its own — an entity's liveness is derived from its
+   * mentions, and `memory_delete` deactivates the memory without touching the entity
+   * row. So a deleted memory's entity survives until {@link gc} reaps it as an orphan,
+   * and `gc` may not run for a long time. Callers on the READ side use this to keep such
+   * an entity out of what reaches the model.
+   *
+   * ⚠️ Dormant is NOT the same as "has no active mentions", and the difference is a
+   * regression waiting to happen. Only an entity that HAD mentions and has lost them all is
+   * dormant; one that never had a mention must not be treated as dead.
+   *
+   * As of 2026-08-24 there is NO producer of mention-less entities left: the DataStore→KG
+   * bridge was the only one and was removed as never-attached, and every `createEntity` call
+   * in the layer is followed immediately by `createMention`. The distinction is kept anyway —
+   * it is a fail-safe, not a description of current traffic, and re-introducing a bulk ingest
+   * that mints without mentioning is exactly the change that would otherwise silently start
+   * dropping entities.
+   *
+   * Deliberately NOT applied inside `EntityResolver.resolve`: the same call also serves
+   * extraction, where refusing to match a dormant entity would create a duplicate instead
+   * of reusing it. The filter belongs at the query site, not the resolver.
+   */
+  entityIsDormant(entityId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT
+        EXISTS(SELECT 1 FROM mentions WHERE entity_id = ?) AS ever,
+        EXISTS(
+          SELECT 1 FROM mentions
+          JOIN memories ON memories.id = mentions.memory_id
+          WHERE mentions.entity_id = ? AND memories.is_active = 1
+        ) AS live
+    `).get(entityId, entityId) as { ever: number; live: number };
+    return row.ever === 1 && row.live === 0;
+  }
+
   incrementEntityMentions(entityId: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`
@@ -892,11 +930,19 @@ export class AgentMemoryDb {
   }
 
   /**
-   * All active memories, newest first, across every scope (capped). The debug-export
-   * snapshot: it answers "what facts does this tenant's memory hold" for diagnosing
+   * All active memories, newest first, across every scope (capped). Part of the debug-export
+   * snapshot: it answers "what facts does this tenant's LEGACY memory hold" for diagnosing
    * cross-subject bleed / poisoning, so it is deliberately scope-INDEPENDENT (unlike
-   * {@link listActiveMemories}, which the recall path scopes). Reads the legacy store —
-   * write-authoritative and complete regardless of the read-cutover flag.
+   * {@link listActiveMemories}, which the recall path scopes).
+   *
+   * ⚠ This is ONE substrate, not the whole picture. The doc here used to call the legacy store
+   * write-authoritative and exhaustive whatever the read cutover did — true in 2026-07, and
+   * false since durable knowledge went default-on: DK writes to `knowledge_entries` in engine.db
+   * and never to `memories`, so a DK tenant's recent facts are absent from every row this
+   * returns. The claim was worse than the gap, because it told the next reader not to look —
+   * a debug export built on it showed a memory store frozen weeks in the past and looked
+   * healthy. Callers diagnosing "nothing was saved" must read BOTH substrates
+   * (`readDurableKnowledgeForDebug` in `src/server/http-api.ts` is the other half).
    */
   listAllActiveMemories(limit = 200): MemoryRow[] {
     const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), 1000) : 200;
@@ -1335,13 +1381,23 @@ export class AgentMemoryDb {
       'SELECT COUNT(*) as cnt FROM memories WHERE is_active = 0',
     ).get() as { cnt: number }).cnt;
 
+    // An orphan is an entity that HAD mentions and has lost them all — the same definition
+    // {@link entityIsDormant} uses, and for the reason its docstring already gives: an entity
+    // that never had a mention must not be treated as dead. No producer of such entities
+    // remains as of 2026-08-24 (see that docstring); the distinction is a fail-safe.
+    //
+    // Without the first EXISTS this deletes every one of them, together with their
+    // `has_data_in` relations, on every single run — and `runStartupReap` runs it at every
+    // process start. So a tenant who connected a data source lost the whole graph derived
+    // from it at the next restart, silently, and rebuilt it only by re-importing.
     const orphanRows = this.db.prepare(`
       SELECT e.id FROM entities e
-      WHERE NOT EXISTS (
-        SELECT 1 FROM mentions mn
-        JOIN memories m ON mn.memory_id = m.id
-        WHERE mn.entity_id = e.id AND m.is_active = 1
-      )
+      WHERE EXISTS (SELECT 1 FROM mentions WHERE entity_id = e.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM mentions mn
+          JOIN memories m ON mn.memory_id = m.id
+          WHERE mn.entity_id = e.id AND m.is_active = 1
+        )
     `).all() as Array<{ id: string }>;
 
     if (dryRun) {

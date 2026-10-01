@@ -14,10 +14,30 @@ import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TriggerRecord, PromptText } from '../types/index.js';
+import type { TriggerRecord, PromptText, BulkWriteEffect } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
+import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
+// Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
+// handler was its first consumer; src/core/ is the better home now that there
+// are two, and the move is deliberately NOT made here because it would edit
+// http-api.ts, which core#1196 holds. `src/core/config.ts` already imports
+// across the same seam, so this is precedented rather than novel.
+import { WallClockBudget } from '../server/wall-clock-budget.js';
+import { compose, engineText, renderFence } from './data-boundary.js';
+
+/** The canonical "the human did not answer" value. Spelled the same in
+ *  `http-api.ts` (which calls it "the canonical skip marker") and in
+ *  `onboarding-promotion.ts` (`ONBOARDING_SKIP_MARKER`), and recognised by
+ *  `ask-user.ts`. It is a fourth literal copy, which is itself drift — hoisting
+ *  all four to one exported constant is a follow-up, kept out of this change
+ *  because it would edit http-api.ts (held by core#1196). */
+const DISMISSED_ANSWER = '__dismissed__';
+
+/** What a swept run's result reads as. It is a RESULT, not a status: the status
+ *  the sweep writes is `failed`, and this is the line a human sees next to it. */
+const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
@@ -105,14 +125,16 @@ export interface WorkerTaskContext {
   startedAt: number;
 }
 
-/** Active task state including abort control and optional pending user input. */
+/** Active task state: abort control, the PAUSABLE execution deadline, and the
+ *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
-  pendingInput?: {
-    question: string;
-    options?: string[] | undefined;
-    resolve: (answer: string) => void;
-  } | undefined;
+  /** Store id of the prompt this task is parked on; undefined while computing. */
+  pendingPromptId?: string | undefined;
+  /** Stop the execution deadline while parked on a human, and re-arm after.
+   *  Human think-time must not consume the task's compute budget. */
+  pauseDeadline: () => void;
+  resumeDeadline: () => void;
 }
 
 /** Access the current worker task context from anywhere in the async call chain. */
@@ -165,10 +187,14 @@ export class WorkerLoop {
       this.timer = null;
     }
     for (const [, active] of this.activeTasks) {
-      if (active.pendingInput) {
-        active.pendingInput.resolve('Task cancelled.');
-        active.pendingInput = undefined;
-      }
+      // No `resolve('Task cancelled.')` here any more. That string was handed to
+      // a parked agent in the slot a USER ANSWER occupies, where it is not
+      // distinguishable from one — the same failure `onboarding-promotion.ts`
+      // guards with `ONBOARDING_SKIP_MARKER` after a control-flow string was
+      // promoted as a literal fact. The wait is now a store prompt awaited with
+      // this controller's signal, so aborting IS the cancellation and the waiter
+      // observes `status: 'aborted'`.
+      active.pauseDeadline();
       active.controller.abort();
     }
     this.activeTasks.clear();
@@ -182,20 +208,25 @@ export class WorkerLoop {
     return this.activeTasks.size;
   }
 
-  /** Resolve a pending user-input request for a background task. Returns true if resolved. */
+  /** Resolve a pending user-input request for a background task. Returns true if resolved.
+   *  Now a thin adapter over the prompt store: the same `answerUser` the HTTP
+   *  reply route calls, so this method and the route settle the SAME row instead
+   *  of two parallel mechanisms. It had zero callers for as long as it owned its
+   *  own in-memory resolver. */
   resolveTaskInput(taskId: string, answer: string): boolean {
-    const active = this.activeTasks.get(taskId);
-    if (!active?.pendingInput) return false;
-    active.pendingInput.resolve(answer);
-    active.pendingInput = undefined;
-    return true;
+    const promptId = this.activeTasks.get(taskId)?.pendingPromptId;
+    if (promptId === undefined) return false;
+    return this.engine.getPromptStore()?.answerUser(promptId, answer) ?? false;
   }
 
   /** Get pending input request for a task, if any. */
   getTaskPendingInput(taskId: string): { question: string; options?: string[] | undefined } | undefined {
-    const active = this.activeTasks.get(taskId);
-    if (!active?.pendingInput) return undefined;
-    return { question: active.pendingInput.question, options: active.pendingInput.options };
+    const promptId = this.activeTasks.get(taskId)?.pendingPromptId;
+    if (promptId === undefined) return undefined;
+    const row = this.engine.getPromptStore()?.getById(promptId);
+    if (!row) return undefined;
+    const options = row.options_json ? (JSON.parse(row.options_json) as string[]) : undefined;
+    return { question: row.question, options };
   }
 
   /**
@@ -240,6 +271,115 @@ export class WorkerLoop {
       if (!taskManager) return;
 
       const dueTasks = taskManager.getDueTriggers();
+
+      // §0 E5/A12 — the SECOND query, and the only thing in the engine that can
+      // still see a parked trigger. `getDueTriggers` excludes `waiting` by
+      // design (T3, or every tick would re-fire a trigger whose question is
+      // still open), which means after that gate no existing loop would ever
+      // look at one again. A trigger parked by a process that died mid-question
+      // would wait forever; this is what collects it.
+      //
+      // Ordered per §0 E6: settle the prompt row BEST-EFFORT first, then end the
+      // wait unconditionally. A prompt left pending stays answerable for its full
+      // TTL, and an answer arriving after the sweep would revive a trigger the
+      // sweep had just ended. The reverse order trades a dead prompt row — which
+      // costs nothing — for a zombie trigger.
+      //
+      // `failed` is the honest terminal status: the run asked a question and
+      // never got its answer, so it did not succeed. `endWait` is conditional on
+      // the row still being `waiting`, so this and a live run's own un-park can
+      // race without either needing to check first.
+      // §0 A10 — an ANSWER ends a wait too, and long before the deadline would.
+      // Scanned separately from the expiry below and FIRST, because when both
+      // apply the answer is the better outcome: a question that was answered a
+      // minute before its deadline should produce a run, not a failure.
+      //
+      // Two queries rather than a join: `triggers` is in engine.db and
+      // `pending_prompts` in history.db, and the tree has no ATTACH. The per-row
+      // lookup is affordable because the outer set is parked triggers, i.e.
+      // bounded by simultaneously unanswered questions.
+      //
+      // `endWait` gates it, so a trigger the run's own `finally` un-parked in
+      // the same moment is claimed once. Making it due is a second write and
+      // only happens for the winner.
+      try {
+        for (const parked of taskManager.getWaitingTriggers()) {
+          const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(parked.id);
+          if (!answered) continue;
+          if (taskManager.endWait(parked.id, 'open')) {
+            this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+            process.stderr.write(
+              `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
+            );
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] answer re-arm failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
+      //
+      // Fenced off from the dispatch below. Collecting abandoned waits is
+      // housekeeping; firing due triggers is the loop's job. A store error here
+      // must degrade to "waits not collected this tick", never to "nothing ran" —
+      // and before this fence it did exactly that, because the throw escaped
+      // straight past the dispatch loop.
+      try {
+        for (const parked of taskManager.getExpiredWaitingTriggers()) {
+          try {
+            this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
+          } catch (err: unknown) {
+            process.stderr.write(
+              `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+          if (taskManager.endWait(parked.id, 'failed')) {
+            // Ending the wait is not the whole job, and getting this wrong is a
+            // LOOP rather than a stall. `next_run_at` still points at the run that
+            // parked — a moment in the past — and `getDue`'s denylist deliberately
+            // keeps a FAILED trigger due while it has a cron schedule (that is the
+            // auto-recovery). So a swept cron trigger is due again on the very next
+            // tick: it re-asks immediately instead of at its next occurrence.
+            //
+            // Recording it as the failed run it was puts it back through the same
+            // branch logic that schedules every other outcome — next occurrence for
+            // cron, interval for watch, `next_run_at = NULL` for a one-shot.
+            //
+            // INSIDE the `if`, and that placement is the point. An earlier comment
+            // here said the ORDER mattered because `recordTaskRun` withholds status
+            // writes from a parked trigger and would otherwise skip the scheduling.
+            // That was false: the guard withholds only the STATUS, and `next_run_at`
+            // is written either way, so both orders leave the same row. The real
+            // reason is exactly-once FOR THIS CALLER: `endWait` resolves the race
+            // against a live run's own un-park, so the sweep only stamps a result
+            // when it won. Recording first would stamp a failed run onto a trigger
+            // another party had already finished.
+            //
+            // ⚠ Not a system-wide guarantee, and an earlier draft of this comment
+            // said it was. A run whose wait the sweep expired is NOT aborted — its
+            // `promptUser` returns the dismissal marker and the agent turn carries
+            // on — so `executeStandard` can still reach its own `recordTaskRun`
+            // afterwards and overwrite what the sweep wrote. That a run which never
+            // got its answer still reports success is §0 A7, which this wave does
+            // not build; the overwrite is the same defect seen from the other end.
+            try {
+              taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
+            } catch (err: unknown) {
+              process.stderr.write(
+                `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
+            process.stderr.write(
+              `[lynox:worker] "${parked.title}" (${parked.id}) waited past ${parked.waiting_until ?? '?'} without an answer — ended\n`,
+            );
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] wait sweep failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
 
       // Missed run detection: warn about tasks that were due >10min ago
       const now = Date.now();
@@ -287,11 +427,46 @@ export class WorkerLoop {
 
   private async executeTask(task: TriggerRecord): Promise<void> {
     const controller = new AbortController();
-    this.activeTasks.set(task.id, { controller });
 
-    // Node.js AbortSignal.timeout() — hard kill after taskTimeoutMs
-    const timeoutSignal = AbortSignal.timeout(this.taskTimeoutMs);
-    timeoutSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
+    // `controller.abort()` while nothing in this file ever read the signal, so
+    // the deadline fired into the void. The invariant that matters now: the
+    // signal has a consumer — the prompt wait below — so `stop()` reaches a task
+    // parked on a human instead of leaving it awaiting a promise nobody can
+    // settle.
+    //
+    // PAUSABLE, and that is load-bearing rather than tidy: `ask_user` is exempt
+    // from the per-tool cap (`Agent.TOOL_TIMEOUT_EXEMPT`), so while a task is
+    // parked this deadline is the only clock that could fire. Unpaused it would
+    // abort the run mid-question — the exact failure `WallClockBudget` was
+    // written for on the HTTP path (its docstring cites issue #77: the human
+    // answers, the run is already gone). Human think-time must not consume
+    // compute budget.
+    //
+    // NOTE ON REACH: the timer aborts the controller, which today ends a WAIT.
+    // It does not kill a computing run — that needs `session.abort()`, and
+    // enabling it is a separate, measured decision: on one production instance
+    // 1 of 17 pipeline runs and 1 of 58 headless runs ran past this 5-minute
+    // default, the longest being 15.2 minutes AND SUCCEEDING. Turning a bound
+    // on that has never fired would abort work that completes today.
+    const budget = new WallClockBudget(this.taskTimeoutMs);
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const armDeadline = (): void => {
+      deadlineTimer = setTimeout(() => controller.abort(), budget.arm(Date.now()));
+      deadlineTimer.unref();
+    };
+    const pauseDeadline = (): void => {
+      if (deadlineTimer === undefined) return;
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+      budget.pause(Date.now());
+    };
+    const resumeDeadline = (): void => {
+      if (deadlineTimer !== undefined) return;
+      armDeadline();
+    };
+    armDeadline();
+    this.activeTasks.set(task.id, { controller, pauseDeadline, resumeDeadline });
 
     // AsyncLocalStorage — per-task context for logging/tracing
     const taskCtx: WorkerTaskContext = {
@@ -352,6 +527,20 @@ export class WorkerLoop {
               await this.executeStandard(task);
             }
             break;
+          case 'bulk_apply':
+          case 'bulk_undo':
+            // Deterministic: writes an APPROVED bulk run's targets, mints no Run. The
+            // consent is the approval route that armed this trigger (PRD
+            // bulk-changes-reversible §3.4); the handler refuses any run that is not
+            // approved, inside its window and matching the approved checksum.
+            await this.executeBulk(task, effect);
+            break;
+          case 'bulk_preview':
+            // Deterministic: reads a planned external run's targets into its ledger and
+            // writes none of them. Its trigger is armed only by the owner starting or
+            // resuming the read; the handler refuses any run that is not planned and unhalted.
+            await this.executeBulkPreview(task, controller.signal);
+            break;
           default:
             // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
             // money-spending run. Record + stop, so it stops re-firing every tick.
@@ -376,9 +565,22 @@ export class WorkerLoop {
       }).catch(() => {});
 
       const isTimeout = err instanceof Error && err.name === 'TimeoutError';
-      const errorMsg = isTimeout
+      // Masked ONCE, here, where the text is known to be a provider's error and
+      // before it forks. It forks three ways — the stored run result, the
+      // notification body, and the follow-up prompt — and only the first of
+      // those stays on the instance. An earlier attempt masked it inside
+      // `recordTaskRun` instead, which covered the stored copy and left the
+      // notification, i.e. the one reader that leaves the machine, untouched.
+      //
+      // Masking here rather than at the store also keeps it OFF the results
+      // that are not errors: `recordTaskRun` is called with a watch run's
+      // SUMMARY too, and `includeGeneric` eats any 40-character run — a commit
+      // SHA, a page slug — so a summary masked on the way in would be compared
+      // against a masked baseline on the next tick.
+      const rawErrorMsg = isTimeout
         ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
         : (err instanceof Error ? err.message : String(err));
+      const errorMsg = maskSecretPatterns(rawErrorMsg, { includeGeneric: true });
       const status = isTimeout ? 'timeout' as const : 'failed' as const;
 
       // Check if task will be retried BEFORE recording (retry_count not yet incremented)
@@ -390,11 +592,16 @@ export class WorkerLoop {
         taskManager.recordTaskRun(task.id, errorMsg, status);
       }
 
-      // If task had pending input, it was interrupted while waiting
+      // If the task was parked on a human it was interrupted while waiting.
+      // It used to be RESOLVED with 'Task failed while waiting for your
+      // response.' — a sentence delivered into the slot a user answer occupies,
+      // which the model cannot tell from an answer. Aborting the controller
+      // ends the store wait as `aborted` instead, a state the caller reads as
+      // a non-answer.
       const active = this.activeTasks.get(task.id);
-      if (active?.pendingInput) {
-        active.pendingInput.resolve('Task failed while waiting for your response.');
-        active.pendingInput = undefined;
+      if (active) {
+        active.pauseDeadline();
+        active.controller.abort();
       }
 
       // Only notify on FINAL failure (all retries exhausted)
@@ -411,8 +618,121 @@ export class WorkerLoop {
         });
       }
     } finally {
+      // Clear the deadline timer before dropping the entry — `pauseDeadline` is
+      // idempotent and is the only handle on it once the map entry is gone.
+      this.activeTasks.get(task.id)?.pauseDeadline();
       this.activeTasks.delete(task.id);
     }
+  }
+
+  /**
+   * Write a bulk run off its trigger. A run left `pending` (targets another loop holds,
+   * or claims of a loop that died) is re-armed shortly; every other outcome ends the
+   * trigger — a halt waits for a human to resume it through the approval route.
+   */
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect): Promise<void> {
+    const ledger = this.engine.getBulkLedger();
+    if (!ledger || task.bulk_run_id === undefined) {
+      this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
+      return;
+    }
+    const { runBulkEffect, bulkWriterFor, BULK_RETRY_DELAY_MS } = await import('./bulk-apply.js');
+    const { externalWriter, parseBulkContract, writeMethodOf } = await import('./bulk-external.js');
+    const dataStore = this.engine.getDataStore();
+    // Built only for an external run: a local run needs none of the stores it reads.
+    const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
+    const clientFor = external ? await this.bulkClientFactory() : (): null => null;
+    const outcome = await runBulkEffect(task.bulk_run_id, effect, {
+      ledger,
+      writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
+        const client = clientFor(r.contractJson);
+        const contract = parseBulkContract(r.contractJson);
+        const method = contract ? writeMethodOf(contract) : null;
+        return client && method ? externalWriter(client, { method }) : null;
+      }),
+    });
+    if (outcome.status === 'pending') {
+      this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
+      this.engine.getRunHistory()?.updateTrigger(task.id, {
+        status: 'open',
+        nextRunAt: new Date(Date.now() + BULK_RETRY_DELAY_MS).toISOString(),
+      });
+      return;
+    }
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
+  }
+
+  /**
+   * Read an external bulk run's targets off its preview trigger. A preview that waits
+   * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
+   * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
+   */
+  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal): Promise<void> {
+    const ledger = this.engine.getBulkLedger();
+    if (!ledger || task.bulk_run_id === undefined) {
+      this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
+      return;
+    }
+    const { runBulkPreview } = await import('./bulk-preview.js');
+    const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
+    const clientFor = await this.bulkClientFactory();
+    const apiStore = this.engine.getApiStore();
+    const run = ledger.getRunForPreview(task.bulk_run_id);
+    const host = run ? externalHostOf(run.targetSystem) : null;
+    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
+    let outcome: Awaited<ReturnType<typeof runBulkPreview>>;
+    try {
+      outcome = await runBulkPreview(task.bulk_run_id, {
+        ledger,
+        signal,
+        costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
+        clientFor: (r) => clientFor(r.contractJson),
+      });
+    } catch (err: unknown) {
+      // A preview that threw would leave its run `planned` and unhalted with no trigger
+      // left to read it — and holding the one-external-run slot. Halted, the owner can
+      // resume it. The error is still reported: it is a defect, not a host's answer.
+      void import('./error-reporting.js').then(({ captureError }) => captureError(err)).catch(() => {});
+      ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.unavailable);
+      const reason = ledger.getStatus(task.bulk_run_id)?.haltReason;
+      this.recordAndNotify(task, reason ? `Bulk preview halted: ${reason}.` : 'Bulk preview stopped.', false);
+      return;
+    }
+    if (outcome.status === 'pending') {
+      this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
+      this.engine.getRunHistory()?.updateTrigger(task.id, {
+        status: 'open',
+        nextRunAt: new Date(outcome.retryAt ?? Date.now()).toISOString(),
+      });
+      return;
+    }
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
+  }
+
+  /**
+   * How an external bulk run reaches its host: the run's own contract, the engine's
+   * network policy and profile store, and the credential attach `http_request` uses.
+   * Null when the contract is unreadable or the stores are missing — the run then halts
+   * as unavailable rather than sending anything.
+   */
+  private async bulkClientFactory(): Promise<(contractJson: string | null) => import('./bulk-external.js').ExternalClient | null> {
+    const { externalClient, parseBulkContract } = await import('./bulk-external.js');
+    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { resolveGuardedAckHosts } = await import('./tool-context.js');
+    const apiStore = this.engine.getApiStore();
+    const secretStore = this.engine.getSecretStore();
+    const toolContext = this.engine.getToolContext();
+    return (contractJson) => {
+      const contract = parseBulkContract(contractJson);
+      if (!contract || !apiStore || !secretStore) return null;
+      return externalClient({
+        contract,
+        hostPolicy: toolContext,
+        ackHosts: resolveGuardedAckHosts(toolContext),
+        attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore }),
+        rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
+      });
+    };
   }
 
   /** Execute a backup task — no LLM needed, direct BackupManager call. */
@@ -468,8 +788,26 @@ export class WorkerLoop {
 
   /** Execute a standard or scheduled task via headless Session. */
   private async executeStandard(task: TriggerRecord): Promise<void> {
+    // §0 A10 — is this run happening BECAUSE a question was answered?
+    //
+    // The answered row carries both halves the new run needs: the thread the
+    // question was asked in, and the question and answer themselves. Reusing the
+    // thread alone would not be enough, and that is a measured claim rather than
+    // a cautious one: answering updates a `pending_prompts` row and nothing else
+    // — `prompt-store.ts` writes to that table and to no other — so the reply
+    // reaches a thread only through the run that was waiting for it, and after a
+    // restart there is no such run. A new turn in the old thread would see its
+    // own unanswered question.
+    //
+    // Not a resumption. Nothing about the paused run is restored; the answer is
+    // read out of a row and handed to a fresh turn as input, which is why §0 E3's
+    // objection — that "continuing" would promise a state restoration that does
+    // not exist — does not apply to it.
+    const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
     const session = this.engine.createSession({
       autonomy: 'autonomous',
+      // Same thread, so the run's own history shows the exchange it continues.
+      ...(answered ? { sessionId: answered.session_id } : {}),
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       // Per-run cost ceiling: without this an autonomous background task could
       // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
@@ -481,35 +819,241 @@ export class WorkerLoop {
     const workerProfile = this.engine.getUserConfig().worker_profile;
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
 
-    // Wire promptUser so background tasks can ask questions via notifications
-    session.promptUser = (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+    // §0 A7 — did every question this run asked actually get an answer?
+    //
+    // `DISMISSED_ANSWER` is a RETURN VALUE, not an exception: an unanswered
+    // question hands the agent the string `'__dismissed__'` and it carries on
+    // reasoning as if that were a reply. Whatever it then produces was built on
+    // an answer nobody gave, and reporting that as `success` is the failure this
+    // whole arc started from — a trigger that says it did its job after asking
+    // something and hearing nothing.
+    //
+    // Set from every path that fabricates an answer, not just the expiry: an
+    // aborted wait and a missing prompt store produce the same fiction.
+    let questionWentUnanswered = false;
+
+    // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
+    // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
+    // whose `resolve` sat in memory under `activeTasks`, and that second,
+    // poorer copy is what made a background question unanswerable: no
+    // persistence, no 24h expiry, no abort, and an answer method
+    // (`resolveTaskInput`) with zero callers because the route that settles a
+    // prompt — `POST /api/sessions/:id/reply` -> `answerUser` — only ever knew
+    // about store rows. Going through the store INHERITS all four rather than
+    // re-implementing them.
+    // Captured ONCE, here, where `executeTask` has just put the entry in the map
+    // (both entry points — `tick` and `runTriggerNow` — go through it). Looking
+    // it up per call instead was a real defect: `stop()` CLEARS the map, so a
+    // second `ask_user` after a cancellation found `undefined`, skipped the
+    // aborted-check below, and then waited with NO signal — an unabortable park
+    // for the full 24h TTL. The entry object outlives the map entry, which is
+    // exactly what makes the cancellation observable after a `stop()`.
+    const active = this.activeTasks.get(task.id);
+    session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+      // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
+      // null and is assigned during init (engine.ts:1101), and is set back to
+      // null if that init fails — so a store captured when the task started
+      // could be stale in both directions.
+      const promptStore = this.engine.getPromptStore();
       // A background task surfaces through a notification body, which is plain
       // text with no renderer — so the frame/value split has nothing to protect
-      // here and the flattened form is the honest one.
+      // here and the flattened form is the honest one. This is the ONE
+      // difference from the HTTP path that is deliberate, not a gap.
       const question = flattenPrompt(rawQuestion);
-      return new Promise<string>((resolve) => {
-        const active = this.activeTasks.get(task.id);
-        if (active) {
-          active.pendingInput = { question, options, resolve };
+      // Already cancelled: `waitForSettled` would settle 'aborted' at once, but
+      // only AFTER this inserted a row and pushed a high-priority question at a
+      // user whose task is gone. Refuse before either side effect.
+      if (active?.controller.signal.aborted === true) { questionWentUnanswered = true; return DISMISSED_ANSWER; }
+      if (!promptStore) {
+        // No store: no durable park and no way to answer. The canonical marker
+        // is the honest outcome — hanging would be worse, and a prose sentence
+        // would land in the slot an answer occupies.
+        questionWentUnanswered = true;
+        return DISMISSED_ANSWER;
+      }
+      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id);
+      // §0 A8/A11 — PARK the trigger. Until now the pairing between this trigger
+      // and the question it is waiting on existed only in a notification payload
+      // and in this closure's stack frame, neither of which survives the process.
+      //
+      // The deadline is READ BACK off the prompt row rather than computed here,
+      // and that is the requirement, not an implementation taste: two independent
+      // numbers would be a defect in both directions — a wait that ends first
+      // kills a still-answerable question, a prompt that expires first leaves the
+      // trigger waiting for an answer nobody can give. One source, read back.
+      //
+      // If the row cannot be read back there is no deadline to park against, and
+      // a trigger parked without one is INVISIBLE to the expiry sweep — it would
+      // wait forever. Not parking is the safe direction: the run still waits in
+      // memory exactly as it did before this slice, and the trigger stays where
+      // the ordinary status writers can reach it.
+      const parkedUntil = promptStore.getById(promptId)?.expires_at;
+      if (parkedUntil !== undefined) {
+        try {
+          this.engine.getRunHistory()?.updateTrigger(task.id, { status: 'waiting', waitingUntil: parkedUntil });
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] park failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
         }
-        void this.notificationRouter.notify({
-          title: `\u2753 ${task.title}`,
-          body: question,
-          taskId: task.id,
-          priority: 'high',
-          // Deep-link to the asking thread so a tap opens the conversation where
-          // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
-          data: { threadId: session.sessionId },
-          inquiry: { question, options },
-        });
+      }
+      if (active) {
+        active.pendingPromptId = promptId;
+        // Park the execution deadline: from here until the prompt settles the
+        // clock must not run, or the human's think-time eats the task's budget.
+        active.pauseDeadline();
+      }
+      void this.notificationRouter.notify({
+        title: `\u2753 ${task.title}`,
+        body: question,
+        taskId: task.id,
+        priority: 'high',
+        // Deep-link to the asking thread so a tap opens the conversation where
+        // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
+        // `promptId` rides along so a client can settle this exact row.
+        data: { threadId: session.sessionId, promptId },
+        inquiry: { question, options },
       });
+      try {
+        const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
+        if (outcome.status === 'answered') return outcome.row.answer ?? DISMISSED_ANSWER;
+        // An ABORTED wait leaves the row `pending` — `waitForSettled` resolves
+        // off the signal without touching it. Two consequences, both real: the
+        // row keeps this session's slot in the partial unique index
+        // (`pending_prompts(session_id) WHERE status='pending'`), so the agent's
+        // very next `ask_user` throws `PromptConflictError` out of this closure;
+        // and it stays answerable for its full TTL with nobody awaiting the
+        // answer — the shape `WallClockBudget`'s docstring cites as issue #77.
+        // Drain the row. Idempotent and scoped `WHERE status='pending'`, so an
+        // already-`expired` outcome costs one no-op UPDATE and a concurrent
+        // answer is never overwritten.
+        //
+        // The throw is SWALLOWED, and the reason is specific to where this sits.
+        // It runs on the CANCELLATION path, and `Engine.shutdown()` calls
+        // `stop()` and later closes the history DB — so the write can land on a
+        // closed handle. By this point the wait has already settled, so a throw
+        // would not re-park it; what it WOULD do is reject `promptUser`, turning
+        // a clean cancellation into a failed tool call for an agent that is
+        // being torn down anyway. A row that survives to its TTL is the cheaper
+        // outcome.
+        //
+        // (The HTTP takeover path faces the same hazard and answers it by
+        // ORDERING instead — it aborts before the bookkeeping, so a store throw
+        // cannot leave its run parked. That option is not available here,
+        // because here the abort is what ended the wait in the first place.)
+        try {
+          promptStore.expirePrompt(promptId);
+        } catch (err: unknown) {
+          // Silent would hide the cases that are NOT a shutdown: `stop()` is a
+          // public method and can run with the DB wide open, where a failure
+          // here means SQLITE_BUSY or schema drift and leaves a pending row
+          // answerable with no reader. One line, because the wait must settle
+          // either way and a teardown is the wrong place to throw.
+          process.stderr.write(
+            `[lynox:worker] prompt drain failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+        questionWentUnanswered = true;
+        return DISMISSED_ANSWER;
+      } finally {
+        // Detach the prompt from the trigger — once, here, for every way this
+        // wait can end.
+        //
+        // Put on each consuming branch first, and that was the wrong shape: an
+        // obligation every exit has to remember is one some exit will not. The
+        // answered branch got it, and then the review found the abort branch,
+        // where a reply committing concurrently with an abort leaves the row
+        // `answered` with the pointer live and `expirePrompt` a silent no-op.
+        // Enumerating exits does not end; owning the row does.
+        //
+        // Reaching this line at all means the wait is over IN THIS PROCESS, so a
+        // later one must not re-arm on it. A question that outlives the process
+        // never gets here — that path is a crash, which is exactly the case §0 A2
+        // keeps the pointer for.
+        try {
+          promptStore.releaseTrigger(promptId);
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] prompt detach failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+        // §0 A6 — END the wait, however it ended: answered, expired, aborted, or
+        // thrown. Conditional on the row still being `waiting`, so this and the
+        // expiry sweep can both fire for the same trigger and only one takes.
+        //
+        // Back to `open` rather than a terminal state: the run is resuming, and
+        // the status it deserves is the one `recordTaskRun` will write when the
+        // run actually ends. Swallowed for the same reason the prompt drain above
+        // is — this can run during `Engine.shutdown()`, against a history DB that
+        // is already closing, and a throw here would turn a clean teardown into a
+        // failed tool call. A wait left standing by a failure here is exactly what
+        // the sweep exists to collect, so the cost is bounded by `waiting_until`.
+        try {
+          this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
+        } catch (err: unknown) {
+          process.stderr.write(
+            `[lynox:worker] un-park failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+        if (active) {
+          active.pendingPromptId = undefined;
+          // Only re-arm while this entry is still the live one. `stop()` clears
+          // the map, and `executeTask`'s finally can only clear a timer it can
+          // still reach through it — so resuming a dropped entry arms a timer
+          // that no longer has an owner. It is `unref()`d and its fire is a
+          // no-op on an already-aborted controller, so this is hygiene, not a
+          // behaviour fix; the mutation that removes it survives by design.
+          if (this.activeTasks.get(task.id) === active) active.resumeDeadline();
+        }
+      }
     };
 
-    const prompt = task.description && task.description.trim() !== task.title.trim()
+    const base = task.description && task.description.trim() !== task.title.trim()
       ? `Task: ${task.title}\n\n${task.description}`
       : `Task: ${task.title}`;
+    // §0 A10: the answer goes into the INPUT, named alongside the question it
+    // answers. Without this the re-armed run asks the same thing again and parks
+    // again — a loop on the wait's own period, which is a worse outcome than the
+    // single fabricated answer this arc set out to remove.
+    //
+    // The pointer is released as soon as it is read, not after the run finishes.
+    // A crash between the two loses the answer and the trigger simply runs on
+    // schedule next time; releasing only on success would leave the pointer live
+    // after a crash, and every later scheduled run would be handed the same stale
+    // reply forever. Losing it once beats carrying it always.
+    let prompt = base;
+    if (answered) {
+      // MASKED and DELIMITED, both for the same reason the live path does it.
+      //
+      // On the in-process path this exact answer comes back as a `tool_result`
+      // block — structurally marked as data — and `agent.ts` runs it through
+      // `maskSecretPatterns` first, because an `ask_user` reply is where someone
+      // pastes an API key. Here the same text becomes part of the opening task
+      // prose of an autonomous turn, which is the strongest position in the
+      // prompt, so it needs at least what the weaker position already got.
+      // Without the mask a secret-shaped answer reaches the model where the live
+      // path would have caught it; without the fences a crafted answer can open
+      // what reads as a second operator-authored task.
+      // `maskAll` — known VALUES and known SHAPES in ONE pass over the original.
+      // Shapes alone was the first attempt and left a stored secret with no
+      // recognisable shape (a generic token, a database URL, a password) in
+      // cleartext. Not the sequence `agent.ts` uses either: `secret-store.ts`
+      // documents that running the two maskers in series is unsafe in BOTH
+      // orders, because each pass rewrites what the next one reads. `maskAll`
+      // reads the original twice and redacts the union once.
+      const store = this.engine.getSecretStore();
+      const mask = (t: string): string => store ? store.maskAll(t) : maskSecretPatterns(t);
+      const q = mask(answered.question);
+      const a = mask(answered.answer ?? '');
+      prompt = compose([
+        engineText(`${base}\n\nA question you asked earlier has been answered.`),
+        renderFence('asked', q),
+        renderFence('answer', a),
+      ], '\n');
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+    }
 
-    // Attribute the run to its trigger source (P1, DEF-0097) so this scheduled
+    // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     const result = await session.run(prompt, { triggerOrigin: task.source });
     const truncatedResult = result.length > MAX_TASK_RESULT_CHARS
@@ -518,7 +1062,12 @@ export class WorkerLoop {
 
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      taskManager.recordTaskRun(task.id, truncatedResult, 'success');
+      // §0 A7. `failed` rather than `timeout`: the run itself did not run out of
+      // time, it ran to completion on an answer that was never given. The two
+      // paths that can end this run without one — the expiry sweep and this —
+      // now agree on the status instead of overwriting each other with different
+      // verdicts.
+      taskManager.recordTaskRun(task.id, truncatedResult, questionWentUnanswered ? 'failed' : 'success');
     }
 
     if (this.notificationRouter.hasChannels()) {
@@ -577,7 +1126,11 @@ export class WorkerLoop {
     }
 
     // Slice B2 — first-run-confirm gate (S2, PRD §4.4): a workflow must have been
-    // confirmed by a human before it runs unattended. The B2 scheduling surface
+    // confirmed by a human before it runs unattended.
+    // LOAD-BEARING ORDER: the 'autonomous'-only check above throws first, so the
+    // message below is only ever read for an autonomous workflow — the one kind
+    // that can actually be scheduled. Keep it in that order, or "schedule it from
+    // the workflow library" becomes advice its reader cannot follow. The B2 scheduling surface
     // stamps `confirmedAt` as part of the consent action, so any workflow
     // scheduled through the product has it; enforce here too so a hand-edited /
     // synced task can't put an un-consented workflow on a cron. (No back-compat

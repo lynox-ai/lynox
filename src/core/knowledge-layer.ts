@@ -26,15 +26,16 @@ import { extractEntities } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, properNounTokens, subjectTokensDisagree } from './contradiction-detector.js';
-import type { DataStoreBridge } from './datastore-bridge.js';
+import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS } from './subject-store.js';
-import type { SubjectRow } from './subject-store.js';
+import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution, makeSubjectExternalRefs } from './subject-store.js';
+import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
+import type { TierDivergenceReport } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
 import { deriveProvenanceTier, provenanceRank, canSupersede } from './provenance.js';
@@ -43,6 +44,26 @@ import { appendMemoryWriteDecisionLog, type WriteDecision } from './memory-write
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
 const DEDUP_THRESHOLD = 0.95;
+
+/**
+ * Rollback sentinel for {@link KnowledgeLayer._raiseTier}. A better-sqlite3 transaction can
+ * only be aborted by throwing, and a tier-raise whose retire is refused must abort WHOLE (see
+ * `_raiseTier`) — so the refusal throws this and `_raiseTier` catches it. A unique object
+ * rather than an `Error` subclass: it is never reported, never matched by message, and must
+ * be impossible to confuse with a real failure escaping the transaction body.
+ */
+const TIER_RAISE_REFUSED = Symbol('tier-raise-refused');
+
+/**
+ * One tier disagreement a supersession mirror observed — {@link TierDivergenceReport} plus the
+ * row it concerns. Collected DURING the mirror transaction and emitted after it returns, for
+ * the reason the legacy backstop's refusals are: the sink is a fire-and-forget async append, so
+ * emitting inline would record a divergence for a transaction that can still roll back (both
+ * mirrors catch and swallow their own failures) and re-record it on the retry.
+ */
+interface MirrorTierDivergence extends TierDivergenceReport {
+  readonly existingId: string;
+}
 
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
@@ -128,6 +149,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * `undefined` = not yet attempted; `null` = unavailable (no runHistory / build failed).
    */
   private _anchorThreadStore: ThreadStore | null | undefined;
+  /**
+   * The datastore.db half of the orphan-subject reference oracle. Set by
+   * {@link setRecordStore} from `Engine._initCoreTools()` the moment the DataStore exists
+   * (before the HTTP surface serves) — deliberately NOT from `_initKnowledge()`, which runs
+   * BEFORE the DataStore is constructed, so anything guarded on it there can never fire.
+   * `null` means the oracle cannot answer and the reap skips.
+   */
+  private _recordStore: DataStore | null = null;
+  /** One stderr line per layer instance when the reap has to skip, not one per erase. */
+  private _reapSkipWarned = false;
+  /** Same, for a cross-DB probe that throws (answers "referenced" while it fails). */
+  private _oracleFailWarned = false;
 
   constructor(
     dbPath: string,
@@ -168,6 +201,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.subjectStore = new SubjectStore(this.engineDb);
       this.relationshipStore = new RelationshipStore(this.engineDb);
       this.memoryGraphStore = new MemoryGraphStore(this.engineDb);
+      // The orphan-subject reap rides INSIDE every engine.db memory delete
+      // (erase / thread-purge / gc). Installed here because only this layer can see every
+      // reference a subject may still have — engine.db, the history.db thread anchor and
+      // the datastore.db cells — and it is fail-closed: with either cross-DB oracle
+      // unavailable the reap skips (logged once) rather than guessing.
+      this.memoryGraphStore.setOrphanSubjectReaper(candidates => this._reapOrphanSubjects(candidates));
       this.retrievalEngine.setMemoryGraphReads(
         this.memoryGraphStore, this.subjectStore, this.memoryReadsActive,
       );
@@ -216,15 +255,16 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   get isReady(): boolean { return true; }
 
-  /** Access the underlying DB (for DataStore bridge and advanced queries). */
+  /** Access the underlying DB (advanced queries). */
   getDb(): AgentMemoryDb { return this.db; }
 
-  /** Access the entity resolver (for DataStore bridge). */
-  getEntityResolver(): EntityResolver { return this.entityResolver; }
-
-  /** Connect DataStore bridge to retrieval engine for data hints. */
-  setDataStoreBridge(bridge: DataStoreBridge): void {
-    this.retrievalEngine.setDataStoreBridge(bridge);
+  /**
+   * Hand the layer the live DataStore so the orphan reap can ask whether a
+   * table row still links a subject. Called by the engine as soon as the DataStore exists;
+   * until then (and forever on an engine without one) the reap stays fail-closed.
+   */
+  setRecordStore(store: DataStore): void {
+    this._recordStore = store;
   }
 
   /**
@@ -340,7 +380,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
         if (this.memoryWriteTrustGate && wouldRaise) {
           const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
-          return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+          if (raisedId !== null) {
+            return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+          }
+          // `null` = the backstop refused the retire and the raise rolled back whole (see
+          // `_raiseTier`). Return here rather than falling through to the no-op-confirm
+          // below: a refusal is NOT the same event as `wouldRaise === false`. That branch
+          // means "an equal-or-lower re-assert of a row we agree about"; this one means the
+          // two stores DISAGREE about the row's tier and the authoritative one says this
+          // write ranks strictly below it. Confirming would let a write the backstop just
+          // judged unentitled to retire the row still raise that row's confidence (+0.05,
+          // capped at 1.0) and confirmation_count on every repeat — in both stores, since
+          // `_mirrorConfidence` follows. Recall ranking reads both, so that is a foothold
+          // on what gets recalled, handed to the one write we decided not to trust. Nothing
+          // happens instead, which is what a refusal should mean.
+          return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
         }
 
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
@@ -387,6 +441,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
 
     // 4+5. Create memory + supersede contradicted (atomic transaction)
+    // Refusals are COLLECTED here and reported after the transaction returns: the sink is a
+    // fire-and-forget async append, so emitting inside would record a refusal for a write
+    // that a later contradiction in the same loop could still roll back — and re-record it
+    // on the retry, inflating the very rate this measurement exists to establish.
+    const refusedIds: string[] = [];
     const memoryId = this.db.transaction(() => {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
@@ -401,12 +460,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           // Backstop (defense-in-depth): the demotion above already prevents a blocked
           // pair from reaching here; this refuses a direct trust-downgrade too. Gated →
           // flag off passes trustGate:false → byte-identical.
-          this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate });
+          //
+          // Its answer is CONSULTED, not discarded. The demotion above and this backstop
+          // do not read the existing row's tier from the same place — the demotion takes
+          // `c.existingSourceType` from the recall row (engine.db under the S5b read
+          // cutover, `_dedupRecall`), this looks it up in agent-memory.db — so the two can
+          // disagree and the backstop is the one holding the authoritative tier. On refusal
+          // the resolution is demoted here exactly as it would have been above: writing the
+          // supersedes edge anyway would claim a retire that did not happen, and leaving
+          // `resolution: 'superseded'` in the array would send both engine.db mirrors
+          // (`_persist*`, keyed on this SAME by-reference array) on to `markSuperseded` the
+          // old stub — the RF4 divergence trap the demotion comment above describes, one
+          // level down: retired on engine.db, active on legacy, the truth invisible under
+          // the read cutover.
+          if (!this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate })) {
+            c.resolution = 'coexist';
+            refusedIds.push(c.existingMemoryId);
+            continue;
+          }
           this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
         }
       }
       return id;
     });
+    for (const refusedId of refusedIds) this._emitBackstopRefusal(derivedTier, refusedId, namespace);
 
     // Wave 1.3b: write-side tier telemetry — one JSONL line per STORED row (post-dedup),
     // gated on the measurement flag. Lets the write distribution be tracked over time
@@ -683,6 +760,71 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * The history.db ThreadStore the anchor read and the orphan reap share — built lazily
+   * over `this.runHistory`'s handle (where live `threads.primary_subject_id` lives), so a
+   * layer without runHistory (tests, mock histories) never touches `getDb()`. `null` =
+   * unavailable (no runHistory / build failed).
+   */
+  private _getAnchorThreadStore(): ThreadStore | null {
+    if (!this.runHistory) return null;
+    if (this._anchorThreadStore === undefined) {
+      try {
+        this._anchorThreadStore = new ThreadStore(this.runHistory.getDb());
+      } catch {
+        this._anchorThreadStore = null;
+      }
+    }
+    return this._anchorThreadStore;
+  }
+
+  /**
+   * The cross-DB half of the subject reference oracle, or `null` when it cannot
+   * be answered (no history.db handle, or no record store handed over yet). `null` means
+   * the reap must NOT run. Each probe answers `true` (referenced) on a read failure — e.g.
+   * a pre-v46 history.db without the anchor column — so an oracle error can never fail
+   * the erase or over-erase; it only keeps the subject.
+   */
+  private _subjectExternalRefs(): SubjectExternalRefs | null {
+    // The probes themselves live in `subject-store.ts` so the operator sweep builds its
+    // oracle from the same factory; what stays here is only WHERE the warning goes —
+    // once per layer instance, because a permanently failing probe keeps every subject
+    // forever and would otherwise be indistinguishable from a real holder.
+    return makeSubjectExternalRefs(this._getAnchorThreadStore(), this._recordStore, (probe, err) => {
+      if (this._oracleFailWarned) return;
+      this._oracleFailWarned = true;
+      process.stderr.write(
+        `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
+  }
+
+  /**
+   * The reaper {@link MemoryGraphStore} calls inside every hard memory delete.
+   * Fail-closed: without the cross-DB oracle the candidates are left standing — logged once
+   * per layer instance with the count, because a skipped candidate is permanent residue (the
+   * deleted memory is never a candidate again) and should at least be quantifiable — never
+   * guessed at. Returns the subject ids actually deleted.
+   */
+  private _reapOrphanSubjects(candidates: readonly string[]): readonly string[] {
+    if (!this.subjectStore) return [];
+    const external = this._subjectExternalRefs();
+    if (!external) {
+      if (!this._reapSkipWarned) {
+        this._reapSkipWarned = true;
+        process.stderr.write(
+          `[lynox:subject-reap] skipped: cross-DB reference oracle unavailable (no history.db handle or record store) — ${candidates.length} candidate subject(s) left in place\n`,
+        );
+      }
+      return [];
+    }
+    const reaped = this.subjectStore.reapOrphans(candidates, external);
+    if (reaped.length > 0) {
+      process.stderr.write(`[lynox:subject-reap] reaped ${reaped.length} orphan subject(s) after a memory delete\n`);
+    }
+    return reaped;
+  }
+
+  /**
    * Slice B — resolve the current thread's anchor subject (the project/client the
    * thread is scoped to via `set_thread_context`). Returns the thread's
    * `primary_subject_id`, or null when the thread is unanchored / unknown / the
@@ -691,17 +833,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * a ThreadStore. Never throws — a read failure degrades to the heuristic.
    */
   private _readThreadAnchor(threadId: string | undefined): string | null {
-    if (!threadId || !this.runHistory) return null;
-    if (this._anchorThreadStore === undefined) {
-      try {
-        this._anchorThreadStore = new ThreadStore(this.runHistory.getDb());
-      } catch {
-        this._anchorThreadStore = null;
-      }
-    }
-    if (!this._anchorThreadStore) return null;
+    if (!threadId) return null;
+    const threads = this._getAnchorThreadStore();
+    if (!threads) return null;
     try {
-      const rawAnchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
+      const rawAnchorId = threads.getThread(threadId)?.primary_subject_id ?? null;
       if (!rawAnchorId) return null;
       // Resolve the v7 merge redirect FORWARD: if the anchor's subject was folded into a
       // canonical (merged_into), use the canonical — so a thread anchored to a since-merged
@@ -772,6 +908,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     const memoryGraph = this.memoryGraphStore!;
+    const diverged: MirrorTierDivergence[] = [];
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST. It only flips OLD memories' stubs and is
@@ -782,7 +919,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    when the old memory has no stub; superseded_by is a soft column (no
       //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (c.resolution !== 'superseded') continue;
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
@@ -801,11 +940,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // Persons route through the subset resolver: a new surface form that is an
         // unambiguous token-subset of exactly one existing person folds in as an alias
         // ("Ada" → the existing "Dr. Ada Lovelace") instead of minting a duplicate.
-        const { id: subjectId } = kind === 'engagement'
+        const resolution = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.canonicalName, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.canonicalName, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
+        // Several subjects already answer to this name, so it identifies nothing. This
+        // mirror is ADDITIVE (the legacy store stays authoritative), so skipping the link
+        // costs a graph edge, not the fact — while binding it to a guess would put one
+        // entity's facts on another's record, silently and permanently.
+        if (isAmbiguousResolution(resolution)) {
+          channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
+          continue;
+        }
+        const subjectId = resolution.id;
         entityToSubject.set(e.id, subjectId);
         subjectIds.push(subjectId);
         // primary = the first person/organization the memory concerns; else the
@@ -866,6 +1014,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    this._emitMirrorDivergences(diverged, namespace);
   }
 
   /**
@@ -968,11 +1117,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const resolvedEntities: EntityRecord[] = [];
     const resolvedRelations: RelationRecord[] = [];
     const stamp = createdAt ?? new Date().toISOString();
+    const diverged: MirrorTierDivergence[] = [];
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (c.resolution !== 'superseded') continue;
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
@@ -989,11 +1141,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // above) so extraction converges with set_thread_context, not a fresh row.
         // Person subset-resolver (see the twin above) so "Ada" folds into an existing
         // "Dr. Ada Lovelace" as an alias rather than a duplicate person row.
-        const { id: subjectId } = kind === 'engagement'
+        const resolution = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.name, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.name, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
+        // Same decision as the twin above, but NOT the same cost, and the difference
+        // matters: this path is the AUTHORITATIVE persistence (no legacy entity write
+        // runs beside it), so a skipped entity is not merely an unwritten edge — that
+        // entity does not enter the graph at all. It is still the right call: the
+        // alternative is attaching it to one of several subjects that answer to the
+        // name, which corrupts a real record instead of omitting one. The memory itself
+        // is unaffected and the skip is counted.
+        if (isAmbiguousResolution(resolution)) {
+          channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
+          continue;
+        }
+        const subjectId = resolution.id;
         nameToSubject.set(e.name.toLowerCase(), subjectId);
         subjectIds.push(subjectId);
         resolvedEntities.push({
@@ -1049,6 +1213,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    this._emitMirrorDivergences(diverged, namespace);
 
     return { resolvedEntities, resolvedRelations };
   }
@@ -1062,7 +1227,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // store — else the purged (privacy) statement text lingers there. id-parity
     // bridge: read the thread's ids from legacy (which owns source_thread_id)
     // BEFORE the legacy purge deletes them, then delete the same stub ids from
-    // engine.db (cascades reap the junction; durable subjects survive).
+    // engine.db (cascades reap the junction; a subject nothing else references is reaped
+    // with it — a cross-thread / verb-layer subject survives).
     //
     // Gated on the STORE existing, NOT the reversible `subjectGraphEnabled` write
     // flag: stubs are durable rows, so a stub written during a flag-ON window must
@@ -1428,7 +1594,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // eraseByPattern).
     //
     // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
-    // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
+    // memory_graph_reads=true (rafael/cat and one customer instance since 2026-07-08), so a swallowed reap
     // leaves the "deleted" content still recallable from engine.db — a silent erasure
     // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
     // → ids=[] → the stub is never revisited). So a failed reap: (1) emits a hard,
@@ -1483,12 +1649,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * RE-THROW, so an awaiting caller fails the delete instead of reporting a false success.
    * The legacy purge cascade reaps mentions, relations, supersedes and orphan entities.
    *
-   * KNOWN residue (engine.db): `purgeMemories` deletes `memories` only; the schema's
-   * ON DELETE CASCADE reaps memory_subjects/supersedes/conflicts, but an orphaned SUBJECT
-   * (plaintext `name`) and a relationship whose source was the erased memory
-   * (`source_memory_id` ON DELETE SET NULL, keeps its `description`) are NOT reaped — the
-   * orphan-subject sweep is deferred to the subject-lifecycle design (memory-graph-store.ts).
-   * The memory TEXT is erased from both stores; that derived residue is a tracked follow-up.
+   * engine.db residue, closed: `purgeMemories` reaps the relationships SOURCED
+   * from the erased memories in the same step, and — inside the same transaction — hands
+   * every subject they were linked to the orphan-subject reaper installed in the
+   * constructor, which deletes the ones NOTHING else references (verb layer, knowledge
+   * entries, thread anchor, records, detail rows — `SubjectStore.referenceReason`). So the
+   * plaintext `name` a minted subject carried goes with the memory that minted it, while a
+   * subject anything else still holds survives. A reaper failure aborts the whole engine.db
+   * step, which this method's re-throw contract below already makes retryable.
    *
    * Returns the number of memories matched + erased.
    */
@@ -1699,6 +1867,52 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Report that `AgentMemoryDb.supersedMemory` REFUSED a retire the caller's own decision
+   * had already cleared — the observable of a legacy/engine.db tier disagreement.
+   *
+   * `existingTier` is deliberately the tier the BACKSTOP compared (read from
+   * agent-memory.db), not the one the decision used. The decision's side is already on
+   * record: a refusal is by construction preceded by this write's `supersede`/`tier-raise`
+   * line for the same `existingId`, and that line carries the recall row's tier. Emitting
+   * the same side twice would log the disagreement as an agreement, which is what the first
+   * cut of this did. Reading it back is one indexed lookup on a path that only runs when the
+   * two stores have already disagreed.
+   *
+   * Emits nothing if the row cannot be read: the backstop's own guard needs BOTH rows to
+   * exist before it can refuse, so an unreadable row means something else changed underneath
+   * us, and a fabricated tier is worse than a missing line in a sink whose only job is to
+   * count. There is no honest placeholder — every `ProvenanceKind` asserts a trust level.
+   */
+  private _emitBackstopRefusal(newTier: ProvenanceKind, existingId: string, namespace: MemoryNamespace): void {
+    const authoritative = this.db.getMemory(existingId)?.source_type;
+    if (authoritative === undefined) return;
+    this._emitWriteDecision('backstop-refused', newTier, authoritative as ProvenanceKind, existingId, namespace);
+  }
+
+  /**
+   * Report the tier disagreements a supersession mirror COMPARED AND SAW — the runtime
+   * observable that used to be missing, where the mirror refused with a bare `return` and
+   * told no one.
+   *
+   * "Compared" is the limit, and it is narrower than "every mirror": the consolidation mirror
+   * in {@link consolidateMemories} passes no `newTier` at all, so it runs no comparison and
+   * can report nothing. Its keeper-sort ranks tiers inside agent-memory.db, which is exactly
+   * the store a stub can drift from — so that path is a known blind spot, not a covered one.
+   *
+   * Reporting is ALL this does. The retire went through (see
+   * {@link MemoryGraphStore.markSuperseded} for why a mirror cannot be a gate), so unlike
+   * {@link _emitBackstopRefusal} there is no write here that was stopped — which is exactly
+   * why the two get different decision names. Takes the tiers from the store's own return
+   * rather than re-reading the stub: the read would happen after the retire and after the
+   * transaction, so it could only ever agree with itself.
+   */
+  private _emitMirrorDivergences(diverged: readonly MirrorTierDivergence[], namespace: MemoryNamespace): void {
+    for (const d of diverged) {
+      this._emitWriteDecision('mirror-tier-diverged', d.newTier, d.stubTier, d.existingId, namespace);
+    }
+  }
+
+  /**
    * P1b — raise a deduped row's trust tier via SUPERSEDE-NOT-MUTATE. Stores the fresh
    * higher-trust row (write-once evidence intact), retires the old lower-trust one
    * (`canSupersede(new, old)` holds → the backstop passes), and carries forward the old
@@ -1707,7 +1921,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * the retired row). Reversible pre-GC (un-retire the tombstone until `gc()` reaps it — the
    * same soft-delete semantics as every supersede here); NO evidence overwrite → the
    * Wave-1 re-derivable-tier invariant holds. Done inline (not via `store()` recursion, which
-   * would re-enter dedup and re-find the same ≥0.95 row). Returns the fresh row's id.
+   * would re-enter dedup and re-find the same ≥0.95 row).
+   *
+   * Returns the fresh row's id, or **null when the backstop refused the retire** — in which
+   * case NOTHING happened: the transaction is rolled back, no row, no edge, no confirmation
+   * transfer, no mirror. The caller then takes the plain dedup no-op path, which is the same
+   * outcome as `wouldRaise === false`.
+   *
+   * The refusal is REACHABLE, and the parenthetical above ("`canSupersede(new, old)` holds →
+   * the backstop passes") is exactly why it must be handled rather than assumed away: the
+   * caller computes `wouldRaise` from `candidate.source_type` as the RECALL returned it —
+   * engine.db under the S5b read cutover — while the backstop reads the tier of the same id
+   * from agent-memory.db. When the two stores disagree about a row's tier, so do the two
+   * checks. Half-applying the raise then leaves two active rows of one fact, a supersedes
+   * edge claiming a retire that never ran, the old row's confirmations copied onto a row that
+   * did not replace it, and `_mirrorTierRaise` retiring the engine.db stub whose legacy twin
+   * is still active. All-or-nothing is the only shape with no wrong intermediate state.
    */
   private _raiseTier(
     candidate: ScoredMemoryRow,
@@ -1724,20 +1953,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
     } | undefined,
-  ): string {
-    const newId = this.db.transaction(() => {
-      const id = this.db.createMemory({
-        text, namespace, scopeType: scope.type, scopeId: scope.id,
-        sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
-        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
-        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
-        embeddingModel, provider: this.embeddingProvider.name, embedding,
+  ): string | null {
+    let newId: string;
+    try {
+      newId = this.db.transaction(() => {
+        const id = this.db.createMemory({
+          text, namespace, scopeType: scope.type, scopeId: scope.id,
+          sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+          sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+          sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+          embeddingModel, provider: this.embeddingProvider.name, embedding,
+        });
+        // The new row must exist BEFORE this call: the backstop looks both tiers up by id and
+        // short-circuits (`existing && incoming`) when either row is missing, so retiring
+        // first would make it silently pass. Order is load-bearing, not stylistic.
+        if (!this.db.supersedMemory(candidate.id, id, { trustGate: true })) throw TIER_RAISE_REFUSED;
+        this.db.createSupersedes(id, candidate.id, 'tier-raise');
+        this.db.addConfirmations(id, candidate.confirmation_count);
+        return id;
       });
-      this.db.supersedMemory(candidate.id, id, { trustGate: true });
-      this.db.createSupersedes(id, candidate.id, 'tier-raise');
-      this.db.addConfirmations(id, candidate.confirmation_count);
-      return id;
-    });
+    } catch (err: unknown) {
+      if (err !== TIER_RAISE_REFUSED) throw err;
+      this._emitBackstopRefusal(derivedTier, candidate.id, namespace);
+      return null;
+    }
     this._mirrorTierRaise(candidate, newId, text, namespace, scope, derivedTier, embeddingModel, embedding, options);
     return newId;
   }
@@ -1766,11 +2005,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   ): void {
     if (!this.subjectGraphEnabled || !this.memoryGraphStore) return;
     const memoryGraph = this.memoryGraphStore;
+    const diverged: MirrorTierDivergence[] = [];
     try {
       const oldSubject = memoryGraph.getStub(candidate.id)?.subject_id ?? null;
       const oldMentions = memoryGraph.getLinkedSubjectIds(candidate.id);
       this.engineDb!.getDb().transaction(() => {
-        memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        const report = memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        if (report) diverged.push({ ...report, existingId: candidate.id });
         memoryGraph.upsertStub({
           id: newId, text, namespace, scopeType: scope.type, scopeId: scope.id,
           subjectId: oldSubject,
@@ -1786,6 +2027,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         });
         if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
       })();
+      this._emitMirrorDivergences(diverged, namespace);
     } catch (err: unknown) {
       process.stderr.write(
         `[lynox:subject-graph] tier-raise mirror failed for ${newId}: ${err instanceof Error ? err.message : String(err)}\n`,

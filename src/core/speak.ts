@@ -8,6 +8,7 @@
 export {
   speak,
   speakStream,
+  isVoiceLanguageTag,
   getActiveSpeakProvider,
   hasSpeakProvider,
   prepareForSpeech,

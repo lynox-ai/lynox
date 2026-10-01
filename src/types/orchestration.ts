@@ -18,6 +18,9 @@ export interface ManifestStep {
   task?: string | undefined;
   model?: string | undefined;
   role?: string | undefined;
+  /** Declared tool set, carried from `InlinePipelineStep.tools` (F2/D2). Inline
+   *  runtime only; agent-runtime steps take their tools from the AgentDef. */
+  tools?: string[] | undefined;
   effort?: import('../types/index.js').EffortLevel | undefined;
   thinking?: import('../types/index.js').ThinkingHint | undefined;
   input_from?: string[] | undefined;

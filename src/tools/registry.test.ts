@@ -62,6 +62,18 @@ describe('ToolRegistry', () => {
   });
 
   describe('scopedView', () => {
+    it('pins [] against undefined — an empty allowlist admits nothing, an absent one everything', () => {
+      // The two absent-ish values are different here, and nothing pinned it: an empty array is
+      // truthy, so it takes the filter branch, while `undefined` takes none. Written while a
+      // routing change was being weighed (it was pulled back out), and kept because the
+      // distinction is this method's own and was untested either way.
+      const reg = new ToolRegistry();
+      reg.register(makeTool('bash')).register(makeTool('read_file'));
+      expect(reg.scopedView({ allowedTools: [] })).toEqual([]);
+      // The control beside it: `undefined` is NOT the same value, and still admits everything.
+      expect(reg.scopedView({ allowedTools: undefined })).toHaveLength(2);
+    });
+
     it('filters by allowedTools whitelist', () => {
       const reg = new ToolRegistry();
       reg.register(makeTool('bash')).register(makeTool('read_file')).register(makeTool('write_file'));

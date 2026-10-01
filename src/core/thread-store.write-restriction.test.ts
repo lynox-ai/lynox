@@ -5,8 +5,8 @@ import BetterSqlite3 from 'better-sqlite3';
 import { ThreadStore } from './thread-store.js';
 
 /**
- * Write-restriction invariant for `ThreadStore.updateThread` (arc:model-selector
- * Wave P1, DEF-0095 / §5.1b, S4 / RI2).
+ * Write-restriction invariant for `ThreadStore.updateThread` (Wave P1, §5.1b,
+ * S4 / RI2).
  *
  * P1 widened the `updateThread` whitelist with `model_tier` + `model_tier_source`
  * so the ONE sanctioned writer — the mid-thread re-pick endpoint via

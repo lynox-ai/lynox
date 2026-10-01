@@ -52,6 +52,16 @@
 		<Icon name="chat" size="xs" class="flex-shrink-0" />
 		<span class="text-xs md:text-sm text-text font-medium truncate min-w-0">{prompt.question}</span>
 
+		<!-- Who asked. This bar exists BECAUSE the dialog is off-screen, so it is
+		     the surface where the user has the least context — the one place the
+		     provenance must not be dropped for space. Only the workflow name
+		     (the half a non-technical user recognises); the step id and task are
+		     one tap away in the dialog this bar scrolls to. -->
+		{#if prompt.origin?.workflowName}
+			<span class="text-text-subtle flex-shrink-0" aria-hidden="true">·</span>
+			<span class="text-[11px] text-text-subtle truncate min-w-0 max-w-[40%] flex-shrink">{prompt.origin.workflowName}</span>
+		{/if}
+
 		{#if showCounter || runForLabel}
 			<span class="hidden md:inline text-text-subtle flex-shrink-0" aria-hidden="true">·</span>
 			<span class="hidden md:inline text-[11px] text-text-subtle font-mono flex-shrink-0 tabular-nums">

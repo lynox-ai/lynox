@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
-import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
+import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
+import { compose, renderFence } from '../core/data-boundary.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -22,6 +24,24 @@ import { isValidCron, nextOccurrence } from './cron-parser.js';
  *   or directly-invoked trigger). Precedence (schedule_cron before watch_config)
  *   MATCHES the migration's condition-derived CASE so the two never disagree.
  */
+/** Exhaustive over {@link BulkTriggerEffect}: a new bulk effect has to be listed here
+ *  before it compiles, so it cannot slip past {@link BulkTriggerLockedError}. */
+const BULK_EFFECTS: Record<BulkTriggerEffect, true> = { bulk_apply: true, bulk_undo: true, bulk_preview: true };
+
+/** Thrown when a task path would edit a bulk run's trigger. That trigger is armed,
+ *  re-armed and ended only by the bulk run's own approval and effect; a status or
+ *  schedule set from a task tool would stall an approved run or re-fire a finished one. */
+export class BulkTriggerLockedError extends Error {
+  constructor() {
+    super('This trigger belongs to a bulk run. It is started, resumed and ended only through the bulk run itself, not through task tools.');
+    this.name = 'BulkTriggerLockedError';
+  }
+}
+
+function refuseBulkTrigger(trigger: TriggerRecord): void {
+  if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
+}
+
 export function deriveSourceEffect(intent: {
   taskType?: string | undefined;
   scheduleCron?: string | undefined;
@@ -242,6 +262,7 @@ export class TaskManager {
     // land on a now-out-of-scope row.
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
+      refuseBulkTrigger(trigger);
       const ok = this.history.updateTrigger(trigger.id, { status: 'completed' }, scopeOpts);
       if (!ok) return undefined;
       return this.history.getTrigger(trigger.id, scopeOpts);
@@ -278,6 +299,7 @@ export class TaskManager {
     // the write can't land on a row re-scoped out from under the read.
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
+      refuseBulkTrigger(trigger);
       this.history.updateTrigger(trigger.id, { status: 'open' }, scopeOpts);
       return this.history.getTrigger(trigger.id, scopeOpts);
     }
@@ -322,6 +344,7 @@ export class TaskManager {
     // next_run_at / schedule_cron columns.
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (trigger) {
+      refuseBulkTrigger(trigger);
       const triggerUpdate: {
         title?: string | undefined;
         description?: string | undefined;
@@ -409,7 +432,7 @@ export class TaskManager {
   }
 
   /** List AGENT-TRIGGERs (the WorkerLoop-fired rows: cron/watch/pipeline/etc). */
-  listTriggers(opts?: { status?: TaskStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
+  listTriggers(opts?: { status?: TriggerStatus | undefined; scope?: MemoryScopeRef | undefined; taskType?: string | undefined }): TriggerRecord[] {
     return this.history.getTriggers({
       status: opts?.status,
       taskType: opts?.taskType,
@@ -510,7 +533,7 @@ export class TaskManager {
       }
     }
 
-    return `<task_overview>\n${parts.join('\n')}\n</task_overview>`;
+    return compose([renderFence('task_overview', parts.join('\n'))]);
   }
 
   getOverdueCount(scopes?: MemoryScopeRef[]): number {
@@ -589,7 +612,11 @@ export class TaskManager {
    *  deleting it (so its schedule + stored params survive). Returns false if no
    *  trigger matched. */
   setEnabled(id: string, enabled: boolean): boolean {
-    return this.history.setTriggerEnabled(id, enabled);
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    refuseBulkTrigger(trigger);
+    // Write the row that was checked, like the four methods above.
+    return this.history.setTriggerEnabled(trigger.id, enabled);
   }
 
   /** Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
@@ -606,6 +633,7 @@ export class TaskManager {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (!trigger) return undefined;
+    refuseBulkTrigger(trigger);
     this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString());
     return this.history.getTrigger(trigger.id, scopeOpts);
   }
@@ -643,6 +671,23 @@ export class TaskManager {
     return this.history.getDueTriggers();
   }
 
+  /** Get PARKED triggers whose wait has run out (§0 E5/A12) — the WorkerLoop
+   *  tick's second query. `getDueTriggers` above cannot return these; after the
+   *  wait gate in `getDue` no other query in the dispatch path sees them. */
+  getExpiredWaitingTriggers(now?: string): TriggerRecord[] {
+    return this.history.getExpiredWaitingTriggers(now);
+  }
+
+  /** Every parked trigger, deadline or not (§0 A10) — the tick's re-arm pass. */
+  getWaitingTriggers(): TriggerRecord[] {
+    return this.history.getWaitingTriggers();
+  }
+
+  /** End a parked trigger's wait, exactly once (§0 A6). */
+  endWait(id: string, to: Exclude<TriggerStatus, 'waiting'>): boolean {
+    return this.history.endTriggerWait(id, to);
+  }
+
   /** Update the watch_config JSON for a watch trigger (e.g. to store last_hash). */
   updateWatchConfig(id: string, config: Record<string, unknown>): void {
     this.history.updateTriggerWatchConfig(id, JSON.stringify(config));
@@ -654,6 +699,19 @@ export class TaskManager {
     if (!task) {
       throw new Error(`Trigger not found: ${id}`);
     }
+
+    // §0 T1/A5: a PARKED trigger's status is not this method's to write. Three of
+    // the five branches below set `status`, and each would end a wait that is
+    // still open — the run asked a question, the answer has not arrived, and the
+    // trigger must stay `waiting` until something ends the wait deliberately
+    // (the run's own un-park, or the expiry sweep). Only the STATUS is withheld:
+    // `last_run_at`, the result and `next_run_at` are still recorded, because
+    // those describe the run that happened and are true either way.
+    //
+    // This comparison is also the compile-time consumer §0 G3 names: it is a
+    // TS2367 error unless `waiting` is a member of TriggerStatus, so narrowing
+    // that union breaks the build here rather than silently disarming the guard.
+    const mayWriteStatus = task.status !== 'waiting';
 
     const now = new Date();
     const truncatedResult = result.length > MAX_RUN_RESULT_CHARS
@@ -683,7 +741,7 @@ export class TaskManager {
       // Guard: don't resurrect a cron that was manually marked
       // 'completed' mid-tick (narrow race between complete() and the
       // finishing tick).
-      if (task.status !== 'completed') {
+      if (mayWriteStatus && task.status !== 'completed') {
         this.history.updateTrigger(id, { status: status === 'success' ? 'open' : 'failed' });
       }
     } else if (task.watch_config) {
@@ -703,7 +761,7 @@ export class TaskManager {
       nextRunAt = new Date(now.getTime() + backoffMs).toISOString();
     } else if (status === 'success') {
       // One-shot background trigger — mark as completed on success
-      this.history.updateTrigger(id, { status: 'completed' });
+      if (mayWriteStatus) this.history.updateTrigger(id, { status: 'completed' });
     } else {
       // One-shot trigger that failed permanently (no max_retries, or
       // retries exhausted). Without this branch `next_run_at` would
@@ -712,7 +770,10 @@ export class TaskManager {
       // and clear `next_run_at` so the worker leaves it alone, while
       // last_run_status preserves the actual outcome ('failed' vs
       // 'timeout') for the UI.
-      this.history.updateTrigger(id, { status: 'failed' });
+      if (mayWriteStatus) this.history.updateTrigger(id, { status: 'failed' });
+      // `next_run_at` is cleared regardless: a parked trigger must not become due
+      // again on the strength of a run that ended without its answer. What ends
+      // its wait is the sweep, not this.
       nextRunAt = null;
     }
 

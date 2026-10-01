@@ -5,6 +5,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DataStore } from './data-store.js';
 import { CRM } from './crm.js';
+import { EngineDb } from './engine-db.js';
+import { SubjectStore } from './subject-store.js';
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-crm-test-'));
@@ -151,6 +153,181 @@ describe('CRM', () => {
       const leads = crm.listContacts({ type: 'lead' });
       expect(leads).toHaveLength(1);
       expect(leads[0]!.name).toBe('Bob');
+    });
+  });
+
+  describe('deleteContact', () => {
+    it('THE POINT: a wrong contact can be removed at all', () => {
+      // Before this the CRM had NO removal path. `contacts_save` upserts on email, so a wrong
+      // row could only be overwritten — and only if it has one.
+      crm.upsertContact({ name: 'Wrong Person', email: 'wrong@example.com', source: 'agent' });
+      const [row] = crm.listContacts();
+      expect(row?._id).toBeDefined();
+      expect(crm.deleteContact(row!._id!)).toBe(true);
+      expect(crm.listContacts()).toHaveLength(0);
+    });
+
+    it('removes ONLY the named row', () => {
+      // A filter that matched more than the id would take the neighbours with it.
+      crm.upsertContact({ name: 'Keep Me', email: 'keep@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Drop Me', email: 'drop@example.com', source: 'agent' });
+      const drop = crm.listContacts().find(c => c.name === 'Drop Me')!;
+      crm.deleteContact(drop._id!);
+      const left = crm.listContacts();
+      expect(left).toHaveLength(1);
+      expect(left[0]?.name).toBe('Keep Me');
+    });
+
+    it('reports false for an id that is not there, instead of pretending', () => {
+      expect(crm.deleteContact(999_999)).toBe(false);
+    });
+
+    it('removes an EMAIL-LESS contact — the case re-saving could never repair', () => {
+      // A NULL email never collides, so every re-save inserted another row. Lead research
+      // produces exactly these.
+      crm.upsertContact({ name: 'Researched Lead', company: 'Some Clinic', source: 'agent_external' });
+      const row = crm.listContacts()[0]!;
+      expect(crm.deleteContact(row._id!)).toBe(true);
+      expect(crm.listContacts()).toHaveLength(0);
+    });
+
+    it('takes the interactions and deals with it', () => {
+      // Otherwise "remove this person" deletes the row holding their phone number and keeps
+      // the notes ABOUT them — `interactions.summary` is free text on what was discussed, and
+      // both collections stay readable by name through their own routes.
+      crm.upsertContact({ name: 'Alte Kundin', email: 'alt@example.com', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Alte Kundin', type: 'call', summary: 'Wollte einen Termin im Herbst' });
+      crm.upsertDeal({ title: 'Beratung', contact_name: 'Alte Kundin', value: 900, stage: 'proposal' });
+      expect(crm.getInteractions('Alte Kundin')).toHaveLength(1);
+      expect(crm.getDealsForContact('Alte Kundin')).toHaveLength(1);
+
+      const row = crm.listContacts().find(c => c.name === 'Alte Kundin')!;
+      expect(crm.deleteContact(row._id!)).toBe(true);
+      expect(crm.getInteractions('Alte Kundin')).toHaveLength(0);
+      expect(crm.getDealsForContact('Alte Kundin')).toHaveLength(0);
+    });
+
+    it('leaves another contact\'s interactions and deals alone', () => {
+      // The cascade is keyed by NAME, so a filter that is too loose takes the neighbours' history.
+      crm.upsertContact({ name: 'Geht Weg', email: 'weg@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Bleibt Da', email: 'bleibt@example.com', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Geht Weg', type: 'call', summary: 'a' });
+      crm.logInteraction({ contact_name: 'Bleibt Da', type: 'call', summary: 'b' });
+      crm.upsertDeal({ title: 'D1', contact_name: 'Bleibt Da', value: 100, stage: 'lead' });
+
+      const row = crm.listContacts().find(c => c.name === 'Geht Weg')!;
+      crm.deleteContact(row._id!);
+      expect(crm.getInteractions('Bleibt Da')).toHaveLength(1);
+      expect(crm.getDealsForContact('Bleibt Da')).toHaveLength(1);
+    });
+
+    it('keeps a NAMESAKE\'s interactions and deals — the case the neighbour test cannot see', () => {
+      // The test above passes with different names, which is the easy half. `interactions` and
+      // `deals` are keyed by `contact_name`, so two people called the same thing share one key
+      // and the cascade cannot tell them apart — it deleted the survivor's entire history.
+      // Not orphaned rows: gone, with nothing to restore them from. Common name, one duplicate
+      // cleaned up, a real customer's record silently emptied.
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' });
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' });
+      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' });
+
+      const both = crm.listContacts().filter(c => c.name === 'Michael Müller');
+      expect(both).toHaveLength(2);
+      expect(crm.deleteContact(both[0]!._id!)).toBe(true);
+
+      // The other Michael Müller is still a contact, so the history still has an owner.
+      expect(crm.listContacts().filter(c => c.name === 'Michael Müller')).toHaveLength(1);
+      expect(crm.getInteractions('Michael Müller')).toHaveLength(1);
+      expect(crm.getDealsForContact('Michael Müller')).toHaveLength(1);
+    });
+
+    it('cascades once the LAST namesake goes', () => {
+      // The other direction, and it has to be stated: a guard that keeps history whenever a
+      // name was ever shared would leak rows forever. Deleting the second of two identical
+      // names leaves no owner, so the cascade must fire — the test above is satisfied by a
+      // cascade that never runs at all.
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' });
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' });
+      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' });
+
+      for (const c of crm.listContacts().filter(c => c.name === 'Michael Müller')) {
+        crm.deleteContact(c._id!);
+      }
+      expect(crm.getInteractions('Michael Müller')).toHaveLength(0);
+      expect(crm.getDealsForContact('Michael Müller')).toHaveLength(0);
+    });
+
+    it('touches nothing when the id was not there', () => {
+      crm.upsertContact({ name: 'Unbeteiligt', email: 'u@example.com', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Unbeteiligt', type: 'call', summary: 'x' });
+      expect(crm.deleteContact(999_999)).toBe(false);
+      expect(crm.listContacts()).toHaveLength(1);
+      expect(crm.getInteractions('Unbeteiligt')).toHaveLength(1);
+    });
+  });
+
+  describe('subject-graph mirror', () => {
+    it('logs an ambiguous-name failure WITHOUT the contact name (data minimisation)', () => {
+      // The mirror's catch writes `err.message` to stderr under an explicit promise that
+      // the contact name is omitted as plaintext PII. An error carrying the colliding
+      // names breaks that promise silently — it did, and only a mutation caught it, so
+      // the PATH is asserted here rather than the helper in isolation.
+      const engineDb = new EngineDb(join(tmpDir, 'engine.db'), '');
+      const graphCrm = new CRM(ds, { engineDb, subjectGraphEnabled: true });
+      graphCrm.ensureSchema();
+      const subjects = new SubjectStore(engineDb);
+      subjects.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      subjects.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+
+      const written: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+        written.push(String(chunk)); return true;
+      }) as typeof process.stderr.write;
+      try {
+        graphCrm.upsertContact({ name: 'Meier', email: 'meier@example.test' });
+      } finally {
+        process.stderr.write = orig;
+        engineDb.close();
+      }
+
+      const log = written.join('');
+      expect(log).toContain('mirror failed');        // it DID hit the ambiguous path
+      expect(log).not.toContain('Meier');            // ...without naming anyone
+      expect(log).not.toContain('Anna');
+      // and the contact itself was still saved — only the graph edge was skipped
+      expect(graphCrm.listContacts().some(c => c.name === 'Meier')).toBe(true);
+    });
+
+    it('holds the same promise for the COMPANY branch, not just the person one', () => {
+      // The mirror resolves two names: the contact and its company. Both go through the
+      // same log, so both need the name-free error — and asserting only the person branch
+      // left the company one revertible with the whole suite green.
+      const engineDb = new EngineDb(join(tmpDir, 'engine-org.db'), '');
+      const graphCrm = new CRM(ds, { engineDb, subjectGraphEnabled: true });
+      graphCrm.ensureSchema();
+      const subjects = new SubjectStore(engineDb);
+      subjects.findOrCreate({ kind: 'organization', name: 'Nordwerk Bau AG', aliases: ['Nordwerk'] });
+      subjects.findOrCreate({ kind: 'organization', name: 'Nordwerk Handel AG', aliases: ['Nordwerk'] });
+
+      const written: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+        written.push(String(chunk)); return true;
+      }) as typeof process.stderr.write;
+      try {
+        // an UNambiguous person, so only the company lookup can be the one that fails
+        graphCrm.upsertContact({ name: 'Rita Fuchs', company: 'Nordwerk', email: 'rita@example.test' });
+      } finally {
+        process.stderr.write = orig;
+        engineDb.close();
+      }
+
+      const log = written.join('');
+      expect(log).toContain('mirror failed');
+      expect(log).not.toContain('Nordwerk');
     });
   });
 

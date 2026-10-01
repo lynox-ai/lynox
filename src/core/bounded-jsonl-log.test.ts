@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { appendBoundedJsonl } from './bounded-jsonl-log.js';
 
 /**
- * DEF-0011 — the shared size-rotation that bounds the opt-in telemetry sinks
+ * The shared size-rotation that bounds the opt-in telemetry sinks
  * (`retrieval-shadow.jsonl` / `memory-write.jsonl` / `context-cost.jsonl`) before
  * `retrieval_shadow_log` is enabled fleet-wide on customer data.
  */

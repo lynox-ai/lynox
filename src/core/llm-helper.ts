@@ -17,7 +17,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
-import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
+import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -86,6 +86,40 @@ export interface StructuredJsonResult<T> {
   outputTokens: number;
   /** Computed USD cost from the model-appropriate list pricing. */
   costUsd: number;
+  /**
+   * The model id this call actually ran on, after `resolveModel` applied the
+   * provider snapshot, the `LYNOX_LLM_HELPER_MODEL` override and the operator
+   * blocklist.
+   *
+   * Returned because the caller CANNOT derive it. Every consumer of this
+   * helper's `costUsd` has to label that spend with a tier for billing, and
+   * before this field existed the only thing available at the call site was a
+   * guess — `api_setup` guessed `'fast'` while the helper's own default is
+   * `MODEL_MAP.balanced`, so a real customer's $0.3848 Sonnet extraction was
+   * reported to the control plane as Haiku spend. A label the caller asserts
+   * drifts from the model the helper picks; a label derived from this does not.
+   */
+  model: string;
+  /**
+   * {@link model}'s capability tier, for callers that need the billing bucket
+   * rather than the id. Falls back to `'balanced'` for an id the capability
+   * registry does not carry a tier for — an unregistered custom-proxy/BYOK id,
+   * or one of the registered ids with `tier: null`. Of the two wrong answers
+   * available, `'balanced'` is the one that does not understate premium spend.
+   *
+   * Two honest limits on this value:
+   *   · For an UNREGISTERED id the cost figure is not exact either: `pricingFor`
+   *     falls back to `claude-sonnet-4-6` list pricing, so a BYOK `gpt-*` call
+   *     is billed at $3/$15 regardless of what it really costs. That predates
+   *     this field and is not fixed by it — but "the tier is a guess AND the
+   *     dollars are a guess" is the accurate description of that path.
+   *   · A Mistral tenant is over-labelled: `MISTRAL_MODEL_MAP.balanced` is
+   *     `mistral-medium-2604`, whose registry tier is `'deep'`. The label
+   *     follows the MODEL, which is what makes it honest about what ran; it
+   *     does not follow the tenant's tier SLOT. Reconciling the two is a
+   *     registry question, not a helper one.
+   */
+  tier: ModelTier;
 }
 
 /**
@@ -378,6 +412,8 @@ export async function callForStructuredJson<T = unknown>(
     inputTokens,
     outputTokens,
     costUsd: computeCostUsd(inputTokens, outputTokens, model),
+    model,
+    tier: modelCapability(model)?.tier ?? 'balanced',
   };
 }
 

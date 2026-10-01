@@ -37,13 +37,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Every `sort` and `comm` below runs under `LC_ALL=C`, per command. `comm` needs
+# both inputs in its own order, and with uutils coreutils (Ubuntu 26.04's default)
+# `sort` collates by locale while `comm` compares bytes. Under en_US.UTF-8 that
+# reported recorded flags as new, and `sort -u` merged names that collate equal
+# (`a_b_c` and `abc`), so a schema field could drop out of the scan. Per command,
+# not exported, so the greps keep the caller's locale.
+
 SCHEMA="src/types/schemas.ts"
 INVENTORY="scripts/default-on-inventory.txt"
 [ -f "$SCHEMA" ] || { echo "default-on-inventory: cannot find $SCHEMA" >&2; exit 1; }
 
 # The config field names, straight from the schema. Anything not declared there is
 # not an operator-facing flag and is out of scope by construction.
-FIELDS="$(grep -oE '^\s{2}[a-z_][a-z0-9_]*:' "$SCHEMA" | tr -d ' :' | sort -u)"
+FIELDS="$(grep -oE '^\s{2}[a-z_][a-z0-9_]*:' "$SCHEMA" | tr -d ' :' | LC_ALL=C sort -u)"
 [ -n "$FIELDS" ] || { echo "default-on-inventory: read zero fields from $SCHEMA — the file's shape changed, refusing to report a clean run" >&2; exit 1; }
 
 found=""
@@ -60,7 +67,7 @@ for f in $FIELDS; do
     found="${found}${f}"$'\n'
   fi
 done
-found="$(printf '%s' "$found" | sed '/^$/d' | sort -u)"
+found="$(printf '%s' "$found" | sed '/^$/d' | LC_ALL=C sort -u)"
 
 if [ "${1:-}" = "--update" ]; then
   { echo "# Config flags whose ABSENCE means ENABLED — regenerate with scripts/default-on-inventory.sh --update"
@@ -72,10 +79,10 @@ if [ "${1:-}" = "--update" ]; then
 fi
 
 [ -f "$INVENTORY" ] || { echo "default-on-inventory: $INVENTORY missing — run with --update" >&2; exit 1; }
-known="$(grep -vE '^\s*(#|$)' "$INVENTORY" | sort -u)"
+known="$(grep -vE '^\s*(#|$)' "$INVENTORY" | LC_ALL=C sort -u)"
 
-new="$(comm -23 <(printf '%s\n' "$found") <(printf '%s\n' "$known") | sed '/^$/d')"
-gone="$(comm -13 <(printf '%s\n' "$found") <(printf '%s\n' "$known") | sed '/^$/d')"
+new="$(LC_ALL=C comm -23 <(printf '%s\n' "$found") <(printf '%s\n' "$known") | sed '/^$/d')"
+gone="$(LC_ALL=C comm -13 <(printf '%s\n' "$found") <(printf '%s\n' "$known") | sed '/^$/d')"
 
 rc=0
 if [ -n "$new" ]; then

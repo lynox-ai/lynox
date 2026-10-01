@@ -423,6 +423,8 @@ services:
       - SEARXNG_URL=http://searxng:8080
     volumes:
       - \${HOME}/.lynox:/home/lynox/.lynox
+    networks:
+      - internal
 
   searxng:
     image: searxng/searxng:latest
@@ -442,6 +444,16 @@ services:
         max-file: "2"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - internal
+
+# Not \`internal: true\` — outbound stays open, the engine needs it for the LLM
+# API. What this buys is opt-in membership: a service added below without a
+# \`networks:\` key lands on Compose's implicit \`default\` network and gets no
+# route to SearXNG, which runs with \`limiter: false\`.
+networks:
+  internal:
+    driver: bridge
 `;
 }
 

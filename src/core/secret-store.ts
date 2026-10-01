@@ -1,6 +1,7 @@
 import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/index.js';
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
+import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 
 export const SECRET_REF_PATTERN = /\bsecret:([A-Z_][A-Z0-9_]*)\b/g;
 
@@ -25,14 +26,44 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
   /^GOOGLE_OAUTH_/,
-  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials the
-  // control plane provisions (cp-managed, "OAuth hijacking" if a tenant could
-  // repoint them) — same admin-only class as the OAuth tokens above. Resolved
-  // engine-internally via secretStore.resolve(); never an agent tool-input ref.
+  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials. They
+  // are resolved engine-internally — never an agent tool-input ref, which is what
+  // keeps them on this list. Operators supply them per deployment.
+  //
+  // The original note here read "OAuth hijacking if a tenant could repoint them".
+  // That threat is per-INSTANCE, and each tenant runs its own container and its own
+  // vault: repointing changes which Google app THAT tenant's engine authenticates
+  // as, against THAT tenant's own data. It is what BYO means, and it is a supported
+  // state since 2026-08-23. So the customer-facing write path carves this prefix out
+  // (http-api.ts CUSTOMER_WRITABLE_INFRA_PATTERNS) while the agent-prompt path does
+  // not — the agent must never be able to raise a credential dialog for it.
   /^GOOGLE_CLIENT_/,
   /^SMTP_/,
   /^IMAP_/,
+  // A calendar feed URL whose SECRECY is the credential (Google/Outlook/Apple "secret
+  // address"). Same class as the mail credentials above: the engine resolves it inside
+  // `calendar_read`, and the model has no reason to hold it. Keeping it agent-invisible
+  // means a prompt-injected turn cannot put `secret:CALENDAR_FEED_…` into an outbound
+  // request body — the URL alone grants read access to someone's whole calendar, and it
+  // matches none of the vendor-prefixed shapes the egress body scan looks for.
+  /^CALENDAR_FEED_/,
 ];
+
+/** True if writing `name` would clobber a credential the tenant cannot recover — either an
+ *  infrastructure secret or a vault slot holding their own LLM provider key. For WRITE gates;
+ *  read visibility is still {@link isInfraSecret}'s question.
+ *
+ *  The provider slots are deliberately NOT in {@link INFRA_SECRET_PATTERNS}: they are
+ *  agent-VISIBLE by design — the setup wizard writes them and the engine resolves them. What
+ *  they must never be is agent-OVERWRITABLE: `api_setup fetch_token` picks its own output
+ *  name, and writing an OAuth token over a provider key destroys the tenant's access to their
+ *  own provider. There is no second copy — the wizard stored it once.
+ *
+ *  The slot set is the one derived from the model catalog (`llm/provider-keys.ts`), not a list
+ *  kept here: a catalog preset that adds a slot is protected without an edit in this file. */
+export function isProtectedSecretWrite(name: string): boolean {
+  return isInfraSecret(name) || PROVIDER_KEY_SLOTS.has(name);
+}
 
 /** True if `name` is an infrastructure/engine-internal secret (agent-invisible). */
 export function isInfraSecret(name: string): boolean {
@@ -40,34 +71,154 @@ export function isInfraSecret(name: string): boolean {
 }
 
 /**
+ * Every `secret:NAME` name written in `input`, in order, deduplicated.
+ *
+ * A pure text scan: it reads no value and needs no store, which is what lets
+ * `secret-scope.ts` derive a spawn's default scope from the spawn order alone.
+ */
+export function extractSecretRefNames(input: unknown): string[] {
+  const text = JSON.stringify(input);
+  const names: string[] = [];
+  const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (!names.includes(match[1]!)) names.push(match[1]!);
+  }
+  return names;
+}
+
+/**
+ * Resolve every `secret:NAME` reference in `input` through `resolve`.
+ *
+ * Extracted from {@link SecretStore.resolveSecretRefs} so a SCOPED view of a
+ * store (see `secret-scope.ts`) can reuse this exact walk with a narrower
+ * resolver instead of re-implementing it. A second implementation would be the
+ * bypass: `resolveSecretRefs` is the path tool input actually travels, so a
+ * scoped store that delegated this one method to the unscoped inner store
+ * would hand the child every secret while every other method looked correct.
+ *
+ * `resolve` returning null leaves the literal `secret:NAME` in place — which is
+ * what makes an out-of-scope reference visible to `findUnresolvedSecretRefs`
+ * and thus to the fail-loud pre-tool gate, rather than silently empty.
+ */
+export function resolveSecretRefsWith(
+  input: unknown,
+  resolve: (name: string) => string | null,
+): unknown {
+  const text = JSON.stringify(input);
+  const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
+  const resolved = text.replace(pattern, (_match, name: string) => {
+    // Infrastructure secrets are never resolved into agent tool input — leave
+    // the literal `secret:NAME` so the credential cannot be exfiltrated to an
+    // external host (the value stays in the vault / credStore path only).
+    if (isInfraSecret(name)) return `secret:${name}`;
+    const value = resolve(name);
+    // Escape for JSON string context
+    return value !== null ? value.replace(/["\\\n\r\t]/g, c => {
+      if (c === '"') return '\\"';
+      if (c === '\\') return '\\\\';
+      if (c === '\n') return '\\n';
+      if (c === '\r') return '\\r';
+      if (c === '\t') return '\\t';
+      return c;
+    }) : `secret:${name}`;
+  });
+  try {
+    return JSON.parse(resolved) as unknown;
+  } catch {
+    return input;
+  }
+}
+
+/**
+ * The known shapes of a credential, kept in one place. The detect/mask helpers
+ * below and the http tool's outbound scan read this list rather than keeping
+ * their own copies: copies drift, and a copy that lags misses the newest key
+ * format.
+ *
+ * - `vendor`: a provider's prefixed key format.
+ * - `key-block` / `jwt`: structural credentials with an unmistakable shape.
+ * - `contextual`: a credential recognisable only by what surrounds it (URL
+ *   userinfo, a `Bearer` header) — ordinary in some places, a leak in others.
+ * - `egress-wide`: a wider spelling of a vendor or JWT form that the outbound
+ *   scan has always used. Kept for that scan only — narrowing it would let
+ *   through something it refuses today, and the detect/mask helpers keep their
+ *   word-bounded forms because the wide ones fire inside ordinary words.
+ * - `generic`: any long token. Last on purpose: callers drop it for short text.
+ */
+export type SecretShapeKind = 'vendor' | 'key-block' | 'jwt' | 'contextual' | 'egress-wide' | 'generic';
+export interface SecretShape {
+  readonly label: string;
+  readonly kind: SecretShapeKind;
+  readonly pattern: RegExp;
+}
+
+export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
+  // Anthropic
+  { label: 'Anthropic API key', kind: 'vendor', pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/ },
+  // OpenAI. Two rules on purpose: the plain `sk-` form is alnum-only, but the
+  // prefixed forms (`sk-proj-`, `sk-svcacct-`) carry `-` and `_` INSIDE the
+  // token, so the alnum rule stops at the first dash and matches four
+  // characters. Measured 2026-08-24: a real `sk-proj-…` key passed the masker
+  // untouched while the test fixture (`sk-ant-` + 40×A) was caught — the fixture
+  // was the reason it looked covered.
+  { label: 'OpenAI API key', kind: 'vendor', pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}\b/ },
+  { label: 'OpenAI-style API key', kind: 'vendor', pattern: /\bsk-[A-Za-z0-9]{20,}\b/ },
+  // A credential embedded in a URL's userinfo (`scheme://user:pass@host`).
+  // Narrow by construction — it needs the `:`…`@` shape — so it does not touch
+  // ordinary URLs, and it catches the database and basic-auth strings that
+  // routinely end up in connection errors.
+  // Two deliberate departures from the obvious form, both measured.
+  //
+  // `{0,32}` instead of `*`: unbounded, this rule is quadratic in a long dotted
+  // run — 40 KB cost ~500 ms of blocked event loop, and a regex cannot be
+  // interrupted.
+  //
+  // NO leading `\b[a-z]` anchor: the quantifier does not govern the SCHEME, it
+  // governs everything since the last word boundary. Anchored, a bound of 32
+  // silently stops matching as soon as 34+ alphanumerics are glued in front of
+  // the URL — and text immediately before an error's URL is exactly what a
+  // caller can control. Without the anchor the same bound keeps the match
+  // (verified: 40 and 200 characters of glued prefix both match) while ordinary
+  // URLs still do not (`https://api.example.com/…`, `host:8443/…`,
+  // `redis://cache:6379/0` — none has the `user:pass@` shape this needs).
+  { label: 'credential in URL', kind: 'contextual', pattern: /[a-z0-9+.-]{0,32}:\/\/[^\s:@/]+:[^\s:@/]+@/i },
+  // Stripe
+  { label: 'Stripe API key', kind: 'vendor', pattern: /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/ },
+  // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
+  { label: 'GitHub token', kind: 'vendor', pattern: /\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}\b/ },
+  // AWS
+  { label: 'AWS access key', kind: 'vendor', pattern: /\bAKIA[A-Z0-9]{16}\b/ },
+  // Google
+  { label: 'Google API key', kind: 'vendor', pattern: /\bAIza[A-Za-z0-9_-]{35}\b/ },
+  // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
+  { label: 'Slack token', kind: 'vendor', pattern: /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/ },
+  // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
+  // a Shopify integration flow leaked the prefix into the agent transcript)
+  { label: 'Shopify token', kind: 'vendor', pattern: /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/ },
+  // JWT (three base64-url segments) — catches OAuth ID tokens etc.
+  { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
+  // Google OAuth access token
+  { label: 'Google OAuth token', kind: 'vendor', pattern: /\bya29\.[A-Za-z0-9_-]{20,}\b/ },
+  // Private key blocks (PEM / OpenSSH) — any key type, not only RSA.
+  { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
+  // The outbound scan's own wider forms: not word-bounded, and a JWT whose
+  // payload segment need not start with `eyJ`. See `egress-wide` above.
+  { label: 'Anthropic API key', kind: 'egress-wide', pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/ },
+  { label: 'OpenAI-style API key', kind: 'egress-wide', pattern: /sk-[a-zA-Z0-9]{20,}/ },
+  { label: 'GitHub token', kind: 'egress-wide', pattern: /gh[po]_[a-zA-Z0-9]{36,}/ },
+  { label: 'JWT token', kind: 'egress-wide', pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./ },
+  // Generic Bearer tokens (long base64-ish)
+  { label: 'bearer token', kind: 'contextual', pattern: /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/ },
+  // Generic long hex/base64 secrets (40+ chars, likely tokens)
+  { label: 'long token', kind: 'generic', pattern: /\b[A-Za-z0-9_-]{40,}\b/ },
+];
+
+/**
  * Common secret patterns — regex-based detection for accidental secret leaks.
  * Used by ask_user guard and chat input warning.
  */
-const SECRET_PATTERNS: RegExp[] = [
-  // Anthropic
-  /\bsk-ant-[A-Za-z0-9_-]{20,}\b/,
-  // OpenAI (sk-, sk-proj-)
-  /\bsk-[A-Za-z0-9]{20,}\b/,
-  // Stripe
-  /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
-  // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
-  /\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}\b/,
-  // AWS
-  /\bAKIA[A-Z0-9]{16}\b/,
-  // Google
-  /\bAIza[A-Za-z0-9_-]{35}\b/,
-  // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
-  /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/,
-  // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
-  // a Shopify integration flow leaked the prefix into the agent transcript)
-  /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/,
-  // JWT (three base64-url segments) — catches OAuth ID tokens etc.
-  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/,
-  // Generic Bearer tokens (long base64-ish)
-  /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/,
-  // Generic long hex/base64 secrets (40+ chars, likely tokens)
-  /\b[A-Za-z0-9_-]{40,}\b/,
-];
+const SECRET_PATTERNS: RegExp[] = SECRET_SHAPES.filter((s) => s.kind !== 'egress-wide').map((s) => s.pattern);
 
 /**
  * Check if text likely contains a secret based on common key patterns.
@@ -105,10 +256,16 @@ export function matchesSecretPatternStrict(text: string): string | null {
  * Mask text that matches common secret patterns.
  * Replaces detected secrets with `***<last4>`.
  */
-export function maskSecretPatterns(text: string): string {
+export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boolean }): string {
   let result = text;
-  // Apply specific patterns (skip generic last pattern to avoid over-masking)
-  for (const pattern of SECRET_PATTERNS.slice(0, -1)) {
+  // The generic 40+ char catcher is skipped by default to avoid over-masking
+  // ordinary prose. Callers that are scrubbing a machine-read sink rather than
+  // something a person reads (error reports) pass `includeGeneric` — there,
+  // masking a long opaque token that turns out to be a hash costs a little
+  // diagnostic detail, while missing one that is a credential costs the
+  // credential.
+  const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
+  for (const pattern of patterns) {
     const globalPattern = new RegExp(pattern.source, 'g');
     result = result.replace(globalPattern, (match) => {
       if (match.length <= 4) return '***';
@@ -116,6 +273,78 @@ export function maskSecretPatterns(text: string): string {
     });
   }
   return result;
+}
+
+/**
+ * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
+ *
+ * Running the two maskers in sequence is unsafe in BOTH orders, and that is
+ * measured, not cautious. Values first: a stored two-character value inside an
+ * `sk-ant-…` key becomes `***`, `*` is in no pattern character class, the rule
+ * stops matching and thirty characters of the key ship in cleartext. Shapes
+ * first: a stored value straddling a shape boundary survives the same way.
+ * Neither order dominates — each has a case where the other is safe.
+ *
+ * Sequencing is unsafe because each pass rewrites the text the next one reads.
+ * So both passes read the ORIGINAL, contribute spans, and the union is redacted
+ * once. A span the value pass finds cannot hide one the pattern pass would have
+ * found, in either direction.
+ *
+ * (The docblock this replaces claimed masking "only shortens" the text, so the
+ * exact pass could not hide a shape. It does not: a value of four characters or
+ * fewer becomes `***`, so `xx ab yy` grows by one.)
+ */
+export function maskSecretsAndPatterns(
+  text: string,
+  values: readonly string[],
+  opts?: { includeGeneric?: boolean },
+): string {
+  const spans: Array<{ start: number; end: number }> = [];
+
+  const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
+  for (const pattern of patterns) {
+    const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    for (const m of text.matchAll(global)) {
+      if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length });
+    }
+  }
+
+  for (const value of values) {
+    // Single characters would match everywhere; the store applies the same floor.
+    if (value.length < 2) continue;
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(value, from);
+      if (at === -1) break;
+      spans.push({ start: at, end: at + value.length });
+      from = at + value.length;
+    }
+  }
+
+  if (spans.length === 0) return text;
+
+  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    // `<=`, not `<`, and this is PRESENTATION, not safety — measured, because the
+    // first version of this comment claimed the opposite. With `<`, two touching
+    // spans stay separate and BOTH are still masked: `******kkkk` instead of
+    // `***kkkk`. Nothing is revealed either way, so the mutation `<=` -> `<` is
+    // equivalent in the dimension that matters and is not claimed as covered.
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else merged.push({ ...span });
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const span of merged) {
+    out += text.slice(cursor, span.start);
+    const matched = text.slice(span.start, span.end);
+    out += matched.length <= 4 ? '***' : `***${matched.slice(-4)}`;
+    cursor = span.end;
+  }
+  return out + text.slice(cursor);
 }
 
 interface InternalSecret {
@@ -296,6 +525,16 @@ export class SecretStore implements SecretStoreLike {
     return false;
   }
 
+  /**
+   * Both maskers at once, over the original text — see
+   * {@link maskSecretsAndPatterns}. The values never leave this object.
+   */
+  maskAll(text: string, opts?: { includeGeneric?: boolean }): string {
+    const values: string[] = [];
+    for (const secret of this.secrets.values()) values.push(secret.value);
+    return maskSecretsAndPatterns(text, values, opts);
+  }
+
   maskSecrets(text: string): string {
     let result = text;
     for (const secret of this.secrets.values()) {
@@ -385,42 +624,11 @@ export class SecretStore implements SecretStoreLike {
   }
 
   extractSecretNames(input: unknown): string[] {
-    const text = JSON.stringify(input);
-    const names: string[] = [];
-    const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      if (!names.includes(match[1]!)) {
-        names.push(match[1]!);
-      }
-    }
-    return names;
+    return extractSecretRefNames(input);
   }
 
   resolveSecretRefs(input: unknown): unknown {
-    const text = JSON.stringify(input);
-    const pattern = new RegExp(SECRET_REF_PATTERN.source, 'g');
-    const resolved = text.replace(pattern, (_match, name: string) => {
-      // Infrastructure secrets are never resolved into agent tool input — leave
-      // the literal `secret:NAME` so the credential cannot be exfiltrated to an
-      // external host (the value stays in the vault / credStore path only).
-      if (isInfraSecret(name)) return `secret:${name}`;
-      const value = this.resolve(name);
-      // Escape for JSON string context
-      return value !== null ? value.replace(/["\\\n\r\t]/g, c => {
-        if (c === '"') return '\\"';
-        if (c === '\\') return '\\\\';
-        if (c === '\n') return '\\n';
-        if (c === '\r') return '\\r';
-        if (c === '\t') return '\\t';
-        return c;
-      }) : `secret:${name}`;
-    });
-    try {
-      return JSON.parse(resolved) as unknown;
-    } catch {
-      return input;
-    }
+    return resolveSecretRefsWith(input, (name) => this.resolve(name));
   }
 
   /**

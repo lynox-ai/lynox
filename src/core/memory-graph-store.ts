@@ -14,6 +14,17 @@ export interface MemoryStubRow {
 }
 
 /**
+ * The orphan-subject reap an engine.db memory delete owes. Called INSIDE the
+ * delete transaction with the subject ids the deleted memories were linked to; deletes
+ * only what nothing else references and returns the ids it removed. Installed via
+ * {@link MemoryGraphStore.setOrphanSubjectReaper} by the owner that can see EVERY
+ * reference — `KnowledgeLayer`, which holds engine.db, the history.db thread anchor and
+ * the datastore.db bridge. A thrown error aborts the memory delete with it (the caller's
+ * re-throw contract makes the erase retryable).
+ */
+export type OrphanSubjectReaper = (candidateSubjectIds: readonly string[]) => readonly string[];
+
+/**
  * The at-rest ciphertext marker — mirrors `ENCRYPTED_PREFIX` in engine-db.ts.
  * `EngineDb.dec()` returns its input UNCHANGED when it can't decrypt (keyless /
  * browse-mode, or wrong key / corrupt), so a row whose decrypted text is
@@ -75,6 +86,23 @@ interface EngineMemoryRaw {
 }
 
 /**
+ * The write-trust comparison {@link MemoryGraphStore.markSuperseded} made when the engine.db
+ * stub's tier and the incoming tier disagreed. A REPORT of a retire that happened, never a
+ * refusal — see that method for why a mirror cannot refuse. Named rather than inlined so the
+ * call sites read as "collect a report", not "check a success flag": the sibling retire on the
+ * authoritative store returns `false` for the opposite meaning.
+ *
+ * Carries `newTier` back out even though the caller passed it in, so reporting needs no second
+ * lookup and no re-narrowing of an optional the store already proved present.
+ */
+export interface TierDivergenceReport {
+  /** The DERIVED tier of the incoming write, as handed to `markSuperseded`. */
+  readonly newTier: ProvenanceKind;
+  /** What the engine.db stub held — the value this check actually compared. */
+  readonly stubTier: ProvenanceKind;
+}
+
+/**
  * MemoryGraphStore — the S1b memory-provenance layer over engine.db: a
  * lightweight `memories` STUB + the `memory_subjects` mention junction + the
  * derived `subject_cooccurrences` counts. It anchors the subject-graph to the
@@ -96,6 +124,8 @@ interface EngineMemoryRaw {
  */
 export class MemoryGraphStore {
   private readonly db: Database.Database;
+  /** Installed by the owner that can see every reference; null = no reap. */
+  private orphanReaper: OrphanSubjectReaper | null = null;
 
   constructor(private readonly engine: EngineDb) {
     this.db = engine.getDb();
@@ -241,26 +271,71 @@ export class MemoryGraphStore {
    * first stored before the flag was on), so it can never reference a missing
    * row. The `supersedes` provenance junction is intentionally NOT mirrored in
    * S1b (its FK needs both stubs present); S2 recomputes it authoritatively.
+   *
+   * With `opts.newTier` it also COMPARES the write-trust order (Memory Foundation Wave 2)
+   * and returns a {@link TierDivergenceReport} when the two disagree — `null` when they
+   * agree, when no tier was passed (flag off, or the consolidation mirror whose keeper-sort
+   * already guarantees keeper ≥ victim), or when the old row has no stub to compare. The
+   * retire is applied EITHER WAY; a non-null return means the retire HAPPENED and something
+   * about it is worth recording. Deliberately not a `boolean`: `AgentMemoryDb.supersedMemory`
+   * returns `false` for "nothing happened", and a second supersede method in the same
+   * subsystem where a falsy value meant the opposite would be a trap worth avoiding.
+   *
+   * WHY THIS IS NOT A GATE. It reads as one — the
+   * shape is `supersedMemory`'s backstop, one store over — but it cannot be:
+   *
+   *  1. It can never catch a downgrade, only a drift. A production caller reaches this line
+   *     only after agent-memory.db DID NOT REFUSE the same retire: the contradiction mirrors
+   *     run on a `contradictions` array the legacy path has already demoted to `coexist` on
+   *     refusal, and `_mirrorTierRaise` is unreachable when `_raiseTier`'s transaction rolled
+   *     back. "Did not refuse" is weaker than "ranked and allowed", and the gap is real:
+   *     `supersedMemory`'s guard needs BOTH rows (`existing && incoming`), so a retire whose
+   *     legacy row was hard-deleted passes it without ranking anything. That case wants the
+   *     retire even more — the stub is an orphan of a row that no longer exists.
+   *
+   *  2. Refusing made things strictly worse. The legacy retire has already COMMITTED by the
+   *     time we get here, so a refusal cannot prevent the loss — it can only leave the row
+   *     retired on one store and active on the other, which is the RF4 divergence trap
+   *     `KnowledgeLayer` demotes contradictions to avoid. Whether the retire then "happened"
+   *     would be decided by the read-cutover flag (recall reads engine.db under it, legacy
+   *     without it), i.e. a trust outcome settled by an unrelated flag. On the tier-raise
+   *     path it was worse still: the old stub stayed active while `upsertStub` inserted the
+   *     raised row, so recall returned BOTH — the exact duplicate `_mirrorTierRaise` exists
+   *     to prevent.
+   *
+   * HOW THE TIERS CAN DIVERGE. No UPDATE path rewrites `source_type` on either store
+   * (agent-memory.db has none; the `upsertStub` ON CONFLICT list omits it, so a re-upsert
+   * preserves it) and the S5a backfill copies it verbatim — so a divergence is not produced
+   * by ordinary writes. But a stub created WITHOUT an explicit tier takes this file's
+   * `'agent_inferred'` INSERT default rather than its legacy row's real tier, which invents
+   * a tier for a row that already has one. Expect that to be the first thing this report counts.
+   *
+   * WHEN TO FLIP IT BACK: at the S5b'-d legacy DROP engine.db becomes authoritative and this
+   * check becomes the PRIMARY gate — it must refuse again, and its callers must handle that
+   * the way `KnowledgeLayer` handles `supersedMemory`'s refusal today (demote the resolution
+   * / roll the raise back whole), not merely log it. That is prose, which is weaker than a
+   * mechanism — the one mechanism that exists is `memory-write-trust-gate.test.ts`'s "REPORTS a
+   * tier disagreement and retires anyway", which fails the moment the policy flips and points
+   * back here.
    */
-  markSuperseded(memoryId: string, supersededById: string, opts?: { newTier?: ProvenanceKind | undefined }): void {
-    // Memory Foundation Wave 2 — the write-trust gate BACKSTOP (defense-in-depth).
-    // Unlike the legacy store, this mirror fires BEFORE the new memory's stub exists
-    // (upsertStub runs after markSuperseded in the store() mirror) and holds only the
-    // engine.db handle — so it CANNOT DB-look-up the incoming tier. The caller passes it
-    // as `opts.newTier` (like the resolution). We look up the OLD stub's tier (it exists —
-    // it's the row being retired) and REFUSE a strictly-lower-trust retire. An UNDEFINED
-    // `newTier` (flag off, OR the consolidation mirror whose keeper-sort already guarantees
-    // keeper ≥ victim) skips the backstop → byte-identical / a safe no-op. If the old stub
-    // is absent the UPDATE no-ops anyway (nothing to protect).
+  markSuperseded(
+    memoryId: string,
+    supersededById: string,
+    opts?: { newTier?: ProvenanceKind | undefined },
+  ): TierDivergenceReport | null {
+    let diverged: TierDivergenceReport | null = null;
     if (opts?.newTier !== undefined) {
       const old = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
         .get(memoryId) as { source_type: string } | undefined;
-      if (old && !canSupersede(opts.newTier, old.source_type as ProvenanceKind)) return;
+      if (old && !canSupersede(opts.newTier, old.source_type as ProvenanceKind)) {
+        diverged = { newTier: opts.newTier, stubTier: old.source_type as ProvenanceKind };
+      }
     }
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = datetime('now')
       WHERE id = ?
     `).run(supersededById, memoryId);
+    return diverged;
   }
 
   /**
@@ -376,14 +451,40 @@ export class MemoryGraphStore {
   // The DELETE side of the memory cutover. Under the mirror flag the engine.db stub
   // store is the authoritative RECALL source, so a thread-purge (privacy) and a
   // dead-stub GC must reap it too — else purged/superseded content lingers in the
-  // recall store. Both delete `memories` rows ONLY; the schema's ON DELETE CASCADE
-  // reaps memory_subjects + supersedes + conflicts, and relationships.source_memory_id
-  // SET-NULLs — a cross-thread SUBJECT is never touched (the cascade runs
-  // memory→junction, not junction→subject), so durable subjects survive. A subject
-  // left with no memory is NOT reaped here: subjects are durable substrate referenced
-  // across the verb layer (tasks/triggers/connections/threads/artifacts), so an
-  // orphan-subject sweep is a deferred slice gated on the subject-lifecycle design,
-  // not a mechanical port of the legacy orphan-entity delete.
+  // recall store. Both delete `memories` rows; the schema's ON DELETE CASCADE reaps
+  // memory_subjects + supersedes + conflicts, and relationships.source_memory_id
+  // SET-NULLs. The cascade runs memory→junction, not junction→subject, so on its own it
+  // leaves a subject the deleted memory minted standing with its plaintext `name`.
+  // That is closed by the ORPHAN-SUBJECT REAP below: inside the same
+  // transaction, every subject the deleted memories were linked to is handed to the
+  // installed {@link OrphanSubjectReaper}, which deletes only what NOTHING else references
+  // (verb layer, knowledge entries, thread anchors, records, detail rows — the
+  // reference-counted discipline the legacy orphan-entity delete had, now over every
+  // store a subject can live in). A cross-thread / verb-layer subject still survives.
+
+  /**
+   * Remember the reaper the owner installs. Absent reaper = no reap — fail-closed: a
+   * lingering name is today's state, a guessed delete would be new damage. Only
+   * `KnowledgeLayer` can see every reference a subject may still have (engine.db plus
+   * the history.db thread anchor plus datastore.db), so it is the one that installs.
+   */
+  setOrphanSubjectReaper(reaper: OrphanSubjectReaper | null): void {
+    this.orphanReaper = reaper;
+  }
+
+  /**
+   * The subjects a set of memories is linked to — the junction rows plus the primary
+   * `memories.subject_id` — collected BEFORE the delete cascades them away. `memorySql`
+   * is a static subquery / placeholder list (never input); `params` bind it twice.
+   */
+  private _linkedSubjectIds(memorySql: string, params: readonly unknown[]): string[] {
+    const rows = this.db.prepare(`
+      SELECT subject_id FROM memory_subjects WHERE memory_id IN (${memorySql})
+      UNION
+      SELECT subject_id FROM memories WHERE subject_id IS NOT NULL AND id IN (${memorySql})
+    `).all(...params, ...params) as Array<{ subject_id: string }>;
+    return rows.map(r => r.subject_id);
+  }
 
   /**
    * Hard-delete memory stubs by id — the id-parity reap behind both the S5b'-c
@@ -397,17 +498,32 @@ export class MemoryGraphStore {
    * ON DELETE SET NULL, so without this the relationship row would SURVIVE the memory
    * delete carrying its `description`/`notes` text — derived content a hard delete must
    * remove too. memory_subjects / supersedes / conflicts still ride their ON DELETE
-   * CASCADE. Orphaned SUBJECTS (durable cross-verb-layer substrate) are a deferred
-   * lifecycle slice — see the header note above. Returns the number of stubs deleted.
+   * CASCADE.
+   *
+   * Then the orphan-subject reap: the subjects these memories were linked to
+   * are collected BEFORE the delete (the cascade takes the junction with it) and handed to
+   * the installed reaper AFTER it, inside the same transaction — so a subject whose only
+   * holder was the erased memory goes with it, a subject anything else still references
+   * stays, and a reaper failure rolls the memory delete back too (the caller's re-throw
+   * makes the erase retryable, see `KnowledgeLayer.eraseByPattern`). Returns the number of
+   * stubs deleted.
    */
   purgeMemories(ids: string[]): number {
     if (ids.length === 0) return 0;
+    // `.immediate()`: the transaction now OPENS with a read (the candidate collection) and
+    // then writes. Under WAL a deferred transaction that reads first and writes after a
+    // concurrent commit raises SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot absorb; taking
+    // the write lock up front makes the open wait instead (same discipline as executeMerge).
     return this.db.transaction(() => {
       let deleted = 0;
+      const candidates = new Set<string>();
       const CHUNK = 500;
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
         const placeholders = chunk.map(() => '?').join(',');
+        if (this.orphanReaper) {
+          for (const sid of this._linkedSubjectIds(placeholders, chunk)) candidates.add(sid);
+        }
         this.db.prepare(
           `DELETE FROM relationships WHERE source_memory_id IN (${placeholders})`,
         ).run(...chunk);
@@ -415,8 +531,9 @@ export class MemoryGraphStore {
           `DELETE FROM memories WHERE id IN (${placeholders})`,
         ).run(...chunk).changes;
       }
+      if (this.orphanReaper && candidates.size > 0) this.orphanReaper([...candidates]);
       return deleted;
-    })();
+    }).immediate();
   }
 
   /**
@@ -447,11 +564,41 @@ export class MemoryGraphStore {
 
   /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
-   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children.
-   * Returns the number of stubs deleted.
+   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, and the
+   * orphan-subject reap runs here too (a `memory_delete` soft-deletes, gc hard-deletes,
+   * and it is the hard delete that would otherwise leave the minted subject's name
+   * behind).
+   *
+   * Unlike {@link purgeMemories} the reap is NOT in the delete's transaction: gc is a
+   * best-effort sweep whose caller (`KnowledgeLayer.gc`) swallows failures, so a reaper
+   * error coupled to the DELETE would roll the stub delete back and leave superseded
+   * content silently recallable — a regression the bare DELETE never had. The stubs go
+   * first and stay gone; a reap failure is logged with the candidate count and the
+   * candidates remain (a lingering name is the pre-reap state, never worse). Returns the
+   * number of stubs deleted.
    */
   gcInactiveStubs(): number {
-    return this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
+    const { deleted, candidates } = this.db.transaction(() => {
+      const found = this.orphanReaper
+        ? this._linkedSubjectIds('SELECT id FROM memories WHERE is_active = 0', [])
+        : [];
+      const changes = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
+      return { deleted: changes, candidates: found };
+    }).immediate();
+    if (this.orphanReaper && candidates.length > 0) {
+      try {
+        // Its own transaction: the reap's fixpoint + merge-closure deletes are several
+        // statements, and a failure halfway must not leave shells gone and their canonical
+        // standing. Separate from the DELETE above on purpose (see the docblock).
+        const reaper = this.orphanReaper;
+        this.db.transaction(() => { reaper(candidates); }).immediate();
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-reap] gc reap failed, ${candidates.length} candidate subject(s) left in place: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    return deleted;
   }
 
   // ── S5b recall reads (engine.db) ──────────────────────────────

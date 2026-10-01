@@ -47,6 +47,14 @@ const CANDIDATES: Candidate[] = [
   { label: 'mistral-medium', provider: 'openai', modelId: 'mistral-medium-2604', apiBaseURL: MISTRAL_BASE, keyName: 'mistral' },
   { label: 'haiku-4.5', provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001', keyName: 'anthropic' },
   { label: 'glm-5p2', provider: 'openai', modelId: 'accounts/fireworks/models/glm-5p2', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'kimi-k3', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  // 2026-08-09 picker-candidate wave (core #1162) — kept in lockstep with replay.ts CANDIDATES.
+  { label: 'deepseek-v4-flash-0731', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4-flash-0731', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'qwen3.7-plus', provider: 'openai', modelId: 'accounts/fireworks/models/qwen3p7-plus', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'gpt-oss-120b', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'kimi-k2.6', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p6', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'kimi-k2.7-code', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p7-code', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
+  { label: 'minimax-m3', provider: 'openai', modelId: 'accounts/fireworks/models/minimax-m3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks' },
 ];
 
 interface Block { type: string; text?: string }

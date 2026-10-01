@@ -73,7 +73,7 @@ describe('ingestDocumentText', () => {
 	it('stores one knowledge memory per chunk with document provenance', async () => {
 		const { sink, calls } = fakeSink();
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9' });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false });
 
 		expect(n).toBe(calls.length);
 		expect(n).toBeGreaterThanOrEqual(1);
@@ -92,8 +92,30 @@ describe('ingestDocumentText', () => {
 
 	it('stores nothing for an empty document', async () => {
 		const { sink, calls } = fakeSink();
-		const n = await ingestDocumentText(sink, { text: '   ', fileName: 'x.pdf', scope, threadId: 't' });
+		const n = await ingestDocumentText(sink, { text: '   ', fileName: 'x.pdf', scope, threadId: 't', durableKnowledgeActive: false });
 		expect(n).toBe(0);
 		expect(calls.length).toBe(0);
+	});
+
+	it('writes NOTHING to the archive when the durable substrate is active', async () => {
+		const { sink, calls } = fakeSink();
+		// Same input that stores several chunks above — only the substrate differs, so a
+		// zero here can only come from the DK guard, not from an empty/short document.
+		const text = 'first paragraph\n\n' + 'y'.repeat(30);
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: true });
+		expect(n).toBe(0);
+		expect(calls).toHaveLength(0);
+	});
+
+	it('still writes the archive when the durable substrate is OFF — byte-identical legacy path', async () => {
+		// The pair matters more than either half: it pins that the guard keys on the
+		// substrate and nothing else. Without this, dropping the write unconditionally
+		// would also pass — and would silently take document recall away from every
+		// self-hosted (flag-off) tenant.
+		const { sink, calls } = fakeSink();
+		const text = 'first paragraph\n\n' + 'y'.repeat(30);
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false });
+		expect(n).toBeGreaterThanOrEqual(1);
+		expect(calls).toHaveLength(n);
 	});
 });

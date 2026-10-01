@@ -115,11 +115,28 @@ pre-push for what actually runs at pre-commit):
 - **pre-commit**: gitleaks, pattern-scan, typecheck, hex-guard, token-contract, shape-contract.
   gitleaks/pattern-scan belong here, not pre-push: they read the *index*, which is empty at
   push time — at pre-push they were no-ops.
-- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), drift-guard (doc/code
-  drift), positioning-guard (copy vs POSITIONING.md).
+- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), public-repo-guard-meta
+  (customer names in commit messages), public-repo-guard-files (customer names in file paths and
+  file contents), drift-guard (doc/code drift), positioning-guard.
+  The customer-name class covers **commit messages and the files a push adds** — not PR text. It
+  used to be messages *only*, and that left the wider hole: a file named after a customer, or
+  holding the name in its body, reached this public repo untouched as long as the message stayed
+  neutral. The file half walks every commit in the range rather than diffing base against head,
+  so a blob added and later deleted is still found — it still ships. A file the range only
+  *deletes* is not scanned; its content is leaving. Its pattern deliberately does NOT live in this
+  repo: one regex per line in `~/.lynox/private-names.re`. Word boundaries belong in the pattern —
+  a bare surname matches inside unrelated words.
+  **Enforced at pre-push only, and it has no CI twin** (a GitHub secret is a textarea, and a
+  pasted list arrives with line breaks that GNU and BSD grep read differently). For the file half
+  that absence is also a *requirement*, not just an accident of the pattern's location: it prints
+  the offending path, which is safe on the operator's own machine and would be a leak in a public
+  Actions log — an earlier tree-scanning version of this class was deleted over exactly that, and
+  a test asserts no workflow invokes it. Without the list the class prints a warning and stands
+  down. Second line, independent of any of it: `businessplan-2026/` is gitignored.
 
-Every hook above re-runs as a **required CI check**, so `git commit/push --no-verify` cannot
-bypass any of them — that is what makes them gates rather than suggestions. (`security-scan` and
+Every hook above re-runs as a **required CI check** — except `public-repo-guard-meta`, whose
+class is pre-push-only by design (see above) — so `git commit/push --no-verify` cannot bypass
+them; that is what makes them gates rather than suggestions. (`security-scan` and
 `hex-guard` got theirs on 2026-07-14, in `hook-guards.yml`; before that they were hook-only, so
 `--no-verify` removed them entirely. The same workflow adds `web-ui-typecheck`, because the root
 `pnpm typecheck` is `tsc --noEmit` over `src` and never touched the SvelteKit package — 1038 files

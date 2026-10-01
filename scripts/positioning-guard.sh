@@ -30,7 +30,8 @@
 #   scripts/positioning-guard.sh           # scan all copy surfaces (CI)
 #   scripts/positioning-guard.sh --staged  # scan staged copy surfaces (hook)
 #
-# Exit 0 = clean, exit 1 = an avoid-word was found.
+# Exit 0 = clean, exit 1 = an avoid-word was found, exit 2 = the guard could not
+# run (its curated file list resolved to nothing, i.e. the list is stale).
 #
 # Escape hatch: put the pragma `positioning:allow` on the line, with a short
 # reason. Contrast copy ("not a chatbot", "assistants respond, lynox operates",
@@ -84,6 +85,30 @@ is_staged() {
 }
 
 violations=0
+
+# The curated list must still resolve to something. COPY_FILES is a hand-written
+# set of paths, and `scan_line_set` skips a path that does not exist — so renaming
+# or moving a copy file silently empties this guard's entire input and it reports
+# `clean ✓` while checking nothing. That is the same failure direction as a file
+# listing whose producer errored (scripts/lib/guard-file-list.sh): a guard must
+# never exit 0 after examining nothing.
+#
+# Only in tree mode. Under `--staged` an empty candidate set is the normal case —
+# most commits touch no copy file at all — so the assertion there would be noise.
+if ! $mode_staged; then
+  # EVERY entry, not merely one: with two curated files, "at least one present"
+  # still let a renamed hero page go unscanned and green — the guard would have
+  # kept reporting clean on the half it could still see. The list is curated, so
+  # removing a file from the repo is exactly the moment COPY_FILES must be updated.
+  _missing=''
+  for _f in $COPY_FILES; do [ -f "$_f" ] || _missing="$_missing $_f"; done
+  if [ -n "$_missing" ]; then
+    echo "❌ positioning-guard: curated COPY_FILES missing:$_missing" >&2
+    echo "   Refusing to report clean copy while part of the candidate set is gone;" >&2
+    echo "   update COPY_FILES to match the files that exist." >&2
+    exit 2
+  fi
+fi
 
 scan_line_set() {
   # $1 = file, $2 = grep pattern to pre-filter relevant lines (or empty for all)

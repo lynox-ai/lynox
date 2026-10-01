@@ -87,9 +87,13 @@ let _monthlyCapUSD = DEFAULT_MONTHLY_CAP_USD;
  */
 let _reservedInFlightUSD = 0;
 
-/** Configure persistent budget caps. Called once at orchestrator init. */
+/**
+ * Configure the session cap and the persistent budget caps. Called once at
+ * engine init. Without a cost provider the session cap still applies; the
+ * daily/monthly caps need recorded spend and are not enforced.
+ */
 export function configurePersistentBudget(opts: {
-  costProvider: CostQueryProvider;
+  costProvider: CostQueryProvider | null;
   sessionCapUSD?: number | undefined;
   dailyCapUSD?: number | undefined;
   monthlyCapUSD?: number | undefined;

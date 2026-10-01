@@ -1,5 +1,5 @@
 /**
- * Wire-contract drift guards (K-W1, PRD-CORE-PRO-CONTRACT / DEF-0030).
+ * Wire-contract drift guards (K-W1, PRD-CORE-PRO-CONTRACT).
  *
  * (a) Byte-equality: EVERY file in the web-ui's vendored contract dir must be
  *     BYTE-identical to its same-named twin in `src/contract/` — the web-ui is

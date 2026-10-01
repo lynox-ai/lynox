@@ -31,6 +31,7 @@ export interface MigratedSymbol {
     | 'vocab.ts'
     | 'shapes.ts'
     | 'env-registry.ts'
+    | 'broker-start.ts'
     | 'http.ts'
     | 'marker.ts'
     | 'fixtures/mirrors.ts';
@@ -70,6 +71,7 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'UsageReportRun', contractFile: 'http.ts', twinPattern: typeTwin('UsageReportRun') },
   { name: 'UsageFlushRequest', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushRequest') },
   { name: 'UsageFlushResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushResponse') },
+  { name: 'SpendGate', contractFile: 'http.ts', twinPattern: typeTwin('SpendGate') },
   { name: 'UsageStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageStatusResponse') },
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
@@ -83,6 +85,27 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'AuthErrorBody', contractFile: 'http.ts', twinPattern: typeTwin('AuthErrorBody') },
   { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
   { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
+  // Born in the contract rather than migrated into it (W5, PRD Stage 1 §3.4).
+  // Listed anyway, and the reason is the sweep rather than the history: without a
+  // row, a local re-declaration of one of these anywhere in `src/` or the web-ui
+  // is invisible to `tests/contract-drift.test.ts`, which is the one thing that
+  // keeps a second definition of a wire format from existing quietly.
+  { name: 'BROKER_START_VERSION', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_VERSION') },
+  { name: 'BROKER_START_TTL_SEC', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_TTL_SEC') },
+  { name: 'BROKER_START_SKEW_SEC', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_SKEW_SEC') },
+  { name: 'BROKER_START_PURPOSE', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_PURPOSE') },
+  { name: 'BROKER_START_NONCE_BYTES', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_NONCE_BYTES') },
+  { name: 'BrokerStartToken', contractFile: 'broker-start.ts', twinPattern: typeTwin('BrokerStartToken') },
+  { name: 'brokerStartPayload', contractFile: 'broker-start.ts', twinPattern: valueTwin('brokerStartPayload') },
+  { name: 'parseBrokerStartToken', contractFile: 'broker-start.ts', twinPattern: valueTwin('parseBrokerStartToken') },
+  { name: 'formatBrokerStartToken', contractFile: 'broker-start.ts', twinPattern: valueTwin('formatBrokerStartToken') },
+  // The shared golden vector. A same-named local copy is how one side would
+  // quietly re-pick it. Two copies this sweep cannot see: one under ANOTHER
+  // name, and one under `tests/`, which is outside its roots — which is why this
+  // repo's minter test imports the constant rather than restating it.
+  { name: 'BROKER_START_GOLDEN', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN') },
+  { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
+  { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

@@ -17,7 +17,7 @@
 // Foreground-suppression (PRD §"Foreground suppression") is OUT OF
 // SCOPE for the first slice — it requires a SW↔tab postMessage
 // channel that exposes the active tab's `document.visibilityState` to
-// the backend before each notify. Tracked as a follow-up.
+// the backend before each notify.
 
 import type { NotificationRouter, NotificationMessage } from '../../core/notification-router.js';
 import type { InboxItem } from '../../types/index.js';

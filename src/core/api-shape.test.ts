@@ -149,6 +149,35 @@ describe('applyShape — projection', () => {
     expect(result.error).toContain('array of 3');
     expect(JSON.parse(result.shaped)).toEqual(raw); // raw preserved, not '[]'
   });
+
+  it('whitelists through arrays WITHOUT [] (JSON:API data.field, implicit traversal)', () => {
+    // api_setup-generated includes omit `[]` — e.g. `data.id` against a JSON:API
+    // `data: [{id, attributes:{name}}]`. Before auto-traversal, a field path that
+    // landed on an array value returned undefined, silently erasing `data` while
+    // another path (`meta.total_count`) still matched — so the result was
+    // non-empty ({meta:{total_count}}), the loud-empty guard never fired, and the
+    // agent saw a 200 carrying only `meta`, concluded the API was empty, and
+    // looped on the same call (observed: productive.io, 2026-08-13).
+    const raw = {
+      data: [
+        { id: '1', type: 'projects', attributes: { name: 'Alpha', number: 'P-1', archived_at: null } },
+        { id: '2', type: 'projects', attributes: { name: 'Beta', number: 'P-2', archived_at: null } },
+      ],
+      meta: { total_count: 22 },
+    };
+    const result = applyShape(raw, {
+      kind: 'reduce',
+      include: ['data.id', 'data.type', 'data.attributes.name', 'meta.total_count'],
+    });
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(result.shaped)).toEqual({
+      data: [
+        { id: '1', type: 'projects', attributes: { name: 'Alpha' } },
+        { id: '2', type: 'projects', attributes: { name: 'Beta' } },
+      ],
+      meta: { total_count: 22 },
+    });
+  });
 });
 
 describe('applyShape — reducers', () => {

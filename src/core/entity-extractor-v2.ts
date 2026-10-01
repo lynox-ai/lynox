@@ -10,6 +10,7 @@ import { getActiveProvider, isCustomProvider, clientForTierSnapshot } from './ll
 import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget, isJunkPersonShape } from './kg-stopwords.js';
 import { calculateCost } from './pricing.js';
+import { compose, renderFence } from '../core/data-boundary.js';
 
 /**
  * Entity extracted by the v2 tool-call pipeline.
@@ -51,7 +52,9 @@ export type RelationPredicate = (typeof RELATION_PREDICATES)[number];
 
 /**
  * Entity types exposed to the LLM.
- * Note: 'collection' is internal (datastore-bridge only) and intentionally omitted.
+ * Note: 'collection' stays out of the extractable set. It was minted only by the DataStore→KG
+ * bridge, which was removed 2026-08-24 as never-attached — so the type currently has no producer
+ * at all. The exclusion is kept rather than the type dropped: retiring it is a schema change.
  */
 const EXTRACTABLE_TYPES = [
   'person', 'organization', 'project', 'product', 'concept', 'location',
@@ -295,7 +298,7 @@ export async function extractEntitiesV2(
       messages: [
         {
           role: 'user',
-          content: `<source_text>\n${text.slice(0, 2000)}\n</source_text>`,
+          content: compose([renderFence('source_text', text.slice(0, 2000))]),
         },
       ],
     });

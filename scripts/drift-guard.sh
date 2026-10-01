@@ -26,10 +26,18 @@
 #
 # Usage: scripts/drift-guard.sh        # scan whole tracked tree
 #
+# Exit 0 = clean, exit 1 = drift found, exit 2 = the guard could not run (its
+# file listing failed) — see scripts/lib/guard-file-list.sh for why that is a
+# distinct code and not a clean tree.
+#
 # Escape hatch (class B/C only — A is never exempt): put the pragma
 # `drift-guard:allow <reason>` anywhere on the offending line.
 
 set -euo pipefail
+
+GUARD_NAME='drift-guard'
+# shellcheck source=scripts/lib/guard-file-list.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/guard-file-list.sh"
 
 PRAGMA='drift-guard:allow'
 SELF_EXCLUDE='scripts/drift-guard.sh .github/workflows/drift-guard.yml'
@@ -38,7 +46,21 @@ SELF_EXCLUDE='scripts/drift-guard.sh .github/workflows/drift-guard.yml'
 REMOVED='[Tt]elegram|[Ww]hats[Aa]pp|MCP[ -]server'
 
 # C: backtick path prefixes treated as real repo paths to verify.
-PATH_RE='`(src|packages|scripts|tests|docs)/[A-Za-z0-9_./-]+`'
+#
+# The optional `:1010` / `:1010-1042` tail: the character class excluded `:`, so
+# `` `src/core/agent.ts:1010` `` matched NOTHING while the bare
+# `` `src/core/agent.ts` `` was verified. A guard over one spelling is blind to
+# every other.
+#
+# ⚠ The value here is PROSPECTIVE, and the first version of this comment claimed
+# otherwise. It said `file:line` was "the dominant citation form" — but in the 36
+# files class C actually scans (`*CLAUDE.md`, `*README.md`,
+# `docs/src/content/docs/*`) the count is 65 bare and **0** file:line. Measured
+# 2026-09-06 with a positive control, i.e. a real zero rather than a blind grep. So
+# this closes a blind spot before it is used, which is the right time for a guard —
+# but no citation in scope is unchecked today, and saying so was borrowing a
+# measurement's credibility for a claim it did not support.
+PATH_RE='`(src|packages|scripts|tests|docs)/[A-Za-z0-9_./-]+(:[0-9]+(-[0-9]+)?)?`'
 
 is_excluded() {
   local f="$1"
@@ -49,7 +71,24 @@ is_excluded() {
 # A doc path is "alive" if it exists relative to the repo root OR as a suffix
 # of any tracked path — docs legitimately use package-relative paths
 # (e.g. `src/lib/...` meaning packages/web-ui/src/lib/...).
-ALL_TRACKED="$(git ls-files)"
+# `-c core.quotePath=false`, not `-z`: this is a newline-joined list consumed by
+# the here-string grep in exists_path, not a read loop. Without it a tracked path
+# with a non-ASCII byte comes back quoted (`"docs/\303\234bersicht.md"`) and a doc
+# that references it would be falsely reported dead. (`-z` is the right tool for a
+# read loop, but the suffix grep here is line-oriented, so quotePath is the fix.)
+# Through the shared helper too, so this listing's producer is status-checked like
+# every other — and so the helper is genuinely the ONE way this repo's guards build
+# a file list. Before, a bare `$(git …)` happened to be loud here only because
+# `set -e` kills a failing command substitution: correct by accident, and it left
+# the helper's own check unpinned for this script.
+# Trap FIRST, then create: the starve path exits from inside the helper, and a
+# trap installed after the mktemp leaks one temp file per starved run (measured).
+# `:-` because `set -u` would otherwise abort while evaluating the trap body for
+# the names that do not exist yet.
+trap 'rm -f "${LIST_PATHS:-}" "${LIST_ALL:-}" "${LIST_DOCS:-}" "${LIST_REFS:-}"' EXIT
+LIST_PATHS="$(mktemp)"
+guard_list_paths_or_die "$LIST_PATHS"
+ALL_TRACKED="$(cat "$LIST_PATHS")"
 exists_path() {
   local p="${1%/}"
   [ -e "$p" ] && return 0
@@ -66,26 +105,42 @@ exists_path() {
 
 violations=0
 
+# Materialise every file listing ONCE, via the shared helper, which checks the
+# producer's status — see scripts/lib/guard-file-list.sh for why a process
+# substitution cannot report its producer's failure, and why the assertion is on
+# the STATUS rather than the count (a pathspec matching nothing is legitimate;
+# a listing that FAILED is not). The three scans below read from plain files.
+LIST_ALL="$(mktemp)"; LIST_DOCS="$(mktemp)"; LIST_REFS="$(mktemp)"
+guard_list_files_or_die "$LIST_ALL"
+guard_list_files_or_die "$LIST_DOCS" 'docs/src/content/docs/*'
+guard_list_files_or_die "$LIST_REFS" '*CLAUDE.md' '*README.md' 'docs/src/content/docs/*'
+
 # ── A. Merge-conflict markers (every tracked text file) ──────────────────
 # Match only the unambiguous git markers (<<<<<<< and >>>>>>> at col 0); the
 # ======= separator is skipped to avoid clashing with markdown setext rules.
-while IFS= read -r f; do
+# NUL-separated listing + `read -d ''` so a path with a non-ASCII byte (which git
+# quotes under the default core.quotePath) is scanned, not skipped silently — the
+# same blind-skip class core#1184 closed in public-repo-guard.sh. Every file
+# operand is prefixed `./` and passed after `--` so a '-'-leading or literal-`-`
+# path is an unambiguous filename, never an option and never the stdin `-` that
+# would drain the loop's listing (git paths are always repo-relative → `./` safe).
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   is_excluded "$f" && continue
-  grep -Iq . "$f" 2>/dev/null || continue
+  grep -Iq -- . "./$f" 2>/dev/null || continue
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     echo "❌ A/merge-conflict marker in $f:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nE '^(<<<<<<<|>>>>>>>)' "$f" 2>/dev/null || true)
-done < <(git ls-files)
+  done < <(grep -nE -- '^(<<<<<<<|>>>>>>>)' "./$f" 2>/dev/null || true)
+done < "$LIST_ALL"
 
 # ── B. Removed feature in a LIVE doc (outside archive/) ───────────────────
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   case "$f" in */archive/*) continue ;; esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -93,13 +148,13 @@ while IFS= read -r f; do
     echo "⚠️  B/removed-feature in LIVE doc $f (move to archive/ or add '${PRAGMA}'):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$REMOVED" "$f" 2>/dev/null || true)
-done < <(git ls-files 'docs/src/content/docs/*')
+  done < <(grep -nIE -- "$REMOVED" "./$f" 2>/dev/null || true)
+done < "$LIST_DOCS"
 
 # ── C. Dead doc-path references in CLAUDE.md / docs / READMEs ─────────────
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   is_excluded "$f" && continue
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
@@ -110,6 +165,16 @@ while IFS= read -r f; do
     while IFS= read -r p; do
       [ -n "$p" ] || continue
       path="${p//\`/}"
+      # A `:line` / `:line-line` citation tail is a pointer INTO the file, so the
+      # path half is what must exist. But a colon is legal in a POSIX filename, and
+      # `src/foo.ts:12` is byte-identical as a name and as a citation — so the whole
+      # token is tried FIRST. Without that order the strip invents a dead path for a
+      # live file: measured 2026-09-06, a tracked `src/foo.ts:12` cited as itself
+      # went from 0 dead-path reports to 1. Cheaper to ask than to guess, and it
+      # costs one `exists_path` on a form that occurs ~never.
+      if ! exists_path "$path"; then
+        [[ $path =~ ^(.*):[0-9]+(-[0-9]+)?$ ]] && path="${BASH_REMATCH[1]}"
+      fi
       # Skip globs / placeholders.
       case "$path" in *'<'*|*'>'*|*'*'*|*'{'*|*'…'*|*' '*) continue ;; esac
       if ! exists_path "$path"; then
@@ -117,8 +182,8 @@ while IFS= read -r f; do
         violations=$((violations + 1))
       fi
     done < <(printf '%s\n' "$rest" | grep -oE "$PATH_RE" || true)
-  done < <(grep -nE "$PATH_RE" "$f" 2>/dev/null || true)
-done < <(git ls-files '*CLAUDE.md' '*README.md' 'docs/src/content/docs/*')
+  done < <(grep -nE -- "$PATH_RE" "./$f" 2>/dev/null || true)
+done < "$LIST_REFS"
 
 # ── D. README provider-verification matrix vs the LLM catalog ─────────────
 # The public README claims which OpenAI-compat presets are "verified"; the

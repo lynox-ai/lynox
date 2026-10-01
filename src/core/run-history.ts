@@ -7,7 +7,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
-import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
@@ -712,7 +712,7 @@ const MIGRATIONS: string[] = [
 
   // v27: Multi-question (tabs) support + unicity per session + partial-answer
   // persistence for reconnect-mid-batch. Any pending prompts from v26 and
-  // earlier are expired — on a cold start the engine calls expireAll()
+  // earlier are expired — on a cold start the engine calls expireUnparked()
   // anyway, so this is a no-op in practice but makes the UNIQUE index safe
   // to add.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (27);
@@ -1057,8 +1057,10 @@ const MIGRATIONS: string[] = [
   // Unlike the tasks rebuilds (v31/v42), this DROPs and recreates instead of
   // INSERT..SELECT-preserving rows: pending_prompts is EPHEMERAL — a pending
   // prompt is bound to a live SSE connection that a restart already severed,
-  // and the engine calls expireAll() on every cold boot (see v27), so no row
-  // here outlives the restart that runs this migration. Dropping is therefore
+  // and the engine calls expireUnparked() on every cold boot (see v27), so no
+  // row here outlives the restart that runs this migration — with the single
+  // exception added later for a trigger's parked question, which by definition
+  // did not exist when this migration ran. Dropping is therefore
   // lossless in practice AND robust to a partial-schema DB (DROP IF EXISTS
   // tolerates a table that a minimal seed never created).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
@@ -1148,8 +1150,8 @@ const MIGRATIONS: string[] = [
    ALTER TABLE threads ADD COLUMN primary_subject_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_threads_primary_subject ON threads(primary_subject_id);`,
 
-  // v47 — Model Execution Policy (arc:model-selector) Wave P1, provenance
-  // (DEF-0094/DEF-0095): record WHO chose a thread's `model_tier`, so a sticky
+  // v47 — Model Execution Policy Wave P1, provenance:
+  // record WHO chose a thread's `model_tier`, so a sticky
   // per-thread pick (D18) is distinguishable from a machine default. The picker
   // already ships (#958/#960/#964) writing real user picks into `model_tier` with
   // no way to tell them from defaults — this column starts capturing that. Three
@@ -1165,7 +1167,7 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
    ALTER TABLE threads ADD COLUMN model_tier_source TEXT NOT NULL DEFAULT 'unknown';`,
 
-  // v48 — Model Execution Policy Wave P1, run attribution (DEF-0097, D21): a
+  // v48 — Model Execution Policy Wave P1, run attribution (D21): a
   // cron/WorkerLoop-fired run must be distinguishable from a user chat turn so the
   // policy is auditable ("what did my nightly automation burn?"). A SEPARATE
   // nullable column, NOT a new `run_type` value — `run_type` is a closed structural
@@ -1178,7 +1180,7 @@ const MIGRATIONS: string[] = [
    ALTER TABLE runs ADD COLUMN trigger_origin TEXT;`,
 
   // v49 — Model Execution Policy Wave P1: the exactly-once marker for the
-  // provenance RECOVERY backfill (DEF-0095). The v47 column starts every existing
+  // provenance RECOVERY backfill. The v47 column starts every existing
   // row at 'unknown'; a boot-backfill in engine.ts then labels a thread whose tier
   // differs from the instance default as a likely deliberate pick ('user'). That
   // recovery needs the per-instance `default_tier` + legacy brand-name
@@ -1232,6 +1234,45 @@ const MIGRATIONS: string[] = [
   // before this migration, and every caller still passing a plain string.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
    ALTER TABLE pending_prompts ADD COLUMN segments_json TEXT;`,
+
+  // v52: Who asked. A prompt raised from inside a pipeline step has no visible
+  // cause in the thread (the step's tool calls carry an empty `context_id` and
+  // never enter `thread_messages`), so the workflow/step that asked rides the
+  // prompt itself. The live SSE events already carried `step_id`/`step_task`;
+  // without this column a page reload resolved through /pending-prompt and the
+  // restored dialog lost the provenance again — i.e. the fix would have held
+  // right up until someone refreshed, which is when a long workflow is most
+  // likely to be waiting. NULL = no origin: every pre-v52 row and every prompt
+  // the main agent raises, where the cause is on screen anyway.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
+   ALTER TABLE pending_prompts ADD COLUMN origin_json TEXT;`,
+
+  // v53 (durable wait state, PRD-DURABLE-WAIT-STATE §0 E4b): which trigger, if
+  // any, is parked on this prompt. NULL for every question the agent raises in a
+  // normal chat turn — the overwhelming majority — and set only when the asking
+  // run belongs to a trigger.
+  //
+  // The pointer sits on the PROMPT side, and the direction is the load-bearing
+  // part. `triggers` lives in engine.db, `pending_prompts` here in history.db;
+  // they are separate SQLite files and the tree has no ATTACH, so neither a
+  // foreign key nor a JOIN is available in either direction. What decides the side
+  // is `expireUnparked()` (prompt-store.ts), which the engine runs on every cold boot
+  // and which today expires all `status='pending'` rows unconditionally: with the
+  // pointer here, the exception that lets a parked trigger's question survive a
+  // restart is a purely local predicate on this table. On the trigger side it
+  // would need the cross-file lookup that does not exist.
+  //
+  // A SOFT reference, like `triggers.last_run_id` pointing the other way across
+  // the same file boundary: no FK, no ON DELETE.
+  //
+  // The boot exception that reads this column landed in wave 3: `expireUnparked()`
+  // (prompt-store.ts) skips `trigger_id IS NOT NULL` at both lifecycle boundaries,
+  // so a parked trigger's question now survives a restart. What v27 and v43 say
+  // above still holds for every other row. A trigger deleted while parked leaves
+  // a pointer to nothing, and such a row is bounded by its own `expires_at`,
+  // which the 5-minute `expireOld()` sweep (engine.ts) enforces independently.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE pending_prompts ADD COLUMN trigger_id TEXT;`,
 ];
 
 export class RunHistory {
@@ -1455,7 +1496,7 @@ export class RunHistory {
     roleId?: string | undefined;
     kind?: 'llm' | 'voice_stt' | 'voice_tts' | undefined;
     units?: number | undefined;
-    /** What fired this run (DEF-0097, v48): e.g. `'cron'` / `'watch'` for a
+    /** What fired this run (v48): e.g. `'cron'` / `'watch'` for a
      *  WorkerLoop-scheduled turn, absent (→ NULL) for a live user chat turn or a
      *  legacy row. A SEPARATE dimension from `run_type` (the closed structural
      *  union) so automation is auditable without polluting the billing filters. */
@@ -1705,7 +1746,17 @@ export class RunHistory {
         -- A2 capture-pollution guard: never re-surface a workflow step's
         -- REPLAYED tool calls to save_workflow / pattern analysis.
         AND r.run_type != 'pipeline_step'
-      ORDER BY r.created_at, r.rowid, tc.sequence_order
+      -- Insertion order IS execution order: rows are written as each call
+      -- finishes. Ordering by the RUN first (created_at, rowid) breaks as soon
+      -- as one turn's calls live on more than one run -- a spawned child's run
+      -- is always younger than its parent's, so every child call sorted AFTER
+      -- every call the parent made that turn, however early the child ran.
+      --
+      -- The only consumer is save_workflow, which turns this list into the
+      -- steps of a saved pipeline, so a call landing at the wrong point is a
+      -- wrong pipeline. sequence_order cannot fix it either: it is per-run, so
+      -- two runs both start at 0.
+      ORDER BY tc.rowid
     `).all(sessionId) as ToolCallRecord[];
     return rows.map(tc => this._decToolCall(tc));
   }
@@ -1881,7 +1932,7 @@ export class RunHistory {
     return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
   }
 
-  // ── Model-provenance backfill (arc:model-selector P1, DEF-0095) ──
+  // ── Model-provenance backfill ──
   // The exactly-once gate for the boot-backfill in engine.ts, mirroring engine.db's
   // `verb_backfill_marker`. The recovery itself lives here (it owns the threads DB)
   // but is DRIVEN from engine.ts because it needs the per-instance default tier.
@@ -1903,7 +1954,7 @@ export class RunHistory {
   }
 
   /**
-   * One-shot recovery of pre-column provenance (DEF-0095): the v47 column starts
+   * One-shot recovery of pre-column provenance: the v47 column starts
    * every existing thread at `'unknown'`. A thread whose NORMALISED tier differs
    * from the instance default was almost certainly a deliberate pick (the composer
    * picker shipped before this column), so label it `'user'` — strictly better
@@ -1914,7 +1965,7 @@ export class RunHistory {
    * treated as the default (NOT claimed as a pick — conservative). BEST-EFFORT +
    * ADVISORY-ONLY: an internal `fast`/escalation thread on a non-default instance is
    * over-labelled `'user'`, which is harmless because `source` gates nothing (v47
-   * caveat; the `'inferred'` refinement is register-deferred DEF-0127). Returns the
+   * caveat). Returns the
    * number of rows labelled.
    */
   backfillModelTierSourceFromDefault(defaultTier: ModelTier): number {
@@ -2196,16 +2247,34 @@ export class RunHistory {
     };
   }
 
-  /** Count tool calls of a specific type within the last N hours (via run timestamps). */
+  /**
+   * Count tool calls of a specific type within the last N hours (via run
+   * timestamps). This ENFORCES the http_request and mail-send rate limits — it
+   * is not a metric, so a row that stops being visible here is a limit that
+   * stops being enforced.
+   *
+   * Every recorded call counts, `pipeline_step` runs included.
+   *
+   * This used to exclude `pipeline_step`, on the stated grounds that a workflow
+   * step's calls were "unrecorded, so uncounted here" and that counting them
+   * would retroactively tighten the limit. The first half was wrong: the calls
+   * WERE recorded, a second time, by the process-global `lynox:tool:end`
+   * subscriber, which booked them onto whatever run the listening Session had
+   * open. So the exclusion was not keeping a step's calls out of the count — it
+   * was cancelling a DOUBLE count, and the two defects held each other up.
+   *
+   * Removing the duplicate write without removing this exclusion would have
+   * silently un-enforced the limit for every workflow step. They fall together.
+   *
+   * One behaviour does change: a workflow run with no chat Session open had no
+   * second row to be counted by, so its steps were never counted at all. Those
+   * now count, which is the limit doing what it says.
+   */
   getToolCallCountSince(toolName: string, hours: number): number {
     const row = this.db.prepare(`
       SELECT COUNT(*) as cnt FROM run_tool_calls tc
       JOIN runs r ON tc.run_id = r.id
       WHERE tc.tool_name = ? AND r.created_at >= datetime('now', ?)
-        -- A2: the step recorder is observability-only — it must not retroactively
-        -- change tool rate-limiting. Excluding pipeline_step preserves the exact
-        -- pre-A2 count (workflow step calls were unrecorded, so uncounted here).
-        AND r.run_type != 'pipeline_step'
     `).get(toolName, `-${hours} hours`) as { cnt: number };
     return row.cnt;
   }
@@ -2249,6 +2318,54 @@ export class RunHistory {
     return this.db.prepare(
       `SELECT * FROM runs WHERE id IN (${placeholders}) ORDER BY created_at`
     ).all(...ids) as RunRecord[];
+  }
+
+  /**
+   * Total spend of everything `runId` spawned, at any depth — the number a
+   * per-message cost line needs to stop understating a delegated turn.
+   *
+   * Walks `runs.spawn_parent_id` rather than the `run_spawns` table that
+   * {@link getSpawnTree} uses: the parent link is written by the spawn path
+   * itself when the child run is inserted, while `run_spawns` is filled from a
+   * separate `spawnEnd` subscription. Both should agree, but only the column is
+   * on the write path that also records the cost, so it cannot be half-present.
+   * Uses `idx_runs_spawn_parent`.
+   *
+   * Deliberately NOT folded into the parent's own `cost_usd`: each child is its
+   * own row, and thread totals sum all rows — adding children upward would
+   * double-count the thread. Callers surface it as a separate figure.
+   *
+   * Carries the same two guards as every other spend aggregate in this file
+   * (see `getThreadTotals` / `getStats`): `run_type != 'pipeline_step'` is the
+   * stated A2 billing invariant — a pipeline step must NEVER move a spend
+   * aggregate — and `status != 'running'` keeps an in-flight row out. Neither
+   * is reachable today (pipeline steps point at a `pipeline_runs` id, which no
+   * `runs.id` can equal, and a running row still has `cost_usd = 0`), but an
+   * aggregate that omits the house guards is one writer away from moving money
+   * quietly, and the invariant is stated as a rule rather than a nicety.
+   *
+   * `UNION` rather than `UNION ALL`: dedup on `(id, cost_usd)` where `id` is
+   * the primary key drops no legitimate row, and it makes a cyclic
+   * `spawn_parent_id` terminate instead of spinning. A cycle is unreachable
+   * from the writers in this repo — every edge points at a strictly earlier row
+   * — but `better-sqlite3` is synchronous and this sits on the run-end path, so
+   * the failure mode would be the whole engine wedging, not a wrong number.
+   * That asymmetry is worth one keyword.
+   */
+  getDescendantCostUsd(runId: string): number {
+    const row = this.db.prepare(`
+      WITH RECURSIVE descendants AS (
+        SELECT id, cost_usd FROM runs WHERE spawn_parent_id = ?
+        UNION
+        SELECT r.id, r.cost_usd FROM runs r JOIN descendants d ON r.spawn_parent_id = d.id
+      )
+      SELECT COALESCE(SUM(cost_usd), 0) as total
+      FROM descendants
+      WHERE id IN (
+        SELECT id FROM runs WHERE status != 'running' AND run_type != 'pipeline_step'
+      )
+    `).get(runId) as { total: number } | undefined;
+    return row?.total ?? 0;
   }
 
   // === Analytics delegates ===
@@ -2795,8 +2912,32 @@ export class RunHistory {
     assignee?: string | undefined;
     nextRunAt?: string | null | undefined;
     scheduleCron?: string | null | undefined;
+    /** Durable wait state (§0 E4a/G2): the parked deadline. This is the write path
+     *  the park uses — `TaskManager.update` is NOT, and must not become, one: it
+     *  validates against VALID_STATUSES and rejects `waiting` by design. */
+    waitingUntil?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
+  }
+
+  /** Durable wait state (§0 A10): every parked trigger, deadline or not. */
+  getWaitingTriggers(): TriggerRecord[] {
+    return this._triggerStore?.getWaiting() ?? [];
+  }
+
+  /** Durable wait state (§0 A6): end a wait, exactly once. Conditional on the
+   *  row still being `waiting`, so the run's own un-park and the expiry sweep can
+   *  both fire and only one of them takes. Returns false when the wait was
+   *  already ended — which is an outcome, not an error. */
+  endTriggerWait(id: string, to: Exclude<TriggerStatus, 'waiting'>): boolean {
+    return this._triggerStore?.endWait(id, to) ?? false;
+  }
+
+  /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
+   *  WorkerLoop tick's second query, beside {@link getDueTriggers} — which no longer
+   *  returns a parked trigger at all. Empty when no trigger store is wired. */
+  getExpiredWaitingTriggers(now?: string): TriggerRecord[] {
+    return this._triggerStore?.getExpiredWaiting(now) ?? [];
   }
 
   getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {

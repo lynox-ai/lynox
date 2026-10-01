@@ -1,15 +1,36 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { createDriveTool } from './google-drive.js';
 import type { IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
+import { FULL_SCOPES, SCOPES } from './google-auth.js';
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+
+// §3.8 moved this module's calls onto the connector egress surface, so they now
+// go through the pinned transport instead of `globalThis.fetch`. The bridge
+// hands them back to the stub these tests already install; the policy gate is
+// NOT bypassed. See the helper for why this is adapted rather than rewritten.
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-function createMockAuth(scopes: string[] = []): GoogleAuth {
+// Default: a FULLY granted BYO connection. These tests exercise the tool's
+// mechanics, not its scope gate — the gate has its own tests, which pass a
+// narrow list explicitly. Before the per-action gate existed the default was
+// `[]`, i.e. every one of these read paths ran on a connection that had
+// granted nothing, which is precisely the hole this wave closes.
+function createMockAuth(scopes: string[] = [...FULL_SCOPES], ownPair = true): GoogleAuth {
   return {
     getAccessToken: vi.fn().mockResolvedValue('mock-token'),
     hasScope: vi.fn().mockImplementation((s: string) => scopes.includes(s)),
+    hasOwnClientPair: vi.fn().mockReturnValue(ownPair),
   } as unknown as GoogleAuth;
 }
 
@@ -34,7 +55,7 @@ describe('google_drive tool', () => {
   describe('search', () => {
     it('searches files and returns results', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -54,7 +75,7 @@ describe('google_drive tool', () => {
 
     it('requires query parameter', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
       const result = await tool.handler({ action: 'search' }, createMockAgent());
       expect(result).toContain('Error: "query" is required');
     });
@@ -63,7 +84,7 @@ describe('google_drive tool', () => {
   describe('read', () => {
     it('exports Google Docs as text', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       // Metadata
       mockFetch.mockResolvedValueOnce({
@@ -88,7 +109,7 @@ describe('google_drive tool', () => {
 
     it('downloads text files directly', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -114,7 +135,7 @@ describe('google_drive tool', () => {
   describe('upload', () => {
     it('requires drive.file scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       const result = await tool.handler({
         action: 'upload',
@@ -122,12 +143,12 @@ describe('google_drive tool', () => {
         content: 'Hello',
       }, createMockAgent('Yes'));
 
-      expect(result).toContain('requires drive.file scope');
+      expect(result).toContain(SCOPES.DRIVE_FILE);
     });
 
     it('uploads file with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -150,7 +171,7 @@ describe('google_drive tool', () => {
 
     it('declares Content-Transfer-Encoding: base64 for a binary upload and strips whitespace', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -174,7 +195,7 @@ describe('google_drive tool', () => {
 
     it('strips a leading data-URI prefix from base64 content', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -196,7 +217,7 @@ describe('google_drive tool', () => {
 
     it('does NOT add a transfer-encoding header for a normal text upload', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -218,7 +239,7 @@ describe('google_drive tool', () => {
   describe('list', () => {
     it('lists folder contents', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -241,7 +262,7 @@ describe('google_drive tool', () => {
   describe('share', () => {
     it('requires full Drive scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       const result = await tool.handler({
         action: 'share',
@@ -249,14 +270,16 @@ describe('google_drive tool', () => {
         email: 'user@example.com',
       }, createMockAgent('Yes'));
 
-      expect(result).toContain('requires full Drive scope');
+      // `share` must NOT be admitted by drive.file — see ACTION_SCOPES.
+      expect(result).toContain(SCOPES.DRIVE);
+      expect(result).not.toContain(SCOPES.DRIVE_FILE);
     });
   });
 
   describe('tool definition', () => {
     it('has correct name and schema', () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       expect(tool.definition.name).toBe('google_drive');
       expect(tool.definition.input_schema.required).toEqual(['action']);

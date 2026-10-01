@@ -15,16 +15,22 @@
  */
 
 import { join } from 'node:path';
-import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
+import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
+import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
+import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
-import { resolveGuardedAckHosts } from '../../core/tool-context.js';
+import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
+import { isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -33,9 +39,6 @@ const OPENAPI_FETCH_TIMEOUT_MS = 15_000;
 /** Cap on the docs-page body pre-Haiku. 250 KB matches PRD-UNIFIED-API-PROFILE-V2. */
 const DOCS_BODY_MAX_BYTES = 250 * 1024;
 const DOCS_FETCH_TIMEOUT_MS = 15_000;
-// OAuth token responses are small JSON; cap the read so a malicious token_url
-// can't stream an unbounded body into memory during fetch_token.
-const TOKEN_BODY_MAX_BYTES = 64 * 1024;
 /**
  * Hard $ budget per extraction call. The helper's default model is now
  * Sonnet 4.6 (matches the engine-wide LLM default) — Haiku was the legacy
@@ -49,7 +52,7 @@ const TOKEN_BODY_MAX_BYTES = 64 * 1024;
  */
 const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
-type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token';
+type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect';
 
 interface RefinePatch {
   addGuidelines?: string[] | undefined;
@@ -84,6 +87,54 @@ interface ApiSetupInput {
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
 const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
+/** Vault key names are UPPER_SNAKE_CASE. Mirrors the bootstrap input schema, applied on the
+ *  create/update path too — that schema only ever guarded the Haiku draft. */
+// The bound is not decoration and it is not new: the OAuth block carried its own
+// copy of this pattern WITH `{0,63}` while this one had no bound at all. Two
+// patterns for one concept, differing in exactly the part that matters, is how
+// the two drifted — so there is one pattern now and it keeps the stricter half.
+const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Every value in a profile that NAMES a vault key, with the path that produced
+ * it — derived from the field NAMES, not from a list kept beside them.
+ *
+ * ## Why derived
+ *
+ * `validateProfile` checked three neighbouring groups of key names at three
+ * different depths: `username_key`/`password_key` against their MEANING
+ * (`isInfraSecret`), `vault_keys[]` against its TYPE (`string`), and the three
+ * `auth.oauth.*_key` slots against their FORM (a regex). Only the first asked
+ * the question that matters — does this name point at a secret the platform
+ * manages rather than one the user supplied for this API.
+ *
+ * Adding the missing fields to the hand-kept list would have fixed the two
+ * groups and left the SHAPE that produced them, so the next field lands beside
+ * the list rather than inside it. The invariant belongs to the function: a
+ * field whose name ends in `_key` names a vault key, and every one of them gets
+ * the same two checks. A slot added to `ApiAuth` tomorrow is covered the day it
+ * is added, without an edit here — and `api-setup.test.ts` pins that by
+ * feeding a synthetic future field.
+ */
+function vaultKeyNamesIn(auth: ApiAuth): Array<readonly [string, unknown]> {
+  const out: Array<readonly [string, unknown]> = [];
+  const harvest = (obj: unknown, prefix: string): void => {
+    if (typeof obj !== 'object' || obj === null) return;
+    for (const [name, value] of Object.entries(obj)) {
+      if (name.endsWith('_key')) out.push([`${prefix}.${name}`, value] as const);
+    }
+  };
+  harvest(auth, 'auth');
+  harvest((auth as { oauth?: unknown }).oauth, 'auth.oauth');
+  // `vault_keys` is the plural form of the same thing: a list of names the
+  // attach resolves. Its entries are not fields, so the suffix rule cannot see
+  // them, and they carry the same authority as any single slot.
+  const list: unknown = auth.vault_keys;
+  if (Array.isArray(list)) {
+    list.forEach((v, i) => out.push([`auth.vault_keys[${i}]`, v] as const));
+  }
+  return out;
+}
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 // `graphql` accepted 2026-05-18 as alias for `reduce` with GraphQL-shaped
 // include paths (e.g. "data.products.edges[*].node"). The reducer treats
@@ -118,6 +169,58 @@ function validateProfile(profile: ApiProfile): string | null {
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
     }
+    // The two keys a `user_pass_split` profile hands the engine at call time. Validated
+    // HERE as well as at the attach, so a bad profile fails loudly at setup — when the
+    // operator is present and can fix it — instead of at the first request. Both halves
+    // matter: the SHAPE (a vault key name), and the refusal to name an infrastructure
+    // secret. The latter is the one that matters: these names come from the profile, which
+    // a prompt-injected agent can author, and `resolve()` — unlike `resolveSecretRefs` —
+    // has no infra filter of its own.
+    // A list of names, or nothing. The attach reads `vault_keys` by index, so any
+    // other value still hands it a name, and every other reader would have to
+    // guess the same way. Checked BEFORE the loop below, which reads its entries.
+    const vaultKeys: unknown = profile.auth.vault_keys;
+    if (vaultKeys !== undefined && vaultKeys !== null && !(Array.isArray(vaultKeys) && vaultKeys.every((k) => typeof k === 'string'))) {
+      return 'Invalid auth.vault_keys: must be a list of vault key names, e.g. ["MY_API_KEY"]. A stored profile holding something else there is fixed with api_setup update.';
+    }
+    // ONE loop over every value that names a vault key — see `vaultKeyNamesIn`
+    // for why the set is derived rather than listed. Both halves matter: the
+    // SHAPE (a vault key name), and the refusal to name an infrastructure
+    // secret. The latter is the one that matters: these names come from the
+    // profile, which a prompt-injected agent can author, and `resolve()` —
+    // unlike `resolveSecretRefs` — has no infra filter of its own.
+    for (const [field, key] of vaultKeyNamesIn(profile.auth)) {
+      if (key === undefined) continue;
+      if (typeof key !== 'string' || !VAULT_KEY_PATTERN.test(key)) {
+        return `Invalid ${field} "${String(key)}": must be an UPPER_SNAKE_CASE vault key name, start with a letter, 1-64 chars`;
+      }
+      // `isProtectedSecretWrite`, not `isInfraSecret`, and the difference is the
+      // whole point of naming these fields at all.
+      //
+      // `isInfraSecret` answers READ VISIBILITY — is this secret engine-internal
+      // and invisible to the model. `PROVIDER_KEY_SLOTS` (ANTHROPIC_API_KEY and
+      // its siblings) is deliberately NOT in it: those are agent-visible by
+      // design, because the setup wizard writes them and the engine resolves
+      // them for the tenant's own LLM calls.
+      //
+      // But a key NAMED here is not read for the tenant's own calls. It is
+      // resolved and SENT — as a basic-auth half, or as an OAuth `client_secret`
+      // to a token endpoint. Agent-visible and safe-to-disclose-to-a-third-party
+      // are different properties, and only the first one had a predicate.
+      // `isProtectedSecretWrite` already unions exactly the set that matters
+      // here — names whose loss the tenant cannot recover, since the wizard
+      // stored them once — so this uses it rather than inventing a fourth
+      // predicate beside three that already disagree.
+      //
+      // ⚠ Its docstring scopes it to WRITE gates. That scoping is about which
+      // question it answers, not a claim that the set is wrong elsewhere; the
+      // set is the right one and the name is narrower than its content. Said
+      // here because borrowing a predicate across the boundary its own comment
+      // draws is exactly how a check ends up meaning something nobody intended.
+      if (isProtectedSecretWrite(key)) {
+        return `Invalid ${field} "${key}": that credential belongs to this instance — an infrastructure secret or the slot holding the tenant's own provider key. It is never attached to an outbound request — use a credential the user supplied for this API.`;
+      }
+    }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
@@ -138,11 +241,66 @@ function validateProfile(profile: ApiProfile): string | null {
       if (o.body_format !== undefined && o.body_format !== 'form' && o.body_format !== 'json') {
         return `Invalid auth.oauth.body_format "${o.body_format}": must be "form" or "json"`;
       }
-      const keyPattern = /^[A-Z][A-Z0-9_]{0,63}$/;
-      for (const field of ['client_id_key', 'client_secret_key', 'refresh_token_key'] as const) {
-        const v = o[field];
-        if (v !== undefined && !keyPattern.test(v)) {
-          return `Invalid auth.oauth.${field} "${v}": must be UPPER_SNAKE_CASE, start with a letter, 1-64 chars`;
+      // The three `*_key` slots were checked HERE, against a local copy of the
+      // vault-key pattern, and nowhere else. That is what made them the shallow
+      // end of the function: a form check, with nothing asking whether the name
+      // points at an infrastructure secret. They now go through the single loop
+      // above like every other key name, so this block is gone rather than
+      // narrowed — leaving it would re-check the same fields with the same
+      // pattern and quietly restore the second opinion this repair removes.
+      // The two fields a HOST is derived from. Checked here for the same reason
+      // the username/password keys above are, and the comment there is the whole
+      // argument: these values come from the profile, a prompt-injected agent can
+      // author them, and this is the point where the operator is still present.
+      //
+      // The type says `Record<string, string>`, and the type is not a check — a
+      // profile arrives as model JSON or as a file. The derivation refuses a
+      // non-string later and that refusal is the real boundary; what this adds is
+      // that a structurally broken profile never persists to fail far from
+      // whoever could fix it.
+      if (o.preset_id !== undefined) {
+        // The value is NOT repeated back, and the asymmetry with the two
+        // refusals below is what gave this away: they name the field and never
+        // the value, this one did the opposite. Tool input passes through the
+        // secret resolver before the handler runs, and the consent it asks for
+        // is per-NAME and remembered — so a name consented to once for some
+        // other call is substituted here with no prompt, and a refusal that
+        // quotes what arrived would put the resolved value into the model's
+        // context. It is a provider id; naming the field is enough to fix it.
+        // One check, and it does both jobs. A vault reference has to contain
+        // `secret:` followed by an uppercase letter, and this grammar permits
+        // neither a colon nor an uppercase letter — so every string that could
+        // carry one is already refused here. A separate reference check was
+        // written first and then deleted: a mutation showed it could never
+        // fire, and a branch that cannot fire reads as a guard while guarding
+        // nothing. The test that hands this field a vault reference stays, so
+        // that loosening the grammar turns red rather than quietly reopening
+        // the hole.
+        if (!PRESET_ID_PATTERN.test(o.preset_id)) {
+          return 'Invalid auth.oauth.preset_id: must be a lowercase provider id — letters, digits and hyphens, starting with a letter. A vault reference is not one. Use api_setup connect to see which providers this engine knows.';
+        }
+      }
+      const presetParams: unknown = o.preset_params;
+      if (presetParams !== undefined) {
+        if (typeof presetParams !== 'object' || presetParams === null || Array.isArray(presetParams)) {
+          return 'Invalid auth.oauth.preset_params: must be an object of name/value pairs, e.g. {"shop": "acme"}.';
+        }
+        for (const [name, value] of Object.entries(presetParams)) {
+          if (typeof value !== 'string') {
+            return `Invalid auth.oauth.preset_params.${name}: must be text. These values are substituted into the provider's address, so only a plain string can be one.`;
+          }
+          // The third condition, and the only one that is not about shape. Tool
+          // input passes through `resolveSecretRefs` before this handler runs, so
+          // a parameter written as a vault reference normally arrives here already
+          // holding the VALUE — which would make a credential a DNS label in an
+          // address the engine hands a browser. What still arrives as a literal
+          // reference is the infra-secret case, which that resolver deliberately
+          // leaves unsubstituted; refusing it is what this line can still do, and
+          // it says the thing the model needs to learn: this field is not a place
+          // for a secret at all.
+          if (new RegExp(SECRET_REF_PATTERN.source).test(value)) {
+            return `Invalid auth.oauth.preset_params.${name}: a vault reference cannot be a provider parameter. This value becomes part of the address the user's browser is sent to — pass the plain value (a shop name, a region), never a credential.`;
+          }
         }
       }
     }
@@ -344,6 +502,8 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
         // to dodge the create-action's "no auth specified" warning.
         type: { type: 'string', enum: ['none', 'basic', 'bearer', 'header', 'query', 'oauth2'] as const },
         basic_format: { type: 'string', enum: ['user_pass_split', 'pre_encoded_b64'] as const },
+        username_key: { type: 'string', pattern: '^[A-Z][A-Z0-9_]*$' },
+        password_key: { type: 'string', pattern: '^[A-Z][A-Z0-9_]*$' },
         header_name: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' },
         query_param: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_-]*$' },
         instructions: { type: 'string' },
@@ -402,6 +562,8 @@ interface DocsExtracted {
   auth?: {
     type: 'none' | 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
     basic_format?: 'user_pass_split' | 'pre_encoded_b64';
+    username_key?: string;
+    password_key?: string;
     header_name?: string;
     query_param?: string;
     instructions?: string;
@@ -442,17 +604,32 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Last two labels — coarse stand-in for registrable domain; over-drops on
- *  multi-label TLDs (co.uk) but never under-drops (the security direction). */
-function lastTwoLabels(hostname: string): string {
-  const labels = hostname.toLowerCase().split('.');
-  if (labels.length < 2) return hostname.toLowerCase();
-  return labels.slice(-2).join('.');
+/** Second-level labels that, under a two-letter country code, are treated as
+ *  a public suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line
+ *  to cover another. */
+const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
+  'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'ne', 'or', 'go', 'ltd', 'plc',
+];
+
+/** The parent a candidate host must sit under: the docs host without its first
+ *  label when it has more than two labels, otherwise the docs host itself. A parent of the
+ *  form `<label from PUBLIC_SECOND_LEVEL_LABELS>.<two-letter country code>` is
+ *  treated as a public suffix, so only hosts under the docs host itself qualify.
+ *  A single-label docs host has no parent: no candidate qualifies. */
+function candidateParent(docsHost: string): string | null {
+  const labels = docsHost.split('.');
+  if (labels.length < 2) return null;
+  const parent = labels.length > 2 ? labels.slice(1) : labels;
+  const isPublicSuffix = parent.length === 2
+    && /^[a-z]{2}$/.test(parent[1]!)
+    && PUBLIC_SECOND_LEVEL_LABELS.includes(parent[0]!);
+  return isPublicSuffix ? docsHost : parent.join('.');
 }
 
-/** Same-domain alt-host candidates referenced in the docs body. Cross-domain
- *  hosts are dropped — surfacing them would let a hostile docs page steer
- *  weak agents at attacker.com. The same-domain check is load-bearing. */
+/** Alt-host candidates referenced in the docs body that sit under the docs
+ *  host's parent (the rule is on `candidateParent`). Every other host is
+ *  dropped. The parent check is load-bearing: the agent reads these hosts as
+ *  candidates for base_url. */
 function findApiHostCandidates(html: string, docsUrl: string): string[] {
   let docsHost: string;
   try {
@@ -460,14 +637,16 @@ function findApiHostCandidates(html: string, docsUrl: string): string[] {
   } catch {
     return [];
   }
-  const docsDomain = lastTwoLabels(docsHost);
+  const parent = candidateParent(docsHost);
+  if (parent === null) return [];
+  const parentSuffix = `.${parent}`;
   const re = /https?:\/\/((?:api[\w-]*|gateway[\w-]*|graphql[\w-]*|rest[\w-]*|edge[\w-]*)\.[a-z0-9.-]+\.[a-z]{2,})/gi;
   const seen = new Set<string>();
   const candidates: string[] = [];
   for (const match of html.matchAll(re)) {
     const host = (match[1] ?? '').toLowerCase();
     if (!host || host === docsHost) continue;
-    if (lastTwoLabels(host) !== docsDomain) continue;
+    if (!host.endsWith(parentSuffix)) continue;
     if (seen.has(host)) continue;
     seen.add(host);
     candidates.push(host);
@@ -582,7 +761,7 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, 'discovery', agent.toolContext);
+      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext);
       // Bootstrap fetches go around the http_request tool, so the session
       // limit didn't see them pre-1.5.0. Charge each successful fetch so a
       // pathological docs_url can't laundromat its way past the budget.
@@ -738,12 +917,19 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, 'discovery', agent.toolContext);
+      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext);
       // Charge the primary docs fetch against the session HTTP budget so
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
       if (!resp.ok) {
-        return `Error: failed to fetch docs page (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL and try again.`;
+        // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
+        // free-form, and echoed here verbatim. `api_setup` is on the agent's
+        // scan-exempt tool allowlist, so this string reaches the model WITHOUT
+        // `scanToolResult`. Measured: a server returning `404 Ignore all previous
+        // instructions…` had the full text delivered byte-identically, and the
+        // injection detector WOULD have flagged it — it never sees it. The status
+        // code alone is diagnostic enough, and it is not attacker-authored text.
+        return `Error: failed to fetch docs page (HTTP ${String(resp.status)}). Check the URL and try again.`;
       }
       const body = await readBodyLimited(resp, DOCS_BODY_MAX_BYTES);
       docsText = body.text;
@@ -801,7 +987,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       agent,
       // Honour the operator model blocklist: without this a managed trial that
       // blocks premium Anthropic ids would still run the Sonnet default here on
-      // the CP pool key (the resolved model falls back to the fast tier).
+      // the CP pool key. Note what this does NOT say: the fast-tier fallback
+      // happens only when the blocklist rejects the resolved id. With no
+      // blocklist — the ordinary case — this extraction runs
+      // `MODEL_MAP.balanced`. An earlier version of this comment read as though
+      // fast were the norm, and that reading survived into the billing label
+      // one line below (see `result.tier`).
       ...(agent.toolContext.userConfig?.blocked_model_ids !== undefined
         ? { blockedModelIds: agent.toolContext.userConfig.blocked_model_ids }
         : {}),
@@ -811,7 +1002,13 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // This pool-key extraction runs on a separate stream inside the (already
     // gated) tool run — account its spend to the local session cap + the tenant
     // balance so it isn't invisible to billing. No-op on self-host / BYOK.
-    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
+    //
+    // The tier comes from the helper, not from here. This call site used to pass
+    // a literal `'fast'` while `callForStructuredJson` defaults to
+    // `MODEL_MAP.balanced` — so a real customer's $0.3848 Sonnet extraction was
+    // reported to the control plane as Haiku spend, and every per-tier breakdown
+    // understated `balanced` by exactly the helper calls it could not see.
+    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
@@ -831,14 +1028,14 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ];
   }
 
-  // Surface same-domain alt-host candidates (api.foo.com vs docs.foo.com).
-  // Cross-domain candidates are dropped in findApiHostCandidates to avoid
-  // an attacker docs page steering vault auth at a foreign host.
+  // Surface alt-host candidates under the docs host's parent (api.foo.com vs
+  // docs.foo.com; the rule is on `candidateParent`). The notes below name the
+  // parent that was checked, and nothing more.
   const apiHostCandidates = findApiHostCandidates(docsText, docsUrl);
   if (apiHostCandidates.length > 0) {
     draft.notes = [
       ...(draft.notes ?? []),
-      `same-domain alt host(s) observed in docs: ${apiHostCandidates.join(', ')} — verify against authoritative source before swapping base_url`,
+      `alt host(s) under ${candidateParent(new URL(docsUrl).hostname.toLowerCase()) ?? ''} observed in docs: ${apiHostCandidates.join(', ')} — verify against authoritative source before swapping base_url`,
     ];
   }
 
@@ -854,7 +1051,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
     : '';
   const hostHintNote = apiHostCandidates.length > 0
-    ? `\nbase_url note: docs host is ${new URL(docsUrl).hostname}; same-domain alt host(s) referenced in the body: ${apiHostCandidates.join(', ')}. Verify before swapping — these are observations from the docs page, not validated endpoints.`
+    ? `\nbase_url note: docs host is ${new URL(docsUrl).hostname}; alt host(s) under ${candidateParent(new URL(docsUrl).hostname.toLowerCase()) ?? ''} referenced in the body: ${apiHostCandidates.join(', ')}. Verify before swapping — these are observations from the docs page, not validated endpoints.`
     : '';
 
   return `Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).
@@ -903,23 +1100,150 @@ function applyRefine(existing: ApiProfile, patch: RefinePatch): ApiProfile {
   return merged;
 }
 
+/**
+ * The tail of the delete message: what left the vault with the profile, and
+ * what stayed — neither half silent. See `purgeRecordedTokens` for which is
+ * which. The kept names are the user's call, so the text says to ask.
+ */
+function purgeMessage(purge: TokenPurge): string {
+  const parts: string[] = [];
+  if (purge.removed.length > 0) parts.push(` Removed the tokens its exchanges wrote: ${purge.removed.join(', ')}.`);
+  if (purge.notRemovable.length > 0) parts.push(` Could NOT remove ${purge.notRemovable.join(', ')} — this vault has no working delete here.`);
+  if (purge.notVisible.length > 0) parts.push(` Did not look at ${purge.notVisible.join(', ')} — outside this agent's vault scope, so whether anything of this profile's is still there is unknown. Ask the user, or run this from an agent whose scope covers ${purge.notVisible.length === 1 ? 'it' : 'them'}.`);
+  if (purge.kept.length > 0) parts.push(` Still in the vault: ${purge.kept.join(', ')}. The user or another profile may need them — ask the user before removing any.`);
+  return parts.join('');
+}
+
+/**
+ * Persist the engine-owned grant record — and, after a successful exchange, the
+ * token expiry — onto the FRESHEST copy of the profile: an exchange takes
+ * seconds, and saving the copy read before it would roll back a concurrent
+ * update. A profile deleted meanwhile stays deleted: tool calls run
+ * concurrently, and re-saving the copy read before the exchange would bring
+ * back a profile the model was just told is gone. A failed or refused save is
+ * swallowed on purpose. The vault already reflects the exchange and the request
+ * budget is already charged; turning a completed exchange into a reported
+ * failure would make the model mint again, while losing the record only returns
+ * this path to the state it had before the record existed.
+ *
+ * Returns `'gone'` when the profile no longer exists, so a caller that just
+ * wrote tokens for it can take them out again.
+ *
+ * `tokenExpiresAt` has THREE states, and collapsing two of them into `undefined`
+ * was a defect:
+ *   · a number — the new access token's absolute expiry;
+ *   · `'unknown'` — a new access token was written, but the response did not say
+ *     how long it lives, so any stored expiry now describes a token that is gone
+ *     and has to go with it;
+ *   · `undefined` — this save does not touch the access token at all (the
+ *     revocation record), and an existing expiry stays as it is.
+ *
+ * Before the split, `undefined` meant both "did not touch the token" and "wrote a
+ * token, do not know its lifetime", and the second case kept the OLD number. That
+ * is a latch: `expires_in` is RECOMMENDED, not REQUIRED, in RFC 6749 §5.1, so one
+ * conformant response without it left a past expiry in place permanently. Nothing
+ * read the field when it was written, which is why it went unnoticed; a lazy
+ * refresh reads it, and would then have exchanged a token on every single request.
+ */
+function persistGrant(
+  apiStore: ApiStore | null | undefined,
+  id: string,
+  apisDir: string,
+  update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
+  tokenExpiresAt?: number | 'unknown',
+): 'saved' | 'gone' | 'not-saved' {
+  if (!apiStore) return 'not-saved';
+  const fresh = apiStore.get(id);
+  if (!fresh) return 'gone';
+  let next: ApiProfile;
+  if (tokenExpiresAt === undefined) {
+    next = { ...fresh };
+  } else {
+    const oauth = { ...fresh.auth?.oauth };
+    // `'unknown'` DELETES rather than writes. Keeping the old number would leave
+    // the profile describing the lifetime of a token that is no longer there.
+    if (tokenExpiresAt === 'unknown') delete oauth.token_expires_at;
+    else oauth.token_expires_at = tokenExpiresAt;
+    next = { ...fresh, auth: { ...fresh.auth, oauth } } as ApiProfile;
+  }
+  next.oauth_grant = update(fresh.oauth_grant);
+  try {
+    return apiStore.save(next, apisDir).ok ? 'saved' : 'not-saved';
+  } catch {
+    // See the docstring: the exchange is complete either way.
+    return 'not-saved';
+  }
+}
+
+/**
+ * The record's writes after an exchange: what it held, with each name this
+ * exchange wrote replaced by the value it wrote now. A name keeps one entry —
+ * the fingerprint of the latest value is the only one a delete may match. One
+ * exchange never writes a name twice: its output name may not be a refresh slot.
+ */
+function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
+  const rewritten = new Set(writes.map((w) => w.name));
+  const kept = recordedWrites({ id: '', name: '', base_url: '', description: '', oauth_grant: current })
+    .filter((w) => !rewritten.has(w.name));
+  return [...kept, ...writes];
+}
+
+/**
+ * Is a vault name filled? Asked through the same indirection `fetch_token`
+ * uses, so the value never reaches the model or this function's caller — only
+ * the yes or no does.
+ */
+function vaultHolds(agent: IAgent, name: string): boolean {
+  const store = agent.secretStore;
+  if (!store) return false;
+  const probe = { _: `secret:${name}` };
+  const probed = store.resolveSecretRefs(probe) as { _: string };
+  return probed._ !== `secret:${name}`;
+}
+
+/**
+ * The reply for an exchange that finished after its profile was deleted: the
+ * delete already ran, so nothing is left to hold a record of what the exchange
+ * wrote — it is taken out again now, where it can be, and the reply says what
+ * was and what was not.
+ */
+function deletedMeanwhile(
+  apiStore: ApiStore,
+  profile: ApiProfile,
+  writes: WrittenSecret[],
+  secretStore: SecretStoreLike,
+): string {
+  const purge = purgeRecordedTokens(apiStore, { ...profile, oauth_grant: { written: writes } }, secretStore);
+  return `Token exchange completed, but api_profile "${profile.id}" was deleted while it ran.${purgeMessage(purge)}`;
+}
+
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+  // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
+  // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
+  // the token at the provider — a vault before-image would restore a dead token. The
+  // rest overwrite a profile or a vault entry. `bootstrap` sits with them without a
+  // check of whether it persists: `restorable` over-requires, it never under-promises.
+  undo: (input) => {
+    if (input.action === 'list' || input.action === 'view') return null;
+    if (input.action === 'fetch_token') return 'none';
+    return 'restorable';
+  },
   definition: {
     name: 'api_setup',
-    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',
+    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token'],
+          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect'],
           description: 'Action to perform',
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',
@@ -946,8 +1270,11 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
     },
   },
   detailedGuidance:
+    'connect: pass `id`. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.',
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
+    ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
+    ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
     const apisDir = getApisDir();
 
@@ -996,14 +1323,16 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, 'discovery', agent.toolContext));
+          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, { surface: 'discovery' }, agent.toolContext));
           // Charge OpenAPI bootstrap fetches against the session budget too.
           agent.sessionCounters.httpRequests++;
         } finally {
           clearTimeout(timer);
         }
         if (!resp.ok) {
-          return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL or pass a direct link to the JSON spec.`;
+          // Same server-controlled reason phrase as the docs-page path above —
+          // dropped for the same reason (scan-exempt tool, verbatim echo).
+          return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)}). Check the URL or pass a direct link to the JSON spec.`;
         }
         const { text, truncated } = await readBodyLimited(resp, OPENAPI_SPEC_MAX_BYTES);
         if (truncated) {
@@ -1018,8 +1347,27 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         return `Error: could not parse OpenAPI spec from ${input.openapi_url} — ${msg}. If the docs site serves HTML, find the raw .json spec URL (often at /openapi.json or /swagger.json).`;
       }
 
-      if (!spec.openapi || !spec.openapi.startsWith('3.')) {
-        return `Error: unsupported spec version (openapi: "${String(spec.openapi)}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      // `typeof` guard, not just truthiness: a remote spec of `{"openapi": 3}` is
+      // truthy but has no `.startsWith`, so the version check threw a TypeError
+      // PAST this handler's try/catch (it closes above) and the agent got a stack
+      // shape instead of the guidance below. A misconfigured server produces that
+      // without any malice. The echoed value is bounded for the same reason the
+      // reason phrase was dropped — it is remote-authored text.
+      // Guard `spec` itself, not just its field: `JSON.parse('null')` is null and
+      // `JSON.parse('"hi"')` is a string, so a 200 with either body dereferenced
+      // null/undefined here — PAST this handler's try/catch, which closes above.
+      // That route matters beyond ergonomics: the dispatcher's catch path returns
+      // `cause.message` WITHOUT `scanToolResult`, so a throw is the one way out of
+      // this tool that the scan does not see. A misconfigured server produces it
+      // with no malice.
+      if (typeof spec !== 'object' || spec === null || typeof spec.openapi !== 'string') {
+        return `Error: spec has no string "openapi" version field. This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      }
+      if (!spec.openapi.startsWith('3.')) {
+        // Render the real value (bounded) — reporting `typeof` would tell the agent
+        // the server declared a version of "number", and send it looking for a field
+        // that says no such thing.
+        return `Error: unsupported spec version (openapi: "${spec.openapi.slice(0, 40)}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
       }
 
       let draft: ApiProfile;
@@ -1071,7 +1419,8 @@ Next steps before calling create:
       if (err) return `Validation error after refine: ${err}`;
 
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
-      apiStore.save(merged, apisDir);
+      const mergedSave = apiStore.save(merged, apisDir);
+      if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
       const changed: string[] = [];
       if (input.refine.addGuidelines?.length) changed.push(`+${String(input.refine.addGuidelines.length)} guidelines`);
@@ -1107,14 +1456,79 @@ Next steps before calling create:
       // there. Gating base_url alone let a profile pair an allowlisted base_url
       // with an arbitrary token_url and egress the client_secret past the
       // allowlist. validateProfile() has already verified base_url and (for
-      // oauth2 profiles) token_url parse as URLs, so isAllowlistedEndpoint()
-      // returns false here only for genuinely non-allowlisted hosts.
+      // oauth2 profiles) token_url parse as URLs, so isVettedEgressHost()
+      // returns false here only for genuinely non-vetted hosts.
       const egressUrls: string[] = [profile.base_url];
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
-      const nonAllowlisted = egressUrls.filter((u) => !isAllowlistedEndpoint(u));
-      if (nonAllowlisted.length > 0) {
+      // A preset profile authorizes at a host nobody typed into it — the register
+      // derives it — so without this the disclosure would name `base_url` and the
+      // connect route would then ask for an acceptance of a host the save never
+      // offered. That refusal's advice ("save it again and accept") would be
+      // unfollowable, which is the exact shape the comment below remembers from
+      // the `*.openai.azure.com` incident.
+      // And when it CANNOT be derived, that is said rather than skipped. The
+      // first version dropped the host silently on any derivation failure, which
+      // made the completeness of a security disclosure depend on whether an
+      // unrelated parameter happened to validate — with no trace in either
+      // direction. Refusing the save instead was the other candidate and is
+      // worse: a provider retired from the register would make every profile
+      // naming it unsaveable, including the update that would remove the field.
+      let presetNote: string | undefined;
+      const redirectUrls: string[] = [];
+      // Set only where a human actually answered. An acceptance nobody gave is
+      // the one thing this record must never contain.
+      let redirectAccepted = false;
+      if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id) {
+        const presetId = profile.auth.oauth.preset_id;
+        const derived = derivePresetEndpoints(presetId, profile.auth.oauth.preset_params);
+        if (!('kind' in derived)) {
+          egressUrls.push(derived.authorizeUrl, derived.tokenUrl);
+          // …and the SAME host again, on its own list, because a second act is
+          // being asked about. The token exchange sends data there, which is the
+          // egress question; the connect link sends the USER there, which is
+          // not. One host, two consents, and they are stamped separately —
+          // see `CustomEndpointAck.redirect_hosts`.
+          redirectUrls.push(derived.authorizeUrl);
+        } else if (derived.kind === 'unknown-preset') {
+          // The id is NOT repeated back here, and that is the one place in this
+          // note where the omission is deliberate: `auth.oauth.preset_id` is a
+          // model-authored field, tool input passes through the secret resolver
+          // before this handler runs, and a resolved value that happens to look
+          // like a provider id would be echoed into the model's context and into
+          // a human's prompt. When the id IS known the two arms below do name it
+          // — that string equals one of ours, so it discloses nothing.
+          const known = presetIds();
+          presetNote = known.length > 0
+            ? `No authorization address could be derived: this profile names a provider this engine does not have built in, so there is nothing here to disclose or accept. It knows: ${known.join(', ')}.`
+            : 'No authorization address could be derived: this engine has no built-in providers yet, so there is nothing here to disclose or accept.';
+        } else if (derived.kind === 'bad-preset') {
+          presetNote = `No authorization address could be derived: the built-in provider "${presetId}" is defined wrongly in this engine — ${derived.detail}. Nothing on this profile fixes that; report it.`;
+        } else if (derived.kind === 'missing-param') {
+          presetNote = `No authorization address could be derived: the provider "${presetId}" needs ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}), which this profile does not supply. Set it with api_setup update — the host is disclosed then.`;
+        } else {
+          // Supplied and REFUSED, which is a different sentence: telling someone
+          // to set a value they already set is the advice that sends them round
+          // a loop. The value itself is not repeated back.
+          presetNote = `No authorization address could be derived: the value this profile supplies for ${derived.param.describe} (auth.oauth.preset_params.${derived.param.name}) is not one the provider "${presetId}" accepts. Correct it with api_setup update — the host is disclosed then.`;
+        }
+      }
+      // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
+      // http.ts asks the same function, and the two MUST agree. While this asked the
+      // broader one, an `*.openai.azure.com` profile saved with no prompt and no ack,
+      // and the attach then refused it with advice ("re-save and accept when
+      // prompted") that could never be followed — the prompt was unreachable and the
+      // else-branch below deleted any ack that did exist.
+      const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      // Two questions, one prompt, and the redirect half is asked even when the
+      // host IS vetted. That is not thoroughness: it is what keeps the refusal
+      // at connect time followable. If this only ran for non-vetted hosts, a
+      // preset pointing at a vetted one would save with no prompt, the redirect
+      // would refuse for want of an acceptance, and its advice — save again and
+      // accept — would point at a prompt that never appears. That dead end is
+      // the one this file already carries a scar from.
+      if (nonVetted.length > 0 || redirectUrls.length > 0) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -1123,17 +1537,52 @@ Next steps before calling create:
         // auto-attaches by hostname). So we ask the human out-of-band via
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
-        // EVERY non-allowlisted egress host so the single accept is informed.
-        const disclosure = nonAllowlisted.map((u) => describeDisclosure(u)).join('\n\n');
+        // EVERY non-vetted egress host so the single accept is informed.
+        // Each act gets its own sentence. The egress half says what the ENGINE
+        // will send and where; the redirect half says what will happen to the
+        // PERSON reading it. A consent whose text does not describe the act is
+        // not a consent for that act, and for a while this text described only
+        // the first one while the second was being authorized by it.
+        const redirectHostNames = Array.from(new Set(
+          redirectUrls
+            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+            .filter((h): h is string => h !== null),
+        ));
+        const disclosureParts = [
+          nonVetted.length > 0
+            ? `This engine will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to host(s) outside lynox's listed sub-processors:\n\n${nonVetted.map((u) => describeDisclosure(u)).join('\n\n')}`
+            : undefined,
+          redirectHostNames.length > 0
+            ? `You will be sent to ${redirectHostNames.join(' and ')} in your own browser to authorize this profile. You sign in there, to that provider — not to lynox — and what comes back is stored here for this profile.`
+            : undefined,
+          presetNote,
+        ].filter((part): part is string => part !== undefined && part !== '');
+        const disclosure = disclosureParts.join('\n\n');
         if (!agent.promptUser) {
-          return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
-        }
-        const answer = await agent.promptUser(
-          pv`⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
-          ['Allow', 'Deny', '\x00'],
-        );
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: profile "${profile.id}" not saved — user declined controller-responsibility for the non-vetted host(s).`;
+          // Two halves, two answers, because they fail in opposite directions.
+          // The egress half has to refuse the SAVE: a stored profile with a
+          // non-vetted host is one a later request attaches a credential to, so
+          // saving it without an acceptance is the leak. The redirect half has
+          // nothing to leak at save time — it only decides whether a link may be
+          // handed out later — so the profile is stored WITHOUT the acceptance
+          // and `connect` refuses until somebody is there to be asked. Sharing
+          // one answer made a background run unable to create any preset OAuth
+          // profile at all, which is a new refusal nobody asked for.
+          if (nonVetted.length > 0) {
+            return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
+          }
+        } else {
+          const answer = await agent.promptUser(
+            pv`⚠ api_setup: saving "${profile.name}" needs your acceptance.\n\n${disclosure}\n\nAccept and save this profile?`,
+            ['Allow', 'Deny', '\x00'],
+          );
+          if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+            return `Blocked: profile "${profile.id}" not saved — user declined.`;
+          }
+          // `true`, not `redirectUrls.length > 0`: the guarded value below is
+          // `hostsOf(redirectUrls)`, which is empty when the list is, so the
+          // second test said the same thing twice.
+          redirectAccepted = true;
         }
       }
 
@@ -1145,22 +1594,50 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonAllowlisted.length > 0) {
-        // Reachable only after the human accepted above (else returned).
-        const ackHosts = Array.from(new Set(
-          nonAllowlisted
-            .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
-            .filter((h): h is string => h !== null),
-        ));
+      const hostsOf = (urls: readonly string[]): string[] => Array.from(new Set(
+        urls
+          .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
+          .filter((h): h is string => h !== null),
+      ));
+      // Computed BEFORE the branch, and the branch reads it, so the guarded
+      // value is the only statement of the rule. While the guard sat in a
+      // ternary and the condition tested `redirectAccepted` separately,
+      // deleting the ternary changed nothing any test could see.
+      const redirectHosts = redirectAccepted ? hostsOf(redirectUrls) : [];
+      if (nonVetted.length > 0 || redirectHosts.length > 0) {
+        // Reachable only after the human accepted above (else returned, or —
+        // for the redirect half in autonomous mode — fell through with
+        // `redirectAccepted` still false, which is what keeps the record honest).
+
+        // Two lists from two sources, never one list used twice. `hosts` still
+        // answers only the data question, so nothing that reads it starts
+        // meaning something wider; `redirect_hosts` is fed from the derived
+        // authorize URL alone, so an acceptance earned by a `base_url` cannot
+        // authorize a redirect even when the two hostnames coincide.
         profile.custom_endpoint_ack = {
           accepted: true,
-          hosts: ackHosts,
+          hosts: hostsOf(nonVetted),
+          ...(redirectHosts.length > 0 ? { redirect_hosts: redirectHosts } : {}),
           accepted_at: new Date().toISOString(),
         };
       } else {
         // Every egress host is vetted — no ack should ride along; strip a forged one.
         delete profile.custom_endpoint_ack;
       }
+
+      // The grant record is the engine's, never the caller's — the same rule as the
+      // ack above. A create/update able to write it could clear a revocation or
+      // forge the client stamp. Whatever arrived is dropped and the stored record
+      // rides along unchanged, so a view → edit → update round trip neither trips
+      // over it nor erases it. Discarding rather than refusing is deliberate: the
+      // round trip would otherwise fail every time the model echoes the field back.
+      const storedGrant = agent.toolContext?.apiStore?.get(profile.id)?.oauth_grant;
+      // Said in the reply when it mattered: a model that "cleared" a revocation by
+      // echoing an edited record must not read a plain success and pass that on.
+      const grantDiscarded = input.profile.oauth_grant !== undefined
+        && JSON.stringify(input.profile.oauth_grant) !== JSON.stringify(storedGrant);
+      if (storedGrant) profile.oauth_grant = storedGrant;
+      else delete profile.oauth_grant;
 
       // Enforce research: warn if profile is too thin
       const warnings: string[] = [];
@@ -1185,7 +1662,13 @@ Next steps before calling create:
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
-      const isUpdate = !apiStore.save(profile, apisDir);
+      const saved = apiStore.save(profile, apisDir);
+      // A refusal used to arrive here as `isNew`, so the tool answered "Created
+      // … saved and activated immediately" for a profile that was never stored.
+      // Fail-closed in effect, false-confident in report — and the only trace was
+      // a stderr line no model ever reads.
+      if (!saved.ok) return `Error: ${saved.reason}`;
+      const isUpdate = !saved.isNew;
 
       const verb = isUpdate ? 'Updated' : 'Created';
       const parts: string[] = [
@@ -1208,8 +1691,147 @@ Next steps before calling create:
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
+      if (grantDiscarded) {
+        parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
+      }
+      // Said here as well, because the disclosure above only runs when some host
+      // was non-vetted. A profile whose base_url is vetted saves with no prompt
+      // at all, and that is the case where the missing authorize host would
+      // otherwise leave no trace anywhere.
+      if (presetNote) parts.push(presetNote);
+      if (redirectUrls.length > 0 && !redirectAccepted) {
+        // Two sentences, because the two cases are not the same event. On a
+        // create nothing was added; on an update an acceptance a human gave
+        // earlier was just DROPPED — the save rebuilds the record from the
+        // incoming profile, and there is no acceptance to carry over when
+        // nobody could be asked. A single sentence let an update read as the
+        // harmless case.
+        parts.push(isUpdate
+          ? 'The acceptance for sending the user to the provider was REMOVED: this run could not ask anyone, and the record is rebuilt on every save. api_setup connect will refuse until the profile is saved again while a person is there to answer.'
+          : 'Saved WITHOUT the acceptance for sending the user to the provider — nobody could be asked in this run. api_setup connect will refuse until the profile is saved again while a person is there to answer.');
+      }
       parts.push('Next steps: use ask_secret to securely collect API credentials if needed, then test with a simple http_request.');
       return parts.join('\n');
+    }
+
+    if (input.action === 'connect') {
+      const id = input.id ?? input.profile?.id;
+      if (!id) return 'Error: "id" is required for connect action.';
+      const apiStore = agent.toolContext?.apiStore;
+      if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
+      const profile = apiStore.get(id);
+      if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
+      if (profile.auth?.type !== 'oauth2') {
+        return `Error: profile "${id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
+      }
+      // The link is built from the server's own origin, never assembled by the
+      // model: a link the model writes is a link the model chooses. Without an
+      // HTTP server there is nothing to send the user to.
+      // ORIGIN is the engine's public address, not a sign that the server is up:
+      // the env registry makes it required on every tier and the installer writes
+      // it unconditionally. So its ABSENCE is what this can answer — that there is
+      // no address to bring the user back to. Whether the route answers is the
+      // route's own business, and W1b gives it a check of its own.
+      const origin = process.env['ORIGIN'];
+      if (!origin) {
+        return 'Error: this engine has no public address configured (ORIGIN), so there is nowhere to send the user back to. Set it, or collect the credentials with ask_secret and use action=fetch_token.';
+      }
+      // Parsed, not merely found. The provider host below is parsed, compared for
+      // identity and checked for userinfo; the host the user is sent to FIRST had
+      // a presence test and one stripped trailing slash. It is operator input
+      // rather than model input, which is why the answer is a refusal and not a
+      // repair — a link a person is told to click is the wrong place to guess
+      // what a malformed address meant.
+      //
+      // None of these refusals echo the value. A misconfigured ORIGIN can hold
+      // anything somebody pasted, including a credential, and this string goes
+      // into the model's context.
+      let base: URL;
+      try {
+        base = new URL(origin);
+      } catch {
+        return 'Error: ORIGIN is not a valid address, so no link can be built from it. Set it to this engine\'s full public address including the scheme, e.g. https://lynox.example.com.';
+      }
+      // The same three questions the redirect guard asks, and deliberately the
+      // same three: this message says "inside the operator's own network", and
+      // while it checked only loopback and numeric private ranges it refused
+      // `http://nas.local:3000` — an ordinary self-hosted address that this
+      // repo's own predicate, two imports away, calls private. A feature with
+      // two definitions of one phrase has the ending the redirect guard's own
+      // docstring describes.
+      // ONE normalisation, read by all three questions — the third used to
+      // normalise the hostname again on its own. Brackets stay on for the URL
+      // form, which is why there are two names and not one.
+      const originRooted = base.hostname.replace(/\.+$/, '');
+      const originHost = originRooted.replace(/^\[|\]$/g, '');
+      const originIsInsideNetwork = originHost === 'localhost'
+        || isPrivateIP(originHost)
+        || isPrivateLanEndpoint(`https://${originRooted}/`);
+      if (base.protocol !== 'https:' && !(base.protocol === 'http:' && originIsInsideNetwork)) {
+        return 'Error: ORIGIN must be an https address. The provider sends the authorization back to it, and plain http exposes that in transit; http is accepted only for an address inside the operator\'s own network.';
+      }
+      if (base.username !== '' || base.password !== '') {
+        return 'Error: ORIGIN carries a username or password in the address. Remove it — this address is shown to the user and handed to the provider.';
+      }
+      if (base.search !== '' || base.hash !== '') {
+        return 'Error: ORIGIN carries a query or a fragment. Set it to the bare public address of this engine — scheme, host, port, and a path prefix only if it is served under one.';
+      }
+      // Derived here only to answer BEFORE sending the user anywhere; the route
+      // derives again at use, and that derivation is the boundary.
+      const endpoints = derivePresetEndpoints(profile.auth.oauth?.preset_id ?? '', profile.auth.oauth?.preset_params);
+      if ('kind' in endpoints) {
+        const ids = presetIds();
+        const known = ids.length > 0 ? `Known providers: ${ids.join(', ')}.` : 'No providers are built in yet, so nothing can be connected this way today.';
+        if (endpoints.kind === 'unknown-preset') {
+          return `Error: profile "${id}" names no built-in provider, so there is no authorization page to send the user to. ${known} Set auth.oauth.preset_id with api_setup update, or keep using a credential the user pastes with ask_secret.`;
+        }
+        if (endpoints.kind === 'bad-preset') {
+          // A defect in a compiled preset. Neither the model nor the user can
+          // fix it, so neither is told to try.
+          return `Error: the built-in provider profile "${id}" names is defined wrongly in this engine — ${endpoints.detail}. There is nothing to set on the profile; collect the credentials with ask_secret and use action=fetch_token, and report the provider as broken.`;
+        }
+        if (endpoints.kind === 'missing-param') {
+          return `Error: profile "${id}" is missing what its provider needs: ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}). Ask the user for it and set it with api_setup update.`;
+        }
+        return `Error: the value profile "${id}" supplies for ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}) is not one its provider accepts. Ask the user to correct it and set it with api_setup update.`;
+      }
+      // The same question the start route asks, from the same function — so a
+      // link is not handed out that the route will then refuse. While only the
+      // route asked it, the model was told to show a link and the user arrived
+      // at a 403, which is the dead end this feature keeps re-learning.
+      const redirect = checkRedirectTarget(endpoints, profile.custom_endpoint_ack);
+      if (redirect) {
+        return redirect.kind === 'inside-network'
+          ? `Error: profile "${id}" would send the user to ${endpoints.host}, which is inside this engine's own network. That is not the provider, and there is no acceptance that would make it one — the profile has to name a built-in provider.`
+          : `Error: nobody has agreed to be sent to ${endpoints.host} for profile "${id}" yet, and this link would be refused. Save the profile again with api_setup update and let the user accept where they will be sent, then connect.`;
+      }
+      const clientIdKey = profile.auth.oauth?.client_id_key;
+      const clientSecretKey = profile.auth.oauth?.client_secret_key;
+      // Only what is missing, because a reply that names a filled slot sends the
+      // model to collect a value the user already gave — and the user then has to
+      // decide which half of the sentence is about them.
+      const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
+      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
+      if (unnamed.length > 0 || unfilled.length > 0) {
+        if (unnamed.length > 0) {
+          return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
+        }
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
+      }
+      // Built from the parsed object, never by string surgery on the raw value.
+      // The path prefix is kept deliberately: an engine served under one needs
+      // it, and `origin` alone would silently produce a link to nothing.
+      const link = `${base.origin}${base.pathname.replace(/\/+$/, '')}/api/oauth/connect/${encodeURIComponent(id)}`;
+      const grant = profile.oauth_grant;
+      // Three replies, one link. What differs is what the user is walking into,
+      // and saying it here is cheaper than a surprise on the provider's page.
+      if (grant?.state === 'revoked') {
+        return `The provider ended this authorization, so "${id}" has to be authorized again. Show the user this link and let them click it: ${link}\n\nThe old access is gone either way; connecting again is what brings it back.`;
+      }
+      if (grant?.origin === 'callback' && (grant.state === 'connected' || grant.state === 'no-refresh')) {
+        return `"${id}" is already connected. Show the user this link only if they want to authorize again: ${link}\n\nA new authorization replaces the stored token, so anything running against the old one stops working the moment it is used.`;
+      }
+      return `Show the user this link and let them click it: ${link}\n\nIt opens ${endpoints.host}, where they authorize this engine. They come back to this instance, and the connection is stored for you — do not ask them to paste a token, and do not build this link yourself.`;
     }
 
     if (input.action === 'delete') {
@@ -1221,19 +1843,30 @@ Next steps before calling create:
       if (!apiStore) {
         return 'Error: API store unavailable — cannot delete the profile. Restart the engine and retry.';
       }
+      // Read before the delete: what the vault holds for this profile is decided
+      // by the profile, and afterwards there is no profile to ask.
+      const existing = apiStore.get(id);
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
+      let removed: boolean;
       try {
-        return apiStore.remove(id, apisDir)
-          ? `Deleted API profile "${id}".`
-          : `API profile "${id}" not found.`;
+        removed = apiStore.remove(id, apisDir);
       } catch (err) {
         // remove() throws ApiProfileUnlinkError only on the flat-JSON fallback
         // when a non-ENOENT unlink fails — the profile is already gone from
-        // memory. Surface it so the agent doesn't retry blindly.
+        // memory. Surface it so the agent doesn't retry blindly. The tokens stay:
+        // a profile that resurrects on restart should come back working.
         return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
+      if (!removed) return `API profile "${id}" not found.`;
+      // Only for a profile that was REGISTERED. `remove` also succeeds for a row
+      // that sat in the store unregistered — the boot refuses the second of a
+      // `-`/`_` pair — and a record read from such a row is not one this
+      // process's exchanges wrote.
+      if (!existing) return `Deleted API profile "${id}".`;
+      if (!agent.secretStore) return `Deleted API profile "${id}". No vault is available here, so no token was checked or removed.`;
+      return `Deleted API profile "${id}".${purgeMessage(purgeRecordedTokens(apiStore, existing, agent.secretStore))}`;
     }
 
     if (input.action === 'fetch_token') {
@@ -1252,12 +1885,14 @@ Next steps before calling create:
       // to token_url. The save-time allowlist gate covers profiles created via
       // this tool, but a profile can re-enter the store WITHOUT passing it —
       // loadFromDirectory at boot, or a JSON written into the apis dir — so
-      // re-verify here fail-closed: a non-allowlisted token_url is refused unless
+      // re-verify here fail-closed: a non-vetted token_url is refused unless
       // the profile carries a persisted acceptance covering that exact host.
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
-      if (!isAllowlistedEndpoint(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
-        let host = oauth.token_url;
-        try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
+      // The same check the module requires, from the module — so the route that
+      // will call `exchangeToken` cannot skip what this path never could.
+      const vetting = vetTokenEndpoint(oauth.token_url, profile.custom_endpoint_ack);
+      if (isTokenEndpointRefused(vetting)) {
+        const host = vetting.host;
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';
@@ -1287,12 +1922,88 @@ Next steps before calling create:
       const missing: string[] = [];
       if (clientId === null) missing.push(clientIdKey);
       if (clientSecret === null) missing.push(clientSecretKey);
-      if (grantType === 'refresh_token' && oauth.refresh_token_key) {
-        const rt = resolveOne(oauth.refresh_token_key);
-        if (rt === null) missing.push(oauth.refresh_token_key);
+      // The profile drives the slot, exactly as the attach does (`http.ts`,
+      // `accessTokenKey`): an explicit `refresh_token_key` wins, otherwise the
+      // derived name — the same one `fetch_token` writes. Without the fallback
+      // the token was stored under a name nothing read, because no engine path
+      // ever set the field and only a model-authored profile edit could.
+      const refreshKey = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      // The same guard the attach applies to its derived key (`http.ts`) and the
+      // write applies below. It covers BOTH shapes: a derived name that lands in a
+      // protected prefix, and an explicit `refresh_token_key` naming one — the
+      // profile is model-authorable, and this value is POSTed to `token_url`.
+      if (grantType === 'refresh_token' && isProtectedSecretWrite(refreshKey)) {
+        return `Error: profile "${input.id}" resolves its refresh token from "${refreshKey}", which is a protected credential slot — refusing to send it to ${new URL(oauth.token_url).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
       }
+      // Resolved once: the token this exchange presents is also the one a failure
+      // is judged against — the rotation check and the revocation fingerprint
+      // below must both refer to exactly what went out.
+      const presentedRefresh = grantType === 'refresh_token' ? resolveOne(refreshKey) : null;
+      if (grantType === 'refresh_token' && presentedRefresh === null) missing.push(refreshKey);
       if (missing.length > 0) {
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${n}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+      }
+      // A revocation verdict stands until the refresh token changes. Posting the
+      // very token the provider already rejected only repeats the rejection, and
+      // a 401 loop would do exactly that. A DIFFERENT token in the slot is the
+      // user's way back, so the verdict steps aside for it — and is cleared once
+      // an exchange succeeds.
+      const grant = profile.oauth_grant;
+      if (presentedRefresh !== null && grant?.state === 'revoked'
+          && grant.revoked_fp === tokenFingerprint(presentedRefresh)) {
+        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at);
+      }
+      // Where the access token will go, checked BEFORE the POST: a refusal after it
+      // would throw away a freshly minted token, and with a provider that rotates,
+      // the refresh token the POST just spent along with it.
+      const outputName = input.output_secret_name ?? accessTokenKey(input.id);
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
+        return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
+      }
+      // `secretStore.set` below overwrites without asking, and the agent chooses
+      // the name, so one injected `fetch_token` could otherwise replace a mail
+      // credential or a feed address with an OAuth token — and the only symptom
+      // would be the feature quietly failing afterwards. `validateProfile` refuses
+      // an infrastructure secret as a basic-auth key name too, but against the
+      // mirror risk: that one is about handing a platform secret OUT to a host,
+      // this one about writing over it. The check covers both halves of what a
+      // tenant cannot recover, the infrastructure secrets and the slot holding
+      // their own provider key.
+      if (isProtectedSecretWrite(outputName)) {
+        return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
+      // Never a slot the refresh token lives in: the access token would be written
+      // over it, and the grant would go with it. Both slots, because a profile can
+      // read from one of its own naming AND still have rotations written to the
+      // derived one.
+      //
+      // The advice is "leave it out", not "pick another name": the attach reads the
+      // derived access name and nothing else, so any other chosen name clears this
+      // refusal and leaves a token no request can use. Two shapes the default does
+      // not fix get their own answer — a profile that reads its refresh token from
+      // that very name, and an id whose derived access name is itself protected —
+      // because in both, following "leave it out" walks into the next refusal.
+      if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
+        const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
+        const derivedAccess = accessTokenKey(input.id);
+        if (isProtectedSecretWrite(derivedAccess)) {
+          return `${clash} The name this profile would otherwise use, "${derivedAccess}", is a protected slot, so its id leaves no name for the access token: rename the api_profile so its derived names do not collide.`;
+        }
+        // On `refreshKey`, not on the output name: the sentence below asserts that
+        // the profile's refresh slot IS the name the access token needs, and that
+        // is true for every shape where it holds — including one that arrives with
+        // an explicit output name and would otherwise be told to leave it out, only
+        // to land here on the next call.
+        if (refreshKey === derivedAccess) {
+          const move = grantType === 'refresh_token'
+            ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
+            : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`;
+          return `${clash} Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${move}`;
+        }
+        return `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
+      }
+      if (!secretStore.set) {
+        return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
       // fetch_token drives a real outbound POST; honour the same per-session HTTP
       // ceiling http_request enforces. It already increments httpRequests after a
@@ -1319,102 +2030,188 @@ Next steps before calling create:
       };
       if (oauth.scope) params['scope'] = oauth.scope;
       if (oauth.audience) params['audience'] = oauth.audience;
-      if (grantType === 'refresh_token' && oauth.refresh_token_key) {
-        const rt = resolveOne(oauth.refresh_token_key);
-        if (rt !== null) params['refresh_token'] = rt;
-      }
-      const headers: Record<string, string> = { 'Accept': 'application/json' };
-      let body: string;
-      if (bodyFormat === 'json') {
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify(params);
-      } else {
-        headers['Content-Type'] = 'application/x-www-form-urlencoded';
-        body = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
-      }
-      let response: Response;
-      let respText: string;
-      const ac = new AbortController();
-      const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
-      // Wall-clock guarantee: an AbortController.signal aborts fetch() but NOT
-      // response.body.getReader() once headers have arrived, so a malicious
-      // token_url that returns headers then drips the body (≤ TOKEN_BODY_MAX_BYTES,
-      // 1 byte/30s) would hang readBodyLimited indefinitely. Race BOTH the fetch
-      // and the body read against this (mirrors http_request's HARD_CAP).
-      let wallTimer: ReturnType<typeof setTimeout> | undefined;
-      const wallTimeout = new Promise<never>((_, reject) => {
-        wallTimer = setTimeout(() => {
-          ac.abort();
-          reject(new Error(`token exchange timed out after ${DOCS_FETCH_TIMEOUT_MS}ms`));
-        }, DOCS_FETCH_TIMEOUT_MS + 1000);
-      });
-      try {
-        // Pass agent.toolContext so the SAME egress controls the docs/http paths
-        // enforce apply here too: network_policy (deny-all / allow-list) + HTTPS
-        // enforcement. Without it the client_secret in `body` would POST to an
-        // arbitrary attacker-supplied token_url regardless of the tenant's
-        // network policy — a credential-exfil channel.
-        ({ response } = await Promise.race([
-          // fetch_token is a full-control credentialed egress (posts the
-          // client_secret to token_url) — gated under `guarded`. The token_url
-          // host is in this profile's own custom_endpoint_ack (base_url +
-          // token_url were both accepted at save), so the accepted-host union
-          // admits it; a token_url no profile accepted stays blocked.
-          fetchWithValidatedRedirects(oauth.token_url, {
-            method: 'POST',
-            headers,
-            body,
-            signal: ac.signal,
-          }, 'full-control', agent.toolContext, undefined, resolveGuardedAckHosts(agent.toolContext)),
-          wallTimeout,
-        ]));
-        // Charge the token exchange against the session HTTP budget so
-        // fetch_token is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
-        agent.sessionCounters.httpRequests++;
-        // Bounded read — a malicious token_url can't stream an unbounded body
-        // into memory (the response is small JSON; we only need the access_token).
-        const read = await Promise.race([
-          readBodyLimited(response, TOKEN_BODY_MAX_BYTES),
-          wallTimeout,
-        ]);
-        respText = read.text;
-      } catch (err) {
-        return `Error: token exchange to ${oauth.token_url} failed: ${err instanceof Error ? err.message : String(err)}.`;
-      } finally {
-        clearTimeout(timer);
-        clearTimeout(wallTimer);
-      }
-      if (!response.ok) {
+      if (presentedRefresh !== null) params['refresh_token'] = presentedRefresh;
+      // The POST itself lives in `core/oauth-token-exchange.ts` because the
+      // OAuth callback route needs the same hardened request — and only that.
+      // What a non-2xx MEANS stays here: everything below this call is about
+      // refresh tokens and the grant behind them, which the authorization-code
+      // caller has neither of.
+      //
+      // `agent.toolContext` carries the egress controls. Without it the
+      // client_secret in the body would POST to an arbitrary token_url whatever
+      // the tenant's network policy says, which is the exfiltration channel this
+      // path is shaped around.
+      //
+      // The session HTTP budget is charged through the callback, after the
+      // response: a refused egress never reached the provider to be charged for,
+      // and `fetch_token` must not be a freebie bypass of the per-session cap.
+      const exchanged = await exchangeToken(
+        { endpoint: vetting, params, bodyFormat },
+        agent.toolContext,
+        () => { agent.sessionCounters.httpRequests++; },
+      );
+      if (!exchanged.ok) return `Error: ${exchanged.message}`;
+      const respText = exchanged.text;
+      if (!exchanged.responseOk) {
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
         const snippet = respText.length > 500 ? respText.slice(0, 500) + '…[truncated]' : respText;
-        return `Token exchange failed with HTTP ${response.status}. Response body:\n${snippet}\n\nThis is the external provider rejecting the credentials or app config — NOT a lynox tool limitation. Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage. Do NOT recommend self-host or tier changes for this kind of failure.`;
+        const responseBody = `Response body:\n${snippet}`;
+        const notOurs = 'This is the external provider\'s answer — NOT a lynox tool limitation. Do NOT recommend self-host or tier changes for this kind of failure.';
+        // Which of three things failed decides what happens to the grant: a
+        // revocation ends it, a client problem leaves it intact, and anything
+        // else changes nothing. Before this, all three read as "check your
+        // credentials", and a revoked grant looked like a token that had merely
+        // expired — the model was told to fetch again, forever.
+        let kind = classifyRefreshFailure(exchanged.status, respText);
+        // Only a refresh token is a grant the user gave and the provider can take
+        // back. A client-credentials exchange answering `invalid_grant` refuses
+        // the client itself, so it is read as a client problem.
+        if (kind === 'grant-revoked' && presentedRefresh === null) kind = 'client-misconfigured';
+        // The stamp speaks only for the token it was taken with. A refresh token
+        // stored since — by the user after re-creating the app, by anyone — is
+        // judged as unstamped; otherwise a dead token from a new client would read
+        // as a mismatch and hide a real revocation.
+        const presentedFp = presentedRefresh === null ? undefined : tokenFingerprint(presentedRefresh);
+        const stampApplies = grant?.minted_for !== undefined && grant.minted_for === presentedFp;
+        kind = reclassifyForeignGrant(
+          kind,
+          stampApplies ? grant?.minted_by : undefined,
+          clientId === null ? undefined : tokenFingerprint(clientId),
+        );
+        // A second writer in THIS process can rotate the token while the request
+        // is out: tool calls run concurrently, so two exchanges for one profile can
+        // overlap, and the provider then rejects the one that lost as spent. If
+        // the slot no longer holds what went out, the rejection says nothing about
+        // what it holds now, so it is no revocation. This reads the process's own view of the vault; a writer in
+        // another process is not seen here — the attach's fingerprint check is
+        // what lets a restart that loads the newer token past such a verdict.
+        // The re-read shows only THAT the slot changed, not who changed it: a
+        // concurrent exchange, or a token stored by hand meanwhile. The reply says
+        // no more than that. An emptied slot is its own case — the token was
+        // removed, possibly with the profile.
+        if (kind === 'grant-revoked') {
+          const nowHeld = resolveOne(refreshKey);
+          if (nowHeld === null) {
+            return `Token exchange failed with HTTP ${exchanged.status}, but the refresh token it sent is no longer in the vault under "${refreshKey}", so this answer says nothing about the grant. Nothing was recorded. Check with api_setup list that api_profile "${input.id}" still exists before anything else. ${responseBody}`;
+          }
+          if (nowHeld !== presentedRefresh) {
+            return `Token exchange failed with HTTP ${exchanged.status}, but the refresh token under "${refreshKey}" was replaced while the request was out — by another exchange running at the same time, or by a token stored meanwhile — so this answer says nothing about the token stored now. Nothing was recorded. Retry the API request; if it is refused or answers 401, call fetch_token once. ${responseBody}`;
+          }
+        }
+        // A profile that names its own refresh slot reads from there, while every
+        // exchange stores a rotated token under the derived name. The token that
+        // just failed may simply be the one the last rotation replaced, so no
+        // verdict can be recorded; the reply names the split instead.
+        if (kind === 'grant-revoked' && refreshKey !== refreshTokenKey(input.id)) {
+          return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected the refresh token read from "${refreshKey}". This profile reads its refresh token from "${refreshKey}", but fetch_token stores a rotated one under "${refreshTokenKey(input.id)}", so the rejected token may just be an old one. Nothing was recorded. Remove auth.oauth.refresh_token_key from the profile with api_setup update, so both are the same slot, then call fetch_token again. ${responseBody}`;
+        }
+        if (kind === 'grant-revoked' && presentedFp !== undefined) {
+          persistGrant(apiStore, input.id, apisDir, (current) => ({
+            ...current,
+            state: 'revoked',
+            revoked_fp: presentedFp,
+            revoked_at: new Date().toISOString(),
+          }));
+          return `${revokedGrantMessage(input.id, refreshKey, undefined)}\n\n${responseBody}`;
+        }
+        if (kind === 'client-misconfigured') {
+          return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;
+        }
+        return `Token exchange failed with HTTP ${exchanged.status} — a temporary provider or network condition, or an answer the engine does not classify. Nothing was changed; retry later. ${responseBody}\n\n${notOurs}`;
       }
       let parsed: { access_token?: string; expires_in?: number; refresh_token?: string; scope?: string; token_type?: string };
       try {
         parsed = JSON.parse(respText) as typeof parsed;
       } catch {
-        return `Token exchange returned HTTP ${response.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
+        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
       }
       const accessToken = parsed.access_token;
       if (!accessToken || typeof accessToken !== 'string') {
-        return `Token exchange returned HTTP ${response.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
+        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
       }
-      const outputName = input.output_secret_name ?? `${input.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
-      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
-        return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
-      }
-      if (!secretStore.set) {
-        return 'Error: secret store has no write path in this context — cannot persist the access_token.';
-      }
+      // A refresh token counts as new only if it differs from the one this exchange
+      // sent. A provider that does not rotate can answer with the very token it was
+      // sent; writing that again and putting it on the record would make the
+      // user's own grant look like the exchange's, and a delete would take it.
+      // Computed HERE, above the write of the access token, rather than below the
+      // refresh write where it used to sit. Two saves follow a token write — the
+      // success save and the protected-refresh-name refusal — and only one of them
+      // could reach the value from down there. The other one silently kept the
+      // previous token's expiry.
+      //
+      // The bound itself lives in `tokenExpiryFrom` because the callback in
+      // `server/http-api.ts` is the second writer of this same field.
+      const tokenExpiresAt = tokenExpiryFrom(parsed.expires_in);
+      const refreshName = refreshTokenKey(input.id);
+      const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' && parsed.refresh_token !== presentedRefresh
+        ? parsed.refresh_token
+        : null;
       secretStore.set(outputName, accessToken);
-      // Stash refresh_token too if the response carries one (for later refresh_token grants).
-      if (parsed.refresh_token && typeof parsed.refresh_token === 'string') {
-        const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
-        secretStore.set(refreshName, parsed.refresh_token);
+      // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
+      if (rotated !== null) {
+        // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
+        // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
+        // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
+        // close the door and leave the window.
+        if (isProtectedSecretWrite(refreshName)) {
+          // The access token is written already; it goes on the record like any
+          // other write, or no later delete could take it.
+          const accessWrite: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
+          const saved = persistGrant(apiStore, input.id, apisDir, (current) => ({
+            ...current,
+            written: mergeWrites(current, accessWrite),
+          }), tokenExpiresAt);
+          if (saved === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, accessWrite, secretStore);
+          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
+        }
+        secretStore.set(refreshName, rotated);
       }
+      // Persist the expiry, absolute and in milliseconds. Until now `expires_in`
+      // was formatted into the reply below and then dropped, so nothing on this
+      // path could know when a token died — which is why neither a lazy refresh
+      // nor a scheduled one was buildable: both need something to plan against.
+      //
+      // On the profile rather than in the vault deliberately. A vault write would
+      // put a non-secret timestamp into a store whose NAMES are enumerated into
+      // the model's briefing (`engine-init.ts`), and the value is not a
+      // credential. The failure mode of the extra write is also mild here: if the
+      // save does not happen, the state is what it is today — no expiry known —
+      // whereas the same second write for the refresh key would have reproduced
+      // the very orphan this change removes, which is why THAT one is derived at
+      // read time instead.
+      // The grant record rides in the same save as the expiry. The client that
+      // just succeeded is stamped as the one the stored refresh token belongs to —
+      // the comparison `reclassifyForeignGrant` needs on the next `invalid_grant`.
+      // A success also ends a revocation verdict: a token that works is not
+      // revoked. Every value this exchange wrote joins the record with its
+      // fingerprint when the save goes through (see `persistGrant`), and that is
+      // what a later delete removes — and all it removes.
+      const writes: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
+      if (rotated !== null) writes.push({ name: refreshName, fp: tokenFingerprint(rotated) });
+      // The refresh token now in play: a new one if the answer carried it,
+      // otherwise the one that just worked — which is also what an answer that
+      // hands it back unchanged names. The stamp names that token, so it says
+      // nothing about any token stored after it.
+      const liveRefresh = rotated ?? presentedRefresh;
+      const outcome = persistGrant(apiStore, input.id, apisDir, (current) => {
+        const next: OAuthGrantRecord = { ...current };
+        if (liveRefresh !== null && clientId !== null) {
+          next.minted_by = tokenFingerprint(clientId);
+          next.minted_for = tokenFingerprint(liveRefresh);
+        }
+        delete next.state;
+        delete next.revoked_fp;
+        delete next.revoked_at;
+        next.written = mergeWrites(current, writes);
+        return next;
+      }, tokenExpiresAt);
+      // Deleted while the exchange was out: there is no profile to hold the
+      // record, and the delete already ran — so the tokens this exchange wrote
+      // would sit in the vault with nothing left to remove them.
+      if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
-      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN\`.` : ''}`;
+      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
     }
 
     return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", or "fetch_token".';

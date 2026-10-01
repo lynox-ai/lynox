@@ -104,6 +104,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { name: 'artifact_history' },
   artifactRestoreTool: { name: 'artifact_restore' },
   recallToolResultTool: { name: 'recall_tool_result' },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { name: 'suggest_follow_ups' },
 }));
 
@@ -263,6 +265,17 @@ describe('Engine.reloadUserConfig — Wave 5d allowlist gate', () => {
     mockLoadConfig.mockReturnValueOnce({
       ...NON_ALLOWLISTED_PERSISTED_ACCEPTED,
       accepted_custom_endpoints: [{ host: 'some-other-host.example.org', accepted_at: '2026-06-07T12:00:00.000Z' }],
+    });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-byok-key');
+
+    await expect(engine.reloadUserConfig()).rejects.toThrow(/my-litellm\.example\.com/);
+  });
+
+  it('persisted acceptance matches the active host by its exact name, not a name it merely ends in', async () => {
+    const engine = makeEngine();
+    mockLoadConfig.mockReturnValueOnce({
+      ...NON_ALLOWLISTED_PERSISTED_ACCEPTED,
+      accepted_custom_endpoints: [{ host: 'litellm.example.com', accepted_at: '2026-06-07T12:00:00.000Z' }],
     });
     mockResolveProviderApiKey.mockReturnValueOnce('sk-byok-key');
 

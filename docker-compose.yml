@@ -95,6 +95,22 @@ services:
     networks:
       - internal
 
+# What this network is, and what it is not — measured 2026-08-10, because the
+# docs used to call it "network isolation" and it is not that.
+#
+# It is NOT `internal: true`. Outbound from both containers is unrestricted;
+# the engine needs it to reach the LLM API, so `internal: true` would break it.
+#
+# What it DOES buy is opt-in membership: a service added without a `networks:`
+# key joins Compose's implicit `default` network instead and gets no route and
+# no DNS to the services here — measured both ways with real containers.
+#
+# ⚠ Two limits, both measured, so nobody mistakes this for a boundary:
+#   - A sidecar with the Docker socket defeats it in one command
+#     (`docker network connect`), so it stops accidents, not adversaries.
+#   - It cuts BOTH ways. Anything you add that must reach `lynox` — the
+#     cloudflared sidecar in setup/remote-access.md is the live example — needs
+#     `networks: [internal]`, or it starts happily and silently cannot connect.
 networks:
   internal:
     driver: bridge

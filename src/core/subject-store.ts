@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { channels } from './observability.js';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { EntityType } from '../types/index.js';
@@ -46,9 +47,72 @@ export type SubjectKind = (typeof KNOWN_SUBJECT_KINDS)[number];
  * Exported as a tiny factory so the wiring is unit-testable without booting the
  * engine; the engine only ever `setSubjectBridge(makeSubjectColumnBridge(store))`.
  */
+/**
+ * What {@link SubjectStore.findOrCreate} can answer. A discriminated union on purpose:
+ * under `strictest` every caller must narrow, so adding the ambiguous arm made the
+ * compiler enumerate the call sites instead of leaving them to be found by hand.
+ *
+ * The `ambiguous` arm is not an error and not a miss. It says the surface form does not
+ * identify anything — several subjects legitimately answer to it — which is a fact about
+ * the NAME, not a failure of the lookup. What to do about it is the caller's to decide,
+ * because only the caller knows whether it can ask a human, skip a link, or fail.
+ */
+export type SubjectResolution =
+  | { ambiguous: false; id: string; created: boolean }
+  | { ambiguous: true; candidateIds: readonly string[] };
+
+/**
+ * The error a NON-interactive caller throws or logs. It carries NO names: several callers
+ * write `err.message` to stderr under an explicit data-minimisation promise (`crm.ts`:
+ * "Contact name omitted from the log — it is plaintext PII"), and a message naming the
+ * colliding contacts breaks exactly that promise. The count diagnoses; the names belong
+ * only where a human is being asked to choose.
+ */
+export function ambiguityError(kind: string, candidateIds: readonly string[]): Error {
+  return new Error(`this name matches ${String(candidateIds.length)} ${kind} entries — it does not identify one`);
+}
+
+/**
+ * Narrows any of the three resolvers' returns to the ambiguous arm. A shared guard rather
+ * than an inline `'ambiguous' in r` at each call site, because the three return DIFFERENT
+ * shapes (`findOrCreateEngagement` has no ambiguous arm at all — an engagement's identity
+ * is provider×client×period, not its name) and a structural check that works for one does
+ * not narrow the others.
+ */
+export function isAmbiguousResolution(r: unknown): r is { ambiguous: true; candidateIds: readonly string[] } {
+  return typeof r === 'object' && r !== null
+    && 'ambiguous' in r && (r as { ambiguous: unknown }).ambiguous === true;
+}
+
+/**
+ * The sentence shown when a human or an agent is being asked to disambiguate. This one
+ * NAMES the candidates, because that is the point: a bare "ambiguous" leaves the asker
+ * guessing which two things collided. Use it where the text is DISPLAYED, never on a path
+ * that logs — see {@link ambiguityError}.
+ *
+ * Names are KG-extracted from untrusted content, so each is stripped of Unicode
+ * format/invisible characters and whitespace-collapsed before display — the same
+ * treatment the merge tool's approval prompt applies, and for the same reason: this text
+ * is read by a model and a human, and a crafted name must not be able to inject into it.
+ */
+export function describeAmbiguity(store: SubjectStore, name: string, candidateIds: readonly string[]): string {
+  const clip = (n: string): string => n.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
+  const names = candidateIds
+    .map(id => store.getSubject(id)?.name)
+    .filter((n): n is string => typeof n === 'string')
+    .map(clip);
+  const list = names.length > 0 ? names.join(', ') : `${String(candidateIds.length)} entries`;
+  return `"${clip(name)}" matches more than one entry (${list}). Use the full name to say which one.`;
+}
+
 export interface SubjectColumnBridge {
   resolve(name: string, kind: string): string | null;
-  find(name: string, kind: string): string | null;
+  /**
+   * EVERY subject id this name could mean: `[]` (nobody carries it), `[id]`
+   * (unambiguous), or several (the name is shared). Deliberately a set rather than
+   * one id — see {@link makeSubjectColumnBridge}.
+   */
+  findAll(name: string, kind: string): string[];
   name(id: string): string | null;
 }
 
@@ -56,10 +120,37 @@ export function makeSubjectColumnBridge(subjectStore: SubjectStore): SubjectColu
   const narrow = (kind: string): SubjectKind =>
     (KNOWN_SUBJECT_KINDS as readonly string[]).includes(kind) ? (kind as SubjectKind) : 'person';
   return {
-    resolve: (name, kind) => subjectStore.findOrCreate({ kind: narrow(kind), name }).id,
-    find: (name, kind) => {
+    // WRITE path. An ambiguous name binds NOTHING — but it returns null rather than
+    // throwing, because this module already states what a resolve failure means and the
+    // call site is written for exactly that: "a resolve FAILURE → store null (unlinked),
+    // NOT the raw name". Throwing loses the WHOLE RECORD instead of just the link, since
+    // `insertRecords` catches per record — measured: two records in, one landed, the
+    // other's unrelated columns gone with it. The record keeps its data and carries no
+    // subject edge, which is the honest outcome when no identity is known, and the skip
+    // is counted so it is not silent.
+    resolve: (name, kind) => {
       const k = narrow(kind);
-      return (subjectStore.findCanonical(name, k) ?? subjectStore.findByAlias(name, k))?.id ?? null;
+      const r = subjectStore.findOrCreate({ kind: k, name });
+      if (r.ambiguous) {
+        channels.subjectAmbiguous.publish({ kind: k, candidateCount: r.candidateIds.length });
+        return null;
+      }
+      return r.id;
+    },
+    // A SET, because a single id cannot express what an ambiguous name means and every
+    // single-value encoding of it is wrong in one polarity or the other. Collapsing an
+    // ambiguous name to `null` let the caller substitute a sentinel that matches nothing:
+    // right under `$eq`, but under `$neq`/`$nin` it reads "not equal to a thing that does
+    // not exist" and matches EVERY row, so an exclusion silently stopped excluding.
+    // Refusing outright is not the answer either — it fires for the polarity that was
+    // already correct, and inside an `$or` one shared name fails the whole query.
+    // The candidate set says exactly what is known: the caller filters to "any of these"
+    // for the positive polarity and "none of these" for the negative, both faithful.
+    findAll: (name, kind) => {
+      const k = narrow(kind);
+      const canonical = subjectStore.findCanonical(name, k);
+      if (canonical) return [canonical.id];
+      return subjectStore.findByAliasResolved(name, k).ids;
     },
     name: (id) => subjectStore.getSubject(id)?.name ?? null,
   };
@@ -130,6 +221,12 @@ export const ENTITY_MAPPABLE_SUBJECT_KINDS: readonly SubjectKind[] =
  */
 export const NAME_DEDUPED_SUBJECT_KINDS = ['person', 'organization', 'product', 'service'] as const;
 const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS);
+
+/** The kinds {@link SubjectStore.findByNameAnyKind} probes by default: every kind a
+ *  name can identify — the dedup kinds plus exact-name `engagement`; `other` is
+ *  unstructured and stays out. */
+const ANY_KIND_RESOLUTION_KINDS: readonly SubjectKind[] =
+  [...NAME_DEDUPED_SUBJECT_KINDS, 'engagement'];
 
 /** Leading generic project word (+ separator) stripped from an engagement name. */
 const ENGAGEMENT_LEADING_GENERIC_RE = /^(?:projekt|project|projet)[\s:]+/iu;
@@ -253,6 +350,106 @@ const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> =
 };
 
 /**
+ * When does a 1:1 detail row carry SUBSTANTIVE data — data that makes the subject a record
+ * in its own right, so the orphan reap must keep it even with no memory left?
+ * Not every non-NULL column qualifies: `people.type` / `organizations.type` are NOT NULL
+ * with a default ('contact' / 'other'), so a bare row minted by an ingest has them set
+ * without anyone having said anything; they count only when set to a NON-default value (a
+ * deliberate classification). `currency` pairs with its amount and says nothing alone.
+ * Static SQL fragments over static column names (never input) — same injection argument as
+ * REPOINT_TARGETS. `src/scripts/subject-sweep.ts` `blockReason` carries a narrower hand copy
+ * of this idea (email/phone/domain/vat_id/sku/price/rate).
+ */
+const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
+  person:       "email IS NOT NULL OR phone IS NOT NULL OR role IS NOT NULL OR type <> 'contact'",
+  organization: "domain IS NOT NULL OR vat_id IS NOT NULL OR country IS NOT NULL OR type <> 'other'",
+  engagement:   'provider_subject_id IS NOT NULL OR client_subject_id IS NOT NULL OR started_at IS NOT NULL OR ended_at IS NOT NULL OR budget_cents IS NOT NULL OR billing_model IS NOT NULL',
+  product:      'sku IS NOT NULL OR price_cents IS NOT NULL',
+  service:      'hourly_rate_cents IS NOT NULL',
+};
+
+/**
+ * Every engine.db column that points at `subjects(id)`, partitioned by how the orphan reap
+ * treats it — exported so a schema sweep (`PRAGMA foreign_key_list` over every table) can
+ * fail the build the day a new FK column onto `subjects(id)` appears that none of the three
+ * lists knows. Without that guard the next such column would be invisible to the reap and the
+ * subject it holds would be over-erased. (A soft pointer declared WITHOUT `REFERENCES` is
+ * outside what `PRAGMA foreign_key_list` can see — those are the cross-DB seams in
+ * {@link SubjectExternalRefs}, kept by hand.)
+ *  - `counted`: a row here is a reference ({@link SubjectStore.referenceReason} keeps the subject).
+ *  - `detail`:  the 1:1 kind-detail rows (PK = subject_id) — part of the subject itself; a
+ *               reference when they carry substantive data (`DETAIL_SUBSTANTIVE_PREDICATE`),
+ *               or — for a kind the predicate map does not know — whenever a row exists.
+ *  - `derived`: recomputable materializations that must NOT count (cooccurrences).
+ *  - `detailKindsMissingPredicate`: detail kinds that would fall back to row-exists; the
+ *               sweep asserts this is empty so the fallback never fires on today's schema.
+ */
+export function subjectReferenceCoverage(): {
+  counted: string[]; detail: string[]; derived: string[]; detailKindsMissingPredicate: string[];
+} {
+  return {
+    counted: [
+      ...REPOINT_TARGETS.map(t => `${t.table}.${t.column}`),
+      'memory_subjects.subject_id',
+      'subjects.merged_into',
+    ],
+    detail: Object.values(DETAIL_TABLE).map(d => `${d.table}.subject_id`),
+    derived: ['subject_cooccurrences.subject_a_id', 'subject_cooccurrences.subject_b_id'],
+    detailKindsMissingPredicate: Object.keys(DETAIL_TABLE).filter(k => !Object.hasOwn(DETAIL_SUBSTANTIVE_PREDICATE, k)),
+  };
+}
+
+/**
+ * Cross-database soft references to a subject that engine.db's own FKs cannot see — both
+ * are LIVE user data outside engine.db: the history.db thread anchor
+ * (`threads.primary_subject_id`; engine.db's `threads` mirror is empty pre-S2) and
+ * datastore.db `subject`-typed cells (record-on-spine). The orphan reap consults them
+ * through this seam so a subject a thread or a table still points at is never erased out
+ * from under its owner. An implementation that cannot answer MUST say `true` (referenced):
+ * keeping a name is today's state, erasing a live anchor would be new damage.
+ */
+export interface SubjectExternalRefs {
+  /** Is `subjectId` the `primary_subject_id` of ANY history.db thread? */
+  isThreadAnchor(subjectId: string): boolean;
+  /** Does ANY datastore.db record link `subjectId` through a `subject`-typed column? */
+  hasRecords(subjectId: string): boolean;
+}
+
+/** The one method {@link makeSubjectExternalRefs} needs from a history.db thread store. */
+export interface ThreadAnchorProbe { listBySubjectId(subjectId: string, limit?: number): readonly unknown[] }
+/** The one method {@link makeSubjectExternalRefs} needs from a datastore.db record store. */
+export interface RecordProbe { hasRecordsForSubject(subjectId: string): boolean }
+
+/**
+ * Build the cross-DB half of the reference oracle from the two live stores, or `null` when
+ * either is missing — `null` means the caller must NOT reap (fail-closed: a missing probe is
+ * not an absent reference). Structural parameter types on purpose: `SubjectStore` sits BELOW
+ * `ThreadStore`/`DataStore`, so naming those classes here would invert the layering. The engine
+ * erase path (`src/core/knowledge-layer.ts`) and the operator sweep's orphan report
+ * (`src/scripts/subject-sweep.ts --orphans`) both build their oracle HERE — the fail-closed rule
+ * below is security logic, and a second copy of it is exactly the drift this factory exists to
+ * prevent. The sweep's ARCHIVE phase deliberately does not: it asks a different question and
+ * keeps its own guardrail list, partitioned against this oracle by `SWEEP_REFERENCE_PARTITION`.
+ *
+ * A probe that THROWS answers `true` (referenced) and reports once via `onProbeFailure`: a
+ * permanently failing probe (a pre-v46 history.db without the anchor column, a locked
+ * datastore) keeps every subject forever, which is indistinguishable from a real holder unless
+ * it is said out loud. Keeping a name is today's state; erasing a live anchor is new damage.
+ */
+export function makeSubjectExternalRefs(
+  threads: ThreadAnchorProbe | null,
+  records: RecordProbe | null,
+  onProbeFailure?: (probe: string, err: unknown) => void,
+): SubjectExternalRefs | null {
+  if (!threads || !records) return null;
+  const keptOnFailure = (probe: string, err: unknown): true => { onProbeFailure?.(probe, err); return true; };
+  return {
+    isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
+    hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
+  };
+}
+
+/**
  * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
  * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
  * caller can persist it FIRST (same crash-safety discipline as the archive sweep:
@@ -355,26 +552,61 @@ export class SubjectStore {
     parentId?: string | undefined;
     status?: string | undefined;
     embedding?: Buffer | undefined;
-  }): { id: string; created: boolean } {
-    const owner = params.ownerUserId ?? DEFAULT_OWNER;
-    if (NAME_DEDUP_KINDS.has(params.kind)) {
-      // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
-      // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
-      // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
-      // normalized query against stored raw names, so the clean form must have been
-      // stored first — full symmetry would need a stored normalized-name column.
-      const normalized = normalizeSubjectName(params.kind, params.name);
-      const existing = this.findCanonical(params.name, params.kind, owner)
-        ?? this.findByAlias(params.name, params.kind, owner)
-        ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
-      if (existing) {
-        // Fold the caller's surface forms into the existing subject's aliases
-        // (case-insensitive — case-variants of an existing alias are no-ops).
-        this._mergeAliases(existing, [params.name, ...(params.aliases ?? [])]);
-        return { id: existing.id, created: false };
-      }
+  }): SubjectResolution {
+    const found = this.resolveForCreate(params);
+    if (found.ambiguous) return { ambiguous: true, candidateIds: found.candidateIds };
+    if (found.row) {
+      // Fold the caller's surface forms into the existing subject's aliases
+      // (case-insensitive — case-variants of an existing alias are no-ops).
+      this._mergeAliases(found.row, [params.name, ...(params.aliases ?? [])]);
+      return { ambiguous: false, id: found.row.id, created: false };
     }
-    return { id: this.createSubject(params), created: true };
+    return { ambiguous: false, id: this.createSubject(params), created: true };
+  }
+
+  /**
+   * The READ half of {@link findOrCreate}: WHICH existing subject a create-call would
+   * fold into, or `null` when it would insert. Side-effect free — no alias merge, no
+   * insert.
+   *
+   * Extracted so a caller that needs to know the OUTCOME without causing it resolves
+   * through the same code instead of a second, slightly-different copy of the rule. That
+   * second copy is not hypothetical: the review queue's approve preview first reproduced
+   * the lookup with `findByNameAnyKind`, which has no normalized fallback, so a hint of
+   * `"Meridian AG."` previewed as "will be created" while the approval quietly folded it
+   * into the existing `Meridian AG`. The preview was a wrong promise on a consent
+   * surface, and nothing could catch it while the rule lived in two places.
+   *
+   * Non-deduped kinds (`engagement`, `other`) resolve to `null` — a create-call there
+   * always inserts, which is the correct answer to "what would this fold into".
+   */
+  resolveForCreate(params: { kind: SubjectKind; name: string; ownerUserId?: string | undefined }):
+    | { ambiguous: false; row: SubjectRow | null }
+    | { ambiguous: true; candidateIds: readonly string[] } {
+    const owner = params.ownerUserId ?? DEFAULT_OWNER;
+    if (!NAME_DEDUP_KINDS.has(params.kind)) return { ambiguous: false, row: null };
+    // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
+    // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
+    // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
+    // normalized query against stored raw names, so the clean form must have been
+    // stored first — full symmetry would need a stored normalized-name column.
+    const normalized = normalizeSubjectName(params.kind, params.name);
+    const canonical = this.findCanonical(params.name, params.kind, owner);
+    const aliasHit = canonical ? null : this.findByAliasResolved(params.name, params.kind, owner);
+    // AMBIGUOUS → hand the question back, and stop looking. Two subjects already carry
+    // this name, so there is no right answer to fold into, and every step below is a
+    // wider matcher than the one that just declined. This store does NOT invent an
+    // identity here: it once returned whichever row SQLite yielded first (a silent
+    // wrong bind), and a later attempt collected such mentions on a row named after the
+    // name itself — which then won `findCanonical` and could only ever be un-done by a
+    // BULK repoint that reassigns every collected fact to ONE of the candidates,
+    // reproducing the original defect later and in bulk. Both invented an answer to a
+    // question the store cannot answer. The caller gets the candidates instead.
+    if (aliasHit?.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
+    const existing = canonical
+      ?? aliasHit?.row
+      ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
+    return { ambiguous: false, row: existing ?? null };
   }
 
   /**
@@ -488,20 +720,217 @@ export class SubjectStore {
     `).get(name, kind, ownerUserId) as SubjectRow | undefined ?? null;
   }
 
-  /** Alias lookup (JSON-array contains, case-insensitive), scoped to kind + owner + active. */
-  findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
-    const escaped = alias.replace(/[%_\\]/g, c => `\\${c}`);
-    const rows = this.db.prepare(`
-      SELECT * FROM subjects
-      WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL AND aliases LIKE ? ESCAPE '\\'
-    `).all(kind, ownerUserId, `%"${escaped}"%`) as SubjectRow[];
-    // LIKE is case-sensitive on the JSON; confirm a real case-insensitive alias hit.
+  /**
+   * Alias lookup that reports WHY it found nothing: the row when exactly ONE active
+   * subject of this kind+owner carries the alias, else `ambiguous` to distinguish
+   * "several carry it" from "none does".
+   *
+   * That distinction is load-bearing. A bare `null` for both reads as a safe refusal,
+   * but several callers legitimately treat a miss as *keep looking* or *exclude
+   * nothing* — so collapsing the two trades one silent wrong answer for quieter ones:
+   * `resolvePersonSubject` falls through to its token-subset scan and can bind the
+   * name to a THIRD person; the kind chains fall from an ambiguous organization into
+   * the person namespace; the DataStore subject filter turns it into a sentinel id,
+   * which is right for `$eq` (matches nothing) and inverts under `$neq`/`$nin`, where
+   * "not equal to a thing that does not exist" matches EVERY row. An ambiguous alias
+   * is not a miss — it is a question this store cannot answer, and each caller has to
+   * say what it does about that.
+   *
+   * NO `aliases LIKE` PREFILTER, deliberately. SQLite folds case for ASCII only —
+   * `lower('MÜLLER')` is `'mÜller'` and `'MÜLLER' = 'müller' COLLATE NOCASE` is false —
+   * while the JS post-filter folds full Unicode. A prefilter therefore drops rows the
+   * post-filter would have matched, so a second subject differing only in the case of
+   * a non-ASCII character never reaches the count and the lookup returns a confident
+   * single hit. On a German-first product that is the common case, not an edge, and it
+   * would defeat the very guarantee this function exists to make. Folding in SQL does
+   * NOT fix it (same ASCII-only `lower()`); scanning the kind+owner range and folding
+   * in JS does, with no side condition.
+   *
+   * IT IS NOT FREE, and an earlier version of this comment claimed it was. `EXPLAIN
+   * QUERY PLAN` is `SEARCH subjects USING INDEX idx_subjects_kind` either way — the LIKE
+   * was a row filter, never an index lookup — but the plan is not the cost: the LIKE
+   * matched 0-1 rows, so `SELECT *` materialised 0-1 embedding BLOBs anyway and the
+   * narrower projection has almost nothing to save, while this pays a `JSON.parse` and a
+   * fold per row of the kind. Measured 1.2-3.2x SLOWER, growing with subject count.
+   * That is the price of a guarantee that holds on non-ASCII names, and it is worth it —
+   * but it is a price, and it grows with the subject count.
+   *
+   * KNOWN LIMIT, pre-existing and symmetric: `toLowerCase()` does not normalise, so an
+   * NFD "ü" and an NFC "ü" neither match nor register as ambiguous. Unlike the
+   * ASCII-folding gap above this cannot produce a confident wrong hit — it is a missed
+   * match on both sides — so it is out of this change's scope.
+   */
+  findByAliasResolved(
+    alias: string,
+    kind: string,
+    ownerUserId = DEFAULT_OWNER,
+  ): { row: SubjectRow | null; ambiguous: boolean; ids: string[] } {
     const lower = alias.toLowerCase();
-    for (const r of rows) {
-      const list = this._parseAliases(r.aliases);
-      if (list.some(a => a.toLowerCase() === lower)) return r;
+    const candidates = this.db.prepare(
+      'SELECT id, aliases FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
+    ).all(kind, ownerUserId) as Array<{ id: string; aliases: string }>;
+    const hits = candidates.filter(c => this._parseAliases(c.aliases).some(a => a.toLowerCase() === lower));
+    const ids = hits.map(h => h.id);
+    if (hits.length !== 1) return { row: null, ambiguous: hits.length > 1, ids };
+    return { row: this.getSubject(hits[0]!.id), ambiguous: false, ids };
+  }
+
+  /**
+   * Row when exactly one subject carries the alias, else null — for the callers where
+   * an ambiguous alias and an unknown one genuinely warrant the same answer (a read
+   * filter returning no rows, a lookup that reports "not found"). Anything that would
+   * KEEP LOOKING or INVERT on a null must use {@link findByAliasResolved} instead.
+   */
+  findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
+    return this.findByAliasResolved(alias, kind, ownerUserId).row;
+  }
+
+  /**
+   * Resolve a name across KINDS — for callers that carry no kind at all (the durable
+   * `remember`/recall surface names a subject, never its kind). A kind-scoped
+   * find-or-create there mints a same-named twin under its default kind whenever the
+   * graph already knows the name under a DIFFERENT kind (measured live: 3 of 573
+   * subjects on the first audited instance were exactly such product/organization
+   * twins) — and a kind-scoped read leaves every entry linked outside its two probed
+   * kinds unreachable by name.
+   *
+   * Same contract as {@link findOrCreate}'s ambiguous arm: one candidate is an answer,
+   * several are a question handed back to the caller, never a pick. Candidates are the
+   * UNION over the probed kinds of the canonical hit (or, per kind, the alias hits when
+   * no canonical exists — mirroring the canonical-shadows-alias order inside each kind).
+   * `engagement` matches by exact name only and may itself contribute several rows (two
+   * clients each have a "Website" project — identity is (name, parent), so a bare name
+   * over multiple engagements is genuinely ambiguous). `other` is unstructured and
+   * never probed.
+   */
+  findByNameAnyKind(
+    name: string,
+    opts?: { kinds?: readonly SubjectKind[] | undefined; ownerUserId?: string | undefined },
+  ): { ambiguous: false; row: SubjectRow | null } | { ambiguous: true; candidateIds: readonly string[] } {
+    const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
+    const kinds = opts?.kinds ?? ANY_KIND_RESOLUTION_KINDS;
+    const ids = new Set<string>();
+    for (const kind of kinds) {
+      if (NAME_DEDUP_KINDS.has(kind)) {
+        const canonical = this.findCanonical(name, kind, owner);
+        if (canonical) { ids.add(canonical.id); continue; }
+        for (const id of this.findByAliasResolved(name, kind, owner).ids) ids.add(id);
+      } else if (kind === 'engagement') {
+        // Engagements created through `findOrCreateEngagement` store the NORMALIZED
+        // name ("Projekt Orion" → "Orion", the surface form kept as an alias) — but
+        // backfilled rows carry the RAW legacy name, so BOTH sides are normalized
+        // here (a raw comparison subsumes into this: normalize is idempotent on an
+        // already-normalized name). Aliases are folded in JS, never SQL `lower()`
+        // (ASCII-only — the `findByAliasResolved` trap).
+        const probe = normalizeSubjectName('engagement', name).toLowerCase();
+        const rawLower = name.toLowerCase();
+        const rows = this.db.prepare(
+          `SELECT id, name, aliases FROM subjects WHERE kind = 'engagement' AND owner_user_id = ? AND archived_at IS NULL`,
+        ).all(owner) as Array<{ id: string; name: string; aliases: string }>;
+        for (const r of rows) {
+          const stored = normalizeSubjectName('engagement', r.name).toLowerCase();
+          if (stored === probe
+            || this._parseAliases(r.aliases).some(a => a.toLowerCase() === rawLower)) {
+            ids.add(r.id);
+          }
+        }
+      }
     }
-    return null;
+    if (ids.size > 1) return { ambiguous: true, candidateIds: [...ids] };
+    const only = [...ids][0];
+    return { ambiguous: false, row: only !== undefined ? this.getSubject(only) : null };
+  }
+
+  /**
+   * Fold a surface form to the key two spellings of the SAME entity share.
+   *
+   * Strips a public domain suffix and all non-alphanumerics, then lowercases — so
+   * "n8n"/"n8n.io", "Smart Bidding"/"Smart-Bidding" and "claude-opus-4-8"/"Claude Opus 4.8"
+   * each collapse to one key.
+   *
+   * IT DOES NOT FOLD A SUFFIX WRITTEN AS A WORD: "mistral.ai" → `mistral` but "Mistral AI"
+   * → `mistralai`, so those two do NOT match. (An earlier version of this comment used
+   * that very pair as its example; a review caught that the example was false.) The fix
+   * would be to strip a trailing `ai`/`io`/`cloud` TOKEN as well, and it is deliberately
+   * not made: that also turns "Google Cloud" into `google`, folding a product into its
+   * vendor. A missed fold costs a duplicate a human can merge; a wrong fold attributes
+   * facts to the wrong entity, so the rule stays on the side that under-matches.
+   *
+   * DIGITS ARE KEPT, and that is the whole reason this is a normalisation and not a
+   * similarity score. The duplicates measured on the canary instance sit next to a class
+   * that must NOT merge — "Opus 4.6"/"Opus 4.7", "GPT-4.1"/"GPT-5", "Sonnet 4.6"/"Sonnet 5"
+   * are seven pairs of genuinely different things whose names differ only in a number.
+   * Any embedding or edit-distance measure scores those as near-identical; keeping the
+   * digits in the key separates them exactly, with no threshold to tune.
+   */
+  static brandKey(name: string): string {
+    return name
+      .trim()
+      .toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/\.(ch|com|io|ai|de|net|org|app|co|eu|dev|cloud)$/, '')
+      .replace(/[^\p{L}\p{N}]/gu, '');
+  }
+
+  /**
+   * Resolve a name to an existing subject that differs only in domain suffix, case or
+   * punctuation. The last lookup before a mint, never the first: it is strictly weaker
+   * than the canonical and alias paths, and running it earlier would let a loose match
+   * outrank an exact one.
+   *
+   * Returns `ambiguous` on several hits rather than picking — the same contract as
+   * {@link findByNameAnyKind}, and for the same reason: two subjects sharing a brand key
+   * is a question, not a licence to choose. Short keys are refused outright, where a
+   * collision between unrelated entities stops being unlikely.
+   */
+  findByBrandKey(
+    name: string,
+    opts?: { kinds?: readonly SubjectKind[] | undefined; ownerUserId?: string | undefined },
+  ): { ambiguous: false; row: SubjectRow | null } | { ambiguous: true; candidateIds: readonly string[] } {
+    const key = SubjectStore.brandKey(name);
+    if (key.length < 3) return { ambiguous: false, row: null };
+    const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
+    const kinds = opts?.kinds ?? ANY_KIND_RESOLUTION_KINDS;
+    // Folded in JS, not SQL: SQLite's `lower()` is ASCII-only, so an SQL-side comparison
+    // would silently miss every non-ASCII pair — the trap `findByAliasResolved` documents.
+    const rows = this.db.prepare(
+      `SELECT id, name, kind FROM subjects WHERE owner_user_id = ? AND archived_at IS NULL AND merged_into IS NULL`,
+    ).all(owner) as Array<{ id: string; name: string; kind: SubjectKind }>;
+    const ids = new Set<string>();
+    let personShares = false;
+    for (const r of rows) {
+      if (SubjectStore.brandKey(r.name) !== key) continue;
+      // The kind filter selects BINDING TARGETS. It deliberately runs after the person
+      // check below, because a person's role here is to VOTE, and a vote must not depend on
+      // whether the caller happened to ask about people: today the sole caller takes the
+      // default set (which includes `person`), but a caller passing
+      // `kinds: ['organization']` would otherwise lose the ambiguity signal precisely where
+      // a person/org name collision is the thing to catch.
+      if (r.kind === 'person') { personShares = true; continue; }
+      if (!kinds.includes(r.kind)) continue;
+      ids.add(r.id);
+    }
+    // A PERSON is never a fold TARGET — person identity has its own rule (`personTokenKey`:
+    // title-stripping, token-order-insensitive), because names vary in ways brands do not,
+    // and a fact about a company filed against a person is worse than a duplicate.
+    //
+    // But it VOTES. Skipping people outright — the first cut of this fix — was
+    // one-directional while its own comment claimed "in both directions", and dropping
+    // people from the scan also removed them from the AMBIGUITY signal, so the one safe
+    // answer became unreachable exactly where it was most needed. A person sharing the key
+    // now forces `ambiguous`: the name is a question, and this store's contract is to ask
+    // it, not to pick.
+    //
+    // The reachable case is a name that canonically matches NEITHER subject — "peterhuber"
+    // or "Peter-Huber" against a person "Peter Huber" and an org "peterhuber.ch". An
+    // earlier version of this comment used "Peter Huber" itself as the example and was
+    // measurably wrong: that name hits the canonical person lookup first and never reaches
+    // this function at all. The fix is real; the example was not, and it came in from a
+    // reviewer's reproduction that I adopted without re-running it.
+    if (personShares && ids.size > 0) return { ambiguous: true, candidateIds: [...ids] };
+    if (ids.size > 1) return { ambiguous: true, candidateIds: [...ids] };
+    const only = [...ids][0];
+    return { ambiguous: false, row: only !== undefined ? this.getSubject(only) : null };
   }
 
   // ── Self-person + assignee resolution (S4a task-cutover) ──────
@@ -549,7 +978,13 @@ export class SubjectStore {
     const a = assignee?.trim();
     if (!a) return null;
     if (a === 'user') return this.findOrCreateSelfPerson();
-    return this.findOrCreate({ kind: 'person', name: a, ownerUserId }).id;
+    // An ambiguous assignee gets no subject link, the same answer this method already
+    // gives for an empty one. Nothing is lost by it: `TaskStore` is an ADDITIVE mirror and
+    // the legacy `history.db` row stays authoritative, so the free-text assignee survives
+    // there and the task stays findable by it. Only the graph EDGE is withheld — two
+    // people answer to that name, and picking one puts a task on the wrong person's list.
+    const r = this.findOrCreate({ kind: 'person', name: a, ownerUserId });
+    return r.ambiguous ? null : r.id;
   }
 
   /**
@@ -614,6 +1049,166 @@ export class SubjectStore {
     ).all(...subjectIds) as { id: string; n: number }[];
     for (const r of rows) counts.set(r.id, r.n);
     return counts;
+  }
+
+  // ── Orphan-subject reap ────────────────────────────
+
+  /**
+   * Why (if at all) a subject is still REFERENCED — the single reference oracle behind the
+   * orphan-subject reap. Returns a short reason, `'missing'` for an unknown id, or `null`
+   * when NOTHING holds the row: then its only content is its plaintext `name`, and an
+   * erasure that just deleted the memories which minted it may delete the subject too.
+   *
+   * What counts as a reference — every column {@link REPOINT_TARGETS} lists (the same list
+   * a merge repoints, so the two never drift apart), the `memory_subjects` junction, a
+   * `merged_into` redirect onto it, the operator self, the cross-DB anchors the caller
+   * supplies via {@link SubjectExternalRefs}, and a 1:1 detail row carrying substantive data
+   * (a CRM contact with an email is a record in its own right, memory or not).
+   *
+   * What deliberately does NOT count: `subject_cooccurrences`. It is a DERIVED
+   * materialization of the junction ({@link MemoryGraphStore.rebuildCooccurrences}
+   * recomputes it from scratch); counting it would keep every once-co-mentioned subject
+   * alive forever, and on a real corpus the reap would never fire (rafael's engine.db:
+   * 1171 cooccurrence rows over 574 subjects). `archived_at` is not a reference either —
+   * an archived row still carries the name.
+   */
+  referenceReason(subjectId: string, external: SubjectExternalRefs): string | null {
+    const row = this.getSubject(subjectId);
+    if (!row) return 'missing';
+    if (row.is_self === 1) return 'is_self';
+    // engine.db probes first — all indexed, same connection, and the junction alone settles
+    // the common case; the two cross-DB probes (separate handles, a schema scan on the
+    // datastore side) come last so they run only for a subject nothing local holds.
+    if (this.db.prepare('SELECT 1 FROM memory_subjects WHERE subject_id = ? LIMIT 1').get(subjectId)) {
+      return 'referenced-by-memory_subjects';
+    }
+    for (const t of REPOINT_TARGETS) {
+      // Table/column names are the STATIC literals above, never input — same injection
+      // argument as the merge repoint. A relationship whose two ends are the SAME subject
+      // is the self-loop `executeMerge` leaves when two directly related subjects are
+      // folded (A→B becomes canon→canon): it describes nothing but the subject itself, so
+      // it is not a holder — counting it would make every such canonical unreapable.
+      const selfLoop = t.table === 'relationships' ? ' AND from_subject_id <> to_subject_id' : '';
+      if (this.db.prepare(`SELECT 1 FROM "${t.table}" WHERE "${t.column}" = ?${selfLoop} LIMIT 1`).get(subjectId)) {
+        return `referenced-by-${t.table}.${t.column}`;
+      }
+    }
+    // `Object.hasOwn`: `kind` is a checked enum on every write path, but a row written
+    // straight into the DB with a prototype key (`constructor`) would otherwise make the
+    // lookup truthy and the SQL below unparseable — which aborts the erase.
+    const detail = Object.hasOwn(DETAIL_TABLE, row.kind) ? DETAIL_TABLE[row.kind] : undefined;
+    if (detail) {
+      // A detail kind WITHOUT a substantive predicate is treated as held by any row at all:
+      // fail-closed, so forgetting the predicate for a new kind keeps subjects rather than
+      // reaping CRM data. The coverage sweep asserts the map is complete for today's kinds.
+      const substantive = Object.hasOwn(DETAIL_SUBSTANTIVE_PREDICATE, row.kind) ? DETAIL_SUBSTANTIVE_PREDICATE[row.kind] : undefined;
+      const where = substantive ? `subject_id = ? AND (${substantive})` : 'subject_id = ?';
+      if (this.db.prepare(`SELECT 1 FROM "${detail.table}" WHERE ${where} LIMIT 1`).get(subjectId)) {
+        return 'has-detail';
+      }
+    }
+    if (external.isThreadAnchor(subjectId)) return 'thread-anchor';
+    if (external.hasRecords(subjectId)) return 'record';
+    // LAST, deliberately: `merge-target` must mean "nothing else holds this canonical —
+    // only the archived shells of the duplicates it absorbed still point at it". Returned
+    // earlier, it would hide a CRM detail row, a thread anchor or a record on the canonical
+    // (a merge moves all of those onto it), and `reapOrphans`' closure branch — which only
+    // inspects the shells — would reap a canonical something real still holds.
+    if (this.db.prepare('SELECT 1 FROM subjects WHERE merged_into = ? LIMIT 1').get(subjectId)) return 'merge-target';
+    return null;
+  }
+
+  /**
+   * The transitive set of merged-away duplicates redirecting (via `merged_into`) onto
+   * `canonicalId` — the archived shells {@link executeMerge} leaves behind, whose own
+   * links were all repointed onto the canonical. A BFS so a chain (A→B→C) is one closure.
+   */
+  private _mergeDupClosure(canonicalId: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>([canonicalId]);
+    const queue = [canonicalId];
+    const dupsOf = this.db.prepare('SELECT id FROM subjects WHERE merged_into = ?');
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const { id } of dupsOf.all(cur) as Array<{ id: string }>) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+        queue.push(id);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * For a canonical whose {@link referenceReason} is `merge-target`: the archived shell closure
+   * that would be reaped TOGETHER with it, or `null` when a shell is still held by something
+   * real (a thread anchor a failed repoint left on a dup id keeps the canonical too).
+   *
+   * Extracted so the decision has ONE home: {@link reapOrphans} executes it, and the operator
+   * report (`src/scripts/subject-sweep.ts --orphans`) shows the same unit. A report that listed
+   * the shell alone, or hid the canonical behind its own redirect, would not describe what an
+   * apply actually takes — and that report is what the operator decides on.
+   */
+  mergeTargetClosure(canonicalId: string, external: SubjectExternalRefs): string[] | null {
+    const closure = this._mergeDupClosure(canonicalId);
+    const shellHeld = closure.some(dup => {
+      const r = this.referenceReason(dup, external);
+      return r !== null && r !== 'merge-target';
+    });
+    return shellHeld ? null : closure;
+  }
+
+  /**
+   * Hard-delete every candidate {@link referenceReason} finds unreferenced — the
+   * orphan-subject reap an erasure owes (after a GDPR erase the `subjects` row
+   * survived with its plaintext name). Runs to a FIXPOINT: deleting one candidate can
+   * release another (a parent whose only child was itself a candidate), and the outcome
+   * must not depend on iteration order. Bounded by the candidate count per pass.
+   *
+   * The CALLER owns the transaction — `purgeMemories` runs this INSIDE the memory delete, so
+   * a failure there rolls the whole erase back (and the erase's re-throw contract makes it
+   * retryable); `gcInactiveStubs` opens one around the reap alone, so a mid-closure failure
+   * leaves no half-reaped shells either way. The DELETE
+   * cascades through the schema (detail row, junction, cooccurrences, relationships) and
+   * SET-NULLs the soft pointers — by construction none of those exist for an unreferenced
+   * subject except the derived cooccurrence rows, which is exactly the residue that should
+   * go with it. Returns the ids actually deleted.
+   */
+  reapOrphans(candidateIds: Iterable<string>, external: SubjectExternalRefs): string[] {
+    const pending = new Set(candidateIds);
+    const reaped: string[] = [];
+    const del = this.db.prepare('DELETE FROM subjects WHERE id = ?');
+    let progressed = true;
+    while (progressed && pending.size > 0) {
+      progressed = false;
+      for (const id of [...pending]) {
+        const reason = this.referenceReason(id, external);
+        if (reason === 'missing') { pending.delete(id); continue; }
+        if (reason === 'merge-target') {
+          // A canonical that absorbed duplicates is pointed at by their archived shells
+          // (`merged_into`) forever — the shells' own links were all repointed onto it, so
+          // they never become candidates themselves. Read literally, `merge-target` would
+          // make every once-merged subject unreapable and keep BOTH plaintext names. So a
+          // canonical goes together with its whole shell closure when nothing but that
+          // closure holds any of them; a shell something else still holds (a thread anchor
+          // a failed repoint left on the dup id) keeps the canonical too. Rolling the merge
+          // back is moot once the canonical itself is erased.
+          const closure = this.mergeTargetClosure(id, external);
+          if (closure === null) continue;
+          for (const dup of closure) if (del.run(dup).changes > 0) reaped.push(dup);
+          if (del.run(id).changes > 0) reaped.push(id);
+          pending.delete(id);
+          progressed = true;
+          continue;
+        }
+        if (reason !== null) continue;
+        if (del.run(id).changes > 0) reaped.push(id);
+        pending.delete(id);
+        progressed = true;
+      }
+    }
+    return reaped;
   }
 
   /** Soft-archive (queries default to active; cascades remain via FK ON DELETE on hard purge). */
@@ -794,13 +1389,22 @@ export class SubjectStore {
   resolvePersonSubject(
     name: string,
     opts?: { aliases?: string[] | undefined; ownerUserId?: string | undefined },
-  ): { id: string; created: boolean; resolved: 'canonical' | 'alias' | 'subset' | 'created' } {
+  ): { id: string; created: boolean; resolved: 'canonical' | 'alias' | 'subset' | 'created' }
+    | { ambiguous: true; candidateIds: readonly string[] } {
     const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
     const surfaceForms = [name, ...(opts?.aliases ?? [])];
     const canonical = this.findCanonical(name, 'person', owner);
     if (canonical) { this._mergeAliases(canonical, surfaceForms); return { id: canonical.id, created: false, resolved: 'canonical' }; }
-    const alias = this.findByAlias(name, 'person', owner);
-    if (alias) { this._mergeAliases(alias, surfaceForms); return { id: alias.id, created: false, resolved: 'alias' }; }
+    const aliasHit = this.findByAliasResolved(name, 'person', owner);
+    if (aliasHit.row) { this._mergeAliases(aliasHit.row, surfaceForms); return { id: aliasHit.row.id, created: false, resolved: 'alias' }; }
+    // AMBIGUOUS alias → hand the question back, do NOT continue. The steps below
+    // (normalized fallback, token-equal fold, subset scan) are progressively LOOSER
+    // matchers, so falling through on "two people already carry this name" could bind it
+    // to a THIRD person who carried neither — worse than the behaviour being fixed, which
+    // at least picked one of the two real candidates. A fail-closed that routes into a
+    // looser matcher is not fail-closed. Minting is equally wrong here: a fresh person
+    // row named after a name two people answer to is an identity this store invented.
+    if (aliasHit.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
     // Normalized fallback (mirrors findOrCreate): a punctuation/collapsed-whitespace variant
     // of an already-stored clean name converges — token-equal forms differ only by trailing
     // "." or doubled spaces, which findCanonical misses and the subset scan (STRICT superset)
@@ -1024,6 +1628,55 @@ export class SubjectStore {
     const { dupId, canonicalId } = entry;
     try {
       db.transaction(() => {
+      // Every reversal step below is an `UPDATE … WHERE id = ?` or an `INSERT OR IGNORE`,
+      // and SQLite reports "0 rows changed" for those exactly as it reports success. So a
+      // ledger this database cannot actually reverse used to walk the whole reversal,
+      // touch nothing (or the WRONG thing), commit, and return {ok:true} — while the tool
+      // told the user the merge had been undone.
+      //
+      // The predicate is "is this merge in effect", not "do these rows exist". Presence
+      // alone is too weak, and the gap is not academic: merge A→B, roll it back, merge
+      // A→C, then replay the FIRST ledger. Both rows are present, so a presence check
+      // passes — and the reversal then un-archives A while C still carries A's aliases,
+      // i.e. it CORRUPTS the graph and reports success. Replaying one ledger twice has the
+      // same shape. `merged_into === canonicalId` is strictly stronger and subsumes the
+      // absent-row case, because an absent row cannot satisfy it.
+      //
+      // Absence is not a hypothetical cross-machine case either: `restoreBackup` is
+      // ADDITIVE — it renames the files the manifest names and removes nothing else — so a
+      // ledger written AFTER a backup survives the restore of the older engine.db and then
+      // points at ids that database never had.
+      //
+      // Checked INSIDE the transaction so nothing can change these rows between the check
+      // and the writes; `.immediate()` below takes the write lock up front, so opening
+      // with a read no longer risks an unretryable SQLITE_BUSY_SNAPSHOT.
+      if (dupId === canonicalId) {
+        // `planMerge` refuses a self-merge, but this function consumes an operator-supplied
+        // ledger file, so the normal path is not the only path.
+        throw new Error('this merge ledger names the same entry on both sides — it cannot be a real merge');
+      }
+      const dupRow = db.prepare('SELECT merged_into FROM subjects WHERE id = ?').get(dupId) as { merged_into: string | null } | undefined;
+      const canonPresent = db.prepare('SELECT 1 AS ok FROM subjects WHERE id = ?').get(canonicalId) as { ok: number } | undefined;
+      const missing = [
+        ...(dupRow ? [] : ['the merged-away entry']),
+        ...(canonPresent ? [] : ['the entry it was merged into']),
+      ];
+      if (missing.length > 0) {
+        // Says what is TRUE (the rows are not here) rather than guessing WHY: "belongs to
+        // another instance" would be wrong for this instance after a hard delete — and this
+        // whole change exists because a message claimed more than it knew.
+        throw new Error(
+          `cannot reverse this merge here — ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not in this subject graph (a ledger from another instance, or an entry deleted since)`,
+        );
+      }
+      if (dupRow!.merged_into !== canonicalId) {
+        throw new Error(
+          dupRow!.merged_into === null
+            ? 'this merge is not in effect — it has already been reversed. If an earlier rollback reported a PARTIAL failure, the engine side is already undone and only the datastore/thread side still needs attention; re-running the whole reversal is not the repair.'
+            : `this merge is not in effect — the entry is currently merged into ${dupRow!.merged_into}, not into the entry this ledger names. Reversing it from here would un-archive the entry while the other merge still holds its aliases.`,
+        );
+      }
+
       // 1. restore dup archive/redirect state. A UNIQUE-index collision here THROWS →
       //    the transaction rolls back atomically (no partial reversal).
       db.prepare("UPDATE subjects SET merged_into = ?, archived_at = ?, updated_at = datetime('now') WHERE id = ?")
@@ -1071,7 +1724,13 @@ export class SubjectStore {
         const stmt = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE "${t.pkCol}" = ? AND "${t.column}" = ?`);
         for (const pk of t.pks) stmt.run(dupId, pk, canonicalId);
       }
-      })();
+      // `.immediate()` — the transaction now OPENS with a read (the guard above), and a
+      // deferred BEGIN would upgrade to a write lock only at the first UPDATE. Under the
+      // documented contention (the operator sweep against a live engine) that upgrade
+      // raises SQLITE_BUSY_SNAPSHOT, which `busy_timeout` cannot absorb because it is not
+      // retryable. Taking the write lock up front keeps the guard's atomicity and restores
+      // the plain-BUSY behaviour the timeout does handle.
+      }).immediate();
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }

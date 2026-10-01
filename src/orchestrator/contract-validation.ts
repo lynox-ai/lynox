@@ -1,4 +1,4 @@
-import type { CapabilityContract, ParamConstraint } from '../types/capability-contract.js';
+import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/pre-approve.js';
 
@@ -104,4 +104,153 @@ export function validateContractAgainstSteps(planned: {
     );
   }
   return null;
+}
+
+/** The methods the default autonomous posture denies, i.e. the only ones a
+ *  contract has any reason to grant. Mirrors `WRITE_METHODS` in `http.ts`. */
+const MINTABLE_WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+
+/** Characters `globToRegex` gives meaning to. A pattern containing one no longer
+ *  denotes the literal it was derived from. */
+const GLOB_META = /[*?[\]]/;
+
+/**
+ * Derive a capability contract from a workflow's steps — the producer Slice B1
+ * left out ("no product path writes a contract onto a saved workflow yet").
+ *
+ * It mints for exactly one shape and refuses every other, and the refusal is the
+ * interesting half: **a contract can only be derived when the outbound write is
+ * fully literal.** The moment a `{{ params.x }}` reaches a step's tool call, the
+ * grant would have to state WHICH values are admissible — and that is a human
+ * judgement the template does not carry. `validateContractAgainstSteps` already
+ * refuses a contract that leaves such a parameter unconstrained, and it refuses
+ * a vacuous constraint too, so a minter that guessed would either wedge saving
+ * or fail open. Returning `undefined` keeps the workflow exactly as it is today:
+ * unattended writes stay denied until a human declares the constraints.
+ *
+ * That boundary is not a limitation of this function. It is where authorship
+ * stops being sufficient — the same line the product draws between "the user
+ * built this themselves" and "someone accepted what it may do".
+ *
+ * Returns `undefined` when there is nothing to grant, when any step's call is
+ * parameterised, or when a write target is not a literal absolute URL.
+ *
+ * ⚠ DELIBERATELY UNWIRED. No product path calls this, and that is the decision,
+ * not an oversight — do not "finish" it by hooking it into the two sites that
+ * stamp `confirmedAt`. A security pass on exactly that wiring found two reasons,
+ * both about the INPUT rather than this function:
+ *   - a call the http consent gate DENIED is still recorded as a step
+ *     (`process-capture.ts:365` filters internal tools only, and a tool-call
+ *     record carries no error flag), so minting would turn a refusal into a
+ *     standing grant;
+ *   - the `inputTemplate` a step carries is written by a MODEL from sanitised
+ *     tool OUTPUT (`process-capture.ts:184`), so injected content can choose the
+ *     URL that would become grant-defining.
+ * A derived grant inherits the trust level of whatever authored the steps, and
+ * that is not the user. What a contract may be derived FROM is a converged-PRD
+ * question; this function is the part that was answerable at the code.
+ */
+export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): CapabilityContract | undefined {
+  if (!steps || steps.length === 0) return undefined;
+
+  // Parameterised anywhere → not derivable. Checked across ALL steps, not just
+  // the writing one: a param that reaches any tool call is the case the grant
+  // cannot describe, and scoping this to http steps would mint a contract whose
+  // own save validator then rejects it.
+  for (const step of steps) {
+    if (paramsReferencedInTemplate(step.input_template).size > 0) return undefined;
+  }
+
+  const methods = new Set<HttpMethod>();
+  const hosts = new Set<string>();
+  const paths = new Set<string>();
+  // What the steps ACTUALLY perform, kept alongside the three sets the contract
+  // type can express — see the exactness check below.
+  const performed = new Set<string>();
+
+  for (const step of steps) {
+    if (step.tool !== 'http_request') continue;
+    const template = step.input_template;
+    if (!template) continue;
+    const rawMethod = typeof template['method'] === 'string' ? template['method'].toUpperCase() : 'GET';
+    if (!MINTABLE_WRITE_METHODS.has(rawMethod)) continue;
+    const rawUrl = template['url'];
+    // A non-literal target cannot be pinned, and an unpinned host is exactly the
+    // fleet-wide grant the validator rejects — refuse the whole contract rather
+    // than mint a partial one that silently omits a write the workflow performs.
+    if (typeof rawUrl !== 'string') return undefined;
+    // A `{{ … }}` marker means the URL is not literal, and only ONE of its two
+    // forms is caught above: `{{ params.x }}` names a parameter, a step-output
+    // reference (`{{ s0.result }}`) names none, so the parameter check never sees
+    // it. Minting from it stores the percent-encoded template TEXT as the pattern,
+    // which can never match the URL the step resolves at run time — fail-closed,
+    // but a grant that reads as granted and is not. Refuse instead of storing it.
+    if (rawUrl.includes('{{')) return undefined;
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return undefined;
+    }
+    // `contractGrants` matches the resolved `hostname` and `pathname` and NOTHING
+    // else — never the scheme, never the port. A contract minted from
+    // `https://api.example.com:8443/orders` would therefore equally grant
+    // `http://api.example.com:9999/orders`: a downgrade to cleartext, and a
+    // different service on the same host. No step performs either. The matcher is
+    // not the place to fix that — it shipped in B1 and other callers depend on its
+    // shape — so the minter refuses the two axes it cannot express, which is what
+    // keeps the sentence below true instead of merely intended.
+    if (parsed.protocol !== 'https:') return undefined;
+    if (parsed.port !== '') return undefined;
+
+    // Those patterns are read as GLOBS, and exactly ONE glob character is both
+    // reachable and widening: `*`. `new URL('https://a*b.example.com/x')` parses
+    // with hostname `a*b.example.com`, and the grant would then match a wider set
+    // than the step it came from, silently.
+    //
+    // `GLOB_META` refuses `?`, `[` and `]` as well, and the honest reason is not
+    // the one this comment used to give. `globToRegex` ESCAPES `[` and `]`, so
+    // they are not metacharacters at all; a literal `?` cannot reach `hostname` or
+    // `pathname` because it opens the query. What `[`/`]` DO reach is an IPv6
+    // literal (`https://[::1]/x` → hostname `[::1]`), and `contractGrants` strips
+    // those brackets before matching — so minting the bracketed form yields a
+    // pattern that can never match: a grant that reads as granted and is not.
+    // Refusing says that at mint time rather than at 3am. (Corrected 2026-09-05
+    // after the claim was measured against `globToRegex`.)
+    //
+    // Deriving a right from steps is only sound while the derived pattern denotes
+    // exactly the literal it came from, so refuse rather than escape: a real
+    // endpoint does not carry glob metacharacters, and refusing keeps the failure
+    // in the one place that already means "a human has to say what is allowed".
+    if (GLOB_META.test(parsed.hostname) || GLOB_META.test(parsed.pathname)) return undefined;
+    methods.add(rawMethod as HttpMethod);
+    hosts.add(parsed.hostname);
+    paths.add(parsed.pathname);
+    performed.add(`${rawMethod} ${parsed.hostname} ${parsed.pathname}`);
+  }
+
+  if (methods.size === 0) return undefined; // read-only workflow — nothing to grant
+
+  // A contract holds methods, hosts and paths as INDEPENDENT lists, and
+  // `contractGrants` matches each separately — so the grant is their CROSS
+  // PRODUCT. With one host that is exactly the steps; with two hosts and two
+  // paths it is four combinations for two steps, and the two the workflow never
+  // performs are a widening nobody asked for. The step agent picks its own tool
+  // arguments, so that widening is reachable. Mint only where the product
+  // collapses onto what the steps actually do — anything else is a set of
+  // endpoints a human would have to approve one by one, which is the same line
+  // the parameter check draws.
+  if (methods.size * hosts.size * paths.size !== performed.size) return undefined;
+
+  return {
+    version: 1,
+    origin: 'authorship',
+    grantedTools: ['http_request'],
+    httpMethods: [...methods],
+    hostPatterns: [...hosts],
+    pathPatterns: [...paths],
+    // Empty by construction: the parameter check above guarantees no
+    // re-targetable parameter exists, which is the only thing constraints bind.
+    paramConstraints: {},
+  };
 }

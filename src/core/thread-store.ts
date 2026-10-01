@@ -5,7 +5,7 @@ export interface ThreadRecord {
   id: string;
   title: string;
   model_tier: string;
-  /** Provenance of `model_tier` (arc:model-selector P1, DEF-0095) — a
+  /** Provenance of `model_tier` — a
    *  {@link import('../types/index.js').ThreadModelSource} value ('user' |
    *  'default' | 'unknown'). ADVISORY-ONLY: never gates a tier/cost decision. */
   model_tier_source: string;
@@ -71,7 +71,7 @@ export class ThreadStore {
   createThread(id: string, opts?: {
     title?: string | undefined;
     model_tier?: string | undefined;
-    /** Provenance of `model_tier` (P1, DEF-0095). Absent → the schema DEFAULT
+    /** Provenance of `model_tier` (P1). Absent → the schema DEFAULT
      *  `'unknown'` (a programmatic creator that did not observe the origin). */
     model_tier_source?: string | undefined;
     context_id?: string | undefined;
@@ -134,7 +134,7 @@ export class ThreadStore {
     is_favorite?: boolean | undefined;
     skip_extraction?: boolean | undefined;
     is_unread?: boolean | undefined;
-    /** Mid-thread re-pick (P1, DEF-0095/§5.1b). The ONLY sanctioned writer of
+    /** Mid-thread re-pick (P1, §5.1b). The ONLY sanctioned writer of
      *  these two is the re-pick endpoint (`PATCH /api/sessions/:id/model`) via
      *  `Session.repickModel`. They are whitelisted so the *shape* carries them —
      *  a test (`thread-store-write-restriction.test.ts`) asserts NO agent-reachable

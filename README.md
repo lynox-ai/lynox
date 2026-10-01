@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@lynox-ai/core)](https://www.npmjs.com/package/@lynox-ai/core)
 [![CI](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml/badge.svg)](https://github.com/lynox-ai/lynox/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-7000%2B-brightgreen)](#testing-and-security)
+[![Tests](https://img.shields.io/badge/tests-10000%2B-brightgreen)](#testing-and-security)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![License: ELv2](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
@@ -70,7 +70,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 - **Activity Bar** — Every tool call streams live with its current sub-phase (e.g. "Reading API docs..." → "Extracting auth..."). No mysterious 30-second waits.
 - **Background Worker** — Scheduled tasks, URL monitoring, recurring workflows.
 - **Mobile Access** — Voice input (Whisper or Voxtral STT), push notifications, and mail/voice workflows. Install as a PWA for a native app feel, or use any mobile browser directly.
-- **Google Workspace** — Gmail, Sheets, Drive, Calendar, Docs via OAuth 2.0.
+- **Google Workspace** — Calendar and the Drive files lynox creates, via OAuth 2.0; Gmail, Sheets and Docs on an opt-in wider consent. Self-hosted needs your own Google Cloud project; on lynox.cloud no Cloud project is needed.
 - **Process Capture** — Teach lynox your workflow once, save it as a reusable template, schedule it. Export a workflow to a versioned format and import it on another instance — secrets and trusted hosts are re-approved on import, never carried over implicitly.
 - **Model Choice** — Pick the model per chat, or set a named model strategy that maps each routing tier to a specific provider's model — with the backing host always disclosed.
 - **4 Specialized Roles** — Researcher, Creator, Operator, Collector — each with scoped tools and budgets.
@@ -128,7 +128,7 @@ Open [localhost:3000](http://localhost:3000) on your phone and use your browser'
 
 ## Testing and security
 
-- 7000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
+- 10000+ tests across the engine, tools, orchestrator, and web UI. Coverage gates on `pnpm run typecheck` + `npx vitest run`.
 - Layered defenses: input-guard, permission-guard, data-boundary, AES-256-GCM vault, security-audit, plus tool-result injection scanning. SSRF protection on every outbound URL via `fetchWithValidatedRedirects` — DNS resolves once, the connection is pinned to the validated IP at TCP-connect time (rebind-safe), and each redirect hop is re-validated.
 - Responsible disclosure → [`SECURITY.md`](SECURITY.md).
 

@@ -128,7 +128,7 @@ describe('extractContent', () => {
       enforceHttps: false,
     } as never;
     await expect(extractContent('https://example.com', undefined, ctx))
-      .rejects.toThrow(/air-gapped|denied|blocked/i);
+      .rejects.toThrow(/denied|blocked/i);
   });
 
   it('honors ToolContext.networkPolicy="allow-list" — blocks unlisted hosts', async () => {

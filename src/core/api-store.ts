@@ -10,12 +10,15 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { wrapUntrustedData } from './data-boundary.js';
+import { join } from 'node:path';
+import { compose, wrapUntrustedData, renderFence } from './data-boundary.js';
+import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
+import { isProtectedSecretWrite } from './secret-store.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
+import type { SecretStoreLike } from '../types/index.js';
 
 // ── Errors ──
 
@@ -92,18 +95,52 @@ export interface ApiAuth {
     scope?: string | undefined;
     /** Optional audience (Auth0-style flows). */
     audience?: string | undefined;
+    /**
+     * Which built-in provider preset this profile connects through
+     * (`src/core/oauth-presets.ts`). It decides the authorize and token hosts,
+     * and it is the ONLY thing that may: a host a model wrote into a profile is
+     * a host a model chose.
+     */
+    preset_id?: string | undefined;
+    /**
+     * The values the preset needs, e.g. the shop name. Checked against the
+     * preset's own anchored patterns at every use, never trusted from here.
+     */
+    preset_params?: Record<string, string> | undefined;
     /** Body encoding for the token POST. Most providers want `form`
      *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
      *  Default: `form`. */
     body_format?: 'form' | 'json' | undefined;
+    /**
+     * Absolute expiry of the stored access token, epoch **milliseconds** — not a
+     * TTL and not seconds, matching the vocabulary the vendored contract already
+     * fixes for the Google path. Written by `fetch_token` from the `expires_in`
+     * the token endpoint returned; before this existed the value was formatted
+     * into the model's reply and then dropped, so nothing could know when a
+     * token died and neither a lazy nor a scheduled refresh had anything to plan
+     * against.
+     */
+    token_expires_at?: number | undefined;
   } | undefined;
   /**
    * For 'basic': how the credential is stored.
-   * - 'user_pass_split' — separate username + password fields combined at call time.
-   * - 'pre_encoded_b64' — single secret already Base64-encoded as `user:pass` (DataForSEO pattern).
+   * - 'user_pass_split' — separate username + password vault keys, combined and Base64-encoded
+   *   by the ENGINE at call time (see the basic branch in `http.ts`). The model cannot do this
+   *   itself: it never holds the plaintext, only `secret:NAME` references, and you cannot
+   *   Base64-encode a value you do not have. Keys come from `username_key`/`password_key`, or
+   *   from the first two `vault_keys` in order.
+   * - 'pre_encoded_b64' — single secret already Base64-encoded as `user:pass` (DataForSEO
+   *   pattern). Use when the credential arrives pre-encoded; otherwise prefer the split form,
+   *   which keeps the two halves separately rotatable and spares the operator a manual encode.
    */
   basic_format?: 'user_pass_split' | 'pre_encoded_b64' | undefined;
-  /** Header name for 'header' type (e.g. 'X-Api-Key'). Default: 'Authorization'. */
+  /** For 'basic' + 'user_pass_split': vault key holding the username. Falls back to `vault_keys[0]`. */
+  username_key?: string | undefined;
+  /** For 'basic' + 'user_pass_split': vault key holding the password. Falls back to `vault_keys[1]`. */
+  password_key?: string | undefined;
+  /** Header name for 'header' type. Default: 'X-Api-Key' — matches what the profile
+   *  description shows the model and what `api_setup bootstrap` writes. The engine
+   *  fills this slot from `vault_keys[0]`; see the attach in `http.ts`. */
   header_name?: string | undefined;
   /** Query parameter name for 'query' type. */
   query_param?: string | undefined;
@@ -225,6 +262,97 @@ export interface ApiProfile {
    * profile is re-saved through the disclosure. See `CustomEndpointAck`.
    */
   custom_endpoint_ack?: CustomEndpointAck | undefined;
+
+  /**
+   * What the engine has learned about this profile's OAuth grant. Written by the
+   * engine only — `api_setup fetch_token` today — and handled like
+   * `custom_endpoint_ack`: a value arriving in a create/update is discarded and
+   * the stored one kept, so the model can neither forge nor erase it.
+   *
+   * Not a security boundary, and nothing that decides where a credential goes
+   * reads it. It steers which refusal the model sees and what a delete purges.
+   */
+  oauth_grant?: OAuthGrantRecord | undefined;
+}
+
+/** The engine-owned half of a profile's OAuth state. See {@link ApiProfile.oauth_grant}. */
+export interface OAuthGrantRecord {
+  /**
+   * Fingerprint (`tokenFingerprint`) of the client id that minted, or last used
+   * successfully, the refresh token named by {@link minted_for}. Compared on
+   * `invalid_grant` to tell a revocation from a client that no longer matches
+   * the token (see `reclassifyForeignGrant`). A fingerprint, not the id: the id
+   * comes from a slot the profile names, and this record is stored and served
+   * in plain text.
+   */
+  minted_by?: string | undefined;
+  /**
+   * Fingerprint of the refresh token {@link minted_by} describes. The stamp only
+   * speaks for that token — a refresh token stored later, by anyone, is one the
+   * stamp knows nothing about, and is judged as unstamped.
+   */
+  minted_for?: string | undefined;
+  /**
+   * How this grant came to be — and the reason it is a field of its own rather
+   * than something read off `auth.oauth.grant_type`.
+   *
+   * ⚠ To the next reader who notices that `callback` grants are the ones with
+   * `grant_type: 'refresh_token'` and reaches for the simplification: they are
+   * not the same set. A profile a user configured BY HAND also carries
+   * `refresh_token`, and it has no callback to send anyone back to. The texts
+   * that tell the model what to do next differ for exactly that reason — a
+   * hand-configured profile is told to call `ask_secret` with a new token,
+   * which is right for it and wrong for a connected one, where the way back is
+   * the connect link. Collapse the two and the hand-configured profile starts
+   * getting advice it cannot follow.
+   */
+  origin?: 'callback' | undefined;
+  /**
+   * What the last exchange left behind.
+   *
+   * `revoked` — the provider rejected the stored refresh token.
+   * `connected` — an exchange succeeded and left a refresh token.
+   * `no-refresh` — an exchange succeeded and left none, so there is nothing to
+   *   refresh with; neither state is the normal case until a real provider has
+   *   been measured, and the code treats them as equal outcomes.
+   * `refresh-dead` — a refresh attempt failed in a way that is not a revocation.
+   */
+  state?: 'revoked' | 'connected' | 'no-refresh' | 'refresh-dead' | undefined;
+  /** Fingerprint of the refresh token the provider rejected (`tokenFingerprint`). */
+  revoked_fp?: string | undefined;
+  /** ISO timestamp of the revocation verdict. */
+  revoked_at?: string | undefined;
+  /**
+   * What a token exchange for this profile actually WROTE — each vault name
+   * with a fingerprint of the value it put there, recorded at the write. A
+   * delete removes a name only while the vault still holds that very value:
+   * the name alone proves nothing, since the user can store their own token
+   * under it later, and a name derived from the id can hold one from the start.
+   */
+  written?: WrittenSecret[] | undefined;
+}
+
+/** One entry of {@link OAuthGrantRecord.written}. */
+export interface WrittenSecret {
+  /** The vault name. */
+  name: string;
+  /** `tokenFingerprint` of the value the exchange wrote under it. */
+  fp: string;
+}
+
+/**
+ * The entries of {@link OAuthGrantRecord.written}, tolerating a hand-edited or
+ * imported record whose field is not an array of entries — the profile arrives
+ * through `JSON.parse(...) as ApiProfile` with no schema check, and a bad value
+ * must not throw on every save and delete of that profile.
+ */
+export function recordedWrites(profile: ApiProfile): WrittenSecret[] {
+  const written: unknown = profile.oauth_grant?.written;
+  if (!Array.isArray(written)) return [];
+  return written.filter((w): w is WrittenSecret =>
+    typeof w === 'object' && w !== null
+    && typeof (w as { name?: unknown }).name === 'string'
+    && typeof (w as { fp?: unknown }).fp === 'string');
 }
 
 /**
@@ -263,6 +391,21 @@ function migrateV1Profile(profile: ApiProfile): ApiProfile {
 const IMPORT_SENTINEL = '.imported-to-connections';
 
 /**
+ * Whether a revocation verdict is on record for a profile it still applies to:
+ * oauth2, exchanging a refresh token — the only kind a verdict is ever recorded
+ * for. One moved to client credentials since has no user grant left to revoke.
+ * The `connections.status` projection is exactly this. The attach asks it too,
+ * and then also steps aside once the vault holds a different refresh token — so
+ * the column can still say `revoked` while the way back is in place, until the
+ * next successful exchange clears the record.
+ */
+export function hasRevokedGrant(profile: ApiProfile): boolean {
+  return profile.auth?.type === 'oauth2'
+    && profile.auth.oauth?.grant_type === 'refresh_token'
+    && profile.oauth_grant?.state === 'revoked';
+}
+
+/**
  * Collect the vault secret NAMES a profile references, for the `vault_keys`
  * name-array column. Denormalized on write so a delete/GDPR path can later purge
  * the referenced secrets without re-parsing `config_json`. Never holds secret
@@ -270,13 +413,41 @@ const IMPORT_SENTINEL = '.imported-to-connections';
  */
 function collectVaultKeys(profile: ApiProfile): string[] {
   const keys = new Set<string>();
-  for (const k of profile.auth?.vault_keys ?? []) keys.add(k);
+  // Guarded: a `vault_keys` that is not an array must not throw here, because the
+  // purge runs this over every OTHER profile too. `api_setup` refuses one, but a
+  // stored row is not re-checked. Such a value is still read the way the attach
+  // reads it — by index, `vault_keys?.[0]` and `?.[1]` — so whatever name it
+  // hands the attach counts here as well.
+  const vaultKeys: unknown = profile.auth?.vault_keys;
+  if (Array.isArray(vaultKeys)) {
+    for (const k of vaultKeys) if (typeof k === 'string') keys.add(k);
+  } else if (vaultKeys !== undefined && vaultKeys !== null) {
+    for (const i of [0, 1]) {
+      const k: unknown = (vaultKeys as Record<number, unknown>)[i];
+      if (typeof k === 'string') keys.add(k);
+    }
+  }
+  // Every name the attach can read: the basic pair as well, or a purge would
+  // count a profile that reads a name as one that does not.
+  for (const k of [profile.auth?.username_key, profile.auth?.password_key]) {
+    if (k) keys.add(k);
+  }
   const oauth = profile.auth?.oauth;
   if (oauth) {
     for (const k of [oauth.client_id_key, oauth.client_secret_key, oauth.refresh_token_key]) {
       if (k) keys.add(k);
     }
   }
+  // The names a token exchange uses at RUNTIME. They come into being after the
+  // last profile write a configuration change causes, so collecting only the
+  // configured names left out exactly the material most likely to be personal
+  // data. An oauth2 profile reads the derived pair; what an exchange actually
+  // wrote is on the record.
+  if (profile.auth?.type === 'oauth2') {
+    keys.add(accessTokenKey(profile.id));
+    keys.add(refreshTokenKey(profile.id));
+  }
+  for (const w of recordedWrites(profile)) keys.add(w.name);
   return [...keys];
 }
 
@@ -291,7 +462,13 @@ function profileToConnectionRow(profile: ApiProfile): ConnectionRow {
     direction: 'outbound',
     configJson: JSON.stringify(rest),
     vaultKeys: collectVaultKeys(profile),
-    status: 'active',
+    // A projection of the engine-owned grant record, never read back: the record
+    // in `config_json` is the one writer, so the column cannot disagree with it.
+    // It was hard-wired to 'active', which left a revoked grant nowhere to land.
+    // Only while the verdict applies (`hasRevokedGrant`): a profile moved to
+    // another auth type or to client credentials keeps its old record, and
+    // nothing prompts the exchange that would clear it.
+    status: hasRevokedGrant(profile) ? 'revoked' : 'active',
   };
 }
 
@@ -374,9 +551,172 @@ class PerApiRateLimiter {
 
 // ── Store ──
 
+/**
+ * The single derivation from a profile id to its vault slot names.
+ *
+ * It exists as one function because the expression was duplicated at four sites
+ * (two mints, the success message, and the attach) and the attach is the one
+ * that decides whether a request carries a credential — three of four agreeing
+ * is worse than none, because the disagreement is silent.
+ *
+ * ⚠ The mapping is NOT injective: `ID_PATTERN` admits both `-` and `_`, and this
+ * collapses `-` onto `_`, so `x-y` and `x_y` derive the same slot. That is not
+ * fixed by changing the derivation — a different encoding would rename the slots
+ * of every already-stored profile whose id contains `_`, i.e. move live
+ * credentials. It is fixed at the gate instead: {@link ApiStore.register}
+ * refuses a second profile that derives onto a slot another id already holds.
+ */
+export function vaultSlotBase(id: string): string {
+  return id.toUpperCase().replace(/-/g, '_');
+}
+
+/** Vault key holding the current access token for this profile. */
+export function accessTokenKey(id: string): string {
+  return `${vaultSlotBase(id)}_ACCESS_TOKEN`;
+}
+
+/** Vault key holding the refresh token for this profile. */
+export function refreshTokenKey(id: string): string {
+  return `${vaultSlotBase(id)}_REFRESH_TOKEN`;
+}
+
+/** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
+function hostOf(profile: ApiProfile): string | null {
+  try {
+    return new URL(profile.base_url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+/** What {@link purgeRecordedTokens} did, for the caller to report. */
+export interface TokenPurge {
+  /** Vault names removed. */
+  removed: string[];
+  /** Names the profile referenced that still hold a value and were left on purpose. */
+  kept: string[];
+  /** Recorded names still holding the value written, which this vault cannot delete. */
+  notRemovable: string[];
+  /**
+   * Names this caller's vault view may not READ, so whether anything of this
+   * profile's is still there could not be established. Fed by BOTH name sources
+   * — the recorded writes and the profile's configured keys.
+   *
+   * Separate from {@link notRemovable} because the two need opposite sentences:
+   * that one means the delete path is broken, this one means the delete path is
+   * fine and the caller was not allowed to look. Folding them together produced
+   * "this vault has no working delete here" for a name a scoped agent simply
+   * could not see — a true-sounding cause that sends the reader at the wrong repair.
+   */
+  notVisible: string[];
+}
+
+/**
+ * Take the tokens a deleted profile's exchanges wrote out of the vault, and say
+ * what stays. Call it AFTER the profile left the store, with the profile as it
+ * was, so `store` holds only the others.
+ *
+ * Removed: a name on the profile's record (`written`) while the vault still
+ * holds the very value the exchange wrote there — unless another profile still
+ * references the name, or the name is protected. The name alone proves nothing:
+ * the user can store their own token under it after the exchange, and a name
+ * derived from the id can hold one from the start. A delete that guesses
+ * destroys it for good.
+ *
+ * Kept: every other name the profile referenced that still holds a value — the
+ * credentials the user stored, tokens from before exchanges were recorded,
+ * recorded names whose value has changed since, and recorded names another
+ * profile uses. The caller names them, because only the user can say whether
+ * anything else needs them. A protected name is not named either: an
+ * infrastructure secret, or the slot holding the tenant's own provider key, is
+ * not this profile's to hand over for removal.
+ */
+export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
+  const inUseElsewhere = new Set<string>();
+  for (const other of store.getAll()) {
+    if (other.id === profile.id) continue;
+    for (const k of collectVaultKeys(other)) inUseElsewhere.add(k);
+  }
+  const valueOf = (k: string): string | null => {
+    try {
+      return secretStore?.resolve(k) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  // Names this profile may never offer for removal, whichever pass meets them:
+  // a protected credential (the comment on PROVIDER_KEY_SLOTS says it — there is
+  // no second copy) or one another profile still holds. Extracted because the
+  // second pass below was written without them and put a provider key into
+  // `notVisible` under a sentence inviting its deletion. A guard that has to be
+  // remembered once per pass is the wrong shape; this is the multiplication made
+  // into one name.
+  const notOursToOffer = (name: string): boolean =>
+    isProtectedSecretWrite(name) || inUseElsewhere.has(name);
+
+  const removed: string[] = [];
+  const notRemovable: string[] = [];
+  const notVisible: string[] = [];
+  for (const w of recordedWrites(profile)) {
+    if (notOursToOffer(w.name)) continue;
+    // A store that cannot READ the name cannot judge whether this profile wrote
+    // what sits there. Saying so is the difference between "nothing to purge"
+    // and "I could not look": without this branch a caller whose vault view is
+    // scoped gets an empty result on all three counts and reads it as done,
+    // while the tokens stay.
+    if (secretStore?.explainUnresolved?.(w.name) === 'out-of-scope') {
+      notVisible.push(w.name);
+      continue;
+    }
+    const value = valueOf(w.name);
+    // Only the value this profile's exchange wrote. Anything else under the
+    // name — replaced since, or nothing at all — is not this profile's to take.
+    if (value === null || tokenFingerprint(value) !== w.fp) continue;
+    if (!secretStore?.deleteSecret) {
+      notRemovable.push(w.name);
+      continue;
+    }
+    try {
+      if (secretStore.deleteSecret(w.name)) removed.push(w.name);
+    } catch {
+      notRemovable.push(w.name);
+    }
+  }
+  // Same question, second pass. `recordedWrites` above is only one of the two
+  // name sources; a profile's configured keys (client_secret, refresh_token,
+  // username/password) come from `collectVaultKeys`, and an out-of-scope one
+  // resolves null here exactly as an absent one does — so it fell out of `kept`
+  // silently and the message said nothing at all about it. That is the failure
+  // `notVisible` was added for, left in place on the other half of the function.
+  for (const k of collectVaultKeys(profile)) {
+    if (notOursToOffer(k)) continue;
+    if (removed.includes(k) || notRemovable.includes(k) || notVisible.includes(k)) continue;
+    if (secretStore?.explainUnresolved?.(k) === 'out-of-scope') notVisible.push(k);
+  }
+  const kept = collectVaultKeys(profile)
+    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !notVisible.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
+  return { removed, kept, notRemovable, notVisible };
+}
+
+/**
+ * Who is registering a profile, because the two answer a duplicate host
+ * differently. `save` is an actor who can be told no: a second profile on a host
+ * another profile holds is refused. `load` is the boot (engine.db, the apis
+ * directory, a migration), where refusing would silently drop a profile that
+ * already exists — so the host is marked as a conflict instead, and the attach
+ * refuses there by name until one of the two is removed.
+ */
+export type RegisterMode = 'save' | 'load';
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
-  private readonly hostToProfile = new Map<string, string>(); // hostname → profile id
+  /**
+   * hostname → every profile id whose `base_url` is on that host. A set rather
+   * than one id: with one id per host the map was last-write-wins, and the
+   * attach handed whichever profile loaded last its credential without a word.
+   * More than one member is a conflict ({@link getHostConflict}).
+   */
+  private readonly hostToIds = new Map<string, Set<string>>();
   readonly rateLimiter = new PerApiRateLimiter();
 
   /**
@@ -397,7 +737,10 @@ export class ApiStore {
   loadFromDirectory(dir: string): number {
     if (!existsSync(dir)) return 0;
 
-    const files = readdirSync(dir).filter(f => f.endsWith('.json'));
+    // Sorted: the slot guard is order-dependent (first id keeps the slot), so an
+    // unsorted read would let a restart hand a live token to the other profile of
+    // a colliding pair. The connections path is already ordered by created_at, id.
+    const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
     let loaded = 0;
 
     for (const file of files) {
@@ -409,8 +752,10 @@ export class ApiStore {
           continue;
         }
         const migrated = migrateV1Profile(profile);
-        this.register(migrated);
-        loaded++;
+        // Count registrations, not files: a refused profile is not in the store,
+        // and reporting it as loaded is the same false confidence the save path
+        // had.
+        if (this.register(migrated, 'load')) loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
@@ -433,7 +778,7 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        this.register(migrateV1Profile(profile));
+        this.register(migrateV1Profile(profile), 'load');
         loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -506,7 +851,10 @@ export class ApiStore {
     const sentinel = join(dir, IMPORT_SENTINEL);
     if (existsSync(sentinel)) return 0;
     if (!existsSync(dir)) return 0; // fresh install — no legacy profiles ever existed
-    const files = readdirSync(dir).filter(f => f.endsWith('.json'));
+    // Sorted for the same reason as the load above, but it matters once rather
+    // than every boot: this import runs a single time, and whichever of a
+    // colliding pair it admits is the one that keeps the slot from then on.
+    const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
     if (files.length === 0) return 0; // nothing to import; re-checked cheaply next boot
     // Files exist but connections already has api rows → those are authoritative;
     // mark imported (stop re-scanning) without clobbering them.
@@ -567,26 +915,120 @@ export class ApiStore {
     }
   }
 
-  /** Register a single profile. Skips silently if the id is malformed. */
-  register(profile: ApiProfile): void {
+  /**
+   * Register a single profile. Returns whether it landed — a refusal is NOT an
+   * exception, but it must not be silent either: the caller has to be able to
+   * tell the actor, or the tool reports success for a profile that does not
+   * exist. Before the slot guard below, the only refusal was a malformed id,
+   * which `validateProfile` already rejects upstream, so no caller had ever
+   * needed the answer.
+   *
+   * This is the BOOT's entry, so it defaults to `load`: a duplicate host is
+   * marked, not refused. An actor who can be told no goes through {@link save},
+   * which admits in `save` mode — a caller adding profiles on someone's behalf
+   * belongs there, not here.
+   */
+  register(profile: ApiProfile, mode: RegisterMode = 'load'): boolean {
+    const refusal = this._admit(profile, mode);
+    if (refusal !== null) {
+      process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${refusal}\n`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The body of {@link register}: `null` when the profile landed, otherwise the
+   * reason it did not — so `save` can hand the actor the reason instead of
+   * reconstructing it after the fact.
+   */
+  private _admit(profile: ApiProfile, mode: RegisterMode): string | null {
     if (!PROFILE_ID_PATTERN.test(profile.id)) {
       // Refuse the id at the gate so the in-memory Map's invariant holds
       // — every key is a safe filename component. `unregister` can then
       // hand the id directly to `join(apisDir, …)` without a second check.
-      process.stderr.write(`[lynox:api-store] Skipping profile with invalid id "${profile.id}" (must match ${PROFILE_ID_PATTERN.source})\n`);
-      return;
+      return `invalid id (must match ${PROFILE_ID_PATTERN.source})`;
     }
-    this.profiles.set(profile.id, profile);
+    // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
+    // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
+    // `_ACCESS_TOKEN` name — the later mint would overwrite the earlier
+    // profile's token and the attach would hand it to BOTH hosts. Refused here
+    // rather than at `save`, because `save` is not the only entry: profiles also
+    // arrive through the boot load, and a collision that only a save can catch
+    // is one a restart re-admits. Refused in BOTH modes — unlike a shared host,
+    // a shared slot cannot be made safe by marking it.
+    const slot = vaultSlotBase(profile.id);
+    for (const [otherId] of this.profiles) {
+      if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
+        return `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${otherId}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
+      }
+    }
 
-    // Map hostname for rate limit lookups
-    try {
-      const hostname = new URL(profile.base_url).hostname;
-      this.hostToProfile.set(hostname, profile.id);
+    const hostname = hostOf(profile);
+    const previous = this.profiles.get(profile.id);
+    // One profile per host, because `http_request` has no profile parameter: the
+    // attach resolves the credential by hostname alone, so two profiles on one
+    // host cannot be told apart at call time. An actor JOINING a held host is
+    // told so here; the boot marks the conflict instead (see RegisterMode). A
+    // save that keeps its host is never refused — in a conflict the boot left
+    // behind, that save (an expiry, a revocation, an edit) makes nothing worse,
+    // and refusing it would lose the write while every way out stays open.
+    const joining = previous === undefined || hostOf(previous) !== hostname;
+    if (hostname !== null && mode === 'save' && joining) {
+      const holder = [...(this.hostToIds.get(hostname) ?? [])].find((o) => o !== profile.id);
+      if (holder !== undefined) {
+        return `api_profile "${holder}" already maps to ${hostname}. http_request picks the profile by hostname, so a second profile on the same host would make it ambiguous which credential a request carries. Nothing was saved. Ask the user whether "${holder}" should be updated instead.`;
+      }
+    }
+
+    // Re-registering starts from a released host. That is what lets a profile
+    // that MOVED stop holding its old host: without it the old host kept pointing
+    // here after an update, and the one-per-host rule above refused the next
+    // profile on a host nobody held any more. On a save that keeps the host it
+    // only drops a rate bucket whose `rate_limit` the update removed.
+    if (previous) this._releaseHost(previous);
+
+    this.profiles.set(profile.id, profile);
+    if (hostname !== null) {
+      let ids = this.hostToIds.get(hostname);
+      if (!ids) {
+        ids = new Set();
+        this.hostToIds.set(hostname, ids);
+      }
+      ids.add(profile.id);
+      if (ids.size > 1) {
+        process.stderr.write(`[lynox:api-store] Host ${hostname} is mapped by more than one profile (${[...ids].join(', ')}); requests to it will be refused until one is removed.\n`);
+      }
       if (profile.rate_limit) {
         this.rateLimiter.register(hostname, profile.rate_limit);
       }
-    } catch {
-      // Invalid URL — skip hostname mapping
+    }
+    return null;
+  }
+
+  /**
+   * Drop `profile` from its host's id set, and keep the host's rate bucket in
+   * step: cleared when nobody is left, handed to the remaining profile's own
+   * limit (or cleared) when one is.
+   */
+  private _releaseHost(profile: ApiProfile): void {
+    const hostname = hostOf(profile);
+    if (hostname === null) return; // Invalid base_url — no hostname mapping or bucket to clean.
+    const ids = this.hostToIds.get(hostname);
+    if (!ids?.delete(profile.id)) return;
+    if (ids.size === 0) {
+      this.hostToIds.delete(hostname);
+      this.rateLimiter.unregister(hostname);
+      return;
+    }
+    if (ids.size === 1) {
+      const [remainingId] = [...ids];
+      const remaining = remainingId === undefined ? undefined : this.profiles.get(remainingId);
+      if (remaining?.rate_limit) {
+        this.rateLimiter.register(hostname, remaining.rate_limit);
+      } else {
+        this.rateLimiter.unregister(hostname);
+      }
     }
   }
 
@@ -603,11 +1045,12 @@ export class ApiStore {
    *
    * Two invariants worth flagging because they're not obvious from the
    * call site:
-   * - The hostname → id index is dropped only when it still points at
-   *   the id being removed. A profile that re-claimed the hostname mid-
-   *   session must keep its mapping.
-   * - The rate-limit bucket is cleared so a future re-registration with
-   *   *no* `rate_limit` doesn't inherit stale throttling from this profile.
+   * - Only this id leaves its host's set. Another profile on the same host
+   *   keeps its mapping — and if exactly one is left, a conflict on that host
+   *   is resolved by this removal.
+   * - The rate-limit bucket is cleared when nobody is left on the host, so a
+   *   future re-registration with *no* `rate_limit` doesn't inherit stale
+   *   throttling from this profile.
    */
   unregister(id: string, apisDir?: string): boolean {
     // Belt-and-suspenders — `register` already refuses bad ids, but this
@@ -619,17 +1062,8 @@ export class ApiStore {
     const profile = this.profiles.get(id);
     if (!profile) return false;
 
+    this._releaseHost(profile);
     this.profiles.delete(id);
-
-    try {
-      const hostname = new URL(profile.base_url).hostname;
-      if (this.hostToProfile.get(hostname) === id) {
-        this.hostToProfile.delete(hostname);
-        this.rateLimiter.unregister(hostname);
-      }
-    } catch {
-      // Invalid base_url — no hostname mapping or bucket to clean.
-    }
 
     if (apisDir) {
       const filePath = join(apisDir, `${id}.json`);
@@ -652,24 +1086,23 @@ export class ApiStore {
    * single-authority); otherwise falls back to the flat-JSON directory (the
    * degraded no-engine.db path — behaviour-identical to the pre-S4b writes).
    *
-   * Returns `true` when this created a NEW profile, `false` when it updated an
-   * existing one — the caller uses it for the "Created/Updated" verb, replacing
-   * the old `existsSync(file)` probe.
+   * Returns `{ok:true, isNew}` — `isNew` drives the "Created/Updated" verb — or
+   * `{ok:false, reason}` when `register` refused. The refusal used to be reported
+   * as `isNew`, i.e. as a successful create, because the only way to reach it was
+   * a malformed id that `validateProfile` had already rejected. The slot guard
+   * makes it reachable, so it has to be a value the caller can see.
    */
-  save(profile: ApiProfile, apisDir?: string): boolean {
+  save(profile: ApiProfile, apisDir?: string): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const isNew = !this.profiles.has(profile.id);
-    this.register(profile); // in-memory (guards the id — a malformed id is refused)
-    if (!this.profiles.has(profile.id)) {
-      // register() refused the id; do not persist a bad row.
-      return isNew;
-    }
+    const refusal = this._admit(profile, 'save');
+    if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
       this.connStore.upsert(profileToConnectionRow(profile));
     } else if (apisDir) {
       mkdirSync(apisDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
     }
-    return isNew;
+    return { ok: true, isNew };
   }
 
   /**
@@ -741,10 +1174,29 @@ export class ApiStore {
     return this.profiles.get(id);
   }
 
-  /** Find profile by hostname (used by http_request for rate limiting). */
+  /**
+   * The ONE profile mapped to this hostname — `undefined` when none is, and
+   * also when more than one is. A conflict has no right answer to return: every
+   * caller (the credential attach, response shaping, the cost display, the 401
+   * hint) would act on whichever profile it got, and picking one silently is the
+   * defect this replaced. Callers that must say so ask {@link getHostConflict}.
+   */
   getByHostname(hostname: string): ApiProfile | undefined {
-    const id = this.hostToProfile.get(hostname);
-    return id ? this.profiles.get(id) : undefined;
+    const ids = this.hostToIds.get(hostname);
+    if (ids?.size !== 1) return undefined;
+    const [id] = [...ids];
+    return id === undefined ? undefined : this.profiles.get(id);
+  }
+
+  /**
+   * The ids sharing this hostname when there is more than one, sorted;
+   * `undefined` otherwise. Only the boot can produce this (a save of a second
+   * profile on a held host is refused) — it is the marker for profiles that
+   * already existed when the one-per-host rule arrived.
+   */
+  getHostConflict(hostname: string): string[] | undefined {
+    const ids = this.hostToIds.get(hostname);
+    return ids && ids.size > 1 ? [...ids].sort() : undefined;
   }
 
   /** Check per-API rate limit for a hostname. Returns null if OK, or reason string. */
@@ -771,100 +1223,110 @@ export class ApiStore {
       return `- ${p.name}: ${p.description} (${p.base_url}${auth}${endpoints}${shape})`;
     });
 
-    return `<api_profiles>
-Registered APIs (use \`api_setup\` action=view with the id to get full details BEFORE calling the API):
-${lines.join('\n')}
+    return compose([renderFence('api_profiles', `${lines.join('\n')}
 
 Maintain these profiles as you learn. If an API call returns an unexpected schema, hits a rate limit,
 or teaches you a new pitfall, update the profile via \`api_setup\` action=refine. For new APIs,
-prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.
-</api_profiles>`;
+prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.`, {
+      preamble: 'Registered APIs (use \`api_setup\` action=view with the id to get full details BEFORE calling the API):',
+    })]);
   }
 
   /**
-   * Format the curated "suggested APIs" catalog as a compact system-prompt block.
+   * Format the curated "suggested APIs" catalogue as a compact system-prompt block.
    *
-   * The catalog (`data/suggested-apis.json` at the package root) is NOT a set
-   * of pre-loaded profiles — it's a list of free public APIs the agent can
-   * offer to bootstrap on demand via `api_setup` action=bootstrap. The block
-   * also encodes the auth-flow constraints the agent must respect (e.g. no
-   * oauth2 authorization-code redirect flow today) and a do-not-suggest list
-   * (payment providers, infra providers) so the agent doesn't proactively
-   * propose risky setups.
+   * The catalogue ({@link SUGGESTED_API_CATALOG}) is NOT a set of pre-loaded
+   * profiles — it's a list of APIs the agent can offer to bootstrap on demand
+   * via `api_setup` action=bootstrap. The block also encodes the auth-flow
+   * constraints the agent must respect (e.g. no oauth2 authorization-code
+   * redirect flow today) and a do-not-suggest list (payment providers, infra
+   * providers) so the agent doesn't proactively propose risky setups.
    *
-   * Returns an empty string when:
-   * - LYNOX_SKIP_SUGGESTED_APIS=1 is set (opt-out)
-   * - the catalog file is missing (silent — e.g. dev tree without data/)
-   * - the catalog JSON is malformed (silent — never throw at boot)
+   * Returns an empty string ONLY when `LYNOX_SKIP_SUGGESTED_APIS=1` is set.
+   *
+   * ⚠ It used to have two more ways to return `''` — catalogue file missing,
+   * catalogue file malformed — each swallowed without a word. The first of
+   * those was not the dev-tree edge case the comment claimed: it was every
+   * container we ship, from the catalogue's first day (core#558, 2026-05-24)
+   * to 2026-09-30, because the image never carried `data/`.
+   * A silent fallback on a briefing text cannot be told apart from an empty
+   * briefing, so there is no fallback here any more. See
+   * {@link ./suggested-apis.ts} for the measurement.
    */
-  formatSuggestedApisForSystemPrompt(): string {
+  formatSuggestedApisForSystemPrompt(catalogue: SuggestedApiCatalog = SUGGESTED_API_CATALOG): string {
     if (process.env['LYNOX_SKIP_SUGGESTED_APIS'] === '1') return '';
 
-    // From src/core/api-store.ts (dev) or dist/core/api-store.js (built),
-    // `../../data/suggested-apis.json` resolves to the package root where
-    // `data/` is shipped via package.json `files`.
-    const thisDir = dirname(fileURLToPath(import.meta.url));
-    const catalogPath = join(thisDir, '..', '..', 'data', 'suggested-apis.json');
+    // A parameter with the constant as its default, the way `oauth-presets.ts`
+    // takes its register: a test seam, not an extension point. Production
+    // callers pass nothing, and there is no file and no env var behind it. It
+    // exists because the empty-list guard below could otherwise only be read,
+    // not run — and the version of that guard this replaced was wrong.
+    //
+    // ⚠ Never pass externally sourced data through it. Every string below is
+    // interpolated into the system prompt verbatim; `renderFence` neutralises
+    // a closing tag and nothing else. The frozen constant is the only thing
+    // production passes, and that is what makes the block's content a decision
+    // rather than an input.
+    const cat = catalogue;
+    // BOTH lists, not just the first: the guard used to name `suggested_apis`
+    // alone, so emptying the offer list would have silently taken the
+    // on-request providers with it — the same shape of silence this whole
+    // module moved out of a file to avoid.
+    if (cat.suggested_apis.length === 0 && cat.connect_when_user_asks.length === 0) return '';
 
-    let raw: string;
-    try {
-      raw = readFileSync(catalogPath, 'utf-8');
-    } catch {
-      return '';
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return '';
-    }
-
-    if (!parsed || typeof parsed !== 'object') return '';
-    const cat = parsed as Record<string, unknown>;
-    const apis = Array.isArray(cat['suggested_apis']) ? cat['suggested_apis'] : [];
-    if (apis.length === 0) return '';
-
-    const supported = Array.isArray(cat['supported_auth_flows']) ? cat['supported_auth_flows'] as unknown[] : [];
-    const notSupported = Array.isArray(cat['not_supported_auth_flows']) ? cat['not_supported_auth_flows'] as unknown[] : [];
-    const doNot = Array.isArray(cat['do_not_proactively_suggest']) ? cat['do_not_proactively_suggest'] as unknown[] : [];
-
-    const lines: string[] = ['<api_bootstrap_hints>'];
+    // Was assembled with the tag as the first array element and the close tag
+    // pushed at the end — a frame built in pieces, which a rule about template
+    // literals would have missed silently. (It used to say "the one fence in the
+    // repo built in pieces". That count came from the inventory of a source guard
+    // that was withdrawn for reporting clean against three planted frames, so the
+    // number it produced is not evidence of anything.)
+    const lines: string[] = [];
     lines.push('You have the `api_setup` tool to bootstrap external APIs from their docs URL.');
     lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap.');
     lines.push('');
 
-    if (supported.length > 0) {
+    if (cat.supported_auth_flows.length > 0) {
       lines.push('Supported auth flows:');
-      for (const s of supported) lines.push(`- ${String(s)}`);
+      for (const s of cat.supported_auth_flows) lines.push(`- ${s}`);
       lines.push('');
     }
-    if (notSupported.length > 0) {
+    if (cat.not_supported_auth_flows.length > 0) {
       lines.push('NOT supported (cannot be bootstrapped today — do not offer):');
-      for (const s of notSupported) lines.push(`- ${String(s)}`);
+      for (const s of cat.not_supported_auth_flows) lines.push(`- ${s}`);
       lines.push('');
     }
-    if (doNot.length > 0) {
+    if (cat.do_not_proactively_suggest.length > 0) {
       lines.push('Do NOT proactively suggest bootstrapping:');
-      for (const s of doNot) lines.push(`- ${String(s)}`);
+      for (const s of cat.do_not_proactively_suggest) lines.push(`- ${s}`);
       lines.push('');
     }
 
-    lines.push('Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):');
-    for (const api of apis) {
-      if (!api || typeof api !== 'object') continue;
-      const a = api as Record<string, unknown>;
-      const name = typeof a['name'] === 'string' ? a['name'] : '';
-      const category = typeof a['category'] === 'string' ? a['category'] : '';
-      const auth = typeof a['auth_type'] === 'string' ? a['auth_type'] : '';
-      const valueProp = typeof a['value_prop'] === 'string' ? a['value_prop'] : '';
-      const docsUrl = typeof a['docs_url'] === 'string' ? a['docs_url'] : '';
-      if (!name || !docsUrl) continue;
-      lines.push(`- ${name} (${category}, auth=${auth}) — ${valueProp} Docs: ${docsUrl}`);
+    if (cat.suggested_apis.length > 0) {
+      lines.push('Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):');
+      for (const api of cat.suggested_apis) {
+        lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
     }
-    lines.push('</api_bootstrap_hints>');
 
-    return lines.join('\n');
+    // The second list, and it gets the opposite instruction. It is an
+    // instruction and not a control: nothing downstream checks who raised the
+    // provider (see the field's own comment in `suggested-apis.ts`).
+    //
+    // Two things the heading has to carry, both of which the first draft left
+    // to the reader. It has to say it is the carve-out of the prohibition
+    // above rather than a second rule beside it — the do-not bullet already
+    // ends "without the user explicitly asking to wire it", and that clause is
+    // this section. And it has to answer the case that actually occurs: a user
+    // who names a KIND ("connect my accounting"), where listing the candidates
+    // would be the very thing the section forbids.
+    if (cat.connect_when_user_asks.length > 0) {
+      lines.push('');
+      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url. `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
+      for (const api of cat.connect_when_user_asks) {
+        lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
+      }
+    }
+    return compose([renderFence('api_bootstrap_hints', lines.join('\n'))]);
   }
 
   /**
@@ -887,9 +1349,21 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     if (p.auth) {
       const authDesc = p.auth.type === 'none' ? 'None (public API — no credentials required)'
         : p.auth.type === 'basic'
-          ? p.auth.basic_format === 'pre_encoded_b64'
-            ? 'Basic Auth (pre-encoded Base64 secret — send as-is in Authorization header)'
-            : 'Basic Auth (username:password base64)'
+          // Three cases, not two. `basic_format` is OPTIONAL (validated only when
+          // present, and `api_setup bootstrap` writes it only when the extraction
+          // produced one), so a profile with none is ordinary — and it used to fall
+          // into the else branch and be told "the ENGINE attaches it, do NOT set an
+          // Authorization header yourself". The engine attaches nothing there: the
+          // only basic branch in http.ts requires `=== 'user_pass_split'`, and a test
+          // pins that ("does NOT attach for a bare basic profile with no
+          // basic_format"). So the shipped profile text instructed the model to omit
+          // the one header nobody else was going to set. Silence would have been
+          // better than that sentence.
+          ? p.auth.basic_format === 'user_pass_split'
+            ? 'Basic Auth — the ENGINE attaches it from the stored username + password. Do NOT set an Authorization header yourself and do NOT try to Base64-encode anything; you do not hold the values.'
+            : p.auth.basic_format === 'pre_encoded_b64'
+              ? 'Basic Auth (pre-encoded Base64 secret — YOURS to send, the engine does not attach it): set `Authorization: Basic secret:<VAULT_KEY>` yourself, as-is.'
+              : 'Basic Auth with no basic_format recorded — the engine attaches NOTHING here, so this header is yours to set. If the vault key holds an already-Base64-encoded `login:password`, send `Authorization: Basic secret:<VAULT_KEY>`. If it holds the two halves under separate keys, set auth.basic_format="user_pass_split" via api_setup({action:"update"}) and the engine takes it over.'
         : p.auth.type === 'bearer' ? 'Bearer Token in Authorization header'
         : p.auth.type === 'header' ? `API key in header: ${p.auth.header_name ?? 'X-Api-Key'}`
         : p.auth.type === 'oauth2' ? 'OAuth2 (managed refresh-token flow)'

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildTierPresetSignal } from './tier-preset-signal.js';
 import { TIER_PRESETS } from './tier-presets.js';
+import { displayPosture, hostDisclosure } from './llm/host-disclosure.js';
 
 // model-presets W4 — the `available_tier_presets` signal that the settings cards
 // + header picker render. The one behaviour with a seam worth pinning: a preset's
@@ -44,11 +45,19 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     for (const p of Object.values(sig)) expect(p.available).toBe(true);
   });
 
-  it('managed without the Fireworks flag: efficient unavailable, balanced + max-quality available', () => {
+  it('managed without the Fireworks flag: ONLY max-quality remains selectable', () => {
+    // State this plainly because it is the sharpest consequence of this PR: both
+    // Fireworks sets need `LYNOX_MANAGED_FIREWORKS_ENABLED`, which is OFF fleet-wide
+    // (a DPA decision, not a code one). A managed tenant without it is therefore left
+    // with exactly ONE preset — the most expensive. An EU-Mistral set would have been
+    // the Fireworks-free middle option; it was pulled on 2026-08-11 because a preset
+    // whose identity is a residency promise must fail closed, and that one degraded
+    // silently. Until either lands, this assertion is the honest picture.
     const sig = buildTierPresetSignal({ isManagedTier: true });
-    expect(sig['efficient']!.available).toBe(false); // deep slot is Fireworks → dropped without the opt-in
-    expect(sig['balanced']!.available).toBe(true);
-    expect(sig['max-quality']!.available).toBe(true);
+    expect(sig['efficient']!.available).toBe(false);   // all three slots Fireworks
+    expect(sig['balanced']!.available).toBe(false);    // Fireworks main
+    expect(sig['max-quality']!.available).toBe(true);  // all-Anthropic
+    expect(Object.values(sig).filter((p) => p.available)).toHaveLength(1);
   });
 
   it('managed WITH the Fireworks flag + CP key: efficient becomes available', () => {
@@ -92,32 +101,69 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
   it('carries provenance + host disclosure for a CN-via-Fireworks slot (⚡ efficient deep)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const deep = sig['efficient']!.tiers.find((t) => t.tier === 'deep')!;
-    expect(deep.model_id).toBe('accounts/fireworks/models/glm-5p2');
+    expect(deep.model_id).toBe('accounts/fireworks/models/kimi-k3');
     expect(deep.provenance).toBe('CN'); // the provenance chip
     expect(deep.residency).toBe('US'); // Fireworks host residency (weights CN, host US)
-  });
-
-  it('resolves an EU Mistral slot host disclosure (balanced tier = mistral-medium)', () => {
-    const sig = buildTierPresetSignal({ isManagedTier: false });
-    const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.model_id).toBe('mistral-medium-2604');
-    expect(bal.residency).toBe('EU');
   });
 
   it('carries per-tier input/output pricing (the cost feel) from the registry', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.pricing).toEqual({ input: 1.50, output: 7.50 }); // mistral-medium (R8: pricier than Ministral 14B's 0.20/0.20 — the main runs every turn)
+    // GLM 5.2. It replaced mistral-medium ($1.50/$7.50) in this slot on 2026-08-10 —
+    // cheaper per output token in the band that runs every turn (the R8 concern,
+    // now the other way round) and stronger on open turns in the sweep.
+    expect(bal.pricing).toEqual({ input: 1.40, output: 4.40 });
     const deep = sig['balanced']!.tiers.find((t) => t.tier === 'deep')!;
     expect(deep.pricing).toEqual({ input: 3, output: 15 }); // Sonnet 5 — visibly pricier
   });
 
-  it('never emits an unconfirmed Fireworks posture as a confirmed claim (R2 gate)', () => {
+  it('emits exactly the GATED posture — never a raw claim of its own (R2 gate)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const deep = sig['efficient']!.tiers.find((t) => t.tier === 'deep')!;
-    // The gate leaves the posture as a residency-prefixed "unconfirmed" string,
-    // never an asserted retention claim.
+    // The signal must not compose its own posture string: it forwards whatever the
+    // gate produced. Asserted as EQUALITY against displayPosture rather than as a
+    // literal, so this keeps holding the day a host ships unconfirmed — a literal
+    // would only re-state the current flag and would go quiet exactly when it matters.
     expect(deep.posture).toBeDefined();
-    expect(deep.posture!.toLowerCase()).not.toContain('zero-retention');
+    // Every Fireworks-hosted slot in every preset must carry the SAME forwarded
+    // string. A hardcoded literal at the emit site would satisfy a single-slot
+    // equality check, so the assertion spans slots AND compares against a host whose
+    // posture differs — mistral, whose EU string a Fireworks-shaped literal cannot
+    // also produce. Equality against displayPosture alone could not tell forwarding
+    // from a coincidentally-equal constant.
+    const hostOf = (id: string): string =>
+      id.startsWith('accounts/fireworks/') ? 'api.fireworks.ai'
+      : id.startsWith('claude-') ? 'api.anthropic.com'
+      : 'api.mistral.ai';
+    const seen = new Set<string>();
+    for (const [name, preset] of Object.entries(sig)) {
+      for (const t of preset!.tiers) {
+        const host = hostOf(t.model_id);
+        seen.add(host);
+        const disc = hostDisclosure(host)!;
+        // All three forwarded fields, not just posture. transferBasis is the one an
+        // earlier round had to correct IN the table ('SCC/DPF' was copied onto
+        // Fireworks, which has no DPF) — leaving the forwarding site unguarded let
+        // the same wrong string back in one layer down, measured green.
+        expect(t.posture, `${name}.${t.tier} posture (${host})`).toBe(disc.posture);
+        expect(t.transferBasis, `${name}.${t.tier} transferBasis (${host})`).toBe(disc.transferBasis);
+        // ⚠ residency is asserted but NOT effectively guarded today: every slot in
+        // every preset is US-hosted since the EU set was pulled (tier-presets.ts),
+        // so hardcoding 'US' at the emit site passes — measured. It becomes a real
+        // guard the moment one EU-hosted slot returns, which is why it is written
+        // this way rather than as a literal. Stated because a silently inert
+        // assertion reads exactly like a live one.
+        expect(t.residency, `${name}.${t.tier} residency (${host})`).toBe(disc.residency);
+      }
+    }
+    // Spanning presets is what gives the loop teeth: max-quality is Anthropic-hosted
+    // and Anthropic's posture differs from Fireworks'. A single hardcoded literal at
+    // the emit site satisfies one host and fails the other — comparing only Fireworks
+    // slots could not tell forwarding from a coincidentally-equal constant. (The
+    // hosts actually met are fireworks and anthropic; the mistral branch in hostOf is
+    // a fallback that no current slot reaches.)
+    expect(seen.size, 'need ≥2 distinct hosts or the loop cannot refute a literal').toBeGreaterThan(1);
+    expect(displayPosture('api.fireworks.ai')).not.toBe(displayPosture('api.anthropic.com'));
+    expect(deep.posture).toBe('US · zero-retention · SOC2');
   });
 });

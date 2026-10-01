@@ -1,10 +1,37 @@
 name: dependabot-auto-merge
 
-# Auto-enables PR merge for dependabot updates that are non-major. Branch
-# protection still requires green CI before the merge actually happens —
-# this workflow only flips the auto-merge bit so we don't have to do it
-# by hand for every minor/patch bump. Major bumps are skipped so they
-# get a manual review.
+# Auto-enables PR merge for the ONE class of dependabot update where a green CI is a sufficient
+# witness: a single non-major update on a branch that is current with main. Everything else gets a
+# human.
+#
+# Why those conditions, measured on 2026-10-01 (three times a green dependabot CI did not carry):
+#   1. a GROUP PR bundling 28 updates — one green run, no per-update witness; a regression in any
+#      of them is attributed to all. → never auto-merged (`dependency-group` set, or more than one
+#      dependency named).
+#   2. a PR whose green run predated a test that pins the jobs it changed (#901) — merging it would
+#      have turned main red. Dependabot bases are routinely weeks old, and branch protection is
+#      deliberately not `strict`. → auto-merge only when the PR is 0 commits behind main.
+#   3. a world-dependent check (OSV audit) that was green and went red minutes later with no change
+#      in the repo, because an advisory was published in between. NO pre-merge condition can
+#      catch that, here or anywhere: it is caught after the fact on main (2026-10-01: red to fixed
+#      in ~25 min). Do not add a condition against it — it cannot work.
+#
+# The class is wider than this workflow: a stale base decides check results on ANY PR, not only
+# dependabot's. Same day, a human PR (#1413) went red only because its base predated the fix for
+# those advisories — no test ran. Condition 2 is limited to dependabot PRs because only those
+# merge themselves here; read that as the scope of this file, not as the size of the problem.
+#
+# Every run re-decides: an update that stops qualifying (a dependabot rebase onto an older state, a
+# group) has auto-merge switched OFF again, so an earlier "on" does not linger.
+#
+# Known limits, stated:
+#   · auto-merge, once on, is not re-checked when main moves without a push to the PR; the next
+#     dependabot rebase (synchronize) re-decides.
+#   · a push by a HUMAN to a dependabot branch skips this whole job (the actor is not dependabot),
+#     including the switch-off step — auto-merge that was on stays on over that push. Whoever
+#     pushes to a dependabot branch should switch auto-merge off by hand.
+#
+# Branch protection still requires green CI before the merge happens; this only flips the bit.
 
 on:
   pull_request_target:
@@ -24,9 +51,59 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge for non-major updates
-        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+      - name: Decide whether this update may auto-merge
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          GROUP: ${{ steps.meta.outputs.dependency-group }}
+          NAMES: ${{ steps.meta.outputs.dependency-names }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Fail-CLOSED: anything this step cannot establish means "no auto-merge".
+          reason=""
+          # A POSITIVE list: only patch and minor qualify. Comparing against "major" alone let an
+          # empty or unknown update type (fetch-metadata could not parse the PR) through as "not
+          # major" — a fail-open a review found in the first version of this step.
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) reason="update type is '${UPDATE_TYPE:-empty}', not patch or minor" ;;
+          esac
+          if [ -z "$reason" ] && [ -n "$GROUP" ]; then reason="group PR ($GROUP)"; fi
+          if [ -z "$reason" ]; then
+            # awk, not `wc -l`: wc counts newlines, and a single name has none — it reported 0 for
+            # exactly the case this rule exists to allow (caught by the test's positive control).
+            count=$(printf '%s\n' "$NAMES" | tr ',' '\n' | awk 'NF { c++ } END { print c + 0 }')
+            if [ "$count" != "1" ]; then reason="names $count dependencies, not exactly one"; fi
+          fi
+          if [ -z "$reason" ]; then
+            behind=$(gh api "repos/$REPO/compare/main...$HEAD_SHA" --jq '.behind_by' 2>/dev/null) || behind=""
+            case "$behind" in
+              0) ;;
+              ''|*[!0-9]*) reason="could not read how far the branch is behind main" ;;
+              *) reason="branch is $behind commit(s) behind main" ;;
+            esac
+          fi
+          if [ -z "$reason" ]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+            echo "auto-merge: eligible (single non-major update, current with main)"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "auto-merge: not eligible — $reason"
+          fi
+
+      - name: Enable auto-merge
+        if: steps.decide.outputs.eligible == 'true'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --squash "$PR_URL"
+
+      - name: Switch auto-merge off if it was on
+        if: steps.decide.outputs.eligible != 'true'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `|| true`: "it was not on" is the normal case and must not fail the job.
+        run: gh pr merge --disable-auto "$PR_URL" || true

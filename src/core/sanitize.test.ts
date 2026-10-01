@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename, readBodyCapped } from './sanitize.js';
+import { stripUntrustedSeparators, collapseToSingleLine, sanitizeAttachmentFilename, sanitizeUploadFilename, readBodyCapped } from './sanitize.js';
 
 // Build control characters via code point so the test source carries none.
 const LF = String.fromCharCode(10);
@@ -84,5 +84,34 @@ describe('readBodyCapped', () => {
     const big = new Uint8Array(2000);
     const res = mockRes([big, big]); // 4000 bytes total, cap 3000
     await expect(readBodyCapped(res, 3000)).rejects.toThrow(/exceeded/);
+  });
+});
+
+describe('collapseToSingleLine', () => {
+  it('collapses LF/CR — the ones stripUntrustedSeparators deliberately keeps', () => {
+    // The whole reason this exists beside its sibling: the sibling preserves them.
+    expect(stripUntrustedSeparators('a\nb')).toBe('a\nb');
+    expect(collapseToSingleLine('a\nb')).toBe('a b');
+    expect(collapseToSingleLine('a\r\n\r\nb')).toBe('a b');
+  });
+
+  it('collapses the exotic separators too', () => {
+    for (const sep of ['\u2028', '\u2029', '\u0085']) {
+      expect(collapseToSingleLine(`a${sep}## heading`)).toBe('a ## heading');
+    }
+  });
+
+  it('collapses runs to ONE space and trims the ends', () => {
+    expect(collapseToSingleLine('  a \t\n  b  ')).toBe('a b');
+  });
+
+  it('leaves an already-single-line value untouched', () => {
+    expect(collapseToSingleLine('Acme GmbH')).toBe('Acme GmbH');
+  });
+
+  it('never emits a newline, for any input', () => {
+    for (const s of ['a\nb', 'a\u2028b', '\n\n\n', 'a\r\nb\u0085c', '']) {
+      expect(collapseToSingleLine(s)).not.toMatch(/[\n\r\u2028\u2029\u0085]/u);
+    }
   });
 });

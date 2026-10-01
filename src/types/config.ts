@@ -4,8 +4,8 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ProviderKey } from './provider-registry.js';
-import type { ToolEntry, StreamHandler } from './tools.js';
-import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn } from './agent.js';
+import type { ToolEntry, EmittingStreamHandler } from './tools.js';
+import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn, ToolCallRecorder } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
@@ -21,7 +21,9 @@ export interface AgentConfig {
   effort?:          EffortLevel | undefined;
   maxTokens?:       number | undefined;
   memory?:          IMemory | undefined;
-  onStream?:        StreamHandler | undefined;
+  // Emitting: the agent built from this config writes INTO this handler, so it
+  // is an emit sink. A plain StreamHandler is still assignable here.
+  onStream?:        EmittingStreamHandler | undefined;
   workerPool?:      IWorkerPool | undefined;
   promptUser?:      PromptUserFn | undefined;
   promptTabs?:      PromptTabsFn | undefined;
@@ -54,6 +56,23 @@ export interface AgentConfig {
   gcpProjectId?:       string | undefined;
   gcpRegion?:          string | undefined;
   currentRunId?:       string | undefined;
+  /**
+   * Sink for this agent's own tool calls — the ONE owner of tool-call
+   * persistence. The agent calls it with the run id it is currently working
+   * under, so a spawned child (which carries its OWN `currentRunId`) books onto
+   * its own run instead of the parent's.
+   *
+   * This replaces a process-global `lynox:tool:end` subscriber per Session.
+   * `node:diagnostics_channel` broadcasts to every subscriber in the process,
+   * so N Sessions each saw all N Sessions' calls and each had to filter by
+   * thread id to guess which were its own — a guess that could not be right for
+   * a child, which shares its parent's thread by design. Injecting the sink
+   * removes the guess: whoever makes the call already knows where it belongs.
+   *
+   * The channel itself stays, for diagnostics with no persistence role
+   * (Bugsink breadcrumbs, the debug subscriber).
+   */
+  recordToolCall?:     ToolCallRecorder | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   autonomy?:           AutonomyLevel | undefined;
@@ -141,8 +160,7 @@ export interface AgentConfig {
    * When set, the agent records each successful tool dispatch + calls
    * `checkAnomaly()` for channel-side-effect publishing — return value
    * intentionally discarded (shadow mode does NOT block dispatch or surface
-   * a warning to the user). Enforcement-mode follow-up tracked for v1.7.3 /
-   * v1.8.0 after we observe false-positive rate in production.
+   * a warning to the user).
    */
   toolCallTracker?: import('../core/output-guard.js').ToolCallTracker | undefined;
 }
@@ -200,6 +218,12 @@ export interface SpawnSpec {
   isolation?:        IsolationConfig | undefined;
   /** Named model profile for non-Claude provider (e.g. 'mistral-eu', 'gemini-research'). */
   profile?:         string | undefined;
+  /**
+   * Vault keys this child may resolve. Omitted = the keys this spawn order
+   * itself names, and nothing else. `'all'` is grantable only by an agent that
+   * holds the full vault — see `core/secret-scope.ts`.
+   */
+  secret_scope?:    readonly string[] | 'all' | undefined;
 }
 
 export interface LynoxConfig {
@@ -337,6 +361,12 @@ export interface LynoxUserConfig {
    */
   balanced_model?: string | undefined;
   max_session_cost_usd?: number | undefined;
+  /** Policy ceiling on workflow steps (overrides the MAX_STEPS=20 default). A
+   *  tenant running large bulk workflows (e.g. a 2000-contact triage needing
+   *  >20 batch steps) raises this so the workflow isn't rejected at validation.
+   *  Enforced on the run paths in pipeline.ts via maxStepsFor; the manifest
+   *  schema keeps an absolute 1000-step sanity ceiling regardless. */
+  max_workflow_steps?: number | undefined;
   /** Max chat runs executing concurrently across all threads (Tier-2 run
    *  executor). Bounds LLM-cost blast + run-buffer memory from many parallel
    *  headless runs. A fresh dispatch past this is refused with HTTP 429
@@ -534,6 +564,27 @@ export interface LynoxUserConfig {
    */
   durable_memory_enabled?: boolean | undefined;
   /**
+   * Calendar reading from a subscribed ICS feed (`calendar_read`). When false the tool is not
+   * registered at all — the agent's decision space is byte-identical to a build without it,
+   * which also means it costs nothing in the always-on prefix.
+   *
+   * Ships OFF so a production tenant can be switched back without a release: a calendar feed
+   * is externally authored, endlessly varied, and only a real one proves the read is right.
+   * Operator-only per-tenant flip; intentionally NOT in PROJECT_SAFE_KEYS — an agent-settable
+   * flag would let injected content switch on a tool that reads external text into context.
+   */
+  calendar_enabled?: boolean | undefined;
+  /**
+   * Bulk runs (`bulk_plan`, `bulk_status`; PRD bulk-changes-reversible). When false the
+   * tools are not registered — decision space and always-on prefix byte-identical to a
+   * build without them. Ships OFF while only the dry run exists: an agent offered a tool
+   * whose runs can never be applied would promise the user something the build cannot do.
+   * Operator-only, and intentionally NOT in PROJECT_SAFE_KEYS. config.json only for now:
+   * an env bridge is a wire-contract entry (`src/contract/env-registry.ts`), which belongs
+   * with the slice that makes the flag worth turning on.
+   */
+  bulk_runs_enabled?: boolean | undefined;
+  /**
    * Extended debug capture (operator surface). When true, the engine persists a
    * REDACTED per-turn {@link import('../core/wire-capture.js').WireSnapshot} — the
    * fully-assembled outbound request (system-prompt hash, the FULL last user message
@@ -558,25 +609,49 @@ export interface LynoxUserConfig {
   /** Block plain HTTP requests (except localhost). Default: false */
   enforce_https?: boolean | undefined;
   /**
-   * Outbound egress policy for the agent's GENERAL-PURPOSE network tools:
+   * Outbound egress policy for the agent's GENERAL-PURPOSE network tools —
    * `http_request`, the `api_setup` probe, and `web_research` (both the search
-   * query AND the page/content fetch). Default 'allow-all' = today's behaviour,
-   * unchanged. 'deny-all' = those tools cannot reach the network. 'allow-list' =
-   * they may reach ONLY the hosts in `network_allowed_hosts`.
+   * query AND the page/content fetch) — AND for the connected-integration
+   * surface: every authenticated Google Workspace call made on behalf of your
+   * grant, plus a managed instance's calls to its own control plane. Default
+   * 'allow-all' = today's behaviour, unchanged. 'deny-all' = none of them can
+   * reach the network. 'allow-list' = they may reach ONLY the hosts in
+   * `network_allowed_hosts`.
    *
    * 'guarded' = surface-aware lockdown: the full-control surfaces (`http_request`
    * any method, `api_setup fetch_token`) may reach ONLY baseline vetted hosts ∪
    * the `network_allowed_hosts` operator floor ∪ the hosts a connected api_profile
-   * was human-accepted for (`custom_endpoint_ack`), while the discovery surfaces
+   * was human-accepted for (`custom_endpoint_ack`); the discovery surfaces
    * (`web_research` read/search, `api_setup` bootstrap) stay open (still SSRF- and
-   * enforce_https-gated). Blocks credential-free active egress to off-baseline
-   * hosts a prompt-injected agent could steer, without breaking "connect any API".
+   * enforce_https-gated); and a connected integration reaches ONLY its own
+   * provider's fixed host set ∪ the operator floor — never the vetted baseline,
+   * which is a data-processing-agreement list, and never another integration's
+   * hosts. Blocks credential-free active egress to off-baseline hosts a
+   * prompt-injected agent could steer, without breaking "connect any API" and
+   * without taking away an integration the user connected themselves.
    *
-   * SCOPE — this is NOT a full process air-gap. It gates the agent-driven HTTP
-   * tool surface only. It does NOT gate: the LLM provider call (separate client),
-   * mail IMAP/SMTP, push notifications, Google Workspace, voice transcribe/TTS,
-   * backup upload, or error reporting — each is its own separately-configured
+   * SCOPE — this is NOT a full process air-gap, and the scope WIDENED: Google
+   * Workspace and the Drive backup upload used to be outside it and are now
+   * inside. It does NOT gate: the LLM provider call (separate client), push
+   * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
+   * anything a shell command starts — each is its own separately-configured
    * egress surface. A cross-integration air-gap is a separate control.
+   *
+   * ⚠ What that costs you if you have already set 'deny-all': a connected
+   * Google account stops working, INCLUDING Gmail read/send over OAuth, which
+   * an earlier version of this comment named as out of scope. Under
+   * 'deny-all' there is no lever — switch to 'guarded', which admits a
+   * connected integration to its own provider while still gating the surfaces a
+   * prompt-injected agent can aim.
+   *
+   * Under 'allow-list' you restore it by listing the Google API hosts — AND, on
+   * a lynox-hosted instance, the control plane's own hostname. 'allow-list' is
+   * uniform across surfaces: it consults only this list, never an integration's
+   * own host set. A hosted instance refreshes its Google token through the
+   * control plane rather than through Google, so a list carrying only the
+   * Google hosts works until the access token expires and then stops, with a
+   * network-policy error rather than an auth one. The refresh fails before the
+   * response is read, so the grant is not touched.
    *
    * The allow-list is AUTHORITATIVE: it is NOT auto-extended by configured API
    * profiles, because `api_setup` is agent-callable and auto-trusting profile

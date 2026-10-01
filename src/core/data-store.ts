@@ -93,6 +93,41 @@ export interface SubjectRepointRecord {
   ids: number[];
 }
 
+/**
+ * The value a column would store for `val`, for every column type that converts
+ * without side effects — i.e. all but `subject`, whose conversion finds-or-creates a
+ * subject and so WRITES. Shared by insert and by the bulk dry run, which must predict
+ * the stored value without writing anything; a `subject` column is refused by the
+ * caller rather than passed here.
+ */
+export function coercePlainColumnValue(val: unknown, col: DataStoreColumnDef): unknown {
+  const colName = col.name;
+  switch (col.type) {
+    case 'string':
+      return String(val);
+    case 'number': {
+      const n = Number(val);
+      if (Number.isNaN(n)) {
+        throw new Error(`Column "${colName}": cannot convert "${String(val)}" to number.`);
+      }
+      return n;
+    }
+    case 'date':
+      if (typeof val === 'string') return val;
+      throw new Error(`Column "${colName}": expected date string, got ${typeof val}.`);
+    case 'boolean':
+      if (typeof val === 'boolean') return val ? 1 : 0;
+      if (val === 1 || val === 0) return val;
+      if (val === 'true') return 1;
+      if (val === 'false') return 0;
+      throw new Error(`Column "${colName}": cannot convert "${String(val)}" to boolean.`);
+    case 'json':
+      return typeof val === 'string' ? val : JSON.stringify(val);
+    default:
+      return val;
+  }
+}
+
 export class DataStore {
   private db: Database.Database;
 
@@ -396,6 +431,65 @@ export class DataStore {
     return { inserted, updated, errors };
   }
 
+  /**
+   * Upsert ONE full row by the collection's single-column unique key — the bulk
+   * apply/undo write (PRD bulk-changes-reversible §3.4). Every user column is written;
+   * one the row does not name becomes NULL, so callers pass a full row. Plain columns
+   * are coerced as {@link insertRecords} does. `subject` columns are written VERBATIM:
+   * a bulk row is built on a row read raw (its before-image), so a subject cell already
+   * holds a stored `subject_id`, and resolving that as a name — what `insertRecords`
+   * does — would create a subject named after an id. Throws instead of collecting
+   * per-record errors: one row, one outcome.
+   */
+  putRowVerbatim(collection: string, row: Record<string, unknown>): 'inserted' | 'updated' {
+    const info = this._getCollectionMeta(collection);
+    if (!info) throw new Error(`Collection "${collection}" not found.`);
+    const uniqueKey = info.unique_key ? info.unique_key.split(',') : [];
+    if (uniqueKey.length !== 1) throw new Error(`Collection "${collection}" has no single-column unique key.`);
+    const keyCol = uniqueKey[0]!;
+    const columns = JSON.parse(info.schema_json) as DataStoreColumnDef[];
+    const colNames = new Set(columns.map(c => c.name));
+    for (const k of Object.keys(row)) {
+      if (!colNames.has(k)) throw new Error(`Unknown column "${k}".`);
+    }
+    const values: unknown[] = columns.map((c) => {
+      const val = row[c.name];
+      if (val === undefined || val === null) return null;
+      return c.type === 'subject' ? String(val) : coercePlainColumnValue(val, c);
+    });
+    const keyIdx = columns.findIndex(c => c.name === keyCol);
+    if (keyIdx < 0 || values[keyIdx] === null) throw new Error('The row has no value for the unique key.');
+    this._checkDbSize();
+
+    const tableName = `ds_${collection}`;
+    const now = new Date().toISOString();
+    const allCols = ['_created_at', '_updated_at', ...columns.map(c => c.name)];
+    const updateSet = [...columns.filter(c => c.name !== keyCol).map(c => `"${c.name}" = excluded."${c.name}"`),
+      '"_updated_at" = excluded."_updated_at"'].join(', ');
+    const sql = `INSERT INTO "${tableName}" (${allCols.map(c => `"${c}"`).join(', ')}) VALUES (${allCols.map(() => '?').join(', ')})` +
+      ` ON CONFLICT("${keyCol}") DO UPDATE SET ${updateSet}`;
+    // Identifiers come from the collection's own metadata (an existing collection, a
+    // column of its schema); the one value is bound.
+    const existsSql = `SELECT COUNT(*) as cnt FROM "${tableName}" WHERE "${keyCol}" = ?`;
+    let outcome: 'inserted' | 'updated' = 'updated';
+    this.db.transaction(() => {
+      const exists = (this.db.prepare(existsSql).get(values[keyIdx]) as { cnt: number }).cnt > 0;
+      if (!exists) {
+        if (info.record_count + 1 > MAX_RECORDS) {
+          throw new Error(`Collection "${collection}" would exceed ${MAX_RECORDS} record limit (current: ${info.record_count}).`);
+        }
+        outcome = 'inserted';
+      }
+      this.db.prepare(sql).run(now, now, ...values);
+      // One row in or none: the count moves by the probe's answer, no table scan per write.
+      // Unlike insertRecords this does not re-derive the count, so drift left by another
+      // path stays until the next insertRecords/deleteRecords recount.
+      this.db.prepare('UPDATE ds_collections SET record_count = record_count + ?, updated_at = ? WHERE name = ?')
+        .run(exists ? 0 : 1, now, collection);
+    })();
+    return outcome;
+  }
+
   // === Query ===
 
   queryRecords(params: {
@@ -475,6 +569,33 @@ export class DataStore {
     if (subjectCols.size > 0) this._hydrateSubjectNames(rows, subjectCols);
 
     return { rows, total: countResult.cnt };
+  }
+
+  /**
+   * Record-on-spine — the EXISTS form of {@link getRecordsForSubject}: does any row, in
+   * any collection, link `subjectId` through a `subject`-typed column? One indexed probe
+   * per collection (the R2a per-subject index), short-circuits on the first hit, never
+   * projects a row. The orphan-subject reap asks this for every subject an
+   * erased memory was linked to, so it stays O(collections), not O(rows). Same
+   * schema-validated identifiers + bound subject id as the full read.
+   */
+  hasRecordsForSubject(subjectId: string): boolean {
+    const collections = this.db
+      .prepare('SELECT name, schema_json FROM ds_collections')
+      .all() as Array<{ name: string; schema_json: string }>;
+    for (const c of collections) {
+      const columns = JSON.parse(c.schema_json) as DataStoreColumnDef[];
+      const subjectCols = columns.filter(col => col.type === 'subject').map(col => col.name);
+      if (subjectCols.length === 0) continue;
+      const whereOr = subjectCols.map(col => `"${col}" = ?`).join(' OR ');
+      // Identifiers are schema-validated (same invariant as getRecordsForSubject); the
+      // subject id is bound. Built as a const, not inlined into .prepare — the file's
+      // parameterized-query pattern, which the security suite's line guard pins.
+      const existsSql = `SELECT 1 FROM "ds_${c.name}" WHERE ${whereOr} LIMIT 1`;
+      const hit = this.db.prepare(existsSql).get(...subjectCols.map(() => subjectId));
+      if (hit) return true;
+    }
+    return false;
   }
 
   /**
@@ -816,28 +937,7 @@ export class DataStore {
   }
 
   private _coerceValue(val: unknown, col: DataStoreColumnDef): unknown {
-    const colName = col.name;
     switch (col.type) {
-      case 'string':
-        return String(val);
-      case 'number': {
-        const n = Number(val);
-        if (Number.isNaN(n)) {
-          throw new Error(`Column "${colName}": cannot convert "${String(val)}" to number.`);
-        }
-        return n;
-      }
-      case 'date':
-        if (typeof val === 'string') return val;
-        throw new Error(`Column "${colName}": expected date string, got ${typeof val}.`);
-      case 'boolean':
-        if (typeof val === 'boolean') return val ? 1 : 0;
-        if (val === 1 || val === 0) return val;
-        if (val === 'true') return 1;
-        if (val === 'false') return 0;
-        throw new Error(`Column "${colName}": cannot convert "${String(val)}" to boolean.`);
-      case 'json':
-        return typeof val === 'string' ? val : JSON.stringify(val);
       case 'subject': {
         // Resolve the row's name → a real subject_id via the injected resolver.
         // No resolver at all (flag off) → degrade to storing the raw string, so
@@ -854,7 +954,7 @@ export class DataStore {
         return this._subjectBridge.resolve(raw, kind) ?? null;
       }
       default:
-        return val;
+        return coercePlainColumnValue(val, col);
     }
   }
 
@@ -1034,28 +1134,65 @@ export class DataStore {
   private _resolveSubjectOperand(colName: string, value: unknown, kind: string): unknown {
     const bridge = this._subjectBridge;
     if (!bridge) return value;
-    const toId = (name: unknown): unknown => {
-      if (typeof name !== 'string') return name;
+    /**
+     * A name → its candidate ids. `null` means "not a name, pass through untouched".
+     * An empty result keeps {@link UNRESOLVABLE_SUBJECT}, whose polarity behaviour is
+     * CORRECT for a genuinely absent name: nothing equals it, and everything differs
+     * from it. Only a SHARED name needed a better answer than one id could carry.
+     */
+    const idsFor = (name: unknown): string[] | null => {
+      if (typeof name !== 'string') return null;
       const trimmed = name.trim();
-      if (trimmed === '') return UNRESOLVABLE_SUBJECT;
-      return bridge.find(trimmed, kind) ?? UNRESOLVABLE_SUBJECT;
+      if (trimmed === '') return [UNRESOLVABLE_SUBJECT];
+      const ids = bridge.findAll(trimmed, kind);
+      return ids.length === 0 ? [UNRESOLVABLE_SUBJECT] : ids;
     };
-    // implicit-eq by name
-    if (typeof value === 'string') return toId(value);
+    // implicit-eq by name → "is any of the subjects this name could mean"
+    if (typeof value === 'string') {
+      const ids = idsFor(value)!;
+      return ids.length === 1 ? ids[0]! : { $in: ids };
+    }
     // null (is-null) / arrays / non-operator scalars pass through unchanged
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
-    // operator object
+    // operator object. Clauses inside ONE operator object are AND-joined, so a widened
+    // `$eq` must INTERSECT with any sibling `$in`, and a widened `$neq` must UNION into
+    // any sibling `$nin` — order-independent either way.
     const out: Record<string, unknown> = {};
+    const narrowIn = (ids: unknown[]): void => {
+      const prev = out['$in'];
+      const next = Array.isArray(prev) ? prev.filter(p => ids.includes(p)) : ids;
+      // An EMPTY intersection means "nothing can satisfy both clauses" — which is a
+      // legitimate zero-row answer, not a malformed filter. Emitting `[]` would hand the
+      // validator an empty `$in` and turn that answer into a thrown error, so the
+      // unmatchable sentinel carries it instead.
+      out['$in'] = next.length > 0 ? next : [UNRESOLVABLE_SUBJECT];
+    };
+    const widenNin = (ids: unknown[]): void => {
+      const prev = out['$nin'];
+      out['$nin'] = Array.isArray(prev) ? [...new Set([...(prev as unknown[]), ...ids])] : ids;
+    };
     for (const [op, opVal] of Object.entries(value as Record<string, unknown>)) {
       switch (op) {
         case '$eq':
-        case '$neq':
-          out[op] = opVal === null ? opVal : toId(opVal);
+        case '$neq': {
+          if (opVal === null) { out[op] = opVal; break; }
+          const ids = idsFor(opVal);
+          if (ids === null) { out[op] = opVal; break; }
+          // One candidate keeps the caller's operator verbatim; several become the
+          // set form, which is the only faithful reading of a shared name.
+          if (ids.length === 1) { out[op] = ids[0]!; break; }
+          if (op === '$eq') narrowIn(ids); else widenNin(ids);
           break;
+        }
         case '$in':
-        case '$nin':
-          out[op] = Array.isArray(opVal) ? opVal.map(toId) : opVal;
+        case '$nin': {
+          if (!Array.isArray(opVal)) { out[op] = opVal; break; }
+          // `?? [v]` keeps a non-string element verbatim, as the previous per-element
+          // mapping did — dropping it would silently shrink the caller's list.
+          const ids: unknown[] = opVal.flatMap((v: unknown) => idsFor(v) ?? [v]);
+          if (op === '$in') narrowIn(ids); else widenNin(ids);
           break;
+        }
         case '$is_null':
           out[op] = opVal;
           break;

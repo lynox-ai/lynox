@@ -1,9 +1,12 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
+import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
+import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
+import { googleFetch } from '../../core/connector-egress.js';
 
 // === Types ===
 
@@ -59,13 +62,36 @@ interface FreeBusyResponse {
 
 const CALENDAR_BASE = 'https://www.googleapis.com/calendar/v3';
 const CONFIRM_ACTIONS = new Set(['create_event', 'update_event', 'delete_event']);
-const WRITE_ACTIONS = new Set(['create_event', 'update_event', 'delete_event']);
+/**
+ * The scopes each action's own API call accepts — see `action-scopes.ts`.
+ *
+ * ⚠ `free_busy` is the entry that only a per-ACTION table can get right:
+ * `freebusy.query` is NOT authorised by `calendar.events`, only by `calendar`,
+ * `calendar.readonly`, `calendar.freebusy` and `calendar.events.freebusy`. A
+ * grant of `calendar.events` alone — which is what a hand-written BYO scope
+ * override plausibly holds — reaches Google and gets a 403.
+ */
+const ACTION_SCOPES: Record<CalendarInput['action'], readonly string[]> = {
+  list_events: [SCOPES.CALENDAR_EVENTS, SCOPES.CALENDAR_READONLY, SCOPES.CALENDAR],
+  free_busy: [SCOPES.CALENDAR_FREEBUSY, SCOPES.CALENDAR_READONLY, SCOPES.CALENDAR],
+  create_event: [SCOPES.CALENDAR_EVENTS, SCOPES.CALENDAR],
+  update_event: [SCOPES.CALENDAR_EVENTS, SCOPES.CALENDAR],
+  delete_event: [SCOPES.CALENDAR_EVENTS, SCOPES.CALENDAR],
+};
+
+const ACTION_DESCRIPTIONS: Record<CalendarInput['action'], string> = {
+  list_events: 'Listing events',
+  free_busy: 'Querying free/busy times',
+  create_event: 'Creating an event',
+  update_event: 'Updating an event',
+  delete_event: 'Deleting an event',
+};
 
 // === Helpers ===
 
 async function calendarFetch(auth: GoogleAuth, url: string, options?: RequestInit): Promise<Response> {
   const token = await auth.getAccessToken();
-  const response = await fetch(url, {
+  const response = await googleFetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -73,7 +99,7 @@ async function calendarFetch(auth: GoogleAuth, url: string, options?: RequestIni
       ...options?.headers,
     },
     signal: options?.signal ?? AbortSignal.timeout(30_000),
-  });
+  }, auth.hostPolicy);
   return response;
 }
 
@@ -110,7 +136,7 @@ function formatAttendees(attendees: CalendarEvent['attendees']): string {
 
 const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event', 'update_event', 'delete_event']);
 
-export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
+export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<CalendarInput> {
   return {
     destructive: {
       mode: 'external',
@@ -203,10 +229,18 @@ export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
       },
     },
     handler: async (input: CalendarInput, agent: IAgent): Promise<string> => {
+      // Registered from boot, connected or not — see google/index.ts.
+      const auth = getAuth();
+      if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
         // Check write scope
-        if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.CALENDAR_EVENTS)) {
-          return `Error: This action requires calendar write permissions. Grant access in Settings → Channels → Google.`;
+        // `hasOwn`, not a truthiness check on the lookup: `input.action` is
+        // typed but arrives from the model, so an unrecognised value is
+        // reachable at runtime and must fall through to the unknown-action
+        // error below rather than be silently admitted.
+        if (Object.hasOwn(ACTION_SCOPES, input.action)) {
+          const refusal = refuseUnlessScoped(auth, ACTION_SCOPES[input.action], ACTION_DESCRIPTIONS[input.action]);
+          if (refusal) return refusal;
         }
 
         // Confirmation — fail-safe: block if no prompt available

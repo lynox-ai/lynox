@@ -28,9 +28,31 @@ fi
 # Check external tools wrap untrusted content. Either helper qualifies:
 # wrapUntrustedData (single-string) or wrapChannelMessage (structured
 # multi-field). Both produce the same <untrusted_data> boundary.
+#
+# The `-f` test is a SEPARATE refusal, not a condition on the grep. Written as
+# `[ -f "$file" ] && ! grep …`, a member that no longer exists simply dropped out
+# of the set and the loop went on to print the tick below. Measured 2026-09-05:
+# six of the seven paths existed and `src/integrations/google/google-gmail.ts`
+# did not — it went with the tool itself in 1a5eacbd (#180, 2026-04-27) — so the
+# green run was already one file short of what it claimed, and had been for four
+# months. That stale entry is removed here; the refusal is what keeps the next
+# one from being silent.
+#
+# `exit 2`: "the list is stale" is neither "clean" nor "found something". Same
+# split `scripts/lib/guard-file-list.sh` makes, and its helpers are deliberately
+# not reused — they wrap `git ls-files`, while this list is hardcoded, so their
+# refusal would name a cause that is not this one.
 WRAP_OK=true
-for file in src/tools/builtin/http.ts src/integrations/search/web-search-tool.ts src/integrations/google/google-gmail.ts src/integrations/google/google-sheets.ts src/integrations/google/google-drive.ts src/integrations/google/google-calendar.ts src/integrations/google/google-docs.ts; do
-  if [ -f "$file" ] && ! grep -qE 'wrapUntrustedData|wrapChannelMessage' "$file"; then
+for file in src/tools/builtin/http.ts src/integrations/search/web-search-tool.ts src/integrations/google/google-sheets.ts src/integrations/google/google-drive.ts src/integrations/google/google-calendar.ts src/integrations/google/google-docs.ts; do
+  if [ ! -f "$file" ]; then
+    {
+      echo "❌ security-scan: $file is in the wrap list but does not exist."
+      echo "   The list is stale — a member that vanishes must not vanish from the check."
+      echo "   Remove it here if the file went on purpose, or restore the path."
+    } >&2
+    exit 2
+  fi
+  if ! grep -qE 'wrapUntrustedData|wrapChannelMessage' "$file"; then
     echo "❌ $file missing wrapUntrustedData or wrapChannelMessage"
     WRAP_OK=false
     ERRORS=$((ERRORS + 1))

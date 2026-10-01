@@ -74,6 +74,22 @@ describe('parseAnnouncedSubAgents', () => {
 		expect(child!.role).toHaveLength(32);
 		expect(child!.model).toHaveLength(64);
 	});
+
+	it('reads tier + downgraded off the wire (spawn-consent downgrade label)', () => {
+		// Mutate the parser to drop the tier/downgraded reads and both come back
+		// undefined — the panel would hide the downgrade label (silent degradation).
+		const [downgraded, plain] = parseAnnouncedSubAgents([
+			{ id: 's:0', name: 'r', model: 'claude-sonnet-4-6', tier: 'balanced', downgraded: true },
+			{ id: 's:1', name: 'r2', tier: 'deep' },
+		]);
+		expect(downgraded!.tier).toBe('balanced');
+		expect(downgraded!.downgraded).toBe(true);
+		expect(plain!.tier).toBe('deep');
+		expect(plain!.downgraded).toBeUndefined();
+		// An unrecognised tier string is dropped, not passed through.
+		const [bogus] = parseAnnouncedSubAgents([{ id: 's:2', name: 'x', tier: 'ultra' }]);
+		expect(bogus!.tier).toBeUndefined();
+	});
 });
 
 describe('recordSpawn', () => {

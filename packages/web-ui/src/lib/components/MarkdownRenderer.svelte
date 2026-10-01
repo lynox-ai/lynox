@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
+	import { externalizeLinks } from '$lib/utils/external-links.js';
 	import { codeToHtml } from 'shiki';
 	import { goto } from '$app/navigation';
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
@@ -30,7 +31,7 @@
 	}
 
 	const baseHtml = $derived(
-		wrapTables(DOMPurify.sanitize(marked.parse(repairCodeFences(fixMarkdownPreprocessing(content)), { async: false }) as string))
+		wrapTables(externalizeLinks(DOMPurify.sanitize(marked.parse(repairCodeFences(fixMarkdownPreprocessing(content)), { async: false }) as string)))
 	);
 
 	function decodeEntities(str: string): string {
@@ -678,7 +679,7 @@
 <div onclick={handleContainerClick} class="markdown-root prose prose-invert max-w-none min-w-0
 	prose-pre:bg-bg-muted prose-pre:border prose-pre:border-border prose-pre:rounded-[var(--radius-md)] prose-pre:overflow-x-auto
 	prose-code:text-accent-text prose-code:text-xs prose-code:font-mono
-	prose-a:text-accent-text prose-a:no-underline hover:prose-a:opacity-80
+	prose-a:text-accent-text prose-a:underline prose-a:decoration-accent-text/40 prose-a:underline-offset-2 hover:prose-a:decoration-accent-text
 	prose-headings:text-text prose-headings:font-medium prose-headings:tracking-tight
 	prose-p:leading-relaxed prose-li:leading-relaxed
 	prose-strong:text-text prose-strong:font-semibold">

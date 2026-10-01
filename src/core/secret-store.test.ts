@@ -6,7 +6,9 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, isInfraSecret } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
+import { LLM_CATALOG } from './llm/catalog.js';
+import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
 
@@ -470,5 +472,166 @@ describe('SecretStore', () => {
       const store = new SecretStore();
       expect(store.findNameMatches('GOOGLE_MAPS_KEY')).toEqual([]);
     });
+  });
+});
+
+describe('maskSecretPatterns — prefixed key forms', () => {
+  // These are pinned HERE and not on the error-reporting path, deliberately.
+  // That path passes `includeGeneric`, whose 40+ char catcher masks these by
+  // accident of length — so a test there stays green with the specific patterns
+  // deleted. Every OTHER caller runs without `includeGeneric`, and there these
+  // rules are the only thing standing between a real key and a log line.
+  it('masks an OpenAI project key, whose token contains - and _', () => {
+    // The plain `sk-[A-Za-z0-9]{20,}` rule stops at the first dash and matches
+    // four characters, so this shipped verbatim until 2026-08-24. The old test
+    // fixture (`sk-ant-` + 40 A's) was alnum-only, which is why it looked
+    // covered.
+    const key = 'sk-proj-Ab1Cd2Ef3Gh4Ij5_Kl6Mn7-Op8Qr9St0Uv1Wx2Yz3';
+    expect(maskSecretPatterns(`key=${key}`)).not.toContain(key);
+  });
+
+  it('masks a service-account key', () => {
+    const key = 'sk-svcacct-Ab1Cd2Ef3_Gh4Ij5-Kl6Mn7Op8Qr9St0';
+    expect(maskSecretPatterns(`key=${key}`)).not.toContain(key);
+  });
+
+  it('masks a credential embedded in a connection URL', () => {
+    const url = 'postgres://lynox:Hunter2Pw@db.internal:5432/lynox';
+    const out = maskSecretPatterns(`connect failed: ${url}`);
+    expect(out).not.toContain('Hunter2Pw');
+  });
+
+  it('leaves an ordinary URL alone', () => {
+    // The userinfo rule needs the `:`…`@` shape. Without this the pattern would
+    // be a false-positive machine over every URL in every message.
+    const url = 'https://api.example.com/v1/users?id=3';
+    expect(maskSecretPatterns(`GET ${url}`)).toContain(url);
+  });
+
+  it('does not apply the generic catcher unless asked', () => {
+    // The default stays conservative for prose surfaces; only the error-report
+    // path opts in.
+    const hash = 'a'.repeat(64);
+    expect(maskSecretPatterns(`sha=${hash}`)).toContain(hash);
+    expect(maskSecretPatterns(`sha=${hash}`, { includeGeneric: true })).not.toContain(hash);
+  });
+});
+
+
+describe('URL-userinfo rule stays linear', () => {
+  it('does not degrade quadratically on a long dotted run', () => {
+    // The trigger is specific and the obvious fixture MISSES it: a solid hex or
+    // base64 blob is linear (one `\b` start), and a space-broken stack trace is
+    // linear (short runs). What degrades is ONE unbroken `[a-z0-9+.-]` run with
+    // many internal word boundaries — `a.a.a.…` — because the scheme quantifier
+    // restarts at each of them. Unbounded this measured 40 KB -> ~500 ms of
+    // blocked event loop, and a regex cannot be interrupted.
+    const input = 'a.'.repeat(20_000); // 40 KB
+    const started = performance.now();
+    maskSecretPatterns(input, { includeGeneric: true });
+    const elapsed = performance.now() - started;
+    // Headroom, measured inside vitest rather than estimated: bounded runs
+    // 3–5 ms idle and 14 ms worst case under load (16 hogs on 8 cores), so the
+    // bar sits ~10x above the bad case. Unbounded measures ~960 ms here, so the
+    // bar sits ~6x below it. Both gaps are smaller than the "two orders of
+    // magnitude" this comment first claimed — a bare wall-clock assertion with
+    // no scaling comparison, kept because it demonstrably fails on the real
+    // regression and holds under load, not because the margin is generous.
+    expect(elapsed).toBeLessThan(150);
+  });
+
+  it('still matches the schemes the bound has to keep', () => {
+    for (const scheme of ['postgres', 'amqp', 'mongodb+srv', 'https']) {
+      expect(maskSecretPatterns(`${scheme}://user:hunter2@host/db`)).not.toContain('hunter2');
+    }
+  });
+});
+
+describe('isProtectedSecretWrite — provider key slots', () => {
+  // The slots are read straight from where they are declared — the model catalog and the
+  // per-provider map — not from the set the guard uses, so a guard that keeps its own
+  // shorter list fails here as soon as the catalog names a slot the list does not.
+  const declaredSlots = [
+    ...Object.values(VAULT_SLOT_BY_PROVIDER),
+    ...LLM_CATALOG.map((e) => e.vault_slot),
+  ].filter((s): s is string => typeof s === 'string');
+
+  it('the catalog declares more than the four first-party slots', () => {
+    // Guards the test itself: with only the four, a hand-kept list would pass.
+    expect(new Set(declaredSlots).size).toBeGreaterThan(4);
+  });
+
+  it.each([...new Set(declaredSlots)])('protects %s against an agent write', (slot) => {
+    expect(isProtectedSecretWrite(slot)).toBe(true);
+  });
+
+  it('protects the SDK alias slot the engine also resolves a provider key from', () => {
+    // Declared in neither source above, so it is pinned by name.
+    expect(isProtectedSecretWrite('OPENAI_API_KEY')).toBe(true);
+  });
+
+  it('does not protect an ordinary API credential name', () => {
+    expect(isProtectedSecretWrite('WOO_CS')).toBe(false);
+    expect(isProtectedSecretWrite('SHOPIFY_TOKEN')).toBe(false);
+    // Same suffix as a provider slot, not a provider slot: a guard keyed on the
+    // `_API_KEY` suffix would lock the tenant's own integrations.
+    expect(isProtectedSecretWrite('STRIPE_API_KEY')).toBe(false);
+  });
+});
+
+describe('SECRET_SHAPES — the shared credential shape list', () => {
+  // One synthetic value per shape, assembled at runtime so no scanner mistakes
+  // the test file for a leak. A shape added to the list without a value here
+  // fails the first test, which is the point: every shape carries a witness.
+  const WITNESS: Record<string, string> = {
+    'Anthropic API key': 'sk-' + 'ant-api03-' + 'A'.repeat(24),
+    'OpenAI API key': 'sk-' + 'proj-' + 'Ab12_Cd34-' + 'B'.repeat(16),
+    'OpenAI-style API key': 'sk-' + 'C'.repeat(24),
+    'credential in URL': 'postgres://' + 'admin:hunter2' + '@db.example.com/app',
+    'Stripe API key': 'sk_' + 'live_' + 'D'.repeat(20),
+    'GitHub token': 'github_pat_' + 'E'.repeat(24),
+    'AWS access key': 'AKIA' + 'F'.repeat(16),
+    'Google OAuth token': 'ya29.' + 'G'.repeat(24),
+    'Google API key': 'AIza' + 'G'.repeat(35),
+    'Slack token': 'xox' + 'b-' + '1234567890-' + 'H'.repeat(12),
+    'Shopify token': 'shp' + 'at_' + '0123456789abcdef'.repeat(2),
+    'JWT token': 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.eyJ' + 'zdWIiOiIxMjM0NTY3ODkwIn0' + '.' + 'I'.repeat(20),
+    'private key': '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----',
+    'bearer token': 'Bearer ' + 'J'.repeat(24),
+    'long token': 'K'.repeat(44),
+  };
+
+  it('every shape has a witness value, and every witness names a shape', () => {
+    expect(Object.keys(WITNESS).sort()).toEqual([...new Set(SECRET_SHAPES.map((s) => s.label))].sort());
+  });
+
+  // The outbound scan's wider spellings get their own witnesses: values only the
+  // wide form catches (glued to a word character, a non-`eyJ` JWT payload).
+  const WIDE_WITNESS: Record<string, string> = {
+    'Anthropic API key': 'X_' + 'sk-' + 'ant-api03-' + 'L'.repeat(24),
+    'OpenAI-style API key': 'TOKEN_' + 'sk-' + 'M'.repeat(24),
+    'GitHub token': 'TOKEN_' + 'ghp_' + 'N'.repeat(36),
+    'JWT token': 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.' + 'O'.repeat(16) + '.' + 'P'.repeat(16),
+  };
+
+  it.each(SECRET_SHAPES.map((s) => [`${s.label} (${s.kind})`, s] as const))('the %s shape recognises its witness', (_name, shape) => {
+    const witness = shape.kind === 'egress-wide' ? WIDE_WITNESS[shape.label] : WITNESS[shape.label];
+    expect(witness).toBeDefined();
+    expect(shape.pattern.test(witness!)).toBe(true);
+  });
+
+  it('keeps the wide outbound spellings out of detect/mask — they fire inside words', () => {
+    expect(matchesSecretPattern('see task-abcdefghij1234567890xyz for details')).toBeNull();
+    expect(maskSecretPatterns('see task-abcdefghij1234567890xyz')).toBe('see task-abcdefghij1234567890xyz');
+  });
+
+  it('keeps the generic catcher last — short-text callers drop the final entry', () => {
+    expect(SECRET_SHAPES[SECRET_SHAPES.length - 1]!.kind).toBe('generic');
+    expect(SECRET_SHAPES.filter((s) => s.kind === 'generic')).toHaveLength(1);
+  });
+
+  it.each(SECRET_SHAPES.filter((s) => s.kind !== 'generic' && s.kind !== 'egress-wide').map((s) => [s.label]))('masks a %s', (label) => {
+    const witness = WITNESS[label]!;
+    expect(maskSecretPatterns(`value: ${witness} end`)).not.toContain(witness);
   });
 });

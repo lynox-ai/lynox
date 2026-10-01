@@ -1,53 +1,44 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { PromptStore, PromptConflictError } from './prompt-store.js';
+import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson, originWireFields } from './prompt-store.js';
+import { RunHistory } from './run-history.js';
 
-/** Build a fresh SQLite instance with just the pending_prompts schema the
- * PromptStore depends on. Mirrors migrations v25 + v27 + v29 + v33 + v43
- * (post-rewrite — connect_mail in the CHECK + payload_json column). */
-function makeDb(): Database.Database {
-  const db = new Database(':memory:');
-  const stmts = [
-    `CREATE TABLE pending_prompts (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-      question TEXT NOT NULL,
-      options_json TEXT,
-      questions_json TEXT,
-      segments_json TEXT,
-      partial_answers_json TEXT,
-      secret_name TEXT,
-      secret_key_type TEXT,
-      answer TEXT,
-      answer_saved INTEGER,
-      answer_error TEXT,
-      multi_select INTEGER,
-      payload_json TEXT,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      answered_at TEXT,
-      expires_at TEXT NOT NULL
-    )`,
-    `CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`,
-    `CREATE UNIQUE INDEX idx_pending_prompts_session_unique
-      ON pending_prompts(session_id) WHERE status = 'pending'`,
-  ];
-  for (const s of stmts) db.prepare(s).run();
-  return db;
+/**
+ * A fresh in-memory database carrying the REAL `pending_prompts` schema.
+ *
+ * This used to hand-roll the DDL, mirroring "migrations v25 + v27 + v29 + v33 +
+ * v43" in a comment. That copy drifted the moment a migration added a column —
+ * and it drifts SILENTLY in the safe-looking direction: the fixture keeps
+ * passing against a schema production does not have, until an insert names the
+ * missing column and 56 tests fail at once for one reason. `RunHistory` runs the
+ * ladder in its constructor and accepts `:memory:`, so there is no second copy
+ * to keep in step.
+ *
+ * ⚠ Five more hand-rolled copies remain, all in `src/server/http-api.test.ts`.
+ * They were left alone here on purpose — that file is the known full-run-flaky
+ * one, and rewriting six fixtures inside it does not belong in a change about
+ * triggers.
+ */
+function makeDb(): { db: Database.Database; close: () => void } {
+  const history = new RunHistory(':memory:');
+  return { db: history.getDb(), close: () => { history.close(); } };
 }
 
 describe('PromptStore', () => {
   let db: Database.Database;
   let store: PromptStore;
+  let closeDb: () => void;
 
   beforeEach(() => {
-    db = makeDb();
+    ({ db, close: closeDb } = makeDb());
     store = new PromptStore(db);
   });
 
   afterEach(() => {
-    db.close();
+    closeDb();
   });
 
   describe('single-question ask_user', () => {
@@ -400,5 +391,216 @@ describe('PromptStore', () => {
     it('throws on an empty question set', () => {
       expect(() => store.insertOnboardingBasics('s-onb2', [], [])).toThrow();
     });
+  });
+
+  // A prompt raised inside a workflow step can sit here for minutes, which is
+  // exactly the window a page gets reloaded in. The live SSE event carries the
+  // origin; without persisting it the restored dialog drops back to the
+  // unexplained "Allow / Deny" the whole feature exists to prevent.
+  describe('prompt origin (v52)', () => {
+    const origin = { workflowName: 'bexio Triage Phase 1-3', stepId: 'load_contacts', stepTask: 'Paginate contacts' };
+
+    it('persists the origin on every prompt kind that a step can raise', () => {
+      const cases: Array<[string, string]> = [
+        ['ask_user', store.insertAskUser('o1', 'Allow?', ['Allow', 'Deny'], false, undefined, origin)],
+        ['tabs', store.insertAskUserTabs('o2', [{ question: 'Which?' }], origin)],
+        ['ask_secret', store.insertAskSecret('o3', 'BEXIO_TOKEN', 'Key?', 'api_key', origin)],
+        ['connect_mail', store.insertConnectMail('o4', 'Connect', '{"address":"a@b.c"}', origin)],
+      ];
+      for (const [kind, id] of cases) {
+        const row = store.getById(id);
+        expect(JSON.parse(row!.origin_json!), kind).toEqual(origin);
+      }
+    });
+
+    it('stores NULL when the prompt has no origin — a main-agent prompt must render no origin line', () => {
+      const id = store.insertAskUser('o5', 'Allow?', ['Allow', 'Deny']);
+      expect(store.getById(id)?.origin_json).toBeNull();
+    });
+
+    it('keeps a partial origin partial instead of inventing the missing half', () => {
+      const id = store.insertAskUser('o6', 'Allow?', undefined, false, undefined, { stepId: 'solo' });
+      expect(JSON.parse(store.getById(id)!.origin_json!)).toEqual({ stepId: 'solo' });
+    });
+  });
+});
+
+/**
+ * The suite above builds `pending_prompts` by hand, so it can only prove the
+ * store agrees with ITSELF — a migration that added the wrong column name, or
+ * none at all, would leave every test above green and every real tenant
+ * throwing on the first workflow prompt. This one runs the actual migrations.
+ */
+describe('PromptStore against the real migrated schema', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('writes and reads the origin on a database built by the migrations', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-prompt-origin-'));
+    tmpDirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'));
+    try {
+      const store = new PromptStore(history.getDb());
+      const id = store.insertAskUser('real-1', 'Allow?', ['Allow', 'Deny'], false, undefined, {
+        workflowName: 'bexio Triage Phase 1-3',
+        stepId: 'load_contacts',
+      });
+      expect(JSON.parse(store.getById(id)!.origin_json!))
+        .toEqual({ workflowName: 'bexio Triage Phase 1-3', stepId: 'load_contacts' });
+    } finally {
+      history.close();
+    }
+  });
+});
+
+describe('promptOriginOf', () => {
+  it('narrows a full meta to the origin fields and nothing else', () => {
+    expect(promptOriginOf({
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+      multiSelect: true,
+    })).toEqual({
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+    });
+  });
+
+  it('survives on a sub-agent alone — a spawn outside any workflow has no step', () => {
+    expect(promptOriginOf({ subagent: true, subagentName: 'triage', subagentTask: 'Fold dupes' }))
+      .toEqual({ subagent: true, subagentName: 'triage', subagentTask: 'Fold dupes' });
+  });
+
+  it('⭐ keeps the flag when every name is empty — the disclosure is not the spec\'s to delete', () => {
+    // `spec.name` of one zero-width space passes `validateSpawnInput` and cleans
+    // to nothing in the client. If the flag travelled only alongside a surviving
+    // name, the parent could suppress its own disclosure by choosing one.
+    expect(promptOriginOf({ subagent: true, subagentName: '', subagentTask: '' }))
+      .toEqual({ subagent: true });
+  });
+
+  it('⭐ only the engine\'s own `true` counts, not any truthy value off a crafted row', () => {
+    // Asserted through `parseOriginJson`, because that is the path a crafted row
+    // actually takes — and with values a TRUTHY check would accept. A fixture of
+    // `undefined` proves nothing here: it is falsy, so `=== true` and a plain
+    // truthy test agree on it, and mutating the comparison survives.
+    expect(parseOriginJson('{"subagent":1,"workflowName":"W"}')).toEqual({ workflowName: 'W' });
+    expect(parseOriginJson('{"subagent":"false","workflowName":"W"}')).toEqual({ workflowName: 'W' });
+    expect(parseOriginJson('{"subagent":true}')).toEqual({ subagent: true });
+  });
+
+  it('⭐ bounds what a field can carry into the row and onto the wire', () => {
+    // `spec.task` may be 16 KB (MAX_SPAWN_TASK_LENGTH). Unbounded here, all of
+    // it was persisted per prompt and pushed through every SSE frame to render
+    // 160 characters. This bound is NOT the display bound — it exists so the
+    // storage and the transport are finite, and the client is free to clamp
+    // tighter for layout without touching it.
+    //
+    // The fixture is ASTRAL on purpose. With `'x'.repeat()` a UTF-16 `slice`
+    // and a code-point slice are indistinguishable, so the bound could be
+    // rewritten to cut surrogate pairs in half and every assertion would hold.
+    const long = '😀'.repeat(20_000);
+    const o = promptOriginOf({ subagent: true, subagentTask: long, stepTask: long })!;
+    expect([...o.subagentTask!]).toHaveLength(512);
+    expect([...o.stepTask!]).toHaveLength(512);
+    expect(o.subagentTask!.isWellFormed(), 'the cut split a surrogate pair').toBe(true);
+    // A value inside the bound is untouched — no ellipsis, no trimming.
+    expect(promptOriginOf({ stepTask: 'Paginate contacts' })!.stepTask).toBe('Paginate contacts');
+  });
+
+  it('is undefined when the meta carries no origin — multiSelect alone is not one', () => {
+    expect(promptOriginOf({ multiSelect: true })).toBeUndefined();
+    expect(promptOriginOf({})).toBeUndefined();
+    expect(promptOriginOf(undefined)).toBeUndefined();
+  });
+
+  it('survives on the workflow name alone', () => {
+    // The half that matters most to a non-technical user: a step id is jargon,
+    // the workflow name is what they clicked. Dropping the origin because two
+    // of three fields are missing would lose exactly the useful one.
+    expect(promptOriginOf({ workflowName: 'bexio Triage' })).toEqual({ workflowName: 'bexio Triage' });
+  });
+
+  it('treats an empty field as absent, so the row cannot claim what the dialog denies', () => {
+    // The client-side parser treats '' as absent. If this side kept it, the row
+    // would persist `{"workflowName":""}` — an origin the renderer then refuses
+    // to show. Two layers disagreeing about the same value is how a stored fact
+    // and a displayed one drift apart.
+    expect(promptOriginOf({ workflowName: '', stepId: 'load_contacts' }))
+      .toEqual({ workflowName: undefined, stepId: 'load_contacts', stepTask: undefined });
+    expect(promptOriginOf({ workflowName: '', stepId: '', stepTask: '' })).toBeUndefined();
+  });
+});
+
+describe('parseOriginJson', () => {
+  it('round-trips what promptOriginOf wrote', () => {
+    const origin = { workflowName: 'bexio Triage', stepId: 'load_contacts', stepTask: 'Paginate' };
+    expect(parseOriginJson(JSON.stringify(origin))).toEqual(origin);
+  });
+
+  it('degrades to undefined instead of throwing, whatever the row holds', () => {
+    // The origin is a LABEL on a prompt. A bad label must cost the user their
+    // provenance line, never the resume of the prompt a run is blocked on —
+    // an unguarded JSON.parse here 500s `GET /pending-prompt` for that session
+    // and the run stays wedged with no way to answer it.
+    //
+    // Only the first two of these DISCRIMINATE: they are the cases that throw
+    // without the try/catch. The rest pin the contract, not a guard — they would
+    // stay green with every shape check deleted, which is why the implementation
+    // does not carry those checks.
+    expect(() => parseOriginJson('{not json')).not.toThrow();
+    expect(parseOriginJson('{not json')).toBeUndefined();
+    expect(parseOriginJson('null')).toBeUndefined();
+    expect(parseOriginJson('"a string"')).toBeUndefined();
+    expect(parseOriginJson('[{"workflowName":"x"}]')).toBeUndefined();
+    expect(parseOriginJson(null)).toBeUndefined();
+  });
+
+  it('drops non-string fields rather than rendering them', () => {
+    expect(parseOriginJson('{"workflowName":42,"stepId":"load_contacts"}'))
+      .toEqual({ workflowName: undefined, stepId: 'load_contacts', stepTask: undefined });
+  });
+
+  it('⭐ reads back every field the writer can write — no half-known set', () => {
+    // The failure this replaces: the write side and the read side were two
+    // hand-written field lists, so a field added to one and forgotten in the
+    // other persists on the row and comes back as nothing. It looks like a
+    // rendering bug and is a parsing one. Both derive from ORIGIN_FIELDS now,
+    // and the point of asserting it here is that the DERIVATION is what holds —
+    // the exhaustive `Record<keyof PromptOrigin, true>` makes forgetting a field
+    // a compile error, and this proves the two agree at runtime as well.
+    const full = {
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+    };
+    const written = promptOriginOf(full)!;
+    expect(parseOriginJson(JSON.stringify(written))).toEqual(full);
+  });
+});
+
+describe('originWireFields', () => {
+  it('names every field on the wire, in the snake_case the client reads', () => {
+    expect(originWireFields({
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+    })).toEqual({
+      workflow_name: 'W', step_id: 's', step_task: 't',
+      subagent_name: 'triage', subagent_task: 'Fold dupes',
+    });
+  });
+
+  it('agrees with the persisted row about an empty field', () => {
+    // The four SSE emits used to read the meta RAW while the row went through
+    // `promptOriginOf`, so `''` was absent in the database and present on the
+    // wire — the live dialog and the one restored after a refresh could disagree
+    // about whether a prompt had an origin at all.
+    expect(originWireFields({ workflowName: '', stepId: 'load' }).workflow_name).toBeUndefined();
+    expect(promptOriginOf({ workflowName: '', stepId: 'load' })?.workflowName).toBeUndefined();
+  });
+
+  it('is all-undefined when there is no origin, so the event grows no fields', () => {
+    expect(Object.values(originWireFields(undefined)).every(v => v === undefined)).toBe(true);
   });
 });

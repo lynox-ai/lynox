@@ -205,6 +205,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
 };
 
 export const writeFileTool: ToolEntry<WriteFileInput> = {
+  undo: 'restorable',
   definition: {
     name: 'write_file',
     description: 'Write content to a file in the workspace, creating directories as needed. For something the user should see/download (a document, report, dataset), prefer `artifact_save` — it shows in the gallery with preview + export; write_file lands in the easily-missed files area.',
@@ -268,6 +269,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
 };
 
 export const editFileTool: ToolEntry<EditFileInput> = {
+  undo: 'restorable',
   definition: {
     name: 'edit_file',
     description:

@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider } from './llm-client.js';
+import type { RunFailure } from './provider-failure.js';
 import { resolveProviderApiKey, enrichTierSetCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
@@ -32,7 +33,7 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
-import type { DataStoreBridge } from './datastore-bridge.js';
+import { compose, engineText, renderFence } from '../core/data-boundary.js';
 
 import {
   bashTool,
@@ -82,12 +83,16 @@ import {
   artifactHistoryTool,
   artifactRestoreTool,
   recallToolResultTool,
+  calendarReadTool,
   setThreadContextTool,
   subjectsMergeTool,
   mediaProcessTool,
+  bulkPlanTool,
+  bulkStatusTool,
 } from '../tools/builtin/index.js';
+import { BulkLedger } from './bulk-ledger.js';
 import type { ToolContext } from './tool-context.js';
-import { createToolContext } from './tool-context.js';
+import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
   configureBudgetAndRateLimits,
   generateInitBriefing,
@@ -97,7 +102,6 @@ import {
   initMemoryInstance,
   initEmbeddingProvider,
   initKnowledgeLayer,
-  initDataStoreBridge,
   setupMemoryStoreSubscription,
 } from './engine-init.js';
 import { submitBatch, pollBatch } from './batch.js';
@@ -105,12 +109,14 @@ import { DataStore } from './data-store.js';
 import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
-import { runMemoryGc, runGraphGc } from './memory-gc.js';
+import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter } from './notification-router.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
+import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
+import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -124,6 +130,12 @@ export interface RunContext {
   source: ContextSource;
   /** Active tenant ID, set via Session.tenantId (Pro). */
   tenantId?: string | undefined;
+  /** Set on the FAILURE path only: a classified provider billing/quota stop for
+   *  this run's LLM call. The managed hook reports it to the control plane as an
+   *  incident (see managed-hook.ts) — the failure class that today reaches a
+   *  customer before it reaches us. `undefined` on success and on non-billing
+   *  failures. */
+  failure?: RunFailure | undefined;
 }
 
 /**
@@ -186,6 +198,30 @@ export function resolveInboxLlmRegion(opts: {
 export class Engine {
   readonly config: LynoxConfig;
   private userConfig: LynoxUserConfig;
+
+  /**
+   * The three tiers `resolveClientPair` reads, in ONE place.
+   *
+   * The config KEYS are Google's and the resolver is not, so the caller has to
+   * name them — but naming them at each call site meant two hand-written copies
+   * of the same two-key mapping, and only the first was covered: swapping or
+   * deleting the copy in `reloadGoogle` left the pair suites green. One copy,
+   * so one mutation reaches both call sites.
+   *
+   * The reload copy was reachable, contrary to the first version of this
+   * comment: the config→vault migration is conditional, and the pair-atomic
+   * case in engine-client-pair-boot.test.ts is a boot where it does not run.
+   * That case now drives the reload. Deduplicating is still the right call —
+   * two hand-written copies of a credential mapping is the shape this module
+   * exists to prevent — but "untestable" was not the reason, and it was wrong.
+   */
+  private googleClientSources(): ClientPairSources {
+    return {
+      vault: this.secretVault,
+      env: process.env,
+      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
+    };
+  }
   readonly registry = new ToolRegistry();
   client: Anthropic;
   private readonly batchIndex = new BatchIndex();
@@ -204,7 +240,6 @@ export class Engine {
   private pluginManager: PluginManager | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
   private knowledgeLayer: KnowledgeLayer | null = null;
-  private dataStoreBridge: DataStoreBridge | null = null;
   private secretVault: SecretVault | null = null;
   private secretStore: SecretStore | null = null;
   private userId: string | null = null;
@@ -237,7 +272,45 @@ export class Engine {
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
   private _hooks: LynoxHooks[] = [];
   private _toolContext: ToolContext;
+  /**
+   * The connection registry, when there is an `engineDb` to hold it. `null` on
+   * an engine without one, and every consumer must no-op rather than assume.
+   */
+  private _connectionStore: import('./connection-store.js').ConnectionStore | null = null;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
+  /** Which source supplied the Google client pair — the UI routes the card on it. */
+  private _googleClientSource: ClientPairSource | null = null;
+
+  /**
+   * Which source supplied the Google client pair.
+   *
+   * Read by `GET /api/google/status` — but only AFTER that route returns early
+   * on a null GoogleAuth, so it is not the surface where a stale value shows.
+   * That is `GET /api/secrets/status`, whose `configured.google` is this value
+   * being non-null: a source left standing after the credentials are gone
+   * reports Google as configured on an engine that resolves nothing.
+   */
+  getGoogleClientSource(): ClientPairSource | null {
+    return this._googleClientSource;
+  }
+
+  /**
+   * True when an ENV-supplied pair sits on a provisioned instance.
+   *
+   * ⚠ It no longer answers "is this tenant on the shared broker", which is
+   * what it used to be called and used for. PRD Stage 1 §3.2 decided a
+   * brokered tenant holds NO pair at all, so this predicate is false exactly
+   * where that question is asked. The live one is
+   * `integrations/google/broker-mode.ts › isBrokerMode`.
+   *
+   * ⚠ And it has no production caller since W3 replaced the `managed_broker`
+   * field's source. It stays because removing a public Engine method and
+   * re-cutting the six assertions in `engine-client-pair-boot.test.ts` is
+   * §3.2's cleanup, not this wave's.
+   */
+  isGoogleManagedBroker(): boolean {
+    return isManagedBrokerPair(this._googleClientSource);
+  }
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _scheduledSendPoller: import('../integrations/mail/mail-scheduled-poller.js').ScheduledSendPoller | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
@@ -262,6 +335,17 @@ export class Engine {
   private _notificationRouter = new NotificationRouter();
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
+  /**
+   * The pure consent decision, cached when `init()` loads the Drive module.
+   *
+   * `null` until then, and `null` forever if that module fails to load — which is why
+   * `_driveUploadAllowed` fails CLOSED on it. It exists because the decision has to be
+   * available SYNCHRONOUSLY at upload time, while the module must stay a dynamic import so
+   * a load failure in an optional feature cannot make `init()` throw.
+   */
+  private _driveGate: {
+    driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
+  } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
@@ -697,7 +781,31 @@ export class Engine {
     await this._initCoreTools();
     await this._initIntegrations();
     await this._initPipelineAndBackup();
+    this._scheduleStartupReap();
     return this;
+  }
+
+  /**
+   * Reap deactivated/retired rows once per process start, in addition to the
+   * every-{@link AUTO_GC_INTERVAL}-runs trigger in {@link incrementRunCount}.
+   *
+   * That trigger is `runCount % 50`, and `runCount` is an in-memory field that resets
+   * to 0 on every restart. An instance that does fewer than fifty runs between restarts
+   * therefore never reaps anything — measured on a production instance: 288 rows sat
+   * deactivated in `agent-memory.db` (28% of the table) with the file untouched for
+   * nine days. Making a restart itself a trigger closes the hole exactly where it
+   * opened: the counter resets on restart, so the restart has to do the work.
+   *
+   * Reap only — deliberately NOT `runGraphGc`, which also runs cross-scope memory
+   * CONSOLIDATION. Merging a user's memories is not something a reboot should do
+   * silently; that stays on the run-count path where it is today.
+   */
+  private _scheduleStartupReap(): void {
+    void runStartupReap(this.knowledgeLayer).then(({ error }) => {
+      // Reported rather than swallowed. A maintenance step whose failure is invisible is
+      // exactly how the original gap survived unnoticed for as long as it did.
+      if (error !== null) process.stderr.write(`[lynox] startup reap failed: ${String(error)}\n`);
+    });
   }
 
   /** Debug logging, LLM provider SDK, Bugsink error reporting. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -998,7 +1106,7 @@ export class Engine {
       }
     }
 
-    // Provenance recovery backfill (arc:model-selector P1, DEF-0095). The v47
+    // Provenance recovery backfill. The v47
     // `model_tier_source` column starts every pre-column thread at 'unknown'; this
     // one-shot pass labels a thread whose tier differs from the instance default as
     // a likely deliberate pick ('user'), recovering the real historical picks the
@@ -1025,8 +1133,10 @@ export class Engine {
       try {
         const { PromptStore } = await import('./prompt-store.js');
         this._promptStore = new PromptStore(this.runHistory.getDb());
-        // Expire any prompts left pending from a previous engine run
-        this._promptStore.expireAll();
+        // Expire prompts left pending from a previous engine run — except the
+        // ones a trigger is parked on, which are exactly the questions whose
+        // answers are allowed to arrive in a later process (§0 A1/A2).
+        this._promptStore.expireUnparked();
         // Periodic cleanup every 5 minutes
         this._promptCleanupTimer = setInterval(() => {
           this._promptStore?.expireOld();
@@ -1109,11 +1219,11 @@ export class Engine {
       }
     }
 
-    // Configure persistent budget caps and HTTP rate limits
+    // Configure persistent budget caps, HTTP rate limits and the egress policy.
+    // Called with or without RunHistory: the limits that count against it are
+    // skipped when it failed to open, the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
-    if (this.runHistory) {
-      configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
-    }
+    configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
 
   /** Context resolution, workspace, briefing, secrets, API client recreate, user ID + scopes. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -1140,7 +1250,8 @@ export class Engine {
     this.secretVault = secretResult.vault;
     this.secretStore = secretResult.store;
     for (const part of secretResult.briefingParts) {
-      this.briefing = this.briefing ? `${this.briefing}\n\n${part}` : part;
+      this.briefing = compose(
+        this.briefing ? [engineText(this.briefing), part] : [part], '\n\n');
     }
 
     // Recreate API client now that secrets are available (vault may hold ANTHROPIC_API_KEY)
@@ -1181,11 +1292,6 @@ export class Engine {
     // onBeforeRun/onAfterRun lifecycle as chat/voice). No-op on self-host.
     this.knowledgeLayer?.setMeteredHost(this);
 
-    // Initialize DataStore ↔ Knowledge Graph Bridge
-    if (this.knowledgeLayer && this._dataStore) {
-      this.dataStoreBridge = initDataStoreBridge(this.knowledgeLayer, this._dataStore);
-    }
-
     // Inject KPI context into briefing (now that KnowledgeLayer is available)
     if (this.knowledgeLayer) {
       try {
@@ -1199,8 +1305,9 @@ export class Engine {
           if (kpiLines.length > 0) perfParts.push(`KPIs: ${kpiLines.join(', ')}`);
         }
         if (perfParts.length > 0) {
-          const perfBlock = `<agent_performance>\n${perfParts.join('\n')}\n</agent_performance>`;
-          this.briefing = this.briefing ? `${this.briefing}\n\n${perfBlock}` : perfBlock;
+          const perfBlock = renderFence('agent_performance', perfParts.join('\n'));
+          this.briefing = compose(
+            this.briefing ? [engineText(this.briefing), perfBlock] : [perfBlock], '\n\n');
         }
       } catch { /* non-critical */ }
     }
@@ -1210,6 +1317,48 @@ export class Engine {
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
       this.context?.id ?? '',
     );
+
+    // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
+    // remember/recall/memory_block_edit tools. Gated on `durable_memory_enabled` + engine.db
+    // → zero standing surface when off. Independent of `subject_graph_enabled`: the substrate
+    // anchors on subjects, but SubjectStore is a thin per-call wrapper over engine.db, so it
+    // works whether or not the legacy subject-graph mirror is on (a fresh subjects table just
+    // grows deliberate findOrCreate anchors — H1).
+    //
+    // This MUST run before `_initCoreTools` registers the tools, and it is why it lives here
+    // rather than in `_initPipelineAndBackup` where it started. With the wiring two phases
+    // LATER, the registration gate could only ever PREDICT the store from its inputs, and this
+    // try/catch is the gap in any such prediction: whatever makes it fire leaves the six durable
+    // tools registered over a null store — each answering "not enabled" — with the legacy
+    // else-branch skipped, so the tenant has no memory at all and nothing says so.
+    // Today the only genuinely reachable throw is the dynamic `import()` (a broken build); both
+    // constructors just take the open handle. The ordering is not about how likely that is — it
+    // is so the gate reads the store INSTEAD of re-deriving it, and therefore cannot drift from
+    // it again. Two earlier versions of that condition drifted, each in a different direction.
+    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
+      try {
+        const { SubjectStore } = await import('./subject-store.js');
+        const { KnowledgeStore } = await import('./knowledge-store.js');
+        const subjectStore = this._subjectStore ?? new SubjectStore(this.engineDb);
+        const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
+        this._knowledgeStore = knowledgeStore;
+        this._toolContext.knowledgeStore = knowledgeStore;
+        // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
+        // subject_graph block wires it, but the durable substrate is independent of that flag —
+        // so wire it here too, or a durable-only tenant's memory_focus set-path is dead
+        // ("subject lookup is not available").
+        //
+        // NOT idempotent any more, and the comment used to claim it was: this now runs BEFORE
+        // the subject_graph block, so `_subjectStore` is always null here and a fresh instance
+        // is always built. When both flags are on, the KnowledgeStore holds this instance and
+        // `_toolContext.subjectStore` ends up holding the subject_graph block's. Harmless only
+        // because SubjectStore is a stateless wrapper over the one engine.db handle — if it
+        // ever gains a cache, these two stop being interchangeable and this is where it breaks.
+        this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
+      } catch (err) {
+        process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
   }
 
   /** API profile loading, builtin tool registration, TaskManager wiring, DataStore + ArtifactStore. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -1228,6 +1377,12 @@ export class Engine {
         // JSON files remain on disk as a rollback backup).
         const { ConnectionStore } = await import('./connection-store.js');
         const connStore = new ConnectionStore(this.engineDb);
+        // Retained on the engine, not only handed to the api-store. It used to
+        // be a local `const` that went out of scope the moment this block
+        // ended, so §3.10's token-change handler had nothing to call — the
+        // estimate that said "the store is already on the engine" was measuring
+        // a reachability that did not exist.
+        this._connectionStore = connStore;
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
@@ -1250,9 +1405,15 @@ export class Engine {
       // many user-bootstrapped profiles are already loaded. On a fresh
       // install (loaded === 0) this is the only API context the agent has;
       // after the user has wired some APIs it sits alongside, showing what
-      // else they can wire on demand. The catalog is suggestions only —
-      // real profiles are produced at bootstrap time by `api_setup` so the
-      // endpoint schema comes from live docs, not the model's training set.
+      // else they can wire on demand. Real profiles are produced at bootstrap
+      // time by `api_setup` so the endpoint schema comes from live docs, not
+      // the model's training set.
+      //
+      // "Suggestions only" is no longer the whole of it: the block carries a
+      // SECOND list the model is told not to suggest at all and to act on only
+      // once the user names a provider (`suggested-apis.ts`,
+      // `connect_when_user_asks`). Instruction, not enforcement — nothing here
+      // or in `api_setup` checks who raised it.
       // Opt-out: LYNOX_SKIP_SUGGESTED_APIS=1.
       const suggestedContext = this._apiStore.formatSuggestedApisForSystemPrompt();
       if (suggestedContext) {
@@ -1282,11 +1443,42 @@ export class Engine {
       .register(suggestFollowUpsTool)
       .register(mediaProcessTool);
 
+    // Calendar reading, behind `calendar_enabled`. Registering it conditionally rather than
+    // refusing inside the handler is what makes OFF byte-identical: an unregistered tool is
+    // absent from the decision space AND from the always-on prefix every turn pays for.
+    if (this.userConfig.calendar_enabled === true) {
+      this.registry.register(calendarReadTool);
+    }
+
+    // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
+    // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
+    // ledger lives there, and a registered tool with no ledger would only ever refuse.
+    if (this.userConfig.bulk_runs_enabled === true && this.engineDb) {
+      this._toolContext.bulkLedger = new BulkLedger(this.engineDb);
+      this.registry.register(bulkPlanTool).register(bulkStatusTool);
+    }
+
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
     // tools with `remember`/`recall`/`memory_block_edit` when `durable_memory_enabled` is on
     // (H9 — no partial swap: the six legacy tools are NOT registered when durable is on, and
     // the new three are NOT registered when it is off, so flag-OFF is byte-identical).
-    if (this.userConfig.durable_memory_enabled === true) {
+    //
+    // The gate is `_knowledgeStore` — the store OBJECT, not the flag and not `engineDb`. That is
+    // deliberate and it is the only version of this condition that cannot drift: `_initKnowledge`
+    // has already run, so the store either exists or it does not, and asking the thing itself
+    // beats re-deriving the two-or-three preconditions that produce it. Every earlier form of
+    // this line predicted the store from an input and each was wrong for a different reason —
+    // the flag alone missed an unopenable engine.db; `&& this.engineDb` missed a KnowledgeStore
+    // constructor that throws. Both landed in the SAME state: six durable tools registered over
+    // a null `toolContext.knowledgeStore`, every one answering "Durable memory is not enabled
+    // for this agent", AND the else-branch skipped, so the six legacy tools were absent too. The
+    // tenant had no memory at all and nothing said so: boot green, /api/health OK, one stderr line.
+    //
+    // That state used to need a deliberate operator flip on a watched instance, which is why it
+    // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
+    // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
+    // silent downgrade over the alternative — the alternative was silence with nothing working.
+    if (this.userConfig.durable_memory_enabled === true && this._knowledgeStore) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
@@ -1333,27 +1525,50 @@ export class Engine {
       this._dataStore = new DataStore();
       this._toolContext.dataStore = this._dataStore;
       // Drop empty CRM-shaped collections (`contacts` / `deals` / `interactions`
-      // …) that older agent sessions left behind. They duplicate the dedicated
-      // CRM tab in the UI and confuse users. Non-empty ones are preserved.
+      // …). Meant for the ones older agent sessions left behind, which duplicate
+      // the dedicated CRM tab in the UI. On an instance whose CRM is still empty
+      // it also drops the CRM's OWN collections, which `CRM.ensureSchema`
+      // recreates later in this boot. Non-empty ones are preserved.
       const droppedOverlaps = this._dataStore.dropEmptyCrmOverlaps();
       if (droppedOverlaps.length > 0) {
         process.stderr.write(`[lynox] DataStore: dropped ${String(droppedOverlaps.length)} empty CRM-overlap collection(s): ${droppedOverlaps.join(', ')}\n`);
       }
-      const collections = this._dataStore.listCollections();
-      if (collections.length > 0) {
-        this.registerDataStoreTools();
-        // The always-injected `<data_collections>` briefing block was removed
-        // 2026-07-18: `listCollections()` is UNSCOPED, so it dumped EVERY project's
-        // tables (a single tenant's laser-clinic, weather, SEO collections, …) into
-        // every thread's first turn — cross-project bleed, and the specific fake-
-        // "project" contents the model confabulated under the "http-api" label. The
-        // agent enumerates tables on demand via `data_store_list` instead (DK's
-        // default-injection-dies / retrieve-on-demand principle).
-      }
+      // Registered as soon as the store exists — all six, unconditionally. This
+      // used to wait for `listCollections().length > 0`, which an instance with
+      // neither a table of its own nor a CRM record never reaches: the drop just
+      // above removes the CRM's empty collections, and the CRM recreates them
+      // only later in boot (`_initPipelineAndBackup` → `CRM.ensureSchema`). So the
+      // tool that creates a table was offered only once a table already existed,
+      // and no agent on a new instance could create its first one.
+      //
+      // All six at once, not create first and the rest later: an agent keeps the
+      // tool list it was built with for the whole turn, so a table created
+      // mid-turn could not be filled in the same turn. The prompt suffix follows
+      // this registration (the session keys it on `getDataStoreEnabled()`).
+      //
+      // It must also run before `registerPipelineTools()` copies the registry
+      // into `_toolContext.tools`: that copy is what workflow steps get when no
+      // session has been built yet, e.g. a scheduled run right after a restart.
+      this.registerDataStoreTools();
+      // The always-injected `<data_collections>` briefing block was removed
+      // 2026-07-18: `listCollections()` is UNSCOPED, so it dumped EVERY project's
+      // tables (one tenant's unrelated collections from several projects, …) into
+      // every thread's first turn — cross-project bleed, and the specific fake-
+      // "project" contents the model confabulated under the "http-api" label. The
+      // agent enumerates tables on demand via `data_store_list` instead (DK's
+      // default-injection-dies / retrieve-on-demand principle).
     } catch (err) {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
     }
+    // The orphan-subject reap needs the record store to answer "does a table row
+    // still link this subject?". Handed over HERE — after the DataStore init block succeeded
+    // (a store whose init threw is null by then, so the reap stays fail-closed) and not in
+    // _initKnowledge(): that step runs BEFORE this one, so `this._dataStore` does not exist
+    // there yet. A guard on it in `_initKnowledge` can therefore never fire — which is exactly
+    // how the DataStore→KG bridge stayed dead from 2026-05-14 until it was removed. The reap
+    // must not sit on that side of the split.
+    if (this._dataStore) this.knowledgeLayer?.setRecordStore(this._dataStore);
 
     // Initialize ArtifactStore (best-effort)
     try {
@@ -1433,26 +1648,22 @@ export class Engine {
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
-    const googleClientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
-      ?? process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id;
-    const googleClientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
-      ?? process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret;
-    if (googleClientId && googleClientSecret) {
+    // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
+    // resolving the halves independently produced a mixed credential.
+    // Registration is UNCONDITIONAL and does not wait for a credential: a model
+    // that can see the tool can tell the user the feature exists and how to
+    // connect it (PRD Stage 1 §3.2). Each tool answers GOOGLE_NOT_CONNECTED
+    // until there is something to resolve.
+    //
+    // It runs BEFORE the resolve, not after: "unconditional" that sits behind a
+    // call which could one day throw is conditional on that call, and the
+    // ordering is free to get right today.
+    await this.registerGoogleTools();
+    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
+    this._googleClientSource = googlePair?.source ?? null;
+    if (googlePair) {
       try {
-        const { createGoogleTools } = await import('../integrations/google/index.js');
-        const { tools: googleTools, auth: googleAuth } = createGoogleTools({
-          clientId: googleClientId,
-          clientSecret: googleClientSecret,
-          serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
-          vault: this.secretVault ?? undefined,
-          scopes: this.userConfig.google_oauth_scopes,
-        });
-        for (const tool of googleTools) {
-          this.registry.register(tool);
-        }
-        this._googleAuth = googleAuth;
+        this._googleAuth = await this._createGoogleAuth(googlePair);
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
@@ -1461,8 +1672,14 @@ export class Engine {
     // Provider-agnostic Mail integration (IMAP/SMTP + OAuth-Gmail).
     // Always initialised when a vault is available — the state DB is cheap
     // and supports zero accounts. Tools are registered when the context has
-    // a vault to bind credentials to. reloadMail() is the runtime path for
-    // account add/remove after startup.
+    // a vault to bind credentials to.
+    //
+    // ⚠ There is NO `reloadMail()`. This comment named one until 2026-09-06,
+    // and it is why a reviewer and an author both assumed a runtime path
+    // existed: account add/remove goes through `MailContext.addAccount`, and
+    // NOTHING re-runs the provider registration after startup — so a grant
+    // that gains a Gmail scope re-attaches its provider on the next engine
+    // start, not on the token change.
     //
     // googleAuth is passed through so OAuth-Gmail accounts coexist with IMAP
     // in the same registry. MailContext.init() runs a boot migration that
@@ -1702,6 +1919,25 @@ export class Engine {
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
         this.registry.register(subjectsMergeTool);
+
+        // Sweep expired merge ledgers once at boot, in addition to the sweep inside runMerge.
+        // Without this the retention has a hole exactly where it is needed most: a backup
+        // restore and a migration import both LAND ledgers without a merge ever running, so an
+        // instance that stops merging would keep that personal data forever — and a restore is
+        // the very case the retention exists for. Best-effort, never fatal: a cleanup must not
+        // be able to stop the engine from starting.
+        try {
+          const { pruneExpiredLedgers } = await import('./subject-merge-runner.js');
+          pruneExpiredLedgers(join(getLynoxDir(), 'sweeps'), new Date().toISOString());
+        } catch {
+          // Unreadable directory, permissions, a partially restored tree — none of it is
+          // worth failing boot over. The next merge sweeps again.
+        }
+        // The CALL is covered, not just the decision: `engine-init-wiring-boot.test.ts` boots a
+        // real Engine against a tmp data dir and asserts that a restored, expired ledger is gone
+        // afterwards, so deleting this line turns that test red. It shipped as a declared
+        // survivor on the premise that reaching init() needs a heavy mock chain; the precedent
+        // for booting one directly (`engine-startup-reap-boot.test.ts`) already existed.
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
@@ -1735,29 +1971,6 @@ export class Engine {
       }
     }
 
-    // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
-    // remember/recall/memory_block_edit tools (registered above under the same flag). Gated on
-    // `durable_memory_enabled` + engine.db → zero standing surface when off. Independent of
-    // `subject_graph_enabled`: the substrate anchors on subjects, but SubjectStore is a thin
-    // per-call wrapper over engine.db, so it works whether or not the legacy subject-graph
-    // mirror is on (a fresh subjects table just grows deliberate findOrCreate anchors — H1).
-    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
-      try {
-        const { SubjectStore } = await import('./subject-store.js');
-        const { KnowledgeStore } = await import('./knowledge-store.js');
-        const subjectStore = this._subjectStore ?? new SubjectStore(this.engineDb);
-        const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
-        this._knowledgeStore = knowledgeStore;
-        this._toolContext.knowledgeStore = knowledgeStore;
-        // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
-        // subject_graph block wires it, but the durable substrate is independent of that flag —
-        // so wire it here too (idempotent), or a durable-only tenant's memory_focus set-path is
-        // dead ("subject lookup is not available"). Exactly the planned canary flip's config.
-        this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
-      } catch (err) {
-        process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
-    }
 
     // Initialize backup manager (always available — backup is essential)
     try {
@@ -1767,6 +1980,11 @@ export class Engine {
         backupDir,
         retentionDays: this.userConfig.backup_retention_days ?? 30,
         encrypt: this.userConfig.backup_encrypt ?? (!!process.env['LYNOX_VAULT_KEY']),
+        // Asked at every upload, over `this.userConfig` — which `reloadUserConfig` REASSIGNS, so
+        // a revoked opt-in takes effect in this process instead of at the next restart. A gate
+        // at the `driveBackupAllowed()` call alone would enforce "true at the last boot"; this
+        // enforces "true now".
+        uploadAllowed: () => this._driveUploadAllowed(),
       }, process.env['LYNOX_VAULT_KEY'] ?? null);
     } catch {
       this._backupManager = null;
@@ -1810,11 +2028,59 @@ export class Engine {
       }
     }
 
-    // Wire Google Drive backup upload if Google auth is available
-    if (this._backupManager && this._googleAuth) {
+    // Wire Google Drive backup upload — SELF-HOSTED ONLY.
+    //
+    // On a CP-provisioned instance the control plane already runs restic backups, so a second
+    // backup path to a third party adds exposure without adding safety. Since core#1240 that
+    // exposure is concrete: the backup carries the merge ledger, which embeds email, phone,
+    // vat_id and domain.
+    //
+    // The boundary is who HOSTS, not the word "managed": BYOK (`hosted`) runs on lynox hosts
+    // too and gets the same CP backups — only the LLM key is the customer's. LYNOX_BILLING_TIER
+    // is emitted to all three CP tiers and absent on self-host, which is exactly the check the
+    // managed hook makes ~15 lines below. Same signal, same meaning, no new concept.
+    // No `&& this._googleAuth` here: a brokered credential is built on the first
+    // claim, long after this runs, and a boot-time check would leave the
+    // uploader unwired for exactly the tenants the broker exists for. The
+    // resolver below decides per call instead.
+    if (this._backupManager) {
       try {
-        const { GDriveBackupUploader } = await import('./backup-upload-gdrive.js');
-        this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+        // Both symbols from ONE dynamic import, INSIDE the try. The first version hoisted a
+        // second `await import` above this block to reach the gate — outside the catch, in an
+        // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
+        // been fatal to boot on every tier. A gate is not worth a crash.
+        const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
+        // Cache the consent decision so the upload itself can ask it synchronously. This is what
+        // makes a revoked opt-in take effect without a restart. Tier is NOT cached: it is asked
+        // at the `driveBackupAllowed()` call that guards this block, because the environment
+        // cannot change in a running process.
+        this._driveGate = { driveUploadOptedIn };
+        // TIER only, and deliberately: this condition is derived from the environment, which
+        // cannot change inside a running process, so boot is the right place to ask it — and
+        // provisioned instances then never build a credential shim they will not use.
+        //
+        // The user's opt-in is NOT asked here. It can change at runtime, so it is asked where the
+        // upload happens (`uploadAllowed` above → `backup.ts` step 10), which is the only place
+        // an answer can be current. One condition, one place, each where it can change: asking
+        // consent in both would give two mechanisms that no single test can tell apart.
+        if (driveBackupAllowed()) {
+          // A resolving shim, not the instance: `BackupAuthProvider` is the two
+          // methods the uploader calls, so a late-built credential is picked up
+          // without threading the resolver through that module's public shape.
+          // Refusing when there is nothing to resolve keeps the failure at the
+          // upload, where it can be reported, rather than at boot.
+          this._backupManager.setGDriveUploader(new GDriveBackupUploader({
+            getAccessToken: async () => {
+              const auth = this._googleAuth;
+              if (!auth) throw new Error('Google is not connected — no Drive backup upload.');
+              return auth.getAccessToken();
+            },
+            hasScope: (scope: string) => this._googleAuth?.hasScope(scope) ?? false,
+            // §3.8: the backup upload is a Google call like any other and is
+            // subject to `network_policy`. Same live context as the credential.
+            hostPolicy: hostPolicyOf(this._toolContext),
+          }));
+        }
       } catch {
         // Non-critical — GDrive backup upload not available
       }
@@ -1846,7 +2112,7 @@ export class Engine {
   /** Create a new per-conversation session. */
   createSession(opts?: SessionOptions): Session {
     // Managed interactive (main-chat) sessions get a CP-owned per-run cost ceiling
-    // (T-within / DEF-0083(b)): the main path otherwise sets no `costGuard`, so one
+    // (T-within): the main path otherwise sets no `costGuard`, so one
     // looping run could drain far past the entitlement balance. Defaulted ONLY when
     // the caller set none (the WorkerLoop's executeStandard passes its own $15) and
     // ONLY on managed instances where the CP emits the ceiling env (self-host / BYOK
@@ -1896,7 +2162,8 @@ export class Engine {
     this._toolContext.runHistory = this.runHistory ?? null;
   }
 
-  /** Register data store tools on demand */
+  /** Register the six data-store tools. Called once at boot, as soon as the store
+   *  opens (`_initCoreTools`); any later call is a no-op. */
   registerDataStoreTools(): void {
     if (this._dataStoreEnabled || !this._dataStore) return;
     this._dataStoreEnabled = true;
@@ -1968,6 +2235,138 @@ export class Engine {
     return this._subjectFootprintReader?.getFootprint(subjectId, opts) ?? null;
   }
 
+  /**
+   * The Google credential, building a BROKERED one if there is none.
+   *
+   * The claim route used to gate on `getGoogleAuth()`, which is circular: the
+   * claim is what CREATES the credential, and on a brokered tenant no client
+   * pair ever resolves, so the gate refused exactly the user the broker exists
+   * for (PRD Stage 1 §3.2).
+   *
+   * Gated on the control-plane identity, not on `isManagedBrokerPair` — that
+   * one needs `source === 'env'` and is false in broker mode by construction.
+   * A self-host instance with no pair gets `null` and the caller refuses, which
+   * is correct: there is nothing for it to claim.
+   */
+  async ensureGoogleAuth(): Promise<import('../integrations/google/google-auth.js').GoogleAuth | null> {
+    if (this._googleAuth) return this._googleAuth;
+    if (!process.env['LYNOX_MANAGED_INSTANCE_ID']) return null;
+    try {
+      this._googleAuth = await this._createGoogleAuth(null);
+      return this._googleAuth;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The `connections` row for Google — a mirror of the credential, written
+   * from the ONE hook every token write and delete now goes through
+   * (PRD Stage 1 §3.10, D8).
+   *
+   * **Row = metadata, vault = material**, the split the `api` rows already use.
+   * The row records what the connection IS; the token stays in its vault slot
+   * and is named here only by key. Nothing reads the row yet — Stage 1 writes
+   * the slot so a later push source has a plug-point, and moves nothing.
+   *
+   * The id is the CONSTANT `google`, not the address: one vault slot, no PII in
+   * a primary key, and a reconnect under a different account updates the row
+   * instead of orphaning the old one.
+   */
+  /**
+   * Build a `GoogleAuth` with everything the engine owes it — including the
+   * §3.10 token-change hook.
+   *
+   * There are three construction sites (init, `reloadGoogle`, and the CLAIM
+   * path after the §3.2 fork), and the claim one is the flow Stage 1 exists
+   * for. A hook attached at two of three would leave the connection row
+   * unwritten for exactly the brokered tenant, and nothing would say so. So the
+   * options are assembled once, here, and a fourth site gets them by calling
+   * this rather than by remembering.
+   */
+  private async _createGoogleAuth(
+    pair: { clientId: string; clientSecret: string } | null,
+  ): Promise<import('../integrations/google/google-auth.js').GoogleAuth> {
+    const { createGoogleAuth } = await import('../integrations/google/index.js');
+    return createGoogleAuth({
+      ...(pair ? { clientId: pair.clientId, clientSecret: pair.clientSecret } : {}),
+      serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
+      vault: this.secretVault ?? undefined,
+      scopes: this.userConfig.google_oauth_scopes,
+      // The live host-policy view (§3.8). `_toolContext` is created once in the
+      // constructor and mutated in place, so this reference keeps seeing the
+      // CURRENT policy — a snapshot would freeze the value this credential was
+      // built under.
+      hostPolicy: hostPolicyOf(this._toolContext),
+      onTokenChange: (event) => { this._onGoogleTokenChange(event); },
+    });
+  }
+
+  private _onGoogleTokenChange(
+    event: import('../integrations/google/google-auth.js').GoogleTokenChange,
+  ): void {
+    const store = this._connectionStore;
+    if (!store) return;
+    if (event.reason === 'disconnect' || event.tokenData === null) {
+      // Kind-scoped, so a foreign row that happens to sit on this id is not
+      // deleted along with a Google disconnect.
+      store.remove('google', 'google');
+      return;
+    }
+
+    const existing = store.get('google');
+    // ⚠ `connections.id` is a GLOBAL primary key (`engine-db.ts`), not scoped by
+    // kind, and `upsert` conflicts on `id` alone. An `api` profile's id comes
+    // from `slugify(title)`, so a user who sets up an API called "Google" owns
+    // this id first — and an unconditional upsert would silently replace their
+    // kind, name, endpoints, auth shape and vault keys, and repoint any trigger
+    // that references the row. Nothing here is worth that: the Google row is a
+    // slot nothing reads yet.
+    //
+    // Skipping is the small half of the fix. The structural half — scoping the
+    // key by `(id, kind)` — is a schema migration on a table three kinds share.
+    if (existing && existing.kind !== 'google') {
+      console.warn(`[lynox] connection id "google" is held by a ${existing.kind} connection — leaving it alone and not registering the Google row`);
+      return;
+    }
+    // `granted_at` marks the CONSENT, so a refresh must not rewrite it — a
+    // refresh replaces an access token under an authorisation that already
+    // exists, and a timestamp that moves on every refresh answers "when was
+    // this last used", which is a different question nobody asked.
+    const grantedAt = (() => {
+      if (!existing || event.reason !== 'refresh') return new Date().toISOString();
+      try {
+        const prev = JSON.parse(existing.configJson) as { granted_at?: unknown };
+        return typeof prev.granted_at === 'string' ? prev.granted_at : new Date().toISOString();
+      } catch {
+        return new Date().toISOString();
+      }
+    })();
+    store.upsert({
+      id: 'google',
+      kind: 'google',
+      // Capped: the address comes from the control plane's reading of the
+      // consent and is only presence-checked on the way in. It used to live
+      // solely inside the encrypted vault blob; this row is plaintext, so an
+      // unbounded value would be a new place for a long or odd one to land.
+      name: (event.tokenData.email ?? 'Google').slice(0, 320) || 'Google',
+      subjectId: null,
+      direction: 'outbound',
+      configJson: JSON.stringify({
+        scopes: event.tokenData.scopes,
+        client_source: this._googleClientSource,
+        granted_at: grantedAt,
+      }),
+      // The constant, not a copy of its value: a rename would otherwise
+      // desync the row from the slot it names, with no signal anywhere. Read
+      // from a LEAF module — importing it from `google-auth.ts` would be the
+      // engine's only static Google import and would pull the integration,
+      // `node:http` and the egress guard into startup.
+      vaultKeys: [GOOGLE_OAUTH_TOKENS_KEY],
+      status: 'active',
+    });
+  }
+
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
@@ -1988,31 +2387,44 @@ export class Engine {
     return runEscalation(this.getThreadStore(), this.getNotificationRouter(), opts);
   }
 
-  /** Re-initialize Google Workspace integration after credentials change. */
+  /**
+   * Register the four Google tools. Called ONCE from init, before any
+   * credential exists — the entries resolve their auth per call.
+   *
+   * This exists so the registration loop has one home. It used to be an inline
+   * `for` duplicated here and in `reloadGoogle()`, each under its own copy of
+   * the `createGoogleTools` block; a change to one was a change nobody made to
+   * the other.
+   */
+  private async registerGoogleTools(): Promise<void> {
+    try {
+      const { createGoogleTools } = await import('../integrations/google/index.js');
+      const { tools } = createGoogleTools(() => this._googleAuth);
+      for (const tool of tools) {
+        this.registry.register(tool);
+      }
+    } catch {
+      // Non-critical: without the tools the agent simply cannot reach Google.
+    }
+  }
+
+  /**
+   * Re-build the Google credential after a credential change.
+   *
+   * It no longer touches the registry: the tools are registered from boot and
+   * read `this._googleAuth` through a resolver, so swapping the instance here
+   * is the whole of the change. That is also why the resolver must not memoise
+   * — see `google/index.ts`.
+   */
   async reloadGoogle(): Promise<boolean> {
-    const clientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
-      ?? process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id;
-    const clientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
-      ?? process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret;
-    if (!clientId || !clientSecret) {
+    const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
+    this._googleClientSource = pair?.source ?? null;
+    if (!pair) {
       this._googleAuth = null;
       return false;
     }
     try {
-      const { createGoogleTools } = await import('../integrations/google/index.js');
-      const { tools: googleTools, auth: googleAuth } = createGoogleTools({
-        clientId,
-        clientSecret,
-        serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
-        vault: this.secretVault ?? undefined,
-        scopes: this.userConfig.google_oauth_scopes,
-      });
-      for (const tool of googleTools) {
-        this.registry.register(tool);
-      }
-      this._googleAuth = googleAuth;
+      this._googleAuth = await this._createGoogleAuth(pair);
       return true;
     } catch {
       return false;
@@ -2020,6 +2432,8 @@ export class Engine {
   }
   getTaskManager(): import('./task-manager.js').TaskManager | null { return this._taskManager; }
   getDataStore(): DataStore | null { return this._dataStore; }
+  /** The bulk-run ledger — null unless `bulk_runs_enabled` and engine.db are both on. */
+  getBulkLedger(): BulkLedger | null { return this._toolContext.bulkLedger; }
   getPluginManager(): PluginManager | null { return this.pluginManager; }
   getApiConfig(): { apiKey?: string | undefined; apiBaseURL?: string | undefined; provider?: import('../types/index.js').LLMProvider | undefined; gcpProjectId?: string | undefined; gcpRegion?: string | undefined; openaiModelId?: string | undefined } {
     return {
@@ -2048,6 +2462,29 @@ export class Engine {
   getSearchProvider(): import('../integrations/search/index.js').SearchProvider | null { return this._searchProvider; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
+  /**
+   * Does the user want this backup uploaded to Drive, right now?
+   *
+   * CONSENT only. The tier condition is asked once, at the wiring in `init()` (above this method
+   * in the file), because it is derived
+   * from the environment and cannot change in a running process — and asking it here as well
+   * produced a survivor: with the tier gate already refusing to attach an uploader on a
+   * provisioned instance, dropping the tier term from this expression changed no test's outcome.
+   * Two mechanisms for one condition are a compensating pair, and a redundancy no test can
+   * distinguish makes the coverage look larger than it is. One condition, one place.
+   *
+   * Fails closed when the Drive module never loaded — no gate, no upload.
+   *
+   * ⚠ Do not "simplify" the `return false`: it is the fail-closed direction of a gate, and its
+   * mutant is fail-open. `backup-drive-gate-unloaded.test.ts` covers it — in a file of its own,
+   * because reaching this branch needs a module-level `vi.mock`.
+   */
+  private _driveUploadAllowed(): boolean {
+    const gate = this._driveGate;
+    if (!gate) return false;
+    return gate.driveUploadOptedIn(this.userConfig);
+  }
+
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }

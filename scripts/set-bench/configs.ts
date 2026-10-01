@@ -5,7 +5,7 @@
  * before that verification would risk publishing silent-degradation
  * results (tool-call format quirks, missing prompt-cache, structured-output
  * parsing differences). They re-enter the panel post-launch once each
- * passes a feature-parity smoke (see backlog).
+ * passes a feature-parity smoke.
  *
  * Model panel (refreshed 2026-05-29 against docs.mistral.ai/models/overview):
  *   - haiku-class:  Anthropic Haiku 4.5 + Mistral ministral-3b-2512 + ministral-8b-2512

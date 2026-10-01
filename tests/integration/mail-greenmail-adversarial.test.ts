@@ -285,6 +285,59 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — adversarial mailbox fixtures', 
     expect(out).toContain('Auto-Submitted');
   });
 
+  // ── Header injection: a DISPLAY NAME cannot add a recipient (core#1219) ──
+
+  it('a crafted display name does NOT become a second SMTP recipient', async () => {
+    // #1219 fixed this on two paths, and the second was the dangerous one: on
+    // IMAP/SMTP the recipients reached nodemailer PRE-SERIALIZED as a string,
+    // which nodemailer then re-parses — so a name that closes its own quoting
+    // could take the ENVELOPE over rather than merely corrupting a header.
+    // That was verified against the shape of the code; this verifies it against
+    // a real SMTP server, which is the only place an envelope actually exists.
+    //
+    // Plant the attack rather than glance for its absence, in both escaping
+    // shapes the fix had to handle: a bare quote, and a trailing backslash
+    // (which would turn the fix's own closing quote into a quoted-pair).
+    const shapes = [
+      { label: 'bare-quote', name: `Bob" <${EVE}>, "`, deliverable: true },
+      { label: 'trailing-backslash', name: 'Bob\\', deliverable: false },
+    ] as const;
+
+    for (const { label, name, deliverable } of shapes) {
+      const tag = `dn-${label}-${String(Date.now())}`;
+      try {
+        await eveProvider.send({
+          to: [{ address: FRANK, name }],
+          subject: `Display name probe ${tag}`,
+          text: 'display-name injection probe',
+        });
+      } catch { /* a synchronous refusal is an acceptable outcome for this property */ }
+      await new Promise(r => setTimeout(r, 3000));
+
+      // THE property, and it holds for both shapes: the address the name tries
+      // to splice in receives nothing.
+      const eveInbox = await eveProvider.list({ limit: 50 });
+      expect(eveInbox.find(e => e.subject.includes(tag))).toBeUndefined();
+
+      const frankInbox = await frankProvider.list({ limit: 50 });
+      if (deliverable) {
+        // Counter-direction, and the half that would have caught the IMAP/SMTP
+        // regression: the intended recipient must still RECEIVE. A "fix" that
+        // simply dropped the message would satisfy the assertion above.
+        expect(frankInbox.find(e => e.subject.includes(tag))).toBeDefined();
+      } else {
+        // Measured, not assumed, and deliberately pinned as-is: a display name
+        // ending in a backslash is accepted by SMTP and then delivered to NOBODY
+        // — not the attacker (the property above) and not the intended recipient
+        // either. That is silent non-delivery, and it is a DIFFERENT defect from
+        // the one #1219 fixed; recorded here so it cannot change unnoticed in
+        // either direction. If someone makes it deliver, this line goes red and
+        // the `deliverable` flag is the one-word edit.
+        expect(frankInbox.find(e => e.subject.includes(tag))).toBeUndefined();
+      }
+    }
+  });
+
   // ── Header injection: CRLF in subject is neutralised at the send boundary ──
 
   it('CRLF-injected subject does NOT smuggle a Bcc to a third-party mailbox', async () => {

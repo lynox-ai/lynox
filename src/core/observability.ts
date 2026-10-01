@@ -33,6 +33,19 @@ export const channels = {
   memoryStore:          channel('lynox:memory:store'),
   memoryExtraction:     channel('lynox:memory:extraction'),
   /**
+   * Emitted when the extraction mirror declines to link an extracted entity because its
+   * name does not identify ONE subject — several already answer to it. The mirror is
+   * additive (the legacy store stays authoritative), so a withheld edge costs a graph
+   * link, not a fact; binding it to a guess would cost correctness.
+   *
+   * It is also the standing measurement of how often shared names actually occur, which
+   * a one-off query can only answer for today: the corpus grows and `_mergeAliases` folds
+   * every surface form of every mention into the alias lists, so the rate is expected to
+   * rise with use rather than stay put.
+   *   { kind, candidateCount }
+   */
+  subjectAmbiguous:     channel('lynox:subject:ambiguous'),
+  /**
    * Memory Foundation Wave 0 — retrieval shadow mode. Emitted once per `retrieve()`
    * when `retrieval_shadow_log` is on, carrying the scored candidate distribution
    * (raw cosine + tier + subject + would-pass) used to measure the Wave-2 FLOOR.

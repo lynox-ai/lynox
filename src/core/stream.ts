@@ -1,4 +1,4 @@
-import type { StreamHandler } from '../types/index.js';
+import type { EmittingStreamHandler } from '../types/index.js';
 import type {
   BetaRawMessageStreamEvent,
   BetaContentBlock,
@@ -16,7 +16,7 @@ import type {
 
 export class StreamProcessor {
   constructor(
-    private onEvent: StreamHandler,
+    private onEvent: EmittingStreamHandler,
     private agentName: string,
   ) {}
 
@@ -150,7 +150,10 @@ export class StreamProcessor {
       (toolBlock as { input: unknown }).input = rawJson ? JSON.parse(rawJson) as unknown : {};
     } catch {
       (toolBlock as { input: unknown }).input = {};
-      await this.onEvent({ type: 'error', message: `Failed to parse tool input for ${toolBlock.name}`, agent: this.agentName });
+      // NOT fatal: the input was replaced with `{}` and the turn continues right
+      // below. Emitting this as an indistinguishable `error` is what let the client
+      // decide a live run had died.
+      await this.onEvent({ type: 'error', message: `Failed to parse tool input for ${toolBlock.name}`, fatal: false, agent: this.agentName });
       return;
     }
 

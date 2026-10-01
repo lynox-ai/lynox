@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -512,6 +514,31 @@ describe('AgentMemoryDb', () => {
       expect(result.orphanEntitiesRemoved).toBeGreaterThanOrEqual(1);
       expect(db.getEntity(e)).toBeNull();
     });
+
+    it('keeps an entity that never had a mention — a DataStore collection is not an orphan', () => {
+      // A structured-data ingest creates one entity per collection and one per
+      // person/organization it extracts from a record; neither calls
+      // `createMention`, because these are derived from structured rows rather than from a
+      // memory. `entityIsDormant` already draws that line — "only an entity that HAD mentions
+      // and has lost them all is dormant" — and gc did not, so it deleted every one of them,
+      // with their has_data_in relations, on EVERY run. `runStartupReap` runs gc at every
+      // process start, so a tenant who connected a data source lost the graph derived from it
+      // at the next restart and got it back only by re-importing.
+      const collection = db.createEntity({ canonicalName: 'invoices', entityType: 'collection', scopeType: 'global', scopeId: 'g' });
+      const extracted = db.createEntity({ canonicalName: 'Nordberg AG', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+
+      // A superseded memory alongside, so gc has real work to do and cannot pass by doing
+      // nothing at all — the failure mode a "survives gc" test invites.
+      const m1 = db.createMemory({ text: 'active', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const m2 = db.createMemory({ text: 'stale', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      db.supersedMemory(m2, m1);
+
+      const result = db.gc(false);
+      expect(result.supersededRemoved).toBe(1);
+      expect(result.orphanEntitiesRemoved).toBe(0);
+      expect(db.getEntity(collection)).not.toBeNull();
+      expect(db.getEntity(extracted)).not.toBeNull();
+    });
   });
 
   // ── Confidence Evolution ──────────────────────────────────────
@@ -642,6 +669,28 @@ describe('AgentMemoryDb', () => {
     });
   });
 
+  /**
+   * The doc on `listAllActiveMemories` called the
+   * legacy store "write-authoritative and complete regardless of the read-cutover flag" — true
+   * in 2026-07, false since durable knowledge went default-on. The CLAIM did more damage than
+   * the gap: it told the next reader not to look, so a debug export showing a memory store
+   * frozen weeks in the past still read as healthy.
+   *
+   * This guard is deliberately WEAK and named as such: it pins a sentence, and a sentence can
+   * be reworded around it. It exists only to stop the specific retired claim from returning.
+   * The behavioural guards in `http-api.test.ts` cover what the export actually DOES — they are
+   * stronger, but not beyond wording either, so the honest claim is "different failure modes",
+   * not "cannot be talked around".
+   */
+  it('the doc no longer claims the legacy store is complete (weak guard; the behavioural one is in http-api.test.ts)', () => {
+    const src = readFileSync(fileURLToPath(new URL('./agent-memory-db.ts', import.meta.url)), 'utf-8');
+    const idx = src.indexOf('listAllActiveMemories(limit');
+    expect(idx, 'listAllActiveMemories not found — this guard is pinned to the wrong symbol').toBeGreaterThan(0);
+    const doc = src.slice(Math.max(0, idx - 1800), idx);
+    expect(doc, 'the retired completeness claim is back on the legacy reader').not.toMatch(/complete regardless of the read-cutover flag/i);
+    expect(doc, 'the doc must point at the second substrate, not just drop the claim').toMatch(/knowledge_entries/);
+  });
+
   // The debug-export memory snapshot (scope-independent, active-only, newest-first, capped).
   describe('listAllActiveMemories', () => {
     it('returns active memories only, newest first, across scopes, honouring the limit clamp', () => {
@@ -662,6 +711,64 @@ describe('AgentMemoryDb', () => {
       expect(db.listAllActiveMemories(0)).toHaveLength(1);
       expect(db.listAllActiveMemories(Number.NaN).length).toBeGreaterThan(0);
       expect(() => db.listAllActiveMemories(10 ** 9)).not.toThrow();
+    });
+  });
+
+  describe('entityIsDormant', () => {
+    // `entities` has no is_active of its own. Deleting a memory deactivates the memory and
+    // leaves the entity row untouched, so without this predicate the query side keeps
+    // resolving the entity — and its NAME reaches the model — long after the memory it came
+    // from was deleted.
+
+    function seed(text: string): { memoryId: string; entityId: string } {
+      const memoryId = db.createMemory({
+        text, namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0],
+      });
+      const entityId = db.createEntity({
+        canonicalName: 'Jana Reber', entityType: 'person', scopeType: 'global', scopeId: 'global',
+      });
+      db.createMention(memoryId, entityId);
+      return { memoryId, entityId };
+    }
+
+    it('is not dormant while a mentioning memory is active', () => {
+      const { entityId } = seed('Jana Reber lives in Bern');
+      expect(db.entityIsDormant(entityId)).toBe(false);
+    });
+
+    it('becomes dormant once the only mentioning memory is deactivated', () => {
+      const { entityId } = seed('Jana Reber lives in Bern');
+      db.deactivateMemoriesByPattern('Jana Reber');
+      // The entity row itself survives — that is the whole point: it is still findable by
+      // name, which is why the query side needs this predicate rather than a lookup.
+      expect(db.getEntity(entityId)).not.toBeNull();
+      expect(db.entityIsDormant(entityId)).toBe(true);
+    });
+
+    it('stays live while ANY other mentioning memory is still active', () => {
+      const { memoryId, entityId } = seed('Jana Reber lives in Bern');
+      const second = db.createMemory({
+        text: 'Jana Reber prefers email', namespace: 'knowledge',
+        scopeType: 'global', scopeId: 'global', embedding: [0, 1, 0],
+      });
+      db.createMention(second, entityId);
+      db.deactivateMemoriesByPattern('lives in Bern');
+      expect(memoryId).not.toBe(second);
+      expect(db.entityIsDormant(entityId)).toBe(false);
+    });
+
+    it('an entity that NEVER had a mention is NOT dormant — DataStore collections are exactly that', () => {
+      // The regression this guards: a structured-data ingest creates one entity
+      // per collection and never calls createMention. Treating mention-less as dead would
+      // silently drop every DataStore hint from the context graph.
+      const collection = db.createEntity({
+        canonicalName: 'invoices', entityType: 'collection', scopeType: 'global', scopeId: 'global',
+      });
+      expect(db.entityIsDormant(collection)).toBe(false);
+    });
+
+    it('an unknown id is not dormant — absence is not death', () => {
+      expect(db.entityIsDormant('no-such-entity')).toBe(false);
     });
   });
 });

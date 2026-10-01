@@ -136,12 +136,14 @@ When enabled, file writes are staged and shown as a diff for review before being
 
 ```json
 {
-  "backup_schedule": "0 3 * * *",
   "backup_retention_days": 30,
   "backup_encrypt": true,
   "backup_gdrive": false
 }
 ```
+
+`backup_schedule` is **accepted and ignored** — it used to stand in this example beside the keys that
+work, with no hint that nothing reads it. Automatic backups are a trigger, not a config key.
 
 See [Backups](/features/backup/) for details.
 
@@ -170,6 +172,15 @@ Controls the agent's outbound network access for the `http_request`, `api_setup`
 - `deny-all` — block all outbound requests from these tools.
 - `allow-list` — allow only the hosts listed in `network_allowed_hosts`.
 - `guarded` — surface-aware lockdown: discovery surfaces stay open, while full-control requests reach only the vetted baseline hosts, the operator floor, and hosts you have explicitly accepted for a connected API.
+
+:::caution[What `network_policy` does not cover]
+It is a policy over **those three tools**, not over the machine. Even on `deny-all`, outbound traffic still leaves the container on paths this setting never sees:
+
+- the engine's own connections — the LLM provider, mail, push notifications, backups, and connected Google services;
+- **anything a shell command starts.** The `bash` tool is not one of the three gated tools, so a program it runs — or writes and then runs — reaches the network normally.
+
+So read `deny-all` as "these three tools will refuse", not as "this machine is offline". If you need the stronger property, it has to come from the layer below: run the container on a network that cannot route outbound (for example a local model plus an egress-filtered Docker network), because no setting inside the engine can promise it.
+:::
 
 Override with the `LYNOX_NETWORK_POLICY` and `LYNOX_NETWORK_ALLOWED_HOSTS` (comma-separated) environment variables.
 
@@ -267,6 +278,10 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | Path to Google service account JSON key file (headless/Docker) |
+
+On **lynox.cloud** these are optional: an instance with no client pair of its own connects through
+lynox's shared Google client, and the card offers that as one button. Setting them switches the instance
+to your own client — see [Google Workspace](/integrations/google-workspace/).
 
 ## Editing Config
 

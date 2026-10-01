@@ -1,3 +1,5 @@
+import { fillTemplate } from './i18n-fill.js';
+
 export type Locale = 'de' | 'en';
 
 let current = $state<Locale>('de');
@@ -81,6 +83,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
 	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
+	'spawn.downgraded_note': { de: 'auf balanced — deep abgelehnt', en: 'on balanced — deep declined' },
 	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
 	'spawn.est_max_hint': {
 		de: 'Obergrenze, die die Engine für diese Delegation reserviert hat — die tatsächlichen Kosten liegen meist deutlich darunter und ersetzen diese Zahl, sobald ein Subagent fertig ist.',
@@ -111,6 +114,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
 	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
 	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
+	// The subject a queued entry would bind to on approval. `target_new` is the one that
+	// changes a decision: approving does not just file the fact, it CREATES the subject.
+	'knowledge.queue.target_new': { de: 'wird neu angelegt', en: 'will be created' },
+	'knowledge.queue.target_ambiguous': { de: 'mehrdeutig · keine Verknüpfung', en: 'ambiguous · no link' },
+	'knowledge.queue.target_existing_title': { de: 'Bei Freigabe wird der Fakt mit diesem vorhandenen Subjekt verknüpft.', en: 'On approval the fact is linked to this existing subject.' },
+	'knowledge.queue.target_new_title': { de: 'Dieser Name ist im Graph unbekannt — die Freigabe legt dafür eine Organisation an.', en: 'The graph does not know this name — approving creates an organization for it.' },
+	'knowledge.queue.target_ambiguous_title': { de: 'Mehrere Subjekte tragen diesen Namen. Die Freigabe verknüpft mit keinem davon.', en: 'Several subjects carry this name. Approving links to none of them.' },
 	'knowledge.queue.approve': { de: 'Freigeben', en: 'Approve' },
 	'knowledge.queue.edit': { de: 'Bearbeiten…', en: 'Edit…' },
 	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
@@ -118,12 +128,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.reject_confirm': { de: 'Eintrag ablehnen? Er bleibt als abgelehnt protokolliert und wird dem Agenten nie gezeigt.', en: 'Reject this entry? It stays on record as rejected and is never shown to the agent.' },
 	// DK-UX read-surface ("Wissen"-Tab, active durable knowledge — browse only).
 	'knowledge.active.count_label': { de: 'aktive Einträge', en: 'active entries' },
-	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat. Änderungen besprichst du direkt im Chat.', en: 'What lynox has remembered about you and your work. Discuss any changes directly in chat.' },
+	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat.', en: 'What lynox has remembered about you and your work.' },
 	'knowledge.active.profile': { de: 'Profil', en: 'Profile' },
 	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
 	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
-	'knowledge.active.edit_hint': { de: 'Etwas ändern oder löschen? Sag es lynox einfach im Chat.', en: 'Want to change or remove something? Just tell lynox in chat.' },
+	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
+	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
+	'knowledge.active.retiring': { de: 'wird entfernt...', en: 'removing...' },
+	'knowledge.active.retire_confirm': { de: 'Diesen Eintrag entfernen? lynox nutzt ihn danach nicht mehr.\n\n{text}', en: 'Remove this entry? lynox will stop using it.\n\n{text}' },
+	'knowledge.active.retire_failed': { de: 'Der Eintrag konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That entry could not be removed. Please try again.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
@@ -156,13 +170,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
 	'voice.subtitle':      { de: 'Spracheingabe (STT) und -ausgabe (TTS) konfigurieren.',            en: 'Configure speech input (STT) and output (TTS).' },
 	'voice.stt_heading':   { de: 'Eingabe (Speech-to-Text)',                                         en: 'Input (Speech-to-Text)' },
-	'voice.stt_privacy':   { de: 'Audiodaten werden an Mistral (Paris, EU) gesendet, nicht gespeichert. Mit whisper.cpp läuft alles lokal.', en: 'Audio is sent to Mistral (Paris, EU), not retained. whisper.cpp runs everything locally.' },
+	'voice.stt_privacy':   { de: 'Audiodaten gehen an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung. Mit whisper.cpp bleibt das Audio auf deinem System; das Transkript geht danach an das Modell, das du gewählt hast.', en: 'Audio goes to Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse. With whisper.cpp the audio stays on your machine; the transcript then goes to the model you chose.' },
 	'voice.tts_heading':   { de: 'Ausgabe (Text-to-Speech)',                                         en: 'Output (Text-to-Speech)' },
-	'voice.tts_privacy':   { de: 'Text wird an Mistral (Paris, EU) zur Synthese gesendet, nichts gespeichert.', en: 'Text sent to Mistral (Paris, EU) for synthesis, nothing retained.' },
+	'voice.tts_privacy':   { de: 'Text geht an Mistral (Paris, EU) zur Synthese: kein Training, 30 rollende Tage zur Missbrauchsüberwachung.', en: 'Text goes to Mistral (Paris, EU) for synthesis: no training, kept 30 rolling days to monitor abuse.' },
 	'voice.tts_voice':     { de: 'Stimme',                                                           en: 'Voice' },
 	'voice.default':       { de: 'Standard',                                                         en: 'Default' },
 	'voice.unavailable':   { de: 'nicht verfügbar',                                                  en: 'unavailable' },
 	'voice.env_override':  { de: 'Vom Server überschrieben:',                                        en: 'Overridden by server:' },
+	'voice.managed_locked': { de: 'Auf Managed-Instanzen von lynox verwaltet — die Sprachverarbeitung läuft über Mistral (EU). Kommt ein weiterer Anbieter dazu, wird dieses Feld wieder wählbar.', en: 'Managed by lynox on managed instances — voice runs on Mistral (EU). This becomes selectable again if a second provider is added.' },
 	'voice.loading':       { de: 'Lädt …',                                                           en: 'Loading …' },
 	'voice.load_failed':   { de: 'Sprach-Einstellungen konnten nicht geladen werden.',               en: 'Could not load voice settings.' },
 	'voice.save':          { de: 'Speichern',                                                        en: 'Save' },
@@ -344,8 +359,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.env_override_title': { de: 'Anbieter wird über eine Umgebungsvariable gesetzt',                          en: 'Provider is set via an environment variable' },
 	'llm.env_override_body_selfhost': { de: 'Solange diese ENV-Variable gesetzt ist, überschreibt sie deine Auswahl hier bei jedem Engine-Neustart. Entferne sie aus deiner .env / docker-compose.yml, damit Änderungen über das UI greifen.', en: 'While this env variable is set, it overrides your selection here on every engine reload. Remove it from your .env / docker-compose.yml so changes in the UI take effect.' },
 	'llm.env_override_body_managed':  { de: 'Dein Anbieter wird von deinem Hosting-Plan festgelegt und kann hier nicht geändert werden.', en: 'Your provider is set by your hosting plan and can\'t be changed here.' },
+	'llm.capture_degraded_title': { de: 'Dauerhaftes Wissen wird mit diesem Modell kaum erfasst', en: 'Durable knowledge is barely captured with this model' },
+	'llm.capture_degraded_body':  { de: 'Der Wissensspeicher ist aktiv, aber dein aktuelles Hauptmodell ruft die Merk-Funktion selten von selbst auf. Dadurch wächst dein dauerhaftes Wissen kaum. Wähle für die Stufe „Ausgewogen“ ein stärkeres Modell – etwa Claude Sonnet –, wenn der Wissensspeicher zuverlässig mitschreiben soll.', en: 'The knowledge store is on, but your current main model rarely calls the remember function on its own, so your durable knowledge barely grows. Pick a stronger Balanced model — such as Claude Sonnet — if you want the knowledge store to record reliably.' },
 	'llm.locked_provider':    { de: 'Dieser Anbieter ist im aktuellen Plan nicht verfügbar.',                    en: 'This provider is not available on the current plan.' },
-	'llm.custom_endpoints_locked_notice': { de: 'Eigene OpenAI- oder Anthropic-kompatible Endpunkte sind im Managed-Plan nicht verfügbar. Anthropic und Mistral kannst du frei wechseln.', en: 'Custom OpenAI- or Anthropic-compatible endpoints are not available on the managed plan. You can switch freely between Anthropic and Mistral.' },
+	'llm.custom_endpoints_locked_notice': { de: 'Eigene OpenAI- oder Anthropic-kompatible Endpunkte sind im Managed-Plan nicht verfügbar. Zwischen Anthropic, Mistral und den freigeschalteten Modellstrategien kannst du frei wechseln.', en: 'Custom OpenAI- or Anthropic-compatible endpoints are not available on the managed plan. You can switch freely between Anthropic, Mistral and whichever model strategies are enabled for you.' },
 	'llm.confirm_title':      { de: 'Eigene Endpoint-URL bestätigen',                                            en: 'Confirm custom endpoint URL' },
 	'llm.confirm_body_1':     { de: 'Beim Testen wird dein API-Schlüssel an folgende URL gesendet:',             en: 'Testing will send your API key to this URL:' },
 	'llm.confirm_body_2':     { de: 'Nur fortfahren, wenn du dieser Domain vollständig vertraust. SSRF-Schutz blockiert interne Adressen, aber ein bösartiger öffentlicher Endpoint könnte deinen Key abgreifen.', en: 'Only proceed if you fully trust this domain. SSRF guard blocks internal addresses, but a malicious public endpoint could still capture your key.' },
@@ -361,9 +378,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.preset.standard':       { de: 'Standard',                                                                en: 'Standard' },
 	'llm.preset.standard_desc':  { de: 'Ein Anbieter bedient jede Stufe — lynox wählt das Modell pro Aufgabe.',   en: 'One provider serves every tier — lynox picks the model per task.' },
 	'llm.preset.efficient':      { de: 'Effizient',                                                               en: 'Efficient' },
-	'llm.preset.efficient_desc': { de: 'Günstigste kohärente Kombi: EU-Mistral für den Alltag, ein großes Kontextfenster für tiefe Aufgaben.', en: 'Cheapest coherent mix: EU Mistral for everyday work, a large context window for deep tasks.' },
+	'llm.preset.efficient_desc': { de: 'Am günstigsten im Haupt-Chat — offene Modelle bei Fireworks (USA), großes Kontextfenster in jeder Stufe.', en: 'Cheapest in the main chat — open-weight models on Fireworks (US), a large context window in every tier.' },
 	'llm.preset.balanced':       { de: 'Ausgewogen',                                                              en: 'Balanced' },
-	'llm.preset.balanced_desc':  { de: 'Der ausgewogene Mix — schnelles Tool-Routing im Haupt-Chat, starke Modelle für die Tiefe.', en: 'The balanced mix — fast tool-routing in the main chat, strong models for depth.' },
+	'llm.preset.balanced_desc':  { de: 'Wie Effizient, aber mit einem stärkeren Modell im Haupt-Chat — die Stufe, die jede Nachricht bedient. Ebenfalls Fireworks (USA).', en: 'Like Efficient, but with a stronger model in the main chat — the tier that serves every message. Also Fireworks (US).' },
 	'llm.preset.max_quality':    { de: 'Max-Qualität',                                                            en: 'Max quality' },
 	'llm.preset.max_quality_desc': { de: 'Durchgehend die stärksten Modelle — der höchste Kostenrahmen.',         en: 'The strongest models across every tier — the highest cost.' },
 	'llm.preset.custom':         { de: 'Eigene',                                                                  en: 'Custom' },
@@ -557,6 +574,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'crm.create_in_chat': { de: 'Neuer Kontakt', en: 'New contact' },
 	'crm.create_in_chat_prompt': { de: 'Ich möchte einen neuen Kontakt erfassen.', en: "I'd like to add a new contact." },
 	'crm.edit_in_chat': { de: 'Im Chat bearbeiten', en: 'Edit in chat' },
+	// Removal + provenance for a contact. `source` used to read 'manual' for every
+	// agent-written row, which claimed the person entered it themselves.
+	'crm.remove': { de: 'Kontakt entfernen', en: 'Remove contact' },
+	'crm.removing': { de: 'wird entfernt...', en: 'removing...' },
+	'crm.remove_confirm': { de: '{name} aus den Kontakten entfernen? Das lässt sich nicht rückgängig machen.', en: 'Remove {name} from contacts? This cannot be undone.' },
+	'crm.remove_failed': { de: 'Der Kontakt konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That contact could not be removed. Please try again.' },
+	'crm.source.agent': { de: 'von lynox angelegt', en: 'created by lynox' },
+	'crm.source.agent_external': { de: 'von lynox angelegt, aus externen Inhalten', en: 'created by lynox, from external content' },
 	'crm.edit_in_chat_prompt': { de: 'Ich möchte diesen Kontakt bearbeiten:', en: "I'd like to edit this contact:" },
 
 	// Backups
@@ -726,6 +751,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.generic': { de: 'Ein Fehler hat diese Runde unterbrochen. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'An error interrupted this turn. Send your message again to retry.' },
 	'chat.note.run_interrupted.title': { de: 'Runde unterbrochen', en: 'Turn interrupted' },
 	'chat.note.run_interrupted': { de: 'Diese Runde wurde gestoppt, bevor sie fertig war. Tippe deine Nachricht erneut, um fortzufahren.', en: 'This turn was stopped before it finished. Send your message again to continue.' },
+	'chat.note.turn_limit.title': { de: 'Rundenlimit erreicht', en: 'Turn limit reached' },
+	'chat.note.turn_limit': { de: 'Der Agent rief noch Werkzeuge auf, als diese Runde ihr Limit erreichte — eine fertige Antwort gibt es deshalb nicht. Lass ihn in kleineren Schritten vorgehen oder grenze die Aufgabe enger ein.', en: 'The agent was still calling tools when this turn hit its limit, so there is no finished answer. Let it work in smaller steps, or narrow the task.' },
+	'chat.note.cost_budget.title': { de: 'Kostenbudget erreicht', en: 'Cost budget reached' },
+	'chat.note.cost_budget': { de: 'Diese Runde hat ihr Kostenbudget aufgebraucht, während der Agent noch Werkzeuge aufrief — eine fertige Antwort gibt es deshalb nicht. Das Budget pro Runde ist fest vorgegeben; lass ihn in kleineren Schritten vorgehen oder grenze die Aufgabe enger ein.', en: 'This turn used up its cost budget while the agent was still calling tools, so there is no finished answer. The per-turn budget is fixed; let it work in smaller steps, or narrow the task.' },
+	'chat.note.tool_loop_break.title': { de: 'Wiederholung gestoppt', en: 'Repetition stopped' },
+	'chat.note.continuation_loop.title': { de: 'Abgebrochen: Antwort ohne Fortschritt', en: 'Stopped: response without progress' },
+	'chat.note.continuation_loop': { de: 'Die Antwort wurde wiederholt abgeschnitten, ohne dass der Agent weiterkam — meist versucht er, eine sehr grosse Datei direkt in die Antwort zu schreiben. Teile die Aufgabe in kleinere Schritte oder lade die Datei erneut hoch (grosse Dateien werden automatisch als Datei gespeichert, nicht in die Nachricht eingebettet).', en: 'The response was truncated repeatedly without the agent making progress — usually it is trying to write a very large file into the reply itself. Split the task into smaller steps or upload the file again (large uploads are stored as a file automatically, not embedded in the message).' },
+	
+	'chat.note.tool_loop_break': { de: 'Der Agent hat dieselbe Aktion wiederholt, ohne dass sich etwas geändert hat, und wurde deshalb gestoppt. Beschreibe den nächsten Schritt anders oder nenne fehlende Angaben direkt in deiner Nachricht.', en: 'The agent repeated the same action with no change and was stopped for it. Describe the next step differently, or include any missing details in your message.' },
 	'chat.note.context_compacted.title': { de: 'Unterhaltung zusammengefasst', en: 'Conversation summarized' },
 	'chat.note.context_compacted': { de: 'Der Verlauf wurde hier gekürzt, um Kontext freizugeben. Frühere Nachrichten bleiben in deiner Historie, aber der Agent arbeitet ab hier mit einer Zusammenfassung. Fehlt etwas Wichtiges, erinnere ihn kurz daran.', en: 'The history was summarized here to free up context. Earlier messages stay in your history, but the agent now works from a summary. If something important is missing, just remind it.' },
 	'chat.run_blocked': { de: 'Anfrage blockiert', en: 'Request blocked' },
@@ -783,6 +817,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.activity.tool.artifact_list': { de: 'Sucht Artefakte...', en: 'Searching artifacts...' },
 	'chat.activity.tool.artifact_delete': { de: 'Löscht Artefakt...', en: 'Deleting artifact...' },
 	'chat.activity.tool.spawn_agent': { de: 'Verteilt Aufgaben...', en: 'Delegating to sub-agents...' },
+	// Dispatch takes about a second; waiting for the children takes minutes. The
+	// generic label above describes only the first, so `spawn.ts` hands over to
+	// this phase as soon as the batch is running.
+	'chat.activity.tool.spawn_agent.waiting': { de: 'Sub-Agenten arbeiten...', en: 'Sub-agents working...' },
 	'chat.activity.tool.read_file': { de: 'Liest Datei...', en: 'Reading file...' },
 	'chat.activity.tool.write_file': { de: 'Schreibt Datei...', en: 'Writing file...' },
 	'chat.activity.tool.list_files': { de: 'Listet Dateien...', en: 'Listing files...' },
@@ -813,9 +851,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.send_failed': { de: 'Nicht gesendet — tippen zum Wiederholen', en: 'Not sent — tap to retry' },
 	'chat.cancel_queue': { de: 'Queue leeren', en: 'Clear queue' },
 	'chat.remove_queued': { de: 'Aus Queue entfernen', en: 'Remove from queue' },
-	'chat.deferred_title': { de: 'Noch offen', en: 'Still open' },
-	'chat.deferred_dismiss': { de: 'Vorschlag entfernen', en: 'Dismiss suggestion' },
-	'chat.deferred_clear': { de: 'Alle entfernen', en: 'Clear all' },
 	'chat.placeholder_streaming': { de: 'Nächste Nachricht vorbereiten...', en: 'Prepare next message...' },
 	'chat.placeholder_answer': { de: 'Antwort eingeben...', en: 'Type your answer...' },
 	'chat.placeholder_secret': { de: 'Schlüssel oben eingeben — dann geht es weiter', en: 'Enter the key above to continue' },
@@ -824,12 +859,27 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
+	'chat.consent_allow_deep': { de: 'Deep erlauben', en: 'Allow deep' },
+	'chat.consent_run_balanced': { de: 'Auf balanced ausführen', en: 'Run on balanced' },
+	'chat.consent_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.permission_running': { de: 'Erlaubt — wird ausgeführt…', en: 'Allowed — running…' },
 	'chat.permission_denied_running': { de: 'Abgelehnt — wird beendet…', en: 'Denied — finishing up…' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.prompt_timeout_left': { de: 'Verbleibende Zeit', en: 'Time remaining' },
+	// Provenance of a confirmation raised from inside a workflow step. Composed
+	// from these two halves rather than one sentence: a step can be reached
+	// without a named workflow (and vice versa), and a half-filled sentence
+	// reads worse than the half that is true.
+	'chat.prompt_origin_workflow': { de: 'Workflow „{name}“', en: 'Workflow "{name}"' },
+	'chat.prompt_origin_step': { de: 'Schritt „{id}“', en: 'Step "{id}"' },
+	// Deliberately WITHOUT a {name} placeholder, unlike the two above. The
+	// sub-agent's name is written by the model that spawned it, so the claim and
+	// the name must not share a string: the claim is the only part of this line
+	// the user can rely on, and it has to stay true even when the name says
+	// something else entirely.
+	'chat.prompt_origin_subagent': { de: 'Ein Unter-Agent fragt', en: 'A sub-agent is asking' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 
 	// Pipeline status v2 — prompt anchor (sticky bar above the chat input)
@@ -842,6 +892,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'attention.badge': { de: 'Antwort nötig · lynox', en: 'Answer needed · lynox' },
 	'attention.notify_title': { de: 'lynox wartet auf deine Antwort', en: 'lynox is waiting for your answer' },
 	'attention.notify_body': { de: 'Öffne den Chat, um zu antworten.', en: 'Open the chat to answer.' },
+	'chat.secret_title': { de: 'Zugangsdaten eingeben', en: 'Enter a credential' },
+	'chat.secret_key_label': { de: 'Schlüsselname', en: 'Key name' },
+	'chat.secret_agent_said': { de: 'Der Assistent sagt', en: 'The assistant says' },
 	'chat.secret_consent': { de: 'Wird lokal verschlüsselt gespeichert und niemals an die KI gesendet.', en: 'Stored encrypted locally and never sent to AI.' },
 	'chat.secret_save': { de: 'Speichern', en: 'Save' },
 	'chat.secret_cancel': { de: 'Abbrechen', en: 'Cancel' },
@@ -864,7 +917,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.mic_requires_https': { de: 'Spracheingabe benötigt HTTPS. Greife über https:// oder localhost zu.', en: 'Voice input requires HTTPS. Access via https:// or localhost.' },
 	'chat.whisper_unavailable': { de: 'Transkription nicht verfügbar. Whisper ist auf dem Server nicht installiert.', en: 'Transcription not available. Whisper is not installed on the server.' },
 	'chat.transcribe_failed': { de: 'Transkription fehlgeschlagen. Versuche es nochmal.', en: 'Transcription failed. Please try again.' },
-	'chat.voice_too_short': { de: 'Aufnahme zu kurz oder leer. Halte den Mic-Button gedrückt und sprich.', en: 'Recording too short or empty. Hold the mic button and speak.' },
+	'chat.voice_too_short': { de: 'Aufnahme zu kurz. Tippe auf das Mikrofon, sprich, und tippe erneut zum Beenden.', en: 'That recording was too brief. Tap the microphone, speak, then tap again to finish.' },
+	'chat.voice_empty_capture': { de: 'Es kam kein Ton an. Wenn das wieder passiert, lade die Seite neu.', en: 'No audio came through. If it happens again, reload the page.' },
 	'chat.use_keyboard_dictation': { de: 'Tipp: Nutze die Diktierfunktion deiner Tastatur (🎙️) für schnellste Spracheingabe.', en: 'Tip: Use your keyboard dictation (🎙️) for the fastest voice input.' },
 	'chat.voice_processing': { de: 'Wird verarbeitet…', en: 'Processing…' },
 	'chat.attach_file': { de: 'Datei anhängen (max. 10 MB)', en: 'Attach file (max 10 MB)' },
@@ -873,8 +927,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.voice_stop': { de: 'Aufnahme stoppen und senden', en: 'Stop recording and send' },
 	'chat.transcribing': { de: 'Wird transkribiert…', en: 'Transcribing…' },
 	'chat.voice_privacy_hint': {
-		de: 'Sprachnachrichten werden zur Transkription an Mistral (Paris, EU) gesendet. Der Anbieter speichert keine Audiodaten. Dein Verbrauch zählt wie bei Text-Eingaben zu deinem inkludierten Limit.',
-		en: 'Voice messages are sent to Mistral (Paris, EU) for transcription. The provider stores no audio. Your usage counts toward your included limit the same as text input.',
+		de: 'Sprachnachrichten werden zur Transkription an Mistral (Paris, EU) gesendet. Mistral trainiert nicht darauf und behält Ein- und Ausgaben 30 rollende Tage zur Missbrauchsüberwachung. Dein Verbrauch zählt wie bei Text-Eingaben zu deinem inkludierten Limit.',
+		en: 'Voice messages are sent to Mistral (Paris, EU) for transcription. Mistral does not train on it and keeps inputs and outputs for 30 rolling days to monitor abuse. Your usage counts toward your included limit the same as text input.',
 	},
 	'chat.voice_privacy_hint_local': {
 		de: 'Sprachnachrichten werden lokal auf diesem Server transkribiert. Keine Audiodaten verlassen das System.',
@@ -893,8 +947,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.speak_failed_empty': { de: 'Vorlesen fehlgeschlagen — keine Audio-Daten erhalten.', en: 'Voice failed — no audio received.' },
 	'chat.speak_failed_blocked': { de: 'Vorlesen blockiert — der Browser hat die automatische Wiedergabe verhindert. Klicke das Lautsprecher-Symbol einmal manuell an.', en: 'Voice blocked — the browser prevented autoplay. Click the speaker button once manually.' },
 	'chat.tts_privacy_hint': {
-		de: 'Vorgelesene Antworten werden zur Sprachausgabe an Mistral (Paris, EU) gesendet. Keine Speicherung durch den Anbieter.',
-		en: 'Read-aloud audio is synthesized by Mistral (Paris, EU). The provider stores nothing.',
+		de: 'Vorgelesene Antworten gehen zur Sprachausgabe an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung.',
+		en: 'Read-aloud audio is synthesized by Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse.',
 	},
 	'status.engine_version': { de: 'lynox Engine Version', en: 'lynox engine version' },
 	'status.stale_bundle': {
@@ -922,8 +976,28 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
 	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
 	// DK-UX untrusted-capture review chip (turn read external content → keep/edit/discard).
+	// The per-thread reminder after a reload: the inline chip is client-only and did not
+	// survive it, and the global queue badge answers "somewhere", not "here".
+	'chat.knowledge.thread_pending_one': { de: '1 Fakt aus diesem Gespräch wartet auf dich', en: '1 fact from this conversation is waiting for you' },
+	'chat.knowledge.thread_pending_many': { de: '{count} Fakten aus diesem Gespräch warten auf dich', en: '{count} facts from this conversation are waiting for you' },
+	'chat.knowledge.thread_pending_open': { de: 'ansehen', en: 'review' },
 	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
 	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	// WHY a write is waiting. "from external content" is true of every queued write and so tells
+	// the person nothing; these two say WHERE it came from.
+	//
+	// Two, not three, although the engine distinguishes three causes. `marker` and
+	// `external-tool` differ in how the engine noticed, not in anything the person can act on —
+	// showing both would be a distinction without a difference. The split that DOES matter is
+	// this step vs an earlier one, because in the second case nothing external happened here at
+	// all and the chip would otherwise look like a malfunction.
+	//
+	// Worded as a POSSIBILITY, not an event. `EXTERNAL_CONTENT_TOOLS` is a capability list that
+	// includes stored read-back (`task_list`, `data_store_query`, `contacts_search`): asking
+	// "which tasks are open?" arms it, and claiming "something external was read" there would be
+	// plainly untrue to someone who just asked about their own to-dos.
+	'chat.knowledge.cause.this_step': { de: 'kann Inhalte von ausserhalb enthalten', en: 'may include content from outside' },
+	'chat.knowledge.cause.earlier': { de: 'ein früherer Schritt in diesem Chat hatte Inhalte von ausserhalb', en: 'an earlier step in this chat had content from outside' },
 	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
 	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
 	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },
@@ -962,6 +1036,7 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Context management
 	'context.compacted': { de: 'Kontext automatisch komprimiert (war {pct}% voll)', en: 'Context auto-compacted (was {pct}% full)' },
+	'context.compacted_delta_tooltip': { de: 'Belegter Kontext vor und nach dem Komprimieren', en: 'Context occupied before and after compacting' },
 	'context.compacted_marker': { de: 'Konversation komprimiert — ältere Nachrichten wurden zusammengefasst. Artefakte, Entscheidungen und der rote Faden bleiben erhalten; du arbeitest nahtlos weiter.', en: 'Conversation compacted — earlier messages were summarized. Artifacts, decisions and the through-line are kept; you continue seamlessly.' },
 
 	// Onboarding (kept for web-ui setup hints)
@@ -1166,11 +1241,64 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.mail_desc': { de: 'IMAP/SMTP-Konten verwalten, App-Passwörter, Postfach-Regeln', en: 'Manage IMAP/SMTP accounts, app passwords, inbox rules' },
 	'settings.channels.mail_rules_link': { de: 'Regeln', en: 'Rules' },
 	'settings.channels.google': { de: 'Google Workspace', en: 'Google Workspace' },
-	'settings.channels.google_desc': { de: 'Gmail, Drive, Calendar, Sheets und Docs verbinden', en: 'Connect Gmail, Drive, Calendar, Sheets and Docs' },
+	'settings.channels.google_desc': { de: 'Kalender und Drive verbinden — Gmail, Sheets und Docs auf Wunsch', en: 'Connect Calendar and Drive — Gmail, Sheets and Docs on request' },
 	'settings.channels.notifications': { de: 'Push-Benachrichtigungen', en: 'Push notifications' },
 	'settings.channels.notifications_desc': { de: 'Browser-Push für Workflow-Ende, Alerts und Deal-Hinweise', en: 'Browser push for workflow completion, alerts, and deal nudges' },
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
 	'settings.channels.search_desc': { de: 'SearXNG-Endpunkt für Webrecherche', en: 'SearXNG endpoint for web research' },
+	'settings.channels.calendar': { de: 'Kalender', en: 'Calendar' },
+	'settings.channels.unavailable': { de: '· auf dieser Instanz nicht aktiv', en: '· not enabled on this instance' },
+	'settings.channels.calendar_unavailable_desc': {
+		de: 'Der Kalender ist auf dieser Instanz nicht freigeschaltet. Eine hier hinterlegte Adresse wird von nichts gelesen.',
+		en: 'The calendar is not enabled on this instance. An address stored here is not read by anything.',
+	},
+	// Each language written natively — the German is not a translation of the English.
+	'settings.google.claim_confirm': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Verbinden?',
+		en: 'A Google account is waiting to be connected to this instance. Connect it?',
+	},
+	'settings.google.claim_confirm_hint': {
+		de: 'Nur bestätigen, wenn du die Verbindung gerade selbst gestartet hast. Welches Konto es ist, können wir hier nicht anzeigen — wer den Link geschickt hat, könnte ein fremdes Konto verbinden.',
+		en: 'Only confirm if you started this yourself. We cannot show you which account it is — whoever sent you the link could be connecting theirs.',
+	},
+	'settings.google.claim_confirm_yes': { de: 'Verbinden', en: 'Connect' },
+	'settings.google.claim_confirm_no': { de: 'Abbrechen', en: 'Cancel' },
+	'settings.channels.calendar_desc': { de: 'Termine lesen — aus Google, Outlook, Apple oder einer Buchungssoftware', en: 'Read appointments — from Google, Outlook, Apple, or booking software' },
+	// Each language written natively: the German is not a translation of the English. The
+	// instructions name the menu items as the operator sees them in their own product.
+	'calendar.title': { de: 'Kalender verbinden', en: 'Connect a calendar' },
+	'calendar.intro': {
+		de: 'Damit kennt der Agent deine Termine und kann sagen, wann du frei bist. Nur lesen — er kann nichts eintragen, verschieben oder absagen.',
+		en: 'This lets the agent see your appointments and say when you are free. Read-only — it cannot create, move, or cancel anything.',
+	},
+	'calendar.where_title': { de: 'Wo du die Adresse findest', en: 'Where to find the address' },
+	'calendar.where_google': {
+		de: 'Google Kalender: Einstellungen → den Kalender links auswählen → „Geheime Adresse im iCal-Format".',
+		en: 'Google Calendar: Settings → pick the calendar on the left → "Secret address in iCal format".',
+	},
+	'calendar.where_outlook': {
+		de: 'Outlook / Microsoft 365: Kalender → Freigeben → Veröffentlichen → ICS-Link kopieren.',
+		en: 'Outlook / Microsoft 365: Calendar → Share → Publish → copy the ICS link.',
+	},
+	'calendar.where_apple': {
+		de: 'Apple Kalender: Rechtsklick auf den Kalender → Freigabeeinstellungen → „Öffentlicher Kalender".',
+		en: 'Apple Calendar: right-click the calendar → Sharing Settings → "Public Calendar".',
+	},
+	'calendar.secrecy_note': {
+		de: 'Diese Adresse ist wie ein Passwort: wer sie hat, kann den Kalender lesen. Sie wird verschlüsselt gespeichert und dem Agenten nie gezeigt.',
+		en: 'This address works like a password: anyone holding it can read the calendar. It is stored encrypted and never shown to the agent.',
+	},
+	'calendar.connected': { de: 'Verbundene Kalender', en: 'Connected calendars' },
+	'calendar.add_first': { de: 'Kalender hinzufügen', en: 'Add a calendar' },
+	'calendar.add_another': { de: 'Weiteren Kalender hinzufügen', en: 'Add another calendar' },
+	'calendar.label': { de: 'Name (z. B. MAIN, PRIVAT, BUCHUNGEN)', en: 'Name (e.g. MAIN, PRIVATE, BOOKINGS)' },
+	'calendar.address': { de: 'Geheime iCal-Adresse', en: 'Secret iCal address' },
+	'calendar.connect': { de: 'Verbinden', en: 'Connect' },
+	'calendar.label_required': { de: 'Bitte einen Namen angeben.', en: 'Please give it a name.' },
+	'calendar.https_required': { de: 'Die Adresse muss mit https:// beginnen.', en: 'The address must start with https://.' },
+	'calendar.save_failed': { de: 'Der Kalender konnte nicht gespeichert werden.', en: 'That calendar could not be saved.' },
+	'calendar.load_failed': { de: 'Die verbundenen Kalender konnten nicht geladen werden.', en: 'Connected calendars could not be loaded.' },
+	'common.remove': { de: 'Entfernen', en: 'Remove' },
 	// PRD-IA-V2 P3-PR-G — `settings.tasks` retired; Tasks now lives under
 	// Automation Hub via `hub.automation.tasks`. Key was already unused in
 	// templates (only the definition remained after SettingsIndex never wired
@@ -1229,16 +1357,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.residency_title': { de: 'Datenresidenz', en: 'Data residency' },
 	'config.residency_llm': { de: 'LLM (Chat)', en: 'LLM (chat)' },
 	'config.residency_voice_in': { de: 'Spracheingabe', en: 'Voice input' },
-	'config.residency_voice_in_value': { de: 'Mistral — Paris (EU), nicht gespeichert', en: 'Mistral — Paris (EU), not retained' },
+	'config.residency_voice_in_value': { de: 'Mistral — Paris (EU), 30 Tage', en: 'Mistral — Paris (EU), 30 days' },
 	'config.residency_voice_out': { de: 'Sprachausgabe', en: 'Voice output' },
-	'config.residency_voice_out_value': { de: 'Mistral — Paris (EU), nicht gespeichert', en: 'Mistral — Paris (EU), not retained' },
+	'config.residency_voice_out_value': { de: 'Mistral — Paris (EU), 30 Tage', en: 'Mistral — Paris (EU), 30 days' },
 	'config.residency_storage': { de: 'Datenbank & Vault', en: 'Database & vault' },
 	'config.residency_storage_local': { de: 'Auf deinem System', en: 'On your machine' },
 	'config.voice_title': { de: 'Sprache', en: 'Voice' },
 	'config.voice_stt_label': { de: 'Spracheingabe-Anbieter (STT)', en: 'Speech-to-text provider' },
-	'config.voice_stt_privacy': { de: 'Bei Mistral Voxtral wird die Audiospur zu Mistral (Paris, EU) gesendet und nicht gespeichert. Lokal via whisper.cpp verlässt kein Audio dein System.', en: 'With Mistral Voxtral the audio goes to Mistral (Paris, EU) and is not retained. With whisper.cpp nothing leaves your machine.' },
+	'config.voice_stt_privacy': { de: 'Bei Mistral Voxtral geht die Audiospur an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung. Lokal via whisper.cpp verlässt kein Audio dein System.', en: 'With Mistral Voxtral the audio goes to Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse. With whisper.cpp the audio stays on your machine.' },
 	'config.voice_tts_provider_label': { de: 'Sprachausgabe-Anbieter (TTS)', en: 'Text-to-speech provider' },
-	'config.voice_tts_privacy': { de: 'Bei Mistral Voxtral TTS wird der Text zur Synthese an Mistral (Paris, EU) gesendet und nicht gespeichert.', en: 'With Mistral Voxtral TTS the text is sent to Mistral (Paris, EU) for synthesis and is not retained.' },
+	'config.voice_tts_privacy': { de: 'Bei Mistral Voxtral TTS geht der Text zur Synthese an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung.', en: 'With Mistral Voxtral TTS the text goes to Mistral (Paris, EU) for synthesis: no training, kept 30 rolling days to monitor abuse.' },
 	'config.voice_tts_voice_label': { de: 'Stimme', en: 'Voice' },
 	'config.voice_tts_voice_desc': { de: 'Voice-Katalog wird live von Mistral abgefragt. Deutsche Stimmen erscheinen hier automatisch sobald Mistral sie ausliefert.', en: 'Voice catalog is fetched live from Mistral. German voices will appear here as soon as Mistral ships them.' },
 	'config.voice_tts_voice_default': { de: 'Standard-Stimme (Paul, neutral)', en: 'Default voice (Paul, neutral)' },
@@ -1250,7 +1378,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.bugsink_managed_always_on': { de: 'Bei Managed-Instanzen sind Fehlerberichte grundsätzlich aktiv (Hetzner, Deutschland, PII entfernt). Siehe DPIA für Details.', en: 'Error reports are always active on Managed instances (Hetzner, Germany, PII scrubbed). See the DPIA for details.' },
 
 	'config.provider': { de: 'LLM Provider', en: 'LLM Provider' },
-	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.', en: 'Where are AI requests sent? Your data stays local — only inference uses the provider.' },
+	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Der Provider erhält den Inferenz-Aufruf; was sonst nach aussen geht, hängt von deiner Konfiguration ab und davon, was der Agent tut.', en: 'Where are AI requests sent? The provider receives the inference call; what else goes out depends on your configuration and on what the agent does.' },
 	'config.provider_anthropic': { de: 'Claude (Anthropic)', en: 'Claude (Anthropic)' },
 	'config.provider_vertex': { de: 'Claude (Vertex AI) — EU-Datenresidenz', en: 'Claude (Vertex AI) — EU data residency' },
 	'config.provider_custom': { de: 'Custom Proxy — experimentell', en: 'Custom Proxy — experimental' },
@@ -1301,12 +1429,6 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Backup
 	'config.backup': { de: 'Backup', en: 'Backup' },
-	'config.backup_schedule': { de: 'Backup-Intervall', en: 'Backup schedule' },
-	'config.backup_schedule_desc': { de: 'Automatische Backups in regelmässigen Abständen.', en: 'Automatic backups at regular intervals.' },
-	'config.backup_off': { de: 'Deaktiviert', en: 'Disabled' },
-	'config.backup_daily': { de: 'Täglich (03:00 Uhr)', en: 'Daily (3:00 AM)' },
-	'config.backup_weekly': { de: 'Wöchentlich (Montag 03:00)', en: 'Weekly (Monday 3:00 AM)' },
-	'config.backup_monthly': { de: 'Monatlich (1. um 03:00)', en: 'Monthly (1st at 3:00 AM)' },
 	'config.backup_encrypt': { de: 'Backups verschlüsseln', en: 'Encrypt backups' },
 	'config.backup_encrypt_desc': { de: 'AES-256-GCM mit Vault Key. Gilt nur für neue Backups — bestehende behalten ihren Verschlüsselungs-Status.', en: 'AES-256-GCM with vault key. Applies to new backups only — existing backups keep their encryption state.' },
 	'config.backup_retention': { de: 'Aufbewahrung (Tage)', en: 'Retention (days)' },
@@ -1445,6 +1567,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.pause': { de: 'Pausieren', en: 'Pause' },
 	'triggers.resume': { de: 'Fortsetzen', en: 'Resume' },
 	'triggers.paused': { de: 'Pausiert', en: 'Paused' },
+	'triggers.awaiting_confirmation': { de: 'Wartet auf Bestätigung', en: 'Awaiting confirmation' },
+	'triggers.awaiting_hint': { de: 'Läuft erst, wenn du ihn bestätigst.', en: "It won't run until you confirm it." },
+	'triggers.instruction': { de: 'Auftrag (von lynox geschrieben)', en: 'Instruction (written by lynox)' },
+	'triggers.watch_url': { de: 'Beobachtete Seite', en: 'Watched page' },
+	'triggers.watch_every': { de: 'Prüft alle {minutes} Minuten.', en: 'Checks every {minutes} minutes.' },
+	'triggers.confirm': { de: 'Bestätigen', en: 'Confirm' },
+	'triggers.confirm_label': { de: 'Bestätigen, dass dieser Trigger ohne dich laufen darf', en: 'Confirm that this trigger may run without you' },
+	'triggers.confirmed': { de: 'Bestätigt.', en: 'Confirmed.' },
+	'triggers.confirm_failed': { de: 'Bestätigen fehlgeschlagen. Bitte erneut versuchen.', en: 'Could not confirm. Please try again.' },
 	'triggers.delete': { de: 'Löschen', en: 'Delete' },
 	'triggers.delete_confirm': { de: 'Diesen Trigger löschen?', en: 'Delete this trigger?' },
 	'triggers.type_workflow': { de: 'Workflow', en: 'Workflow' },
@@ -1496,7 +1627,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.api_key_saved': { de: 'API-Key gespeichert.', en: 'API key saved.' },
 	'integrations.api_key_update': { de: 'Key aktualisieren', en: 'Update key' },
 	'integrations.google_workspace': { de: 'Google Workspace', en: 'Google Workspace' },
-	'integrations.google_services': { de: 'Gmail, Drive, Calendar, Sheets, Docs', en: 'Gmail, Drive, Calendar, Sheets, Docs' },
+	// Names what the DEFAULT consent grants. Listing five products next to a
+	// consent screen that asks for two is the over-claim this wave exists against.
+	'integrations.google_services': { de: 'Kalender, Drive — Gmail, Sheets und Docs bei vollem Zugriff', en: 'Calendar, Drive — Gmail, Sheets and Docs with full access' },
 	'integrations.connected': { de: 'Verbunden', en: 'Connected' },
 	'integrations.not_connected': { de: 'Nicht verbunden', en: 'Not connected' },
 	'integrations.not_configured': { de: 'Nicht konfiguriert', en: 'Not configured' },
@@ -1513,7 +1646,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_connected_managed': { de: 'Google Workspace verbunden!', en: 'Google Workspace connected!' },
 	'integrations.google_oauth_unavailable': { de: 'Google-Verbindung konnte nicht hergestellt werden.', en: 'Could not establish Google connection.' },
 	'integrations.google_code_copied': { de: 'Code kopiert — im geöffneten Tab einfügen', en: 'Code copied — paste in the opened tab' },
-	'integrations.credentials_saved': { de: 'Credentials gespeichert. Engine wird neu gestartet...', en: 'Credentials saved. Restarting engine...' },
+	// NOT a restart: `POST /api/google/reload` rebuilds the Google credential in
+	// the running engine and answers `{ ok }`. The old wording promised something
+	// the route does not do, and a user watching for a restart waits for nothing.
+	'integrations.credentials_saved': { de: 'Credentials gespeichert. Google-Verbindung wird neu geladen …', en: 'Credentials saved. Reloading the Google connection…' },
 	'integrations.save_credentials': { de: 'Credentials speichern', en: 'Save credentials' },
 	'integrations.google_setup_guide': { de: 'Folge der Einrichtungsanleitung', en: 'Follow the setup guide' },
 	'integrations.google_setup_guide_suffix': { de: 'Du brauchst ein Google-Cloud-Projekt mit aktivierten APIs und OAuth-Credentials', en: 'You need a Google Cloud project with APIs enabled and OAuth credentials' },
@@ -1524,13 +1660,58 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_invalid_credentials': { de: 'Ungültige Client-ID. Bitte prüfe, ob die Client-ID korrekt aus der Google Cloud Console kopiert wurde.', en: 'Invalid Client ID. Please verify you copied the Client ID correctly from the Google Cloud Console.' },
 	'integrations.change_credentials': { de: 'Credentials ändern', en: 'Change credentials' },
 	'integrations.access_level': { de: 'Zugriffsebene', en: 'Access level' },
-	'integrations.scope_readonly': { de: 'Nur lesen', en: 'Read only' },
 	'integrations.scope_full': { de: 'Voller Zugriff', en: 'Full access' },
-	'integrations.scope_full_desc': { de: 'Mails senden, Termine erstellen, Sheets bearbeiten, Dateien hochladen.', en: 'Send emails, create events, edit sheets, upload files.' },
+	// ⚠ Names the mailbox switch, which is the half users were never told about:
+	// full access includes a Gmail READ scope, and lynox then reads that mailbox
+	// over the Google connection instead of over IMAP. Everything else here is a
+	// capability; that one is a change to something already working.
+	'integrations.scope_full_desc': { de: 'Sheets und Docs bearbeiten, Mails senden — und Gmail lesen: dein Posteingang läuft dann über die Google-Verbindung statt über IMAP.', en: 'Edit sheets and docs, send email — and read Gmail: your inbox then runs over the Google connection instead of IMAP.' },
 	'integrations.reconnect_google': { de: 'Erneut verbinden', en: 'Reconnect' },
 	'integrations.scope_change_hint': { de: 'Erneute Google-Autorisierung nötig, um die Berechtigungen zu ändern.', en: 'Re-authorization with Google required to change permissions.' },
 	'integrations.scope_label_read': { de: 'Lesen', en: 'Read' },
 	'integrations.scope_label_readwrite': { de: 'Lesen & Schreiben', en: 'Read & Write' },
+	// A per-SCOPE label, because "Read & Write" was derived from
+	// `s.includes('/drive') && !s.includes('.readonly')` — which `drive.file`
+	// satisfies. The card then promised full Drive read-write access next to a
+	// consent screen that had granted access to lynox's own files only.
+	'integrations.scope_label_drive_file': { de: 'Dateien, die lynox anlegt', en: 'Files lynox creates' },
+	'integrations.scope_label_calendar_events': { de: 'Termine lesen & schreiben', en: 'Read & write events' },
+	'integrations.scope_label_freebusy': { de: 'Frei/Belegt', en: 'Free/busy' },
+	'integrations.scope_standard': { de: 'Standard', en: 'Standard' },
+	'integrations.scope_mode_legacy': { de: 'Diese Verbindung wurde mit einem älteren Berechtigungssatz erteilt.', en: 'This connection was granted with an older permission set.' },
+
+	// Drive honesty: `drive.file` reaches only what lynox created. Two remedies,
+	// because a brokered connection has no control here to widen the grant with.
+	'integrations.drive_app_files_only_broker': { de: 'Drive-Suchen finden nur Dateien, die lynox angelegt hat. Für den Rest deiner Ablage brauchst du einen eigenen Google-Cloud-Client (unter „Erweitert").', en: 'Drive searches only find files lynox created. Reaching the rest of your Drive needs your own Google Cloud client (under “Advanced”).' },
+	'integrations.drive_app_files_only_byo': { de: 'Drive-Suchen finden nur Dateien, die lynox angelegt hat. Für den Rest deiner Ablage auf „Voller Zugriff" wechseln.', en: 'Drive searches only find files lynox created. Switch to Full access to reach the rest of your Drive.' },
+
+	// Managed broker card
+	'integrations.google_broker_connect': { de: 'Mit Google verbinden', en: 'Connect with Google' },
+	'integrations.google_broker_desc': { de: 'lynox fragt Kalender und die Dateien, die lynox für dich anlegt. Kein eigener Google-Cloud-Zugang nötig.', en: 'lynox asks for your calendar and the files lynox creates for you. No Google Cloud project of your own required.' },
+	'integrations.google_broker_unavailable': { de: 'Die verwaltete Google-Verbindung wird gerade eingerichtet — noch nicht verfügbar.', en: 'Managed Google connection is being set up — not available yet.' },
+	'integrations.google_advanced': { de: 'Erweitert — eigenen Google-Cloud-Client verwenden', en: 'Advanced — use your own Google Cloud client' },
+
+	// D12 — switching a BYO connection back to the managed one
+	'integrations.google_switch_to_managed': { de: 'Zur verwalteten Verbindung wechseln', en: 'Switch to the managed connection' },
+	'integrations.google_switch_confirm_title': { de: 'Eigenen Google-Client entfernen?', en: 'Remove your own Google client?' },
+	'integrations.google_switch_confirm_body': { de: 'Deine Client-ID und dein Client-Secret werden gelöscht, danach verbindest du dich über lynox. Zwei Dinge davor: die Zustimmung über lynox kann fehlschlagen, solange die App noch nicht verifiziert ist (Google lässt dann höchstens 100 Konten zu). Und zurück geht es nur, indem du das Client-Paar erneut aus der Google Console einträgst und die Zustimmung wiederholst.', en: 'Your Client ID and Client Secret are deleted, and you then connect through lynox. Two things first: the lynox consent can fail while the app is unverified (Google allows at most 100 accounts until then). And getting back means re-entering the client pair from the Google Console and consenting again.' },
+	'integrations.google_switch_confirm_yes': { de: 'Wechseln', en: 'Switch' },
+	// Three failures, three sentences. One string for all of them told a user
+	// whose grant was already gone that nothing had changed.
+	'integrations.google_switch_aborted': { de: 'Der Wechsel wurde abgebrochen — die bestehende Verbindung ist unverändert.', en: 'The switch was aborted — your existing connection is unchanged.' },
+	'integrations.google_switch_half_done': { de: 'Die Verbindung wurde getrennt, aber dein Client-Paar konnte nicht gelöscht werden. Verbinde dich neu, oder versuche den Wechsel noch einmal.', en: 'Your connection was disconnected, but your client pair could not be deleted. Reconnect, or try the switch again.' },
+	'integrations.google_pair_delete_failed': { de: 'Mindestens ein Löschvorgang ist fehlgeschlagen — die Credentials sind möglicherweise noch gespeichert.', en: 'At least one deletion failed — the credentials may still be stored.' },
+	'integrations.google_grant_stays': { de: 'Deine Google-Freigabe für lynox bleibt bestehen. Du kannst sie jederzeit unter myaccount.google.com/permissions entfernen.', en: 'Your Google grant for lynox stays in place. You can remove it any time at myaccount.google.com/permissions.' },
+
+	// Mail — a Google mailbox whose grant carries no Gmail read scope.
+	// ⚠ The Mail card's three sibling BADGES are hardcoded EN (`DEFAULT`,
+	// `NEEDS PASSWORD`, `RECEIVE-ONLY`); the rest of the card is translated.
+	// These three are translated because they are the ones a user meets when
+	// their mailbox stops working, and a dead end in the wrong language is worse
+	// than an English label on a working control.
+	'mail.needs_mailbox_scope_badge': { de: 'KEIN POSTFACH-ZUGRIFF', en: 'NO MAILBOX ACCESS' },
+	'mail.needs_mailbox_scope_hint': { de: 'Die Google-Verbindung erlaubt kein Lesen von Gmail, dieses Postfach bleibt daher leer. Verbinde es stattdessen per IMAP:', en: 'The Google connection does not permit reading Gmail, so this mailbox stays empty. Connect it over IMAP instead:' },
+	'mail.needs_mailbox_scope_link': { de: 'App-Passwort einrichten', en: 'set up an app password' },
 
 	// Push Notifications
 	'integrations.push_notifications': { de: 'Push-Benachrichtigungen', en: 'Push Notifications' },
@@ -2062,4 +2243,10 @@ export function initLocale(): void {
 
 export function t(key: string): string {
 	return translations[key]?.[current] ?? key;
+}
+
+/** Translate `key`, then fill its `{placeholder}` slots substitution-safely. See
+ *  {@link fillTemplate} for why the naive `t(key).replace('{x}', value)` is a hazard. */
+export function tf(key: string, vars: Record<string, string>): string {
+	return fillTemplate(t(key), vars);
 }

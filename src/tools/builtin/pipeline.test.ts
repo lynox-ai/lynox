@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RunState, AgentOutput } from '../../types/orchestration.js';
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
+import { withinSurface } from '../resolve-tools.js';
 
 // Mock DAG planner
 const mockEstimatePipelineCost = vi.fn().mockReturnValue({ steps: [], totalCostUsd: 0.02 });
@@ -21,13 +22,17 @@ vi.mock('../../orchestrator/runner.js', async (importActual) => {
   };
 });
 
-// Mock validate — keep MAX_STEPS in sync with the real module (pipeline.ts
-// imports the canonical constant from here).
+// Mock validate — partial mock: spread the real module (so pipeline.ts gets the
+// real maxStepsFor, which it now imports) and override only validateManifest.
 const mockValidateManifest = vi.fn();
-vi.mock('../../orchestrator/validate.js', () => ({
-  validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
-  MAX_STEPS: 20,
-}));
+vi.mock('../../orchestrator/validate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../orchestrator/validate.js')>();
+  return {
+    ...actual,
+    validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
+    MAX_STEPS: 20,
+  };
+});
 
 // Spy the billing debit so the money-leak fix can be asserted: an in-session
 // run_workflow must report its aggregated step cost (partial mock — keep every
@@ -69,7 +74,16 @@ const mockTools: ToolEntry[] = [
   },
 ];
 
-function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: ToolEntry[] }): IAgent {
+/**
+ * @param opts.granted - what `getAvailableTools()` answers, when it must DIFFER from the
+ *   context's set. Omitted it answers the same list, which is the shape every test here but
+ *   one needs: the distinction between the engine's registry and an agent's own grant is
+ *   invisible to a stub that has only one list, and defaulting them equal keeps those tests
+ *   about what they are about.
+ */
+function makePipelineAgent(opts?: {
+  config?: LynoxUserConfig | null; tools?: ToolEntry[]; granted?: ToolEntry[];
+}): IAgent {
   const ctx = createToolContext(opts?.config ?? mockConfig);
   if (opts?.config === null) {
     (ctx as Record<string, unknown>)['userConfig'] = null;
@@ -77,7 +91,14 @@ function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: Too
   ctx.tools = opts?.tools ?? mockTools;
   // noteUntrustedData: the parent-taint seam (CORE-9) — a workflow run must latch
   // the parent's untrusted signal so its end-of-run memory extraction abstains.
-  return { toolContext: ctx, noteUntrustedData: vi.fn() } as unknown as IAgent;
+  return {
+    toolContext: ctx,
+    noteUntrustedData: vi.fn(),
+    // The accessor the pipeline pool is drawn from. Its docblock in `agent.ts` names pipeline
+    // child-agents as its consumers, and a stub without it cannot see which of the two lists
+    // a route reads.
+    getAvailableTools: () => opts?.granted ?? ctx.tools,
+  } as unknown as IAgent;
 }
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
@@ -188,6 +209,48 @@ describe('run_workflow — inline steps', () => {
       agent,
     );
     expect(result).toBe('Error: Workflow exceeds maximum of 20 steps (got 21).');
+  });
+
+  it('honors a config max_workflow_steps override (bulk workflows)', async () => {
+    // config.max_workflow_steps raises the policy cap above the default 20, so a
+    // large bulk workflow (>20 batch steps) isn't rejected. The default-cap test
+    // above still holds; this is the tenant escape hatch for big bulks.
+    const agent = makePipelineAgent({ config: { ...mockConfig, max_workflow_steps: 40 } });
+    const steps = Array.from({ length: 25 }, (_, i) => makeStep(`s${i}`, `task ${i}`));
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler(
+      { name: 'bulk', steps },
+      agent,
+    );
+    expect(result).not.toMatch(/exceeds maximum/); // pipeline.test.ts:<this line> — kills the hardcoded-MAX_STEPS regression
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('draws the step pool from the agent GRANT, not from the engine registry', async () => {
+    // The two lists differ only in a stub that carries both, and that difference is the
+    // subject: `toolContext.tools` is the ENGINE's registry, and for a child agent it is
+    // wider than what the child itself holds. A workflow step naming something outside the
+    // child's grant was served from the wider list.
+    // Built explicitly rather than filtered off `mockTools`: that fixture holds `bash` ALONE,
+    // so a filter produced an empty grant and the handler refused with "No parent tools" —
+    // a fixture failure that reads exactly like the route withholding everything.
+    const readTool: ToolEntry = {
+      definition: { name: 'read_file', description: 'Read', input_schema: { type: 'object' as const, properties: {} } },
+      handler: vi.fn() as ToolEntry['handler'],
+    };
+    const agent = makePipelineAgent({ tools: [readTool, ...mockTools], granted: [readTool] });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ name: 'pool', steps: [makeStep('s1', 'do it')] }, agent);
+    expect(mockRunManifest, `handler returned instead of running: ${String(result)}`).toHaveBeenCalledTimes(1);
+
+    const opts = mockRunManifest.mock.calls[0]![2] as { parentTools?: ToolEntry[] };
+    const pool = opts.parentTools ?? [];
+    expect(withinSurface(pool, agent.getAvailableTools())).toBe(true);
+    expect(pool.map(t => t.definition.name)).not.toContain('bash');
+    // Two controls in the same call, because an empty pool and a narrow pool look alike, and
+    // a fixture without the tool looks like a route that withheld it:
+    expect(pool.length).toBeGreaterThan(0);
+    expect(agent.toolContext.tools.map(t => t.definition.name)).toContain('bash');
   });
 
   it('returns error for duplicate step IDs', async () => {
@@ -427,27 +490,33 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     });
   }
 
-  it('reports the AGGREGATED step cost to CP billing for an inline run', async () => {
-    // The core money property: two steps at 0.002 + 0.01 must be billed as 0.012.
-    // Before the fix this spend was written only as excluded pipeline_step rows,
-    // so it escaped the daily/monthly cap and the managed-billing debit entirely.
+  it('reports the FULL step cost to CP billing, one debit per step under its own tier', async () => {
+    // The core money property: two steps at 0.002 + 0.01 must be billed in
+    // full. Since F1 the debit is per-step under the tier the step RAN on: an
+    // undeclared step runs (and bills as) fast, a declared one as declared —
+    // one aggregated debit under the session tier would report fast spend as
+    // balanced, the #1155 mis-attribution on a new surface.
     const { agent, meteredHost } = makeBillableAgent();
     mockRunManifest.mockResolvedValueOnce(twoStepState());
 
-    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x'), makeStep('b', 'y')] }, agent);
+    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x'), { ...makeStep('b', 'y'), model: 'deep' }] }, agent);
 
-    expect(mockReportMeteredCost).toHaveBeenCalledTimes(1);
-    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.012, 'balanced');
+    expect(mockReportMeteredCost).toHaveBeenCalledTimes(2);
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.002, 'fast');
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.01, 'deep');
   });
 
-  it('reports a stored-workflow (workflow_id) run too', async () => {
+  it('reports a stored-workflow (workflow_id) run too, under the undeclared-fast tier', async () => {
     const { agent, meteredHost } = makeBillableAgent();
     const pipelineId = seedStoredPipeline([{ id: 'only', task: 'do it' }]);
-    mockRunManifest.mockResolvedValueOnce(makeRunState()); // costUsd 0.001
+    const state = makeRunState();
+    const out = state.outputs.get('step-1')!;
+    state.outputs = new Map([['only', { ...out, stepId: 'only' }]]);
+    mockRunManifest.mockResolvedValueOnce(state); // costUsd 0.001
 
     await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
 
-    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'balanced');
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'fast');
   });
 
   it('does NOT report on self-host / BYOK (no metered host)', async () => {
@@ -473,6 +542,35 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('…and ALLOWS a confirmed one in that same autonomous session', async () => {
+    // The missing half of the pair above, and the half that matters more now.
+    // Until this change every workflow built in a session arrived confirmed
+    // (`save_workflow` stamped it), so the refusal above only ever met an
+    // imported one. With the stamp gone the gate decides the normal case too —
+    // and a gate that refuses EVERYTHING passes the refusal test. This is the
+    // control that tells the two apart.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = 'stored-confirmed';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'test-plan',
+      goal: 'test goal',
+      steps: [{ id: 's1', task: 'x' }],
+      reasoning: 'test plan',
+      estimatedCost: 0.01,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      confirmedAt: '2026-01-01T00:00:00.000Z',
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
   it('ALLOWS an unconfirmed workflow from an INTERACTIVE session (each step still prompts)', async () => {
     // autonomy undefined = interactive chat: the per-step approver is present, so
     // run_workflow stays the safe way to trial an imported workflow. Not gated.
@@ -481,6 +579,23 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     mockRunManifest.mockResolvedValueOnce(makeRunState());
     const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
     expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('RUNS an interactive workflow from a chat — the case the prompter conjunct exists for', async () => {
+    // The guard above the consent gate reads `mode === 'interactive' &&
+    // !parentPromptUser`. The second conjunct is what keeps an interactive
+    // workflow runnable where somebody can answer it, and NOTHING covered that:
+    // every fixture in this file lacked `promptUser`, so dropping the conjunct
+    // left the whole suite green while breaking the one path it protects.
+    const { agent } = makeBillableAgent();
+    (agent as unknown as Record<string, unknown>)['promptUser'] = vi.fn();
+    const pipelineId = seedStoredPipeline([{ id: 'q', task: 'ask_user which option' }]);
+    const stored = getPipeline(pipelineId);
+    if (stored) stored.mode = 'interactive';
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).not.toMatch(/requires a live chat session/);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 });
@@ -523,6 +638,111 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
       agent,
     );
     expect(result).toMatch(/requires a live chat session/);
+  });
+
+  it('answers an interactive UNCONFIRMED workflow with the MODE, not the consent gate', async () => {
+    // Pins the order for the NO-PROMPTER case, which the test above does not: it
+    // leaves `autonomy` undefined, so the consent gate cannot fire there and the
+    // two blocks could be swapped without it noticing. Here both conditions hold
+    // at once — autonomous caller, interactive workflow, no confirmedAt — and
+    // this agent has no prompt callbacks, so the interactive guard's second
+    // conjunct is satisfied and it answers first. The sibling test below covers
+    // the case where it does NOT, which is the one this file used to miss.
+    //
+    // It has to be the mode one. "Schedule it (the consent step confirms it)" is
+    // a route an interactive workflow does not have: `POST /api/tasks` refuses a
+    // non-autonomous workflow and the library hides its Schedule button. The
+    // consent sentence is only true for a reader who can take it, and the mode
+    // check in front of it is what guarantees that.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = 'interactive-unconfirmed';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'asks',
+      goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+      // confirmedAt deliberately absent — both gates would fire, order decides.
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toMatch(/requires a live chat session/);
+    expect(result).not.toMatch(/first-run confirmation/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('an autonomous WORKER (which has a prompter) gets the mode answer, not "schedule it"', async () => {
+    // The case the file was blind to, and the reason the message branches on mode
+    // instead of trusting the guard above it. That guard is a CONJUNCTION,
+    // `mode === 'interactive' && !parentPromptUser`, so it stands down whenever a
+    // prompter exists — and an autonomous worker session HAS one: WorkerLoop
+    // assigns `session.promptUser` (through the prompt store, so a human can
+    // answer later), the Session setter forwards it to `agent.promptUser`, and
+    // `run_workflow` builds `parentPrompt` from that. So this reaches the consent
+    // gate with an interactive workflow, which the old single sentence answered
+    // with "Schedule it" — a route this workflow does not have.
+    //
+    // Every agent in this file lacked `promptUser`, so the interactive guard
+    // always fired and this path was unreachable from the tests.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    const pipelineId = 'interactive-worker';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'asks',
+      goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'interactive',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    // Assert on the phrase that is UNIQUE to this message. The first version
+    // matched /ask_user \/ ask_secret/, which the interactive guard's own message
+    // also contains — so it passed whether this gate answered or that one did,
+    // and a mutant dropping the `&& !parentPromptUser` conjunct survived it.
+    expect(result).toMatch(/no unattended run to confirm/);
+    expect(result).not.toMatch(/requires a live chat session/);
+    expect(result).not.toMatch(/Schedule it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...and an AUTONOMOUS unconfirmed workflow still gets "Schedule it" on that same path', async () => {
+    // The positive half: same prompter, same autonomy, same missing confirmedAt,
+    // only the mode differs. Without it, a message that dropped "Schedule it" for
+    // every workflow would satisfy the test above while removing the only route
+    // an autonomous workflow has.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    const pipelineId = 'autonomous-worker-unconfirmed';
+    storePipeline(pipelineId, {
+      id: pipelineId,
+      name: 'fetches',
+      goal: 'fetch',
+      steps: [{ id: 's1', task: 'fetch a page' }],
+      reasoning: 'r',
+      estimatedCost: 0,
+      createdAt: new Date().toISOString(),
+      executed: false,
+      executionMode: 'tracked',
+      template: false,
+      mode: 'autonomous',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toMatch(/Schedule it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
   it('returns error when pipeline already executed', async () => {
@@ -1290,14 +1510,19 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'secretStore',
+  'limits', 'secretStore', 'runTaint',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
 function makeAutonomyAgent(autonomy: AutonomyLevel | undefined): IAgent {
   const ctx = createToolContext(mockConfig);
   ctx.tools = mockTools;
-  return { toolContext: ctx, autonomy } as unknown as IAgent;
+  // `getAvailableTools` belongs here for the same reason `parentTools` is in RUN_CTX_KEYS
+  // above: the pool a workflow step draws from comes through it. The contract these tests
+  // assert is the COMPLETENESS of the run context, and this stub was missing the accessor the
+  // pool is read from — which is why they all threw rather than failed when it started being
+  // read. Same list, because these tests are about autonomy and not about the grant.
+  return { toolContext: ctx, autonomy, getAvailableTools: () => ctx.tools } as unknown as IAgent;
 }
 
 describe('A1: buildRunCtx — complete run-context shaping', () => {
@@ -1356,6 +1581,71 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['parentTools']).toBe(mockTools);
   });
 
+  it('headless run forwards a stored maxParallelSteps (symmetry with in-session)', async () => {
+    // Symmetry fix: resolveHeadlessLimits used to omit maxParallelSteps entirely
+    // — a workflow that stored maxParallelSteps:3 got it in-session but it was
+    // silently dropped on the headless path (the path that arguably needs it
+    // more, being unattended). Now all four WorkflowLimits fields pass through.
+    const id = 'wf-headless-cap';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 3 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number; maxIterations?: number; maxWallClockMs?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(3); // pipeline.test.ts:<this line> — kills the symmetry regression
+    expect(limits?.maxWallClockMs).toBe(30 * 60_000); // headless default still applies to unset fields
+  });
+
+  it('headless run normalizes a MALFORMED stored maxParallelSteps to the same default as in-session', async () => {
+    // The two resolvers must agree about one stored blob. While this one passed
+    // the value through raw, a stored `null` resolved to 5 in-session but hit the
+    // executor's fallback of 1 — fully SERIAL — headless. That is the worse half:
+    // the headless path always carries a 30-minute wall clock, and
+    // workflowBoundExceeded re-checks it at every phase boundary, so serializing
+    // a multi-phase run can turn a completing run into a wall-clock abort.
+    //
+    // `null`, not NaN, is the value under test on purpose: JSON.stringify writes
+    // both NaN and Infinity as null, so null is the only malformed form a stored
+    // limits blob can actually carry.
+    const id = 'wf-headless-malformed';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: null as unknown as number },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(5); // NOT 1 (serial), NOT null
+  });
+
+  it('headless run leaves an UNSET maxParallelSteps unbounded (no default imposed)', async () => {
+    // Counter-direction: normalizing the malformed case must not smuggle a
+    // default onto the absent one. An unattended run defaulting to unbounded
+    // fan-out is a deliberate operator policy choice here, unlike in-session.
+    const id = 'wf-headless-unset';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBeUndefined();
+  });
+
   it('in-session inline run inherits the parent agent autonomy + forwards its context', async () => {
     const agent = makeAutonomyAgent('autonomous');
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -1373,6 +1663,66 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['parentTools']).toBe(agent.toolContext.tools);
   });
 
+  it('in-session inline run applies default limits (backpressure + iteration backstop)', async () => {
+    // T4: in-session runs ran with limits===undefined — so the DoS guards
+    // (workflowBoundExceeded) AND the backpressure cap (maxParallelSteps, T2)
+    // never fired for a chat-started workflow. resolveInSessionLimits now
+    // supplies defaults: an iteration backstop + a parallelism cap. Wall-clock
+    // + spend stay opt-in (attended run; Session cost cap + cancel bound them).
+    const agent = makeAutonomyAgent('autonomous');
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxIterations?: number; maxParallelSteps?: number; maxWallClockMs?: number; maxSpendUsd?: number } | undefined;
+    expect(limits).toBeDefined(); // pipeline.test.ts:<this line> — kills the limits-less in-session path
+    expect(limits?.maxIterations).toBe(50);    // backstop
+    expect(limits?.maxParallelSteps).toBe(5);  // backpressure (T2 activator)
+    expect(limits?.maxWallClockMs).toBeUndefined(); // opt-in (attended)
+    expect(limits?.maxSpendUsd).toBeUndefined();    // opt-in (Session cap bounds it)
+  });
+
+  it('in-session run replaces a MALFORMED stored maxParallelSteps with the default', async () => {
+    // `??` is nullish, so a stored 0 / -1 / NaN survived it and reached the
+    // executor, where it failed the old `cap > 0` test and turned backpressure
+    // OFF for that workflow. The executor now clamps a malformed width to 1, but
+    // that would silently SERIALIZE the run; the resolver is what restores the
+    // intended default width, so this assertion is what pins the resolver.
+    const id = 'wf-malformed-cap';
+    storePipeline(id, {
+      id, name: 'malformed', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 0 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, makePipelineAgent());
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(5); // NOT 0, and NOT the executor's serial fallback of 1
+  });
+
+  it('in-session run still honours a VALID stored maxParallelSteps', async () => {
+    // Counter-direction: the clamp must not flatten every stored width to the
+    // default — a workflow that deliberately stored 2 keeps 2.
+    const id = 'wf-valid-cap';
+    storePipeline(id, {
+      id, name: 'valid', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 2 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, makePipelineAgent());
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(2);
+  });
+
   it('threads the parent agent secretStore into the run options (value, not just key)', async () => {
     // The security fix: run_workflow forwards agent.secretStore so each step
     // sub-agent's tools resolve `secret:NAME` refs + fire the fail-loud guard —
@@ -1388,6 +1738,47 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     );
     const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
     expect(opts['secretStore']).toBe(secretStore);
+  });
+
+  it('seeds the run taint accumulator from a tainted caller (value, not just key)', async () => {
+    // A workflow started on a tainted turn must not launder a durable write
+    // through a fresh step agent — the run's accumulator starts armed.
+    const agent = makeAutonomyAgent(undefined);
+    (agent as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'record something')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+  });
+
+  it('a clean caller yields a clean (but present) accumulator', async () => {
+    const agent = makeAutonomyAgent(undefined);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    // Present even when clean: the accumulator is what carries taint ACROSS
+    // steps once any step reads external content mid-run.
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
+  });
+
+  it('the headless saved-workflow run carries a clean accumulator (cross-step chain without a caller)', async () => {
+    const id = 'wf-headless-taint';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
   });
 
   it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
@@ -1432,6 +1823,60 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // emits the keys, so a key-only check would not catch a re-introduced drop).
     expect(retryOpts['parentToolContext']).toBe(agent.toolContext);
     expect(retryOpts['userTimezone']).toBe('Europe/Zurich');
+  });
+
+  it('the stored-run path seeds its accumulator from a tainted caller (value, not just key)', async () => {
+    // buildRunCtx emits the runTaint KEY unconditionally, so the RUN_CTX_KEYS
+    // contract cannot catch a by-id path that stops seeding — the VALUE can.
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined);
+    (agent as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+  });
+
+  it('a retry carries the ORIGINAL run\'s earned taint even under a clean caller', async () => {
+    // The retry feeds re-run steps the cached outputs of the original run's
+    // completed steps; a fresh accumulator would let a retry from a clean
+    // caller land a re-run step's durable write as active. Found independently
+    // by two review lenses on this PR.
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined); // clean caller, both runs
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    // The original run EARNED taint mid-run: a step read external content.
+    const firstOpts = mockRunManifest.mock.calls[0]![2] as { runTaint: { earned: string } };
+    firstOpts.runTaint.earned = 'external-tool';
+
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    expect(retryOpts['runTaint']).toEqual({ seeded: 'none', earned: 'external-tool' });
+  });
+
+  it('a retry also carries a SEED-armed original run — and builds a fresh accumulator', async () => {
+    // The sibling gap of the earned-carry: a run whose steps were armed by the
+    // caller's taint alone leaves earned='none' by construction (noteStepTaint
+    // ignores the reflected 'conversation'), so an earned-only carry loses it.
+    // Its cached outputs derive from a tainted conversation all the same.
+    const id = seedStoredPipeline();
+    const taintedCaller = makeAutonomyAgent(undefined);
+    (taintedCaller as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, taintedCaller);
+    const firstOpts = mockRunManifest.mock.calls[0]![2] as { runTaint: unknown };
+
+    const cleanCaller = makeAutonomyAgent(undefined);
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, cleanCaller);
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    expect(retryOpts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+    // A fresh object, not the stored one passed through: passing prev.runTaint
+    // by reference would couple the stored record to the retry's mutations and
+    // would also pass the clean-caller case above by accident.
+    expect(retryOpts['runTaint']).not.toBe(firstOpts.runTaint);
   });
 });
 
@@ -1494,5 +1939,17 @@ describe('A1: §4.5 drift fixes', () => {
 
     resolveRun(makeRunState());
     await inFlight;
+  });
+});
+
+describe('buildManifest carries the declared tool set (F2)', () => {
+  it('copies step.tools onto the manifest agent entry', async () => {
+    const { buildManifest } = await import('./pipeline.js');
+    const manifest = buildManifest('m', [
+      { id: 'a', task: 'fetch', tools: ['http_request'] },
+      { id: 'b', task: 'bare' },
+    ], 'stop');
+    expect(manifest.agents[0]!.tools).toEqual(['http_request']);
+    expect(manifest.agents[1]!.tools).toBeUndefined();
   });
 });

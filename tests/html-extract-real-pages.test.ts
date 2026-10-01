@@ -103,9 +103,8 @@ describe('html extraction under a hostile page', () => {
   //
   // So the honest position is the opposite of reassuring: the anchor walk is
   // quadratic in INPUT size with no input-side bound, and a page crafted to
-  // produce no links keeps it walking. That is a register item to fix, not a
-  // property to pin — and a test asserting a comforting ratio would have made it
-  // look handled. This file exists because a performance claim shipped without
-  // anything able to falsify it; shipping a second one here would be the joke
-  // writing itself.
+  // produce no links keeps it walking. That is not a property to pin — and a
+  // test asserting a comforting ratio would have made it look handled. This
+  // file exists because a performance claim shipped without anything able to
+  // falsify it; shipping a second one here would be the joke writing itself.
 });

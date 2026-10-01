@@ -17,6 +17,11 @@ export interface UsageInfo {
 	 *  populated by the api_cost stream event. Distinct from `costUsd` which is
 	 *  LLM-only. Surfaces in the thread footer rollup. */
 	apiCostUsd?: number;
+	/** What this turn's sub-agents spent, at any spawn depth. Absent when the
+	 *  turn delegated nothing. Held apart from `costUsd` because the engine
+	 *  keeps each child as its own run row (folding it in would double-count
+	 *  thread totals) — the footer adds the two for display. */
+	spawnCostUsd?: number;
 	/** Actual model that produced this turn — comes from the engine's turn_end
 	 *  event. Differs from the session default when the auto-downgrade flipped
 	 *  to the haiku-tier for a simple task; surfaces in the footer so the user
@@ -56,6 +61,9 @@ export function usageFromDoneEvent(raw: unknown): UsageInfo | null {
 		cacheRead: Number(u['cacheRead'] ?? 0),
 		cacheWrite: Number(u['cacheWrite'] ?? 0),
 		costUsd: Number(u['costUsd'] ?? 0),
+		...(typeof u['spawnCostUsd'] === 'number' && u['spawnCostUsd'] > 0
+			? { spawnCostUsd: u['spawnCostUsd'] }
+			: {}),
 		...(typeof u['model'] === 'string' ? { model: u['model'] } : {}),
 		...(typeof u['runId'] === 'string' ? { runId: u['runId'] } : {}),
 		...(typeof u['durationMs'] === 'number' ? { durationMs: u['durationMs'] } : {}),
@@ -125,7 +133,25 @@ export interface UsageMetaPart {
 export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageMetaPart[] {
 	const parts: UsageMetaPart[] = [];
 	if (includeCost) {
-		parts.push({ text: formatCost(u.costUsd) });
+		// A delegated turn costs what the main run cost PLUS what its sub-agents
+		// spent, and the two live in separate run rows. Show the sum — that is the
+		// number the question "what did this answer cost?" asks for — and name the
+		// parts in the tooltip so the main-run figure stays recoverable. Showing
+		// only `costUsd` understated a measured deep review by 18%.
+		//
+		// The tooltip lists the parts, it does not render them as a SUM. `formatCost`
+		// switches from 2 to 4 decimals below $0.01, so an "a + b" phrasing reads as
+		// arithmetic that does not check out whenever the sub-agent spend is
+		// sub-cent (the common case for `fast`-tier children): `$0.38 + $0.0050`
+		// against a headline of `$0.38`. Labelled parts carry the same information
+		// without inviting the subtraction.
+		const spawn = u.spawnCostUsd ?? 0;
+		parts.push(spawn > 0
+			? {
+				text: formatCost(u.costUsd + spawn),
+				title: `main ${formatCost(u.costUsd)} · sub-agents ${formatCost(spawn)}`,
+			}
+			: { text: formatCost(u.costUsd) });
 		// Phase E: surface third-party API cost (DataForSEO etc.) next to the LLM
 		// cost when the message hit any profiled API. Threshold of >$0.001 keeps
 		// the row clean when nothing meaningful happened.

@@ -119,12 +119,23 @@ html {
 	line-height: 1.7;
 	height: 100%;
 	overflow: hidden;
+	/* The document must never rubber-band: the app is a fixed shell and every
+	   legitimate scroll happens in an inner scroller. Without this, iOS Safari
+	   lets a touch gesture that chains past the last inner scroller bounce the
+	   whole document, which reads as the layout tearing loose. Declared on both
+	   html and body as defense-in-depth (body->viewport propagation only applies
+	   while html computes `auto`, so these two are independent, not redundant).
+	   Deliberate side effect: this also disables browser pull-to-refresh on
+	   every route — wanted for an app shell, where a scroll gesture must never
+	   turn into an accidental reload. */
+	overscroll-behavior: none;
 }
 
 body {
 	height: 100%;
 	overflow: hidden;
 	margin: 0;
+	overscroll-behavior: none;
 }
 
 /*
@@ -219,6 +230,62 @@ textarea::-webkit-scrollbar {
 	outline-offset: 2px;
 	box-shadow: 0 0 0 2px var(--color-bg);
 	border-radius: var(--radius-sm);
+}
+
+/* `overflow: clip` makes a box impossible to scroll even programmatically —
+   scrollTop assignment, scrollIntoView, and WebKit's keyboard-avoidance all
+   no-op — which `hidden` does NOT: an overflow:hidden box is still a scroll
+   container, and iOS Safari WILL scroll one to reveal a focused input,
+   shifting the layout with no gesture that can shift it back. Used on
+   AppShell's structural containers, which exist to clip, never to scroll.
+   The base declaration is `hidden` with clip layered in an @supports block:
+   a plain `overflow: hidden; overflow: clip;` pair looks equivalent but the
+   production minifier (lightningcss, Safari 16.4+ targets) collapses it to
+   `clip` alone, deleting the fallback from the shipped artifact — @supports
+   survives minification in every pipeline this file passes through.
+   TWO TRAPS, both measured not theorized:
+   1. A scroll container zeroes a flex item's automatic minimum size; a clip
+      box does NOT. Every flex item that carries this class needs an explicit
+      `min-h-0`/`min-w-0` in its main axis, or it grows to content height
+      again (composer at y=1718 in an 844px viewport).
+   2. These rules are UNLAYERED, so they beat every Tailwind utility (those
+      live in @layer utilities) regardless of specificity — an added
+      `md:overflow-y-auto` on such an element will compile and silently never
+      apply. Override only with another unlayered rule. */
+.overflow-clip-safe {
+	overflow: hidden;
+}
+@supports (overflow: clip) {
+	.overflow-clip-safe {
+		overflow: clip;
+	}
+}
+
+/* AppShell's page slot is the single scroller for document-shaped pages
+   (settings, hub, …) that render content and expect the shell to scroll it.
+   A page that pins interactive chrome to the bottom edge — the chat composer,
+   the inbox triage footer — must NOT sit inside a scrollable ancestor: iOS
+   WebKit treats every ancestor scroller of a focused input as fair game for
+   keyboard-avoidance scrolling, and a touch drag on the pinned chrome
+   scroll-chains into that ancestor too. Either way the pinned chrome rides up
+   and dead whitespace opens above the status bar (reported repeatedly from an
+   iPhone PWA, latest 2026-09-06). Such a page declares `data-owns-scroll` on
+   its root; the slot then stops being a scroll container entirely, and the
+   page's own inner scrollers are the only thing that can move.
+   CONTRACT: the marker must sit on a DIRECT child of the slot — an interposed
+   wrapper element breaks the `>` match and silently restores the scrolling
+   slot (guarded in-repo by tests/smoke/composer-stays-pinned.spec.ts, "the
+   shell slot is not a scroll container on the chat route"; library consumers
+   composing AppShell themselves must keep the page root immediate).
+   Engines without :has() keep the scrolling slot — the pre-fix behavior,
+   degraded rather than broken. */
+[data-app-shell-slot]:has(> [data-owns-scroll]) {
+	overflow: hidden;
+}
+@supports (overflow: clip) {
+	[data-app-shell-slot]:has(> [data-owns-scroll]) {
+		overflow: clip;
+	}
 }
 
 /* Hide overflow indicators (used for horizontally-scrollable tab strips on

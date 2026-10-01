@@ -3,7 +3,7 @@ import { isRetryable } from './agent.js';
 
 const named = (name: string, message = 'x'): Error => Object.assign(new Error(message), { name });
 
-describe('isRetryable — stream-transport failures (DEF-fireworks-longstream-retry)', () => {
+describe('isRetryable — stream-transport failures', () => {
   it('retries a TransformError (a dropped provider stream on a long output)', () => {
     expect(isRetryable(named('TransformError'))).toBe(true);
   });

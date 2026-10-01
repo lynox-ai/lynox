@@ -249,6 +249,31 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getSessionToolCalls keeps a spawned child\'s call at the point it ran, not at the end', () => {
+    // `save_workflow` turns this list into the STEPS of a saved pipeline, so an
+    // out-of-place call is a wrong pipeline, not a cosmetic sort.
+    //
+    // Ordering by the run first (`created_at, rowid`) held only while one turn's
+    // calls all lived on one run. Once a child books onto its own run — which is
+    // always younger than its parent's — every child call sorted after every
+    // call the parent made that turn, however early the child actually ran.
+    // `sequence_order` cannot repair it: it restarts per run.
+    const h = createHistory();
+    const parent = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+    h.insertToolCall({ runId: parent, toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
+
+    // Mid-turn: the parent spawns a child, which makes a call of its own...
+    const child = h.insertRun({ sessionId: 'thread-1', taskText: 'child', modelTier: 'fast', modelId: 'm', runType: 'single', spawnParentId: parent, spawnDepth: 1 });
+    h.insertToolCall({ runId: child, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
+
+    // ...and only afterwards does the parent make its next call.
+    h.insertToolCall({ runId: parent, toolName: 'write_file', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 1 });
+
+    expect(h.getSessionToolCalls('thread-1').map(c => c.tool_name))
+      .toEqual(['read_file', 'http_request', 'write_file']);
+    h.close();
+  });
+
   it('getRunsBySession returns every run for a thread (ALL statuses), chronological + isolated', () => {
     const h = createHistory();
     const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
@@ -2667,14 +2692,43 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('getToolCallCountSince excludes pipeline_step calls — A2 must not change tool rate-limiting', () => {
+    it('getToolCallCountSince counts a pipeline_step call — the rate limit sees every recorded call', () => {
+      // This used to assert the opposite, on the stated grounds that a workflow
+      // step's calls were "unrecorded, so uncounted" and counting them would
+      // retroactively tighten the limit. The premise was wrong: they WERE
+      // recorded a second time, by the process-global `lynox:tool:end`
+      // subscriber, onto whatever run the listening Session had open. The
+      // exclusion was therefore not keeping step calls out of the count — it was
+      // cancelling a double count.
+      //
+      // With the duplicate write gone, keeping the exclusion would have left
+      // every workflow step's calls counted by nothing at all — a rate limit
+      // silently un-enforced for a whole execution path. The two are one change.
       const h = createHistory();
       const chat = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
       h.insertToolCall({ runId: chat, toolName: 'http', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
       const step = h.insertRun({ taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'p', spawnDepth: 1 });
       h.insertToolCall({ runId: step, toolName: 'http', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
 
-      expect(h.getToolCallCountSince('http', 24)).toBe(1); // only the chat turn's call counts
+      expect(h.getToolCallCountSince('http', 24)).toBe(2);
+      h.close();
+    });
+
+    it('a spawned child\'s calls count toward the rate limit from the child\'s own run', () => {
+      // The enforcement half of moving a child's calls onto its own row. A
+      // spawn fan-out is exactly the shape that can outrun a limit — twenty
+      // children issuing http_request in parallel — so the count must follow the
+      // calls to wherever they are now attributed. A child run is `single`, not
+      // `pipeline_step`, and is joined like any other.
+      const h = createHistory();
+      const parent = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall({ runId: parent, toolName: 'http_request', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+      for (let i = 0; i < 5; i++) {
+        const child = h.insertRun({ sessionId: 's', taskText: `child ${i}`, modelTier: 'fast', modelId: 'm', runType: 'single', spawnParentId: parent, spawnDepth: 1 });
+        h.insertToolCall({ runId: child, toolName: 'http_request', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+      }
+
+      expect(h.getToolCallCountSince('http_request', 24), 'the parent call plus all five children').toBe(6);
       h.close();
     });
 
@@ -2695,5 +2749,95 @@ describe('RunHistory', () => {
       h.close();
     });
   });
-});
 
+  /**
+   * A delegated turn bills across several rows: the parent run plus one per
+   * spawned child (and their children). The per-message cost line needs that
+   * sum, so it does NOT understate a delegated answer — a measured thread
+   * showed $0.38 for a turn that actually billed $0.4532.
+   *
+   * Reads `runs.spawn_parent_id` (written when the child row is inserted, on
+   * the same path that later records its cost) rather than the `run_spawns`
+   * table, which a separate subscription fills.
+   */
+  describe('getDescendantCostUsd', () => {
+    it('sums every descendant, at any depth, but never the run itself', () => {
+      const h = createHistory();
+      // Cost and a terminal status are written together by every real writer
+      // (spawn.ts / session.ts), and the aggregate excludes `running` rows.
+      const parent = h.insertRun({ taskText: 'parent', modelTier: 'balanced', modelId: 'mistral-medium-2604' });
+      h.updateRun(parent, { costUsd: 0.3834, status: 'completed' });
+
+      const child = h.insertRun({
+        taskText: 'deep review', modelTier: 'deep', modelId: 'glm-5p2',
+        spawnParentId: parent, spawnDepth: 1,
+      });
+      h.updateRun(child, { costUsd: 0.0698, status: 'completed' });
+
+      const grandchild = h.insertRun({
+        taskText: 'nested', modelTier: 'fast', modelId: 'ministral-8b-2512',
+        spawnParentId: child, spawnDepth: 2,
+      });
+      h.updateRun(grandchild, { costUsd: 0.01, status: 'completed' });
+
+      expect(h.getDescendantCostUsd(parent)).toBeCloseTo(0.0798, 6);
+      // The child's own subtree, and a leaf with nothing under it.
+      expect(h.getDescendantCostUsd(child)).toBeCloseTo(0.01, 6);
+      expect(h.getDescendantCostUsd(grandchild)).toBe(0);
+      h.close();
+    });
+
+    it('returns 0 for a run that delegated nothing', () => {
+      const h = createHistory();
+      const solo = h.insertRun({ taskText: 'solo', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+      h.updateRun(solo, { costUsd: 0.12, status: 'completed' });
+      expect(h.getDescendantCostUsd(solo)).toBe(0);
+      h.close();
+    });
+
+    /**
+     * The house invariant for every spend aggregate in this file, stated at
+     * `getThreadTotals`: a `pipeline_step` must NEVER move one, and an in-flight
+     * row is not spend yet. Neither is reachable from today's writers, but this
+     * is the fifth aggregate over `cost_usd` and the first four all carry the
+     * guards — an aggregate that quietly omits them is one writer away from
+     * moving money.
+     */
+    it('excludes pipeline_step and still-running descendants, like every other spend aggregate', () => {
+      const h = createHistory();
+      const parent = h.insertRun({ taskText: 'parent', modelTier: 'balanced', modelId: 'm' });
+
+      const done = h.insertRun({
+        taskText: 'settled child', modelTier: 'deep', modelId: 'm',
+        spawnParentId: parent, spawnDepth: 1,
+      });
+      h.updateRun(done, { costUsd: 0.07, status: 'completed' });
+
+      // Still running: cost written but no terminal status.
+      const inflight = h.insertRun({
+        taskText: 'in flight', modelTier: 'fast', modelId: 'm',
+        spawnParentId: parent, spawnDepth: 1,
+      });
+      h.updateRun(inflight, { costUsd: 0.05 });
+
+      const step = h.insertRun({
+        taskText: 'pipeline step', modelTier: 'fast', modelId: 'm',
+        spawnParentId: parent, spawnDepth: 1, runType: 'pipeline_step',
+      });
+      h.updateRun(step, { costUsd: 0.11, status: 'completed' });
+
+      // Only the settled, non-pipeline child counts — not 0.23.
+      expect(h.getDescendantCostUsd(parent)).toBeCloseTo(0.07, 6);
+      h.close();
+    });
+
+    it('ignores a sibling run that shares no spawn parent', () => {
+      const h = createHistory();
+      const parent = h.insertRun({ taskText: 'p', modelTier: 'balanced', modelId: 'm' });
+      const unrelated = h.insertRun({ taskText: 'other turn', modelTier: 'balanced', modelId: 'm' });
+      h.updateRun(unrelated, { costUsd: 9.99, status: 'completed' });
+      expect(h.getDescendantCostUsd(parent)).toBe(0);
+      h.close();
+    });
+  });
+});

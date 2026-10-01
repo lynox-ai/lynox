@@ -17,6 +17,9 @@ interface PlanPhase {
   name: string;
   steps: string[];
   model?: ModelTier | undefined;
+  /** Declared tool set for this phase's step (F2/D2) — the generator names what
+   *  the task needs; bash is granted only when declared. */
+  tools?: string[] | undefined;
   thinking?: ThinkingHint | undefined;
   effort?: EffortLevel | undefined;
   verification?: string | undefined;
@@ -104,7 +107,7 @@ export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[]
         if (input_from.length === 0) input_from = undefined;
       }
 
-      return { id, task: taskLines.join('\n'), input_from, model: phase.model, thinking: phase.thinking, effort: phase.effort };
+      return { id, task: taskLines.join('\n'), input_from, model: phase.model, tools: phase.tools, thinking: phase.thinking, effort: phase.effort };
     });
 }
 
@@ -277,7 +280,12 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
               model: {
                 type: 'string',
                 enum: ['deep', 'balanced', 'fast'],
-                description: 'Capability tier for this step. Omit to use session default. Prefer fast for simple tasks, balanced for standard, deep only for complex analysis. Provider-agnostic — resolves to a concrete model per the active provider.',
+                description: 'Capability tier. Omitted = fast. Use balanced for analysis/writing, deep only for complex reasoning. Provider-agnostic.',
+              },
+              tools: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Exact tool names this step needs, from your own toolset (inline-safe subset — an invalid name fails at save with the grantable list). Declare the minimum; bash needs per-call user approval.',
               },
               thinking: {
                 type: 'string',
@@ -304,7 +312,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
                 description: '"agent" (default) = automated. "user" = needs human input.',
               },
             },
-            required: ['name', 'steps'],
+            required: ['name', 'steps', 'tools'],
           },
         },
         steps: {
@@ -348,9 +356,15 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, plan.actualCostUsd, 'fast');
       }
       if (plan && plan.steps.length > 0) {
+        // Carry the planner's declared tier + tools through — this mapping used
+        // to drop `model`, so planDAG's per-step tier choice (its prompt REQUIRES
+        // one) never reached the pipeline and every auto-planned step ran on the
+        // undeclared default.
         phases = plan.steps.map(s => ({
           name: s.id,
           steps: [s.task],
+          model: s.model,
+          tools: s.tools,
           depends_on: s.input_from?.length ? s.input_from : undefined,
         }));
         hasPhases = true;

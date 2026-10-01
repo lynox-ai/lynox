@@ -13,11 +13,10 @@
   Minimal by design: it offers the three capability TIERS (deep/balanced/fast),
   gated by the tenant's max_tier ceiling. The engine ALSO clamps server-side (the
   Session ctor delegates to resolveRunModel), so this is a UX filter, not the
-  security boundary. Each tier is labelled with its concrete model (DEF-0082a,
+  security boundary. Each tier is labelled with its concrete model (e.g.
   "Tief (Opus 4.6)") from the server's `main_chat_tiers`; when that field is
   absent (a single-model custom / OpenAI-compat provider whose tiers all resolve
-  to one model) the picker hides entirely rather than offer three fake choices
-  (DEF-0082b).
+  to one model) the picker hides entirely rather than offer three fake choices.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';

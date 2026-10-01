@@ -1,10 +1,13 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
+import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
+import { refuseUnlessScoped } from './action-scopes.js';
 import type { DocsDocument } from './google-docs-format.js';
 import { docsToMarkdown, markdownToHtml } from './google-docs-format.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
+import { googleFetch } from '../../core/connector-egress.js';
 
 // === Types ===
 
@@ -26,13 +29,31 @@ interface BatchUpdateResponse {
 // === Constants ===
 
 const DOCS_BASE = 'https://docs.googleapis.com/v1/documents';
-const WRITE_ACTIONS = new Set(['create', 'append', 'replace']);
+/**
+ * The scopes each action's own API call accepts — see `action-scopes.ts`.
+ * `documents.get` also accepts Drive scopes, but only for a document the app
+ * itself created (`drive.file`); an arbitrary `document_id` is not covered, so
+ * reading keeps requiring a Docs scope.
+ */
+const ACTION_SCOPES: Record<DocsInput['action'], readonly string[]> = {
+  read: [SCOPES.DOCS_READONLY, SCOPES.DOCS],
+  create: [SCOPES.DOCS],
+  append: [SCOPES.DOCS],
+  replace: [SCOPES.DOCS],
+};
+
+const ACTION_DESCRIPTIONS: Record<DocsInput['action'], string> = {
+  read: 'Reading a document',
+  create: 'Creating a document',
+  append: 'Appending to a document',
+  replace: 'Replacing text in a document',
+};
 
 // === Helpers ===
 
 async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): Promise<Response> {
   const token = await auth.getAccessToken();
-  const response = await fetch(url, {
+  const response = await googleFetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -40,7 +61,7 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
       ...options?.headers,
     },
     signal: options?.signal ?? AbortSignal.timeout(30_000),
-  });
+  }, auth.hostPolicy);
   return response;
 }
 
@@ -54,7 +75,7 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
 // permission prompts — keep it aligned with the enumerated write actions.
 const DOCS_WRITE_ACTIONS = new Set<DocsInput['action']>(['create', 'append', 'replace']);
 
-export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
+export function createDocsTool(getAuth: () => GoogleAuth | null): ToolEntry<DocsInput> {
   return {
     destructive: {
       mode: 'external',
@@ -104,10 +125,17 @@ export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
       },
     },
     handler: async (input: DocsInput, _agent: IAgent): Promise<string> => {
+      // Registered from boot, connected or not — see google/index.ts.
+      const auth = getAuth();
+      if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
-        // Check write scope
-        if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DOCS)) {
-          return `Error: This action requires document write permissions. Grant access in Settings → Channels → Google.`;
+        // `hasOwn`, not a truthiness check on the lookup: `input.action` is
+        // typed but arrives from the model, so an unrecognised value is
+        // reachable at runtime and must fall through to the unknown-action
+        // error below rather than be silently admitted.
+        if (Object.hasOwn(ACTION_SCOPES, input.action)) {
+          const refusal = refuseUnlessScoped(auth, ACTION_SCOPES[input.action], ACTION_DESCRIPTIONS[input.action]);
+          if (refusal) return refusal;
         }
 
         // Write actions confirmation is owned by the permission guard
@@ -184,7 +212,7 @@ async function handleCreate(auth: GoogleAuth, input: DocsInput): Promise<string>
   ].join('\r\n');
 
   const token = await auth.getAccessToken();
-  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+  const response = await googleFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -192,7 +220,7 @@ async function handleCreate(auth: GoogleAuth, input: DocsInput): Promise<string>
     },
     body,
     signal: AbortSignal.timeout(30_000),
-  });
+  }, auth.hostPolicy);
 
   if (!response.ok) {
     const text = await response.text();

@@ -351,6 +351,17 @@ describe('mail_send tool', () => {
     expect(out).toContain('JWT token');
     expect(provider.send).not.toHaveBeenCalled();
   });
+
+  it('blocks a provider key the scan did not list by name, and says how to phrase example text', async () => {
+    const tool = createMailSendTool(registry);
+    const fakeStripe = 'sk_' + 'live_' + 'A1b2C3d4E5f6G7h8I9j0';
+    const out = await tool.handler({ to: 'a@x.com', subject: 'setup', body: `Use this key: ${fakeStripe}` }, yesAgent);
+    expect(out).toBe(
+      'mail_send blocked: the message appears to contain a Stripe API key. A real key is never sent by email. '
+      + 'If it is example or placeholder text, write it without the key\'s format (for example <your token>) and send again.',
+    );
+    expect(provider.send).not.toHaveBeenCalled();
+  });
 });
 
 // ── mail_reply ─────────────────────────────────────────────────────────────
@@ -373,7 +384,7 @@ describe('mail_reply tool', () => {
     await tool.handler({ uid: 77, body }, agent);
     const flatLen = body.replace(/\s+/g, ' ').trim().length;
     expect(prompt).toContain(`Body is ${String(flatLen)} chars`);
-    expect(prompt).toContain('only the first 199 are shown');
+    expect(prompt).toContain('only the first 3999 are shown');
   });
 
   // The reply confirmation renders the REMOTE sender's subject, and the prompt
@@ -394,8 +405,8 @@ describe('mail_reply tool', () => {
     const tool = createMailReplyTool(registry);
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
-    await tool.handler({ uid: 78, body: 'q'.repeat(400) }, agent);
-    expect(prompt).toContain('Body is 400 chars');
+    await tool.handler({ uid: 78, body: 'q'.repeat(5000) }, agent);
+    expect(prompt).toContain('Body is 5000 chars');
     expect(prompt.split('\n').some((l) => l.trimStart().startsWith('<!--'))).toBe(false);
   });
 

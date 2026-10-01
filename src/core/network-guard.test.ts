@@ -527,41 +527,45 @@ describe('assertHostPolicy (network_policy SSOT)', () => {
 
   it('allow-all / unset lets any host through on either surface', () => {
     for (const ctx of [undefined, policyCtx({ networkPolicy: 'allow-all' })]) {
-      expect(() => assertHostPolicy('https://anything.example.com', 'full-control', ctx)).not.toThrow();
-      expect(() => assertHostPolicy('https://anything.example.com', 'discovery', ctx)).not.toThrow();
+      expect(() => assertHostPolicy('https://anything.example.com', { surface: 'full-control' }, ctx)).not.toThrow();
+      expect(() => assertHostPolicy('https://anything.example.com', { surface: 'discovery' }, ctx)).not.toThrow();
     }
   });
 
-  it('deny-all blocks BOTH surfaces incl. discovery (air-gap, P4)', () => {
+  it('deny-all blocks BOTH surfaces incl. discovery, naming the tool scope (P4)', () => {
     const ctx = policyCtx({ networkPolicy: 'deny-all' });
-    expect(() => assertHostPolicy('https://api.example.com', 'full-control', ctx)).toThrow(/air-gapped isolation/);
+    // Pins the SCOPE, not just the refusal: the message must say this TOOL is
+    // blocked. It used to read "air-gapped isolation", i.e. a claim about the
+    // machine — a stronger promise than `network_policy` makes, since it covers
+    // three tools and nothing else.
+    expect(() => assertHostPolicy('https://api.example.com', { surface: 'full-control' }, ctx)).toThrow(/for this tool \(network_policy=deny-all\)/);
     // web_research (discovery) must NOT be a deny-all bypass.
-    expect(() => assertHostPolicy('https://api.example.com', 'discovery', ctx)).toThrow(/air-gapped isolation/);
+    expect(() => assertHostPolicy('https://api.example.com', { surface: 'discovery' }, ctx)).toThrow(/for this tool \(network_policy=deny-all\)/);
   });
 
   it('allow-list stays authoritative + uniform across surfaces', () => {
     const ctx = policyCtx({ networkPolicy: 'allow-list', allowedHosts: new Set(['api.example.com']) });
-    expect(() => assertHostPolicy('https://api.example.com/v1', 'full-control', ctx)).not.toThrow();
-    expect(() => assertHostPolicy('https://evil.com', 'full-control', ctx)).toThrow(/not in network allow-list/);
+    expect(() => assertHostPolicy('https://api.example.com/v1', { surface: 'full-control' }, ctx)).not.toThrow();
+    expect(() => assertHostPolicy('https://evil.com', { surface: 'full-control' }, ctx)).toThrow(/not in network allow-list/);
     // discovery is NOT auto-opened under allow-list (only guarded opens it).
-    expect(() => assertHostPolicy('https://evil.com', 'discovery', ctx)).toThrow(/not in network allow-list/);
+    expect(() => assertHostPolicy('https://evil.com', { surface: 'discovery' }, ctx)).toThrow(/not in network allow-list/);
   });
 
   describe('guarded', () => {
     it('opens discovery to an off-baseline host (web_research read/search)', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded' });
-      expect(() => assertHostPolicy('https://some-random-blog.example', 'discovery', ctx)).not.toThrow();
+      expect(() => assertHostPolicy('https://some-random-blog.example', { surface: 'discovery' }, ctx)).not.toThrow();
     });
 
     it('blocks a full-control off-baseline host with no floor/ack', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded' });
-      expect(() => assertHostPolicy('https://attacker.example.org/v1', 'full-control', ctx))
+      expect(() => assertHostPolicy('https://attacker.example.org/v1', { surface: 'full-control' }, ctx))
         .toThrow(/not permitted under guarded egress policy/);
     });
 
     it('allows a baseline (vetted) host on full-control', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded' });
-      expect(() => assertHostPolicy('https://api.anthropic.com/v1/messages', 'full-control', ctx)).not.toThrow();
+      expect(() => assertHostPolicy('https://api.anthropic.com/v1/messages', { surface: 'full-control' }, ctx)).not.toThrow();
     });
 
     it('does NOT admit an attacker-registerable *.openai.azure.com host on full-control', () => {
@@ -570,22 +574,47 @@ describe('assertHostPolicy (network_policy SSOT)', () => {
       // (any Azure account can create <label>.openai.azure.com) must NOT be
       // reachable without the operator floor or a human-accepted profile.
       const ctx = policyCtx({ networkPolicy: 'guarded' });
-      expect(() => assertHostPolicy('https://evilexfil.openai.azure.com/?d=x', 'full-control', ctx))
+      expect(() => assertHostPolicy('https://evilexfil.openai.azure.com/?d=x', { surface: 'full-control' }, ctx))
         .toThrow(/not permitted under guarded egress policy/);
     });
 
     it('does NOT admit a .local / LAN name on full-control (baseline excludes the LAN patterns)', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded' });
-      expect(() => assertHostPolicy('https://printer.local/status', 'full-control', ctx))
+      expect(() => assertHostPolicy('https://printer.local/status', { surface: 'full-control' }, ctx))
         .toThrow(/not permitted under guarded egress policy/);
     });
 
     it('allows an operator-floor host on full-control (exact + wildcard)', () => {
       const exact = policyCtx({ networkPolicy: 'guarded', allowedHosts: new Set(['ops.example.com']) });
-      expect(() => assertHostPolicy('https://ops.example.com/x', 'full-control', exact)).not.toThrow();
+      expect(() => assertHostPolicy('https://ops.example.com/x', { surface: 'full-control' }, exact)).not.toThrow();
       const wild = policyCtx({ networkPolicy: 'guarded', allowedWildcards: ['example.com'] });
-      expect(() => assertHostPolicy('https://sub.example.com', 'full-control', wild)).not.toThrow();
-      expect(() => assertHostPolicy('https://example.com', 'full-control', wild)).not.toThrow();
+      expect(() => assertHostPolicy('https://sub.example.com', { surface: 'full-control' }, wild)).not.toThrow();
+      expect(() => assertHostPolicy('https://example.com', { surface: 'full-control' }, wild)).not.toThrow();
+    });
+
+    it('matches an operator wildcard at a label boundary: the domain and its subdomains, not a longer name ending in it', () => {
+      const wild = policyCtx({ networkPolicy: 'guarded', allowedWildcards: ['example.com'] });
+      expect(() => assertHostPolicy('https://notexample.com/x', { surface: 'full-control' }, wild))
+        .toThrow(/not permitted under guarded egress policy/);
+      const listed = policyCtx({ networkPolicy: 'allow-list', allowedWildcards: ['example.com'] });
+      expect(() => assertHostPolicy('https://api.example.com/x', { surface: 'full-control' }, listed)).not.toThrow();
+      expect(() => assertHostPolicy('https://notexample.com/x', { surface: 'full-control' }, listed))
+        .toThrow(/not in network allow-list/);
+    });
+
+    it('admits an accepted profile host by its exact name, not by a longer name ending in it', () => {
+      const ctx = policyCtx({ networkPolicy: 'guarded' });
+      const ackHosts = new Set(['token.provider.net']);
+      expect(() => assertHostPolicy('https://xtoken.provider.net/oauth/token', { surface: 'full-control', ackHosts }, ctx))
+        .toThrow(/not permitted under guarded egress policy/);
+    });
+
+    it('lets a connector call reach its own hosts by their exact names only', () => {
+      const ctx = policyCtx({ networkPolicy: 'guarded' });
+      const hosts = new Set(['api.vendor.test']);
+      expect(() => assertHostPolicy('https://api.vendor.test/v1', { surface: 'connector', hosts }, ctx)).not.toThrow();
+      expect(() => assertHostPolicy('https://xapi.vendor.test/v1', { surface: 'connector', hosts }, ctx))
+        .toThrow(/not permitted under guarded egress policy/);
     });
 
     it('allows a human-accepted profile egress host — incl. a token_url ≠ base_url (P7)', () => {
@@ -593,33 +622,33 @@ describe('assertHostPolicy (network_policy SSOT)', () => {
       // guardedAckHosts is the union across profiles; a token endpoint on a
       // different host than base_url is admitted iff it is in the accepted set.
       const ackHosts = new Set(['token.provider.net']);
-      expect(() => assertHostPolicy('https://token.provider.net/oauth/token', 'full-control', ctx, ackHosts)).not.toThrow();
+      expect(() => assertHostPolicy('https://token.provider.net/oauth/token', { surface: 'full-control', ackHosts: ackHosts }, ctx)).not.toThrow();
       // A host NOT in the accepted set is still blocked.
-      expect(() => assertHostPolicy('https://api.provider.net/data', 'full-control', ctx, ackHosts))
+      expect(() => assertHostPolicy('https://api.provider.net/data', { surface: 'full-control', ackHosts: ackHosts }, ctx))
         .toThrow(/not permitted under guarded egress policy/);
     });
 
     it('still enforces the private-IP early-out on the open discovery surface', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded' });
-      expect(() => assertHostPolicy('http://10.0.0.1/', 'discovery', ctx)).toThrow(/private IP/);
+      expect(() => assertHostPolicy('http://10.0.0.1/', { surface: 'discovery' }, ctx)).toThrow(/private IP/);
     });
 
     it('still enforces enforce_https on full-control', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded', enforceHttps: true });
-      expect(() => assertHostPolicy('http://api.anthropic.com/x', 'full-control', ctx)).toThrow(/enforce_https/);
+      expect(() => assertHostPolicy('http://api.anthropic.com/x', { surface: 'full-control' }, ctx)).toThrow(/enforce_https/);
     });
   });
 
   it('fails CLOSED on an unrecognised policy value (version skew / malformed)', () => {
     const ctx = policyCtx({ networkPolicy: 'bogus' as unknown as NetworkPolicy });
-    expect(() => assertHostPolicy('https://api.example.com', 'full-control', ctx))
+    expect(() => assertHostPolicy('https://api.example.com', { surface: 'full-control' }, ctx))
       .toThrow(/unrecognised egress policy/);
-    expect(() => assertHostPolicy('https://api.example.com', 'discovery', ctx))
+    expect(() => assertHostPolicy('https://api.example.com', { surface: 'discovery' }, ctx))
       .toThrow(/unrecognised egress policy/);
   });
 
   it('rejects a non-http(s) protocol regardless of policy', () => {
-    expect(() => assertHostPolicy('ftp://api.example.com', 'full-control', policyCtx({ networkPolicy: 'guarded' })))
+    expect(() => assertHostPolicy('ftp://api.example.com', { surface: 'full-control' }, policyCtx({ networkPolicy: 'guarded' })))
       .toThrow(/unsupported protocol/);
   });
 });

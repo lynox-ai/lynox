@@ -45,10 +45,10 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v11', () => {
+  it('creates the database and stamps schema_version v15', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(11); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances)
+    expect(row.v).toBe(15); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger) + v14 (bulk apply/undo: atomic, kind, claimed_at) + v15 (bulk_targets.after_actual)
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -181,7 +181,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(byId['g-workflow']).toBeNull();
     expect(byId['g-backup']).toBeNull();
     expect(byId['g-notify']).toBeNull();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     e.close();
   });
 
@@ -208,7 +208,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
     expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     e.close();
   });
 
@@ -243,7 +243,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       text: 'a fact from before v8', source_type: 'user_asserted',
       source_channel: null, source_untrusted: 0, embedding_model: null,
     });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     e.close();
   });
 
@@ -279,7 +279,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // The two v9 tables exist and are empty.
     expect((db.prepare("SELECT COUNT(*) c FROM knowledge_entries").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_blocks").get() as { c: number }).c).toBe(0);
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
 
     // H6 (pin is a store invariant): an active, trusted row MAY pin.
     expect(() =>
@@ -441,7 +441,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(11); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(15); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -551,9 +551,13 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     db.prepare("INSERT INTO tasks (id, title, due_trigger_id) VALUES ('tk','Todo','tr')").run();
     db.prepare("INSERT INTO connections (id, kind, name) VALUES ('cn','api','API')").run();
     db.prepare("INSERT INTO artifacts (id, type, thread_id) VALUES ('ar','html','t1')").run();
+    // The bulk-run ledger holds before-images — customer data — so it is in the slice.
+    db.prepare("INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase) VALUES ('br','h','workspace','restorable','previewed')").run();
+    db.prepare("INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before) VALUES ('br',0,?,'update','restorable',?)").run(e.enc('a.txt'), e.enc('{"absent":false,"value":"x"}'));
 
     // Sanity: the slice really populated rows, so "all empty after" is not vacuous
     // (a future no-op INSERT couldn't make the wipe assertion trivially green).
+    expect((db.prepare("SELECT COUNT(*) c FROM bulk_targets").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT COUNT(*) c FROM subjects").get() as { c: number }).c).toBe(2);
     expect((db.prepare("SELECT COUNT(*) c FROM relationships").get() as { c: number }).c).toBe(1);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_subjects").get() as { c: number }).c).toBe(1);
@@ -575,7 +579,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // boot backfill re-populating from the still-present legacy history.db).
     expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -583,10 +587,85 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
+  it('v15 migration keeps a populated v14 bulk ledger, adds an empty after_actual and the probe table', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-engine-'));
+    tmpDirs.push(dir);
+    const path = join(dir, 'engine.db');
+    const at = new EngineDb(path, '');
+    at.getDb().exec(`
+      INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total) VALUES ('br','h','workspace','restorable','done',1);
+      INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, applied_at, result)
+        VALUES ('br',0,'k0','update','restorable','b0','a0','2026-09-30T00:00:00Z','written');
+      ALTER TABLE bulk_targets DROP COLUMN after_actual;
+      DROP TABLE bulk_host_probes;
+      DELETE FROM schema_version WHERE version >= 15;
+    `);
+    at.close();
+
+    const e = new EngineDb(path, '');
+    const db = e.getDb();
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
+    expect(db.prepare('SELECT seq, before, after_planned, result, after_actual FROM bulk_targets').all())
+      .toEqual([{ seq: 0, before: 'b0', after_planned: 'a0', result: 'written', after_actual: null }]);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM bulk_host_probes').get()).toEqual({ n: 0 });
+    e.close();
+  });
+
+  it('v14 migration carries a POPULATED v13 bulk ledger over and admits undo-only `delete` targets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-engine-'));
+    tmpDirs.push(dir);
+    const path = join(dir, 'engine.db');
+    // Rewind to v13: the two bulk tables in their v13 shape (copied from MIGRATIONS[12]),
+    // one dry run in them.
+    const at = new EngineDb(path, '');
+    at.getDb().exec(`
+      DELETE FROM schema_version WHERE version >= 14;
+      DROP TABLE bulk_targets; DROP TABLE bulk_runs; DROP TABLE bulk_host_probes;
+      CREATE TABLE bulk_runs (
+        id TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), created_by TEXT,
+        rule_hash TEXT NOT NULL, target_system TEXT NOT NULL,
+        undo TEXT NOT NULL CHECK (undo IN ('restorable','compensatable','none','mixed')),
+        phase TEXT NOT NULL CHECK (phase IN ('planned','previewed','approved','writing','done','aborted','undone')),
+        contract_json TEXT, approved_by TEXT, approved_at TEXT, approval_checksum TEXT, max_targets INTEGER,
+        expires_at TEXT, targets_total INTEGER NOT NULL DEFAULT 0, targets_applied INTEGER NOT NULL DEFAULT 0,
+        targets_failed INTEGER NOT NULL DEFAULT 0, halt_reason TEXT);
+      CREATE INDEX idx_bulk_runs_created ON bulk_runs(created_at);
+      CREATE TABLE bulk_targets (
+        run_id TEXT NOT NULL REFERENCES bulk_runs(id) ON DELETE CASCADE, seq INTEGER NOT NULL,
+        target_key TEXT NOT NULL,
+        change TEXT NOT NULL CHECK (change IN ('update','create','unchanged','invalid')),
+        undo TEXT CHECK (undo IN ('restorable','compensatable','none')),
+        before TEXT, after_planned TEXT, applied_at TEXT, result TEXT, error TEXT, undone_at TEXT,
+        PRIMARY KEY (run_id, seq));
+      INSERT INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total) VALUES ('br','h','workspace','restorable','previewed',2);
+      INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned) VALUES ('br',0,'k0','update','restorable','b0','a0');
+      INSERT INTO bulk_targets (run_id, seq, target_key, change, error) VALUES ('br',1,'k1','invalid','bad_key');
+    `);
+    at.close();
+
+    const e = new EngineDb(path, '');
+    const db = e.getDb();
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
+    expect(db.prepare('SELECT id, phase, targets_total, atomic, kind, source_run_id, target_collection FROM bulk_runs').all())
+      .toEqual([{ id: 'br', phase: 'previewed', targets_total: 2, atomic: 0, kind: 'apply', source_run_id: null, target_collection: null }]);
+    expect(db.prepare('SELECT seq, target_key, change, before, after_planned, error, claimed_at, source_seq FROM bulk_targets ORDER BY seq').all())
+      .toEqual([
+        { seq: 0, target_key: 'k0', change: 'update', before: 'b0', after_planned: 'a0', error: null, claimed_at: null, source_seq: null },
+        { seq: 1, target_key: 'k1', change: 'invalid', before: null, after_planned: null, error: 'bad_key', claimed_at: null, source_seq: null },
+      ]);
+    db.prepare("INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('br',2,'k2','delete')").run();
+    expect(() => db.prepare("INSERT INTO bulk_targets (run_id, seq, target_key, change) VALUES ('br',3,'k3','bogus')").run()).toThrow(/CHECK/);
+    expect(() => db.prepare("UPDATE bulk_runs SET atomic = 2 WHERE id = 'br'").run()).toThrow(/CHECK/);
+    // The cascade survived the rebuild.
+    db.prepare("DELETE FROM bulk_runs WHERE id = 'br'").run();
+    expect((db.prepare('SELECT COUNT(*) c FROM bulk_targets').get() as { c: number }).c).toBe(0);
+    e.close();
+  });
+
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     e.close();
   });
 
@@ -601,7 +680,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(15);
     e.close();
   });
 });
@@ -621,11 +700,36 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
   const flags = (e: EngineDb): Array<{ flag: string; value: string }> =>
     e.getDb().prepare("SELECT flag, value FROM onboarding_flags WHERE owner_user_id = 'system'").all() as Array<{ flag: string; value: string }>;
 
-  /** Take a db to v10 exactly, then close it — the state every pre-W1 instance is in. */
+  /** Take a db to v10 exactly, then close it — the state every pre-W1 instance is in.
+   *
+   *  ⚠ Coupled to the ladder HEAD, and silently so before this guard existed. The
+   *  migrator resumes from MAX(schema_version), so deleting only the v11 row while a
+   *  v12 row remains leaves the head at 12 and re-runs NOTHING — every test in this
+   *  describe then asserts against a database v11 never touched, and they fail with
+   *  six unrelated-looking assertion errors instead of one clear one. Rewinding needs
+   *  BOTH halves: drop the version rows AND undo what those migrations did, or the
+   *  re-run hits an already-applied DDL (SQLite has no ADD COLUMN IF NOT EXISTS).
+   *  ⚠ ADDING A MIGRATION ABOVE v11? UNDO ITS EFFECT HERE, AND NOTHING WILL REMIND YOU.
+   *  Whether a lapse is loud depends entirely on the migration's SHAPE, so this is
+   *  stated rather than guarded:
+   *    · `ALTER TABLE … ADD COLUMN` or an unguarded `CREATE TABLE` → the re-run hits
+   *      the already-applied statement and throws. Loud, in every test here.
+   *    · `CREATE {TABLE,INDEX} IF NOT EXISTS`, or a guarded `INSERT … WHERE NOT
+   *      EXISTS` — which is what v11 itself is — → the re-run is a silent no-op, the
+   *      rewind never happened, and these tests quietly run against the wrong schema.
+   *  An earlier draft asserted `MAX(version) === 10` and called it a positive control.
+   *  It was a tautology: the DELETE above makes that true whether or not the undo was
+   *  added. It was removed rather than kept, because a check that cannot fail reads as
+   *  protection and is worse than an admitted gap. */
   const openAtV10 = (p: string): void => {
     const e = new EngineDb(p, '');
-    e.getDb().prepare('DELETE FROM schema_version WHERE version = 11').run();
-    e.getDb().prepare('DELETE FROM onboarding_flags').run();
+    e.getDb().exec(`
+      DELETE FROM schema_version WHERE version >= 11;
+      DELETE FROM onboarding_flags;
+      ALTER TABLE triggers DROP COLUMN waiting_until;   -- v12
+      DROP TABLE bulk_targets; DROP TABLE bulk_runs;    -- v13 (v14 alters these two)
+      DROP TABLE bulk_host_probes;                      -- v15
+    `);
     e.close();
   };
 

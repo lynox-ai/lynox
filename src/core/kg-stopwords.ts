@@ -134,6 +134,139 @@ export function isCleanupTarget(name: string): boolean {
 }
 
 /**
+ * Owners that make a possessive a TOPIC rather than a name. Deliberately tiny: the rule
+ * fires on the owner, so "Aurelva Women's Health" and "Levi's" — real names carrying a
+ * possessive — are untouched, while "Client's compliance risk" is caught by its owner.
+ */
+const GENERIC_OWNERS = ['client', 'user', 'company', 'assistant', 'customer', 'operator', 'team', 'business'];
+const GENERIC_POSSESSIVE_RE = new RegExp(`^(the\\s+)?(${GENERIC_OWNERS.join('|')})['\u2019]s\\s+\\S`, 'i');
+const BARE_GENERIC_RE = new RegExp(`^(the\\s+)?(${GENERIC_OWNERS.join('|')})$`, 'i');
+
+/**
+ * Function words that may legitimately appear lowercase inside a name, in both languages
+ * this product serves. German matters as much as English here: "Zentralstelle für Handelsdaten"
+ * is a real organisation and "für" is the only lowercase token in it.
+ */
+const NAME_CONNECTIVES: ReadonlySet<string> = new Set([
+  'of', 'and', 'the', 'for', 'at', 'by', 'in', 'on', 'to', 'vs', 'a',
+  'für', 'und', 'mit', 'auf', 'im', 'am', 'an', 'zur', 'zum', 'von', 'der', 'den', 'die', 'das',
+  'de', 'du', 'van', 'la', 'le', 'el', 'di', 'da',
+]);
+
+/**
+ * A `v`-prefixed version token ("v2", "v10") reads as lowercase prose but is not.
+ *
+ * Only the `v` form is checked, and that is not an oversight: this is consulted solely from
+ * the lowercase-initial branch below, so a digit-initial token ("4.6", "2024") can never
+ * reach it. An earlier version matched `/^v?\d/` and documented "4.6" as a case it handles
+ * — a dead half no test could kill, because nothing could reach it.
+ */
+function isVersionToken(w: string): boolean {
+  return /^v\d/.test(w);
+}
+
+/**
+ * A lowercase-initial token carrying an interior capital is a BRAND, not prose:
+ * "iPhone", "reCAPTCHA", "inDesign", "eBay". Without this, rule 4 refuses "Apple iPhone"
+ * and "Google reCAPTCHA" — real product names with the exact shape it looks for.
+ */
+function isCamelBrand(w: string): boolean {
+  return /\p{Lu}/u.test(w.slice(1));
+}
+
+/**
+ * True if `name` describes a TOPIC rather than naming an ENTITY — the shape that must
+ * never be minted as a subject.
+ *
+ * Structural, not a word list, and that is the design rather than an economy: the word
+ * list it would need is unbounded (a production sample produced "Technical Architecture",
+ * "Compliance Strategy", "Regulatory Compliance" and "Strategic recommendation for
+ * compliance and operational efficiency", sharing no vocabulary and one shape). Each rule
+ * below keys on a property a real entity name does not have.
+ *
+ * ASYMMETRIC BY DESIGN, and the asymmetry is why it can afford to be blunt. A false
+ * positive costs the fact its SUBJECT LINK — the fact is still written, still carries its
+ * `subject_hint`, and a human can still bind it. A false negative mints a permanent
+ * subject nobody can use, and 442 of 592 subjects on the canary instance were exactly
+ * that. So the rules lean toward refusing to mint.
+ *
+ * KNOWN GAPS, both measured against a live 477-subject graph rather than assumed. The
+ * example names are INVENTED and reproduce the measured shapes; the graph they came from
+ * is a customer list and this repo is public:
+ *  - a two-token Title-Case pair of abstract nouns ("Technical Architecture") is
+ *    shape-identical to a real product name ("Google Cloud") and passes;
+ *  - conversely "Python requests", "Qualvenn framework v2" and "die tageszeitung" are REAL
+ *    names that the sentence-case rule flags. Six of 477 live subjects are false positives
+ *    of this kind.
+ * Separating either pair needs vocabulary, not shape, which is why the extraction prompt —
+ * not this filter — is the primary defence and this is the net beneath it.
+ *
+ * ⚠ NOT AN ARCHIVE ORACLE. `subject-sweep.ts` decides what to soft-archive from
+ * {@link isCleanupTarget}, and this must not be substituted for it: there, a false
+ * positive REMOVES a real subject, inverting the asymmetry the rules above are tuned for.
+ * A dry run over the same graph flagged one engagement carrying 58 memories and two
+ * subjects that are people's names. The tuning that is right for refusing a mint is wrong
+ * for undoing one.
+ *
+ * An earlier cut also refused any name over four tokens. It was removed, and the honest
+ * account matters more than the removal: it DID catch a class the surviving rules miss —
+ * long all-Title-Case clauses, "Strategic Recommendation For Compliance And Operational
+ * Efficiency", "Q4 Marketing Budget Planning And Approval Workflow". Those leak today.
+ * (An earlier version of this comment claimed the cap "caught NOTHING the others miss".
+ * That was measured on a corpus containing no such name — a true statement about the
+ * SAMPLE, asserted about the RULE.)
+ *
+ * It stays removed because every variant costs more than it earns. Measured over the live
+ * graph: a cap of 4 wrongly refuses 3 real subjects, a cap of 5 refuses 2, and pairing the
+ * cap with "contains a generic noun" still refuses "AI for Science Innovation Factory" and
+ * "Shopify Custom App Admin API Access Token" while missing "Technical Architecture
+ * Decision Record Summary". A long Title-Case clause and a long Title-Case name are one
+ * shape; neither length nor noun-presence separates them.
+ *
+ * Likewise an all-lowercase-phrase rule stood here, and briefly an article rule after it.
+ * Both are gone for the same measured reason: over the live graph neither flagged a single
+ * subject, while the article rule refused "die tageszeitung" and "the Ocean Cleanup". So
+ * article-led descriptions ("the iPhone") leak. Every rule here has to earn its false
+ * positives on the real corpus, not on a plausible example.
+ */
+export function isTopicShapedName(name: string): boolean {
+  const t = name.trim();
+  if (!t) return true;
+  // 1. "Client's compliance risk" — a possessive whose owner is a role, not a party.
+  if (GENERIC_POSSESSIVE_RE.test(t)) return true;
+  // 2. "the user", "Company" — the role standing alone.
+  if (BARE_GENERIC_RE.test(t)) return true;
+  const tokens = t.split(/\s+/).filter(Boolean);
+  // (An all-lowercase-phrase rule stood here and was REMOVED. Measured over the 477 live
+  //  subjects plus the known bad names, it caught exactly one string the rule below does
+  //  not — "de la" — which is not a shape any writer produces. A rule that fires only on
+  //  inputs nothing generates is not a safety net, it is an untested branch: nothing can
+  //  kill it, so it cannot be shown to work either.)
+  // (An article rule stood here for one commit and was REMOVED. It caught "the iPhone"
+  //  and "das Angebot" — and refused "die tageszeitung", "die Mobiliar", "das Örtliche",
+  //  "the Ocean Cleanup", plus every extractor that writes a real name mid-sentence
+  //  ("the Guardian", "the North Face"). Over the live graph it flagged exactly ZERO
+  //  subjects, so it was pure downside: a rule that catches nothing here and refuses real
+  //  names elsewhere. Article-led descriptions therefore LEAK, and that is the accepted
+  //  trade — same conclusion, and the same reason, as the token cap above.)
+
+  // 3. "Compliance and regulatory risks", "MURRANTO Ventures regional preferences" — a
+  //    lowercase content word inside a multi-word name is sentence case, i.e. prose.
+  //
+  //    THIS RULE HAS AN IRREDUCIBLE ERROR RATE, measured rather than feared: "Python
+  //    requests" and "Qualvenn framework v2" are real names with exactly the shape of
+  //    "lynox platform features", which is not. No structural rule separates them; only
+  //    vocabulary would. It is kept because the two directions cost differently on THIS
+  //    path — see the asymmetry note above — and it is why {@link isTopicShapedName} must
+  //    not be used to decide an ARCHIVE, where the costs invert.
+  if (tokens.length > 1 && tokens.some((w, i) =>
+    i > 0 && /^\p{Ll}/u.test(w) && !NAME_CONNECTIVES.has(w.toLowerCase())
+    && !isVersionToken(w) && !isCamelBrand(w))) return true;
+  // 4. The existing generic-noun/pricing/fragment machinery, which this extends.
+  return isCleanupTarget(t);
+}
+
+/**
  * True if a `person`-typed name has a shape that is almost never a real person, so the
  * extractor can refuse to mint a person subject WITHOUT a stopword entry — which would
  * collide with real names/brands (this is exactly why 'will'/'target' are kept OUT of

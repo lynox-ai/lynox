@@ -12,6 +12,71 @@ commit-msg:
       run: bash scripts/no-ai-attribution.sh strip {1}
 
 pre-push:
+  # SCRIPTS, not commands, for every check that has no CI twin. lefthook (2.1.5 and 2.1.8, measured
+  # in real clones) computes its push files from the CHECKED-OUT HEAD against that branch's upstream
+  # (no upstream: origin/HEAD). With zero files it skips EVERY pre-push command — "(skip) no
+  # matching push files", exit 0 — whatever refs are being pushed: an empty commit on an
+  # already-pushed branch, a fresh branch carrying only an empty commit, a push of a branch you are
+  # not standing on. The commands below have CI twins, so for them that is latency. The scripts
+  # here do not, and a script ran in every measured case.
+  scripts:
+    "push-lands-guard.sh":
+      # A push to a branch whose pull request is already merged or closed lands nowhere, and git
+      # reports success anyway. Fail-closed: an unreadable PR state blocks the push. Its backstop
+      # for --no-verify is the scheduled sweep (.github/workflows/push-lands-sweep.yml).
+      runner: sh
+      use_stdin: true
+    "public-repo-guard-meta.sh":
+      # The customer-name class does NOT scan the tree — it scans commit
+      # messages, which is where that leak actually happens and the one surface
+      # that cannot be edited after a merge. So it needs its own invocation:
+      # without this the class would be enforced nowhere at all locally, since
+      # the scan above never looks at a message.
+      #
+      # merge-base gives the commits this push adds, relative to HEAD. Known
+      # limit, stated rather than hidden: pushing a branch you are not standing
+      # on (`git push origin other`) computes the range from HEAD, so it walks
+      # nothing. That case prints "NO commits scanned" — visible, not silent —
+      # and this class has no CI twin to catch it afterwards.
+      #
+      # Without ~/.lynox/private-names.re the class warns and stands down rather
+      # than blocking: an unpushable hook is how people learn --no-verify.
+      # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
+      # origin/main — a --single-branch clone, a differently named remote, a repo
+      # with no origin at all — makes the substitution empty, the guard sees a
+      # missing argument and exits 2, and the push is BLOCKED for a reason its
+      # message never mentions. Falling back to HEAD yields an empty range, which
+      # the guard reports as "NO commits" and lets through: it says it checked
+      # nothing rather than blocking. That is the deliberate trade, and it is NOT
+      # softened by a CI twin — this class has none (see the comment above, and
+      # CLAUDE.md). It is chosen because a hook nobody can push through is how
+      # people learn --no-verify, and because the state it lets through announces
+      # itself in the output instead of passing as a clean scan.
+      # The invocation lives in .lefthook/pre-push/public-repo-guard-meta.sh.
+      runner: bash
+      skip:
+        - merge
+        - rebase
+    "public-repo-guard-files.sh":
+      # The same class over the other surface: the PATHS and CONTENT of the files
+      # this push adds. The message half above cannot see them, so a file named
+      # after a customer — or holding the name in its body — reached this PUBLIC
+      # repo untouched as long as the message stayed neutral.
+      #
+      # ⛔ This runs at pre-push and MUST have no CI twin. It prints the offending
+      # path, which is only safe on the operator's own machine; a public Actions
+      # log printing a customer name is the exact failure that got an earlier
+      # tree-scanning version of this class deleted. tests/public-repo-guard.test.ts
+      # asserts that no workflow invokes `check-files` — keep it that way.
+      #
+      # Same range expression, same fallback, same reasons as the block above:
+      # `|| echo HEAD` yields an empty range that the guard reports as "NO files"
+      # rather than blocking a clone that has no local origin/main.
+      # The invocation lives in .lefthook/pre-push/public-repo-guard-files.sh.
+      runner: bash
+      skip:
+        - merge
+        - rebase
   commands:
     security-scan:
       run: sh scripts/security-scan.sh
@@ -65,7 +130,26 @@ pre-commit:
         -- || true
       fail_text: "Potential secrets detected in staged files"
     typecheck:
-      run: npm run typecheck
+      # A fresh worktree has no node_modules, and the typecheck then dies deep inside
+      # tsc/pnpm output where the real cause is invisible. What the operator sees is not
+      # "install your dependencies" — it is a failed commit, then `git push` creating an
+      # EMPTY branch, then `gh pr create` saying "No commits between". Three documented
+      # occurrences on 2026-08-20 alone, in three different sessions, against a rule that
+      # is written in /track step 3 and in two memory files. Prose lost; this is the
+      # mechanism. A loud one-line refusal beats a rule everyone has already read.
+      run: |
+        test -d node_modules || {
+          echo ""
+          echo "  ✋ node_modules is missing in this worktree — the typecheck cannot run."
+          echo "     Run:  pnpm install --force"
+          echo ""
+          echo "     (A fresh worktree needs this once. Without it the commit fails here,"
+          echo "      the push creates an empty branch, and gh pr create reports"
+          echo "      \"No commits between\" — three sessions hit exactly that on 2026-08-20.)"
+          echo ""
+          exit 1
+        }
+        npm run typecheck
       stage_fixed: true
     hex-guard:
       # Fail if a web-ui change introduces hardcoded 6-digit hex outside the

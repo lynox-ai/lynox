@@ -235,6 +235,9 @@ function resolveScope(scopeStr: string | undefined, agent: IAgent): MemoryScopeR
 }
 
 export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
+  // Not a pure append: the knowledge-layer write supersedes contradicted memories, so
+  // deleting what was stored would not bring those back.
+  undo: 'restorable',
   definition: {
     name: 'memory_store',
     description: 'Save qualitative knowledge for future sessions — business context, preferences, techniques, or lessons learned. NOT for structured/quantitative data (use data_store_insert) or deliverables with deadlines (use task_create).',
@@ -377,6 +380,7 @@ export const memoryRecallTool: ToolEntry<MemoryRecallInput> = {
 };
 
 export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
+  undo: 'restorable',
   destructive: { mode: 'data' },
   definition: {
     name: 'memory_delete',
@@ -450,6 +454,7 @@ export const memoryDeleteTool: ToolEntry<MemoryDeleteInput> = {
 };
 
 export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
+  undo: 'restorable',
   definition: {
     name: 'memory_update',
     description: 'Correct or refine previously saved knowledge. Tries an exact substring match first; if no line contains `old_content`, the closest matching lines (by token overlap) are marked `[SUPERSEDED YYYY-MM-DD]` and `new_content` is appended as a new line — so the new knowledge is never silently lost.',
@@ -693,6 +698,7 @@ export const memoryListTool: ToolEntry<MemoryListInput> = {
 };
 
 export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
+  undo: 'restorable',
   // Promotion deletes from the source scope, so it is a data-destructive op — gate
   // it in autonomous mode exactly like memory_delete (an injected promote must not
   // silently move/erase knowledge without the destructive-op check).

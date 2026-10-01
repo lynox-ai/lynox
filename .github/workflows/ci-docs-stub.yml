@@ -48,7 +48,7 @@ jobs:
     outputs:
       docs-only: ${{ steps.check.outputs.docs-only }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: check
@@ -88,14 +88,13 @@ jobs:
     if: needs.detect.outputs.docs-only == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: Install gitleaks
-        env:
-          GITLEAKS_VERSION: '8.21.2'
-        run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
-          sudo mv gitleaks /usr/local/bin/
+        uses: ./.github/actions/install-gitleaks
+      - name: Check the gitleaks config still detects
+        # A config with no active rules passes every scan below without a sign.
+        run: bash scripts/gitleaks-config-canary.sh
       - name: Run gitleaks
         run: gitleaks detect --source . --verbose --redact
 

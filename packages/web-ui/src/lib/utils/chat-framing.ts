@@ -23,7 +23,29 @@
  * `\s` and the C0 class both miss. This matches the server sanitiser byte-for-byte
  * so the two layers behave identically.
  */
+/**
+ * Characters that forge a label rather than fill it: the bidi OVERRIDES and
+ * ISOLATES, which render text in an order it is not written in, and the
+ * zero-width formatters, which put content in a field that looks empty.
+ *
+ * LRM/RLM (U+200E/200F) are deliberately NOT here, and the omission is the
+ * considered half. They are legitimate in right-to-left text — an Arabic or
+ * Hebrew contact name orders its digits and punctuation with them — and this
+ * function is shared by six seed-message surfaces where the value is a real
+ * person's name. Stripping them there reorders `אבי ‎+41 79 123`. The overrides
+ * buy an attacker the actual reversal; the marks only nudge neutrals, so the
+ * trade goes the other way. `prompt-origin.ts` does strip the marks as well,
+ * because its field is a workflow label that is never a name — that difference
+ * is intended, not drift.
+ */
+const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
+
 export function sanitizeFramingField(s: string, max = 200): string {
-	const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
-	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+	// Strip BEFORE collapsing: removing a character between two spaces after the
+	// collapse leaves the two spaces behind, so `'a \u200E b'` would keep a double
+	// space and `'\u202E x'` a leading one.
+	const flat = s.replace(FORGING_CHARS, '').replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
+	// Cut by code point so a truncation cannot end on a lone surrogate.
+	const points = [...flat];
+	return points.length > max ? `${points.slice(0, max - 1).join('')}…` : flat;
 }

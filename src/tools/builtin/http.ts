@@ -1,14 +1,19 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
+import { accessTokenKey, hasRevokedGrant, refreshTokenKey } from '../../core/api-store.js';
+import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
-import type { EgressSurface } from '../../core/network-guard.js';
+import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
+import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
+import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import {
   extractHtmlText,
   isHtmlContentType,
@@ -39,7 +44,15 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('private IP')) return 'That address points to an internal network and cannot be reached.';
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
   if (technical.includes('unsupported protocol')) return 'Only HTTP and HTTPS connections are supported.';
-  if (technical.includes('air-gapped')) return 'Network access is disabled in this security mode.';
+  // This string is what the MODEL reads back as the tool result, so it teaches a
+  // rule. "Network access is disabled" taught the wrong one: it describes the
+  // machine, while the policy only covers this tool — the engine's own outbound
+  // paths and anything a shell command starts are outside `network_policy`. A
+  // model that believes the machine is offline either gives up on work it could
+  // legitimately do, or tries another route, succeeds, and learns that the stated
+  // policy is decorative. Naming the scope avoids both without advertising a way
+  // around it.
+  if (technical.includes('network_policy=deny-all')) return 'Network access is disabled for this tool in the current security mode.';
   if (technical.includes('guarded egress policy')) return 'That server is not reachable under the current egress policy. Connect it as an API via api_setup, or ask your operator to allow it.';
   if (technical.includes('unrecognised egress policy')) return 'Network access is blocked by an unrecognised egress policy configuration.';
   if (technical.includes('allow-list')) return 'That server is not in the allowed list for this security mode.';
@@ -48,6 +61,77 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
   if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
+}
+
+/**
+ * A block the agent must READ — recorded in the ledger as a failure all the same.
+ *
+ * ## Why a returned block became a thrown one
+ *
+ * The handler declines a request in fourteen places and RETURNED the refusal as
+ * an ordinary string, because the model has to read it and adapt (retry another
+ * host, ask the operator, give up on that branch). `agent.ts` books a returned
+ * string as a success and writes an EMPTY `output_json`, and
+ * `getToolStats` derives its `error_count` from that field
+ * (`output_json != '' AND != '{}'`) and reads no other column for it. So a
+ * blocked call was, in that view, byte-for-byte a successful call that had
+ * nothing to say.
+ *
+ * That is not a cosmetic defect. Measured on a real thread (dogfood 2026-08-23):
+ * an agent asked to read a PUBLIC repository hit a guarded block on
+ * `api.github.com`, saw no failure anywhere, and reported the repository as
+ * non-existent — a fact-claim built on a refusal it could not perceive. It then
+ * proposed spawning six to eight sub-agents onto an analysis with no codebase.
+ * The same defect had already been observed ten days earlier, on the same
+ * instance, in the same shape: eight egress blocks at 0–2 ms, every one with an
+ * empty output field, none counted. It was written down and not fixed, and it
+ * cost the same user a second time.
+ *
+ * `ToolSoftFailure` is the existing mechanism for exactly this (core#1259): the
+ * payload takes the ordinary result path — masked, injection-scanned, truncated,
+ * NOT marked `is_error` — while the reason lands in `output_json`, where the
+ * counter can see it.
+ *
+ * What changes is the ledger and the diagnostics channel, not the conversation:
+ * `toolEnd` now publishes `success: false` for a refused call, which flips the
+ * Bugsink breadcrumb and the debug line. Both are operator surfaces, and both
+ * were previously as wrong as the ledger.
+ *
+ * ## The rule for a fifteenth block
+ *
+ * Throw, never return. The payload argument must be the string the caller would
+ * otherwise have returned, so what the model reads does not change; that is what
+ * keeps this an observability fix rather than a behaviour change in disguise.
+ *
+ * Not every refusal goes through here, and that is deliberate: the `catch` at
+ * the bottom of the handler re-throws a network-layer block as an ordinary
+ * `Error`, which the agent loop already books as a failure and shows the model
+ * as `is_error`. Only the paths that RETURNED were silent, so only they moved.
+ *
+ * The `technical` reason is what an operator needs and the friendly text
+ * deliberately withholds: which rule fired, and — where the rule is
+ * host-specific — on which host. It is safe to record because `agent.ts` masks
+ * it through `maskSecrets` and bounds it before persisting, and because the
+ * input row beside it already carries the same URL.
+ */
+function blockedFriendly(technical: string): never {
+  throw new ToolSoftFailure(friendlyBlockMessage(technical), technical);
+}
+
+/**
+ * As {@link blockedFriendly}, for the refusals phrased outside
+ * `friendlyBlockMessage` — the ones this handler writes itself, plus
+ * `auth.refusal`, which `attachEngineManagedAuth` phrases.
+ *
+ * Deliberately NOT routed through `friendlyBlockMessage`: its rules match on
+ * substrings, and these messages are not written to avoid them — a consent
+ * refusal mentioning "this session" would be rewritten into "Request limit
+ * reached for this session", which is a different and false statement. Passing
+ * the message through unchanged keeps the model-visible bytes identical to what
+ * the `return` produced.
+ */
+function blockedVerbatim(message: string): never {
+  throw new ToolSoftFailure(message, message);
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -83,10 +167,16 @@ function shouldRewriteToGet(status: number, method: string): boolean {
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
-  // Which egress surface this ride is — REQUIRED so the `guarded` policy can
-  // open discovery reads while gating full-control targets (no safe default).
-  surface: EgressSurface,
-  ctx?: ToolContext | undefined,
+  // Which egress surface this ride is, AND the allowance it is entitled to —
+  // REQUIRED so the `guarded` policy can open discovery reads while gating
+  // full-control targets and admitting a connector to its own hosts (no safe
+  // default). Re-applied per redirect hop, so an allowed host cannot 302 to a
+  // forbidden one on any surface.
+  call: EgressCall,
+  // Only the host-policy fields are read here. Typed as the narrow structural
+  // interface rather than ToolContext so a connector caller — which holds a
+  // policy, not a tool context — can pass one without inventing the rest.
+  ctx?: HostPolicyContext | undefined,
   // Slice B: for a capability-contract-governed write, every redirect hop must
   // ALSO stay within the contract — `isDangerous`/the consent gate only saw the
   // ORIGINAL url, so without this a 307/308 to another (network-allow-listed)
@@ -94,10 +184,15 @@ export async function fetchWithValidatedRedirects(
   // Returns true if the hop is permitted. Omitted for non-contract calls (no
   // redirect-behaviour change).
   redirectGuard?: ((nextUrl: string, method: string) => boolean) | undefined,
-  // Union of connected api_profiles' human-accepted egress hosts, consulted only
-  // for a full-control surface under `guarded`. Computed in the handler (where
-  // the ApiStore resolves) and re-checked here per redirect hop.
-  guardedAckHosts?: ReadonlySet<string> | undefined,
+  // An engine-attached credential header whose name is NOT in the fixed
+  // cross-origin drop set. `CROSS_ORIGIN_DROP_HEADERS` covers Authorization,
+  // Cookie and the common `X-Api-Key`/`X-Auth-Token` spellings, but an
+  // `auth.type: 'header'` profile names its own slot — `Private-Token`,
+  // `X-Shopify-Access-Token`, anything — and the engine now fills it from the
+  // vault on every request. One 302 off the accepted host would otherwise replay
+  // that credential to the new origin, and it is exempt from the egress scan
+  // precisely because the engine put it there.
+  extraCredentialHeader?: string | undefined,
   // Returns the FINAL hop alongside the response. Callers need the URL, not
   // just the bytes: cost attribution profiles by hostname, and link extraction
   // resolves relative hrefs against it and filters on its origin — so handing
@@ -115,7 +210,7 @@ export async function fetchWithValidatedRedirects(
   let headers = flattenHeaders(init.headers);
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    assertHostPolicy(currentUrl, surface, ctx, guardedAckHosts);
+    assertHostPolicy(currentUrl, call, ctx);
     const requestInit: RequestInit = {
       ...init,
       method,
@@ -149,7 +244,7 @@ export async function fetchWithValidatedRedirects(
     }
     // Drop credential headers before a cross-origin hop (mirror fetch()) so the
     // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
-    headers = redirectHopHeaders(headers, currentUrl, nextUrl);
+    headers = redirectHopHeaders(headers, currentUrl, nextUrl, extraCredentialHeader);
     // A 307/308 preserves the method + body — drop the body too on a cross-origin
     // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
     // open redirect), degrading to a bodyless GET like the 301/302/303 path.
@@ -252,17 +347,54 @@ export { HTTP_TOOL_HOURLY_LIMIT as DEFAULT_HOURLY_LIMIT, HTTP_TOOL_DAILY_LIMIT a
 
 // === Egress control: detect data exfiltration attempts ===
 
-/** Common secret/API key patterns that should never appear in outbound requests. */
-const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/,                    label: 'Anthropic API key' },
-  { pattern: /sk-[a-zA-Z0-9]{20,}/,                          label: 'OpenAI-style API key' },
-  { pattern: /ghp_[a-zA-Z0-9]{36,}/,                         label: 'GitHub personal access token' },
-  { pattern: /gho_[a-zA-Z0-9]{36,}/,                         label: 'GitHub OAuth token' },
-  { pattern: /\bAKIA[A-Z0-9]{16}\b/,                         label: 'AWS access key' },
-  { pattern: /\bAIza[a-zA-Z0-9_-]{35}\b/,                    label: 'Google API key' },
-  { pattern: /-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/,    label: 'private key' },
-  { pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,  label: 'JWT token' },
-];
+// Credential shapes that must never appear in an outbound request, chosen by
+// KIND from the shared list: every provider key format (`vendor`), private-key
+// blocks, JWTs, and this scan's own wider spellings (`egress-wide`). A format
+// added to the shared list is scanned here without an edit in this file.
+// `contextual` (URL userinfo, `Bearer …`) and `generic` (any long token) stay
+// out on purpose: outbound bodies and headers legitimately carry long IDs and
+// auth headers, and blocking those would refuse ordinary API calls.
+const EGRESS_SHAPE_KINDS: ReadonlySet<SecretShapeKind> = new Set(['vendor', 'key-block', 'jwt', 'egress-wide']);
+const SECRET_PATTERNS: ReadonlyArray<SecretShape> =
+  SECRET_SHAPES.filter((s) => EGRESS_SHAPE_KINDS.has(s.kind));
+
+/**
+ * What the model reads when a request is refused for carrying a credential.
+ * The scanner cannot tell a real key from a placeholder written in the same
+ * format, so the text names the way out for each. For a real key the way out
+ * depends on the host's profile, and the three cases get fixed sentences — no
+ * profile-authored text enters this string, since it reaches the model before
+ * any network call:
+ * - `none`: no api_profile for the host → connect the service.
+ * - `attached`: the engine attached the profile's key → the extra one is not needed.
+ * - `not-attached`: a profile of an engine-attached type (bearer, header, oauth2,
+ *   basic with split credentials) exists but its key was not attached → check it.
+ * - `model-owned`: a profile whose auth type the engine never attaches (query,
+ *   none, pre-encoded basic) → send the key the way the profile describes.
+ */
+export type EgressProfileState = 'none' | 'attached' | 'not-attached' | 'model-owned';
+export function egressSecretRefusal(where: string, label: string, profile: EgressProfileState = 'none'): string {
+  const realKey = profile === 'attached'
+    ? `The engine already attaches this service's stored key to the request; leave keys out of your own headers, URL and body. `
+    : profile === 'not-attached'
+      ? `This service has an api_profile, but the engine did not attach its stored key to this request. Check the profile with api_setup (re-save it and accept when prompted, or store its key with ask_secret) instead of putting the key into the request. `
+      : profile === 'model-owned'
+        ? `This service has an api_profile whose auth type the engine does not attach. Send the key the way the profile describes (a query-parameter profile carries it in the URL), or change the profile's auth type with api_setup. `
+        : `If this is a real key for the service you are calling, connect that service with api_setup instead of putting the key into the request — the engine then attaches the stored key itself. `;
+  return `Blocked: ${where} appears to contain a ${label}, so this request was not sent. `
+    + realKey
+    + `If it is example or placeholder text, write it without the key's format (for example <your token>).`;
+}
+
+/**
+ * The same refusal for outgoing mail. There is no connected-service route for a
+ * key in a mail — a real key is never sent by email — so the only way out named
+ * is the one for example text.
+ */
+export function mailSecretRefusal(tool: 'mail_send' | 'mail_reply', label: string): string {
+  return `${tool} blocked: the message appears to contain a ${label}. A real key is never sent by email. `
+    + `If it is example or placeholder text, write it without the key's format (for example <your token>) and send again.`;
+}
 
 /**
  * Scan a string for embedded secrets/credentials.
@@ -296,6 +428,854 @@ function detectGetExfiltration(url: string): string | null {
     // Invalid URL — will be caught by assertHostPolicy later
   }
   return null;
+}
+
+
+/** Outcome of the engine-managed auth attach. */
+interface AttachedAuth {
+  /** Lower-cased header the engine filled. The egress scan skips exactly this one. */
+  slot?: string | undefined;
+  /** Set when the engine REFUSED — the handler returns this verbatim and sends nothing. */
+  refusal?: string | undefined;
+  /**
+   * Set when the engine did not attach, for a reason worth naming. Surfaced on a 401.
+   *
+   * A THUNK, not a string, and both reasons came out of review rather than design.
+   * Built eagerly it ran `secretStore.resolve()` on EVERY request to a model-owned
+   * profile — publishing a `secretAccess` audit event for a credential the engine
+   * never used, on requests that mostly did not 401. And it fixed the wording
+   * before the redirect chain was known, while `redirectHopHeaders` strips
+   * Authorization on a cross-origin hop: the text then claimed "you set the header
+   * yourself" about a request that reached the answering host without one. Both
+   * facts are settled only once the response is.
+   */
+  hint?: ((ctx: HintContext) => string) | undefined;
+}
+
+/** What a hint may only know once the response is back. */
+interface HintContext {
+  /**
+   * The final hop changed origin, so `redirectHopHeaders` dropped Authorization /
+   * Cookie (`CROSS_ORIGIN_DROP_HEADERS`) — a header the model set did NOT reach
+   * the host that answered.
+   */
+  crossOriginRedirect: boolean;
+}
+
+/**
+ * Attach the profile's credential to `headers` and report which slot was filled.
+ *
+ * Runs BEFORE the egress secret scan, which then skips the returned slot. That
+ * order is deliberate: the alternative is predicting which slot is about to
+ * become engine-owned so the scan can spare it, and a prediction that disagrees
+ * with what the attach actually did sends the request with no credential at all.
+ *
+ * Three outcomes, and the difference matters:
+ *   - `slot`    — attached; the scan skips it, redirects drop it cross-origin.
+ *   - `refusal` — the engine says no and nothing is sent. Reserved for a profile
+ *                 that is trying something it may not: a protected vault key, a
+ *                 CRLF-bearing header name. These are attacks, not misconfigurations.
+ *   - `hint`    — did not attach, for a reason worth naming. Nothing is dropped, the
+ *                 model's own header stands, and the request proceeds exactly as
+ *                 it does today; the hint rides along on a 401 so the cause is
+ *                 nameable instead of silent. `custom_endpoint_ack` only exists
+ *                 since 2026-07-02 and `regateMigratedApiConnections` strips it on
+ *                 self→managed import, so refusing here would break integrations
+ *                 that work today, on upgrade, with no action by their owner.
+ *
+ *                 TWO populations, and they were one line apart in intent for a
+ *                 while: bearer/header decline for a RECOVERABLE reason (no
+ *                 acceptance on record, no vault key, empty value), while the
+ *                 model-owned shapes below — basic/pre_encoded_b64, basic with no
+ *                 basic_format, query, and `none` — are working as designed and
+ *                 hint anyway. A shape the engine will never attach is precisely
+ *                 the one whose 401 the model cannot explain on its own.
+ */
+/**
+ * How far before expiry an oauth2 access token is renewed.
+ *
+ * Derived, not chosen. The token has to stay valid through everything that
+ * happens after the check:
+ *   · the exchange itself — `TOKEN_EXCHANGE_TIMEOUT_MS` is 15 s
+ *     (`core/oauth-token-exchange.ts`);
+ *   · then the request it is attached to — `http_request` caps `timeout_ms`
+ *     at 60 s and defaults to 30 s (see the tool's schema below).
+ * So anything under 75 s can hand a provider a token that dies mid-call, and
+ * the failure would look like a revocation rather than a race. Five minutes is
+ * four times the hard cap, and it is the value the Google path has used since
+ * it was written (`integrations/google/google-auth.ts`) — the one constant a
+ * review of that file classified as provider-neutral rather than Google-shaped.
+ *
+ * ⚠ Degenerate case, named because the arithmetic hides it: a provider issuing
+ * tokens shorter than this buffer would be refreshed on every single call. None
+ * of the providers this engine connects does — Shopify's client-credentials
+ * token lives 24 h — but a profile pointed at one would burn an exchange per
+ * request rather than fail, which is the safer of the two wrong behaviours and
+ * the reason there is no floor here.
+ */
+export const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+/**
+ * The name `api_setup` registers under. A literal, because a static import of
+ * `api-setup.ts` from this module is a cycle — the same reason the renewal below
+ * imports it dynamically. Pinned by a test against `apiSetupTool.definition.name`
+ * rather than trusted, since a rename here fails open: the gate would stop finding
+ * the tool and every renewal would quietly refuse.
+ */
+const API_SETUP_TOOL_NAME = 'api_setup';
+
+/**
+ * Whether a token may be renewed on THIS caller's behalf.
+ *
+ * Pure and exported so a test can assert the decision without performing it. The
+ * renewal writes secrets and posts a client secret; a test that could only reach
+ * this judgement by running it would have to run that too.
+ *
+ * TWO conditions, answering two different questions, and an agent can pass one
+ * and fail the other:
+ *
+ * **1. The right.** Tool scoping in this engine is keyed on `definition.name`
+ * (`tools/resolve-tools.ts › resolveTools`, and `tools/resolve-tools.ts › withinSurface` for
+ * what a derived list may hold), so
+ * calling another tool's handler directly walks past it. Without this check an
+ * `http_request` would carry out the write side of `api_setup` for a caller that
+ * does not hold `api_setup` — and two populations are exactly in that state:
+ * `roles.ts`'s `collector` (which describes itself as writing only to memory), and
+ * every workflow step, because `INLINE_CORE_TOOLS` never admits `api_setup` and
+ * the step's tools are filtered to that set. So the renewal is allowed only where
+ * the caller could have run `fetch_token` itself, which means it adds no right.
+ * That is also why it is not enough to read `toolContext.tools`: `session.ts`
+ * fills that with the UNSCOPED registry.
+ *
+ * **2. The guards.** `fetch_token` dereferences two things it is handed:
+ * `agent.sessionCounters.httpRequests`, the per-session HTTP budget, and
+ * `agent.toolContext`, which it passes to `exchangeToken` as the carrier of the
+ * egress controls. A fabricated agent — `{ secretStore } as IAgent` is one that
+ * exists — satisfies the compiler and neither of those.
+ *
+ * ⚠ The runtime checks below look redundant against the types, and are not:
+ * `IAgent` declares both fields non-optional, so an `as IAgent` cast is a promise
+ * the type system then stops questioning. This is the one place that has to
+ * distrust it.
+ *
+ * ⚠ Condition 2 is UNREACHABLE through `http_request`, and that is the honest
+ * description of what it is for. The handler dereferences `agent.toolContext`
+ * and `agent.sessionCounters.httpRequests` itself, both before it ever calls the
+ * attach — so an agent missing either cannot arrive here by that route. The only
+ * other caller is `attachStoredCredential`, the bulk worker effect's entry
+ * point, and its fabricated agent is missing BOTH at once. So no behavioural
+ * test can separate the two halves, and the predicate tests are the only
+ * witnesses that can exist for them. That was measured, after a count of killed
+ * mutants said "2" and a count of distinct WITNESSES said "2, both of one kind":
+ * the attempt to add an effect-level witness failed on unmutated code, at the
+ * handler's own counter check, which is how the unreachability was found.
+ *
+ * It stays because it is the barrier for the next caller that does not come
+ * through the handler — and one exists today.
+ *
+ * ⚠ The paragraph above is a claim about code that can move, and it is anchored
+ * on SYMBOLS rather than line numbers for that reason — but it is NOT pinned by
+ * a test, and a reader should know which of the two it is. It cannot be. If the
+ * handler's two reads were moved BELOW the attach, the renewal would become
+ * reachable for such an agent and this condition would then decline it
+ * silently: no exchange, no log, which is observably identical to the handler
+ * having thrown first. The only difference would be where the throw comes from,
+ * and asserting that pins an unguarded dereference a future cleanup should be
+ * free to fix. So the same masking that makes the witness impossible makes the
+ * detector impossible, and this is prose on purpose rather than prose for want
+ * of effort.
+ *
+ * ⚠ And condition 2 is NECESSARY, not SUFFICIENT — said plainly because the
+ * cheap reading of it is that a caller which passes carries real guards. It
+ * refuses a dereference that would throw, and it refuses the fabricated agent
+ * that exists today. It cannot certify that a `toolContext` it was handed
+ * actually holds a network policy or a rate-limit provider, because a real agent
+ * may legitimately have neither set. Nothing here can close that; the durable
+ * answer is an authorization recorded when the work is PLANNED and carried by
+ * the effect, rather than inferred at runtime from an object's shape.
+ */
+export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IAgent): boolean {
+  // Condition 2 reads first for legibility only. An earlier comment claimed
+  // that asking condition 1 first would throw a TypeError on a fabricated
+  // agent; it would not, because condition 1 carries its own `typeof` guard
+  // before it calls anything. Both orders are safe, and saying otherwise
+  // invented a correctness reason for a formatting choice.
+  const counters: unknown = agent.sessionCounters;
+  if (typeof counters !== 'object' || counters === null) return false;
+  if (typeof (counters as { httpRequests?: unknown }).httpRequests !== 'number') return false;
+  const toolContext: unknown = agent.toolContext;
+  if (typeof toolContext !== 'object' || toolContext === null) return false;
+
+  if (typeof agent.getAvailableTools !== 'function') return false;
+  return agent.getAvailableTools().some((t) => t.definition.name === API_SETUP_TOOL_NAME);
+}
+
+/**
+ * Whether this PROFILE may be renewed unattended — a different question from
+ * whether the CALLER may trigger one, which is why it is a second predicate and
+ * not another condition in the first.
+ *
+ * Refuses exactly one shape: a stored refresh token with no explicit
+ * `grant_type`. That combination is ambiguous, and automating it makes the
+ * ambiguity destructive.
+ *
+ * `auth.oauth.grant_type` is OPTIONAL on a profile — the validator checks it
+ * only when present — and `fetch_token` defaults it to `client_credentials`.
+ * The authorization-code flow sends `grant_type: 'authorization_code'` in the
+ * token REQUEST and never writes one onto the profile, so a profile created by
+ * `connect` carries a user-delegated refresh token and no grant type at all.
+ * Renew that and `fetch_token` posts a CLIENT-CREDENTIALS grant: it either fails,
+ * or it succeeds and replaces the token the user consented to with an app-level
+ * one that can see different data.
+ *
+ * A model calling `fetch_token` by hand has always been able to do that. What
+ * this change would add is doing it BY ITSELF, on expiry, with nobody choosing
+ * it — so the automated path declines and leaves the decision where it was.
+ *
+ * What it does NOT refuse, because these are unambiguous:
+ *   · `grant_type: 'refresh_token'` — the intended case;
+ *   · no refresh token at all — `client_credentials` is then the only thing the
+ *     profile can mean, which is the Shopify shape this piece exists for;
+ *   · `grant_type: 'client_credentials'`, explicitly chosen.
+ *
+ * ⚠ The refusal is not a workaround for the missing piece, it is a pointer at
+ * it: nothing switches a profile to `refresh_token` after an authorization-code
+ * exchange, which is the other half of the row this branch closes. Until that
+ * lands, such a profile has to be given its grant type before it can renew, and
+ * the log line says which profile.
+ */
+export function oauthProfileMayBeRenewedUnattended(
+  profile: { auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined },
+  hasStoredRefreshToken: boolean,
+): boolean {
+  const grantType = profile.auth?.oauth?.grant_type;
+  if (grantType !== undefined) return true;
+  return !hasStoredRefreshToken;
+}
+
+/**
+ * One renewal per profile at a time.
+ *
+ * Not a nicety: `api_setup` has no in-flight guard of its own — the comment at
+ * its concurrency re-read says so, and what it guarantees is that an overlapping
+ * exchange cannot record a FALSE revocation, not that overlap does not happen.
+ * Before this, N concurrent `http_request` calls against one expiring profile
+ * started N exchanges, each presenting the same refresh token. A provider that
+ * rotates rejects all but one; on a provider with reuse detection, the whole
+ * grant dies. The in-repo precedent is `integrations/google/google-auth.ts ›
+ * refreshInFlight`, and this is that shape.
+ *
+ * Keyed by profile id, so it bounds by the number of profiles. The entry is
+ * removed when the renewal settles, which makes the map a coalescer and not a
+ * cache: a later request renews again.
+ */
+const oauthRenewalsInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Renew an oauth2 access token that is about to expire, by running the SAME
+ * exchange the `api_setup` tool runs — deliberately by calling that handler
+ * rather than by extracting its body into a shared function.
+ *
+ * The exchange carries a guarantee this path must not re-implement: when two
+ * exchanges for one profile overlap, the provider rejects the one that lost as
+ * spent, and `api_setup` re-reads the slot before recording anything — "if the
+ * slot no longer holds what went out, the rejection says nothing about what it
+ * holds now, so it is no revocation". An extracted copy would be identical
+ * today and would hold that line in one of two places tomorrow. A call IS the
+ * same code.
+ *
+ * The import is dynamic because `api-setup.ts` imports this module, so a static
+ * one is a cycle. That moves a load failure from build time to the first
+ * refresh — which is why a test drives this path for real rather than mocking
+ * the module.
+ *
+ * Returns nothing and throws nothing: a failed renewal leaves the vault as it
+ * was and the caller attaches whatever is there. That is deliberate. The buffer
+ * means the stored token is still valid at this moment, so a provider hiccup
+ * must not turn into a refusal — and the existing 401 path already says what to
+ * do if it really is dead. This path records no verdict of its own; the handler
+ * it calls is the only thing that writes state, and it writes no revocation it
+ * has not proven.
+ *
+ * ⚠ Residue, named rather than left for a reader to discover — and LARGER than
+ * a first version of this note said. There is no back-off after a failure, so a
+ * profile whose renewal keeps failing is retried on every request that reaches
+ * the buffer, at up to sixteen seconds each.
+ *
+ * That first note called the cost "bounded by the session budget". It is not.
+ * The budget is charged by the exchange's callback AFTER a response arrives, so
+ * a token endpoint that HANGS is never charged at all: the ceiling of a hundred
+ * requests bounds the triggering calls, not the renewals that time out. State is
+ * still not corrupted, so this stays a cost rather than a cache that would also
+ * refuse a provider that has recovered — but anyone deciding whether to add
+ * back-off should know which of the two numbers actually binds.
+ */
+async function renewExpiringOAuthToken(
+  profileId: string,
+  agent: import('../../types/index.js').IAgent,
+): Promise<void> {
+  if (!mayRenewOAuthUnattended(agent)) {
+    // Silent on purpose, and this is the one refusal that should be: it is the
+    // ordinary state of a scoped caller, not a fault. The request goes out with
+    // the stored token and the existing 401 path says what to do — which is what
+    // happened before this renewal existed at all.
+    return;
+  }
+
+  const running = oauthRenewalsInFlight.get(profileId);
+  if (running !== undefined) return running;
+
+  const run = runOAuthRenewal(profileId, agent).finally(() => {
+    oauthRenewalsInFlight.delete(profileId);
+  });
+  oauthRenewalsInFlight.set(profileId, run);
+  return run;
+}
+
+/** The renewal itself. Never rejects — see the contract on the caller above. */
+async function runOAuthRenewal(
+  profileId: string,
+  agent: import('../../types/index.js').IAgent,
+): Promise<void> {
+  // TWO catches, not one, and the split is the point. A first draft wrapped both
+  // steps together — which would have swallowed a failing import as if it were a
+  // provider hiccup, leaving a packaging defect invisible for as long as nobody
+  // looked. That is the same silent fallback that let a shipping gap live in this
+  // repo for four months; it does not get rebuilt here.
+  let mod: typeof import('./api-setup.js');
+  try {
+    mod = await import('./api-setup.js');
+  } catch (err) {
+    // A module that will not load is a build or packaging defect, not a
+    // transient. It cannot be retried into working and it must not be quiet.
+    process.stderr.write(
+      `[lynox:http] oauth token renewal unavailable: api_setup did not load (${err instanceof Error ? err.message : String(err)}). `
+      + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.
+`,
+    );
+    return;
+  }
+
+  // The RETURN VALUE is read, because almost every failure IS one. Discarding it
+  // made every refusal silent while a comment claimed the two catches above
+  // meant a non-transient failure "must not be quiet".
+  //
+  // ⚠ Two things that comment got wrong, both found by review rather than by a
+  // measurement of mine:
+  //
+  //   · It said the branch "throws nowhere". It does: `secretStore.set` is
+  //     called unguarded for the access token, and again for a rotated refresh
+  //     token, in the `fetch_token` success path. The count behind the wrong
+  //     claim was of `throw` STATEMENTS, which is not the same question as what
+  //     can throw — and a failing vault write after the provider has already
+  //     rotated is the worst outcome this path has, because the presented
+  //     refresh token is spent and the new one was not stored. So the catch
+  //     logs rather than swallowing.
+  //   · It filtered on `Error:`, and nine of this branch's returns do not start
+  //     that way — including every `Token exchange failed with HTTP …`, which is
+  //     the provider rejecting the refresh token and therefore the LIKELIEST
+  //     renewal failure of all. The success shape is the narrow one, so that is
+  //     what gets matched instead.
+  try {
+    const answer = await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+    if (typeof answer !== 'string' || !answer.startsWith('Token exchange OK')) {
+      // stderr, not a refusal to the model: the stored token is still valid for
+      // at least the buffer, so the request continues. This is what lets an
+      // operator tell a renewal that was refused from one that never ran.
+      writeRenewalFailure(profileId, 'refused', typeof answer === 'string' ? answer : String(answer), agent);
+    }
+  } catch (err) {
+    // A throw here is a vault write that failed, or something under the exchange
+    // that it does not convert. Either way it must not be silent: the request
+    // continues on the stored token, but the grant may now be broken in a way
+    // only a log will show.
+    writeRenewalFailure(profileId, 'threw', err instanceof Error ? err.message : String(err), agent);
+  }
+}
+
+/**
+ * One sink for a failed renewal, so the two shapes cannot drift apart.
+ *
+ * The detail is MASKED and stripped of control characters, and neither is
+ * decoration:
+ *   · `exchangeToken` puts the RAW `token_url` into its failure message, and
+ *     `vetTokenEndpoint` in that same file says why that matters — "the raw
+ *     value can hold anything somebody pasted, including a credential". Nothing
+ *     masks `process.stderr.write`, so masking has to happen at the call.
+ *   · the same string can carry a provider's own text, and a newline in it would
+ *     forge a log line.
+ */
+function writeRenewalFailure(
+  profileId: string,
+  kind: 'refused' | 'threw',
+  detail: string,
+  agent: import('../../types/index.js').IAgent,
+): void {
+  let masked = detail;
+  try {
+    masked = agent.secretStore?.maskAll?.(detail) ?? detail;
+  } catch {
+    // A masker that throws must not turn a log line into a failed request; the
+    // unmasked string is then NOT written, because the whole point of this step
+    // is that the raw value may hold a credential.
+    masked = '<detail withheld: masking failed>';
+  }
+  const oneLine = masked.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ').slice(0, 300);
+  process.stderr.write(
+    `[lynox:http] oauth token renewal ${kind} for profile "${profileId}": ${oneLine}\n`,
+  );
+}
+
+async function attachEngineManagedAuth(
+  url: string,
+  headers: Record<string, string>,
+  toolContext: ToolContext | undefined,
+  agent: import('../../types/index.js').IAgent,
+): Promise<AttachedAuth> {
+  const secretStore = agent.secretStore;
+  const apiStore = toolContext?.apiStore;
+  if (!apiStore || !secretStore) return {};
+
+  let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+    profile = apiStore.getByHostname(hostname);
+  } catch {
+    return {}; // invalid URL — assertHostPolicy reports it downstream
+  }
+  if (!profile) {
+    // Two profiles on one host — only the boot can leave that behind, since a
+    // save of the second is refused. The engine used to attach whichever had
+    // loaded last, silently. Now it attaches nothing and says why, but only when
+    // a credential is at stake: two public (`none`) profiles on one host have
+    // nothing to mix up, and blocking their requests would help no one.
+    const conflict = apiStore.getHostConflict(hostname);
+    const credentialed = conflict?.some((id) => {
+      const type = apiStore.get(id)?.auth?.type;
+      return type !== undefined && type !== 'none';
+    });
+    if (conflict && credentialed) {
+      // The model cannot know which of the two is still wanted, so the text sends
+      // it to the user rather than to a delete.
+      return { refusal: `Error: more than one api_profile maps to ${hostname} (${conflict.join(', ')}), so the engine cannot tell which stored credential this request should carry, and it sends none. Ask the user which profile to keep; the other one then has to be deleted or given a different base_url.` };
+    }
+    return {};
+  }
+  const auth = profile.auth;
+  if (!auth) return {};
+
+  /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
+  const put = (name: string, value: string): AttachedAuth => {
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === name.toLowerCase()) delete headers[k];
+    }
+    headers[name] = value;
+    return { slot: name.toLowerCase() };
+  };
+
+  // The engine is about to hand a stored credential to this host, so the host must
+  // be vetted or carry a recorded human acceptance. `isVettedEgressHost`, not
+  // `isAllowlistedEndpoint`: the latter also vouches for `*.openai.azure.com`, a
+  // namespace ANY account can register (see its own docstring). Under the broader
+  // check, a prompt-injected agent could point a profile at `x.openai.azure.com`,
+  // save it with no human prompt because it reads as allowlisted, and have the
+  // engine attach a vault credential to an attacker's host — past the scan that
+  // would otherwise have caught it, since the engine's own slot is exempt.
+  // Same question api_setup asks when it decides whether to prompt for acceptance.
+  // They must agree: when they did not, the attach demanded an ack that api_setup
+  // would never create — see isVettedEgressHost.
+  const hostVetted = isVettedEgressHost(url) || isEndpointAcked(profile.custom_endpoint_ack, url);
+
+  if (auth.type === 'oauth2') {
+    // Wave 5d runtime egress gate (base_url parity with fetch_token). A profile can
+    // enter the store without passing the save-time gate (loadFromDirectory at boot,
+    // or a JSON dropped into the apis dir), so re-verify here, fail-closed.
+    if (!hostVetted) {
+      return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
+    }
+    // A revoked grant is said so here, before a request goes out, rather than
+    // after it comes back 401 — where the hint below would call it an expired
+    // token and send the model to fetch_token, which cannot help. Only while the
+    // vault still holds the token that was rejected (or none): a different one
+    // is the way back, and it is also how a verdict another process reached on
+    // a stale view of the vault steps aside once this one holds the newer token.
+    // And only for a refresh-token profile — the only kind a revocation is ever
+    // recorded for; one moved to client credentials since has no refresh token
+    // to hand back, and the text would send the user after one.
+    if (hasRevokedGrant(profile)) {
+      const refreshKey = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+      const current = secretStore.resolve(refreshKey);
+      if (current === null || tokenFingerprint(current) === profile.oauth_grant?.revoked_fp) {
+        return { refusal: revokedGrantMessage(profile.id, refreshKey, profile.oauth_grant?.revoked_at) };
+      }
+    }
+    // Profile drives — the agent should NOT have to remember which vault key holds
+    // the current access_token. Prevents two failure modes: a stale key re-referenced
+    // after api_setup recreated the profile (staging 2026-05-18: fetch_token had
+    // written SHOPIFY_SEO_ACCESS_TOKEN, the agent kept reaching for
+    // SHOPIFY_ACCESS_TOKEN → 401 forever), and rotation, where every later request
+    // should pick up a freshly minted token automatically.
+    // Renew before attaching, not after a 401 comes back. Two reasons it has to
+    // be here rather than in a worker: a worker would have to know every profile
+    // and guess a frequency, and it would keep alive connections nobody uses —
+    // for a 24-hour token that is a daily exchange, and a daily secret write, for
+    // a shop untouched for months. This runs only for a token about to be used.
+    //
+    // Ordered after the revoked-grant check, and that order is LOAD-BEARING:
+    // it is least-secret-exposure. A path that is going to refuse must not read
+    // the client secret.
+    //
+    // ⚠ The first draft of this comment claimed the opposite — that the order was
+    // "a cost and clarity choice, not a correctness property" — on the strength of
+    // a mutation that survived. The mutation survived because the test vault's
+    // `resolve` is silent and publishes nothing, so the quantity the swap changes
+    // was not one the instrument could report. Measured properly, by recording
+    // what `resolveSecretRefs` is asked for: in this order a refused request
+    // reads neither the client id nor the client secret; with the two swapped it
+    // reads both.
+    //
+    // ⚠ NOT "resolves nothing", which an earlier wording claimed and this file's
+    // own test contradicts — the revoked-grant check above reads the refresh key
+    // itself, deliberately, to decide whether the recorded revocation still
+    // applies. The property is about the CLIENT SECRET, and it is narrower than
+    // the first wording: inside `fetch_token` several other refusals do come
+    // after those reads, so this order buys the revoked case and not a general
+    // rule.
+    //
+    // `fetch_token` does short-circuit on a revoked grant before it POSTs and
+    // before any secret WRITE (`api-setup.ts`, "posting the very token the
+    // provider already rejected only repeats the rejection"). What it does not sit
+    // before is the READS: client_id and client_secret are resolved first, then
+    // the refresh token, and only then does it return. Each resolve publishes a
+    // `secretAccess` audit event in the real store, so the swap buys three vault
+    // reads of a credential on a request that was never going to be sent.
+    const expiresAt = profile.auth?.oauth?.token_expires_at;
+    if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
+      // Asked HERE rather than inside the renewal because only this scope can
+      // answer the second argument: whether the vault actually holds a refresh
+      // token for this profile. The profile can NAME a slot that is empty.
+      const refreshSlot = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+      const holdsRefresh = secretStore.resolve(refreshSlot) !== null;
+      if (oauthProfileMayBeRenewedUnattended(profile, holdsRefresh)) {
+        await renewExpiringOAuthToken(profile.id, agent);
+      } else {
+        process.stderr.write(
+          `[lynox:http] oauth token renewal declined for profile "${profile.id}": it holds a refresh token but names no auth.oauth.grant_type, and the default would post a client-credentials grant that replaces the user's delegated token. Set grant_type to "refresh_token" with api_setup update.\n`,
+        );
+      }
+    }
+
+    const tokenKey = accessTokenKey(profile.id);
+    const resolved = secretStore.resolve(tokenKey);
+    if (!resolved) {
+      return { refusal: `Error: api_profile "${profile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${profile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.` };
+    }
+    return put('Authorization', `Bearer ${resolved}`);
+  }
+
+  if (auth.type === 'basic' && auth.basic_format === 'user_pass_split') {
+    // The model CANNOT do this one itself: Basic is base64(user:pass) and it never
+    // holds either half, only `secret:NAME` refs resolved after it has composed the
+    // header. You cannot Base64-encode a value you do not have.
+    if (!hostVetted) {
+      return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the stored credentials to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
+    }
+    // HTTPS only. Unlike the oauth2 sibling's rotatable access_token this is a
+    // long-lived password the operator typed once; `getByHostname` keys on hostname
+    // alone, so without this an `http://` URL to the same host would ship it clear.
+    if (!url.toLowerCase().startsWith('https://')) {
+      return { refusal: `Error: api_profile "${profile.id}" uses stored credentials — refusing to attach them over a non-HTTPS URL. Use https://.` };
+    }
+    // Explicit keys win; otherwise the first two `vault_keys` IN ORDER. A profile
+    // carrying both would otherwise authenticate as whichever the array listed first.
+    const userKey = auth.username_key ?? auth.vault_keys?.[0];
+    const passKey = auth.password_key ?? auth.vault_keys?.[1];
+    if (!userKey || !passKey) {
+      return { refusal: `Error: api_profile "${profile.id}" is basic/user_pass_split but does not name two vault keys. Set auth.username_key and auth.password_key (or list both in auth.vault_keys, username first) via api_setup({ action: "update", ... }).` };
+    }
+    const protectedKeys = [userKey, passKey].filter(k => isProtectedSecretWrite(k));
+    if (protectedKeys.length > 0) {
+      return { refusal: protectedKeyRefusal(profile.id, protectedKeys.join(' + ')) };
+    }
+    const user = secretStore.resolve(userKey);
+    const pass = secretStore.resolve(passKey);
+    // Truthiness, not a null check: an EMPTY vault value would ship
+    // `Basic base64("ck:")` — a half-credential that reads as an auth failure
+    // rather than as a missing secret.
+    if (!user || !pass) {
+      const missing = [user ? null : userKey, pass ? null : passKey].filter(Boolean).join(' + ');
+      return { refusal: `Error: api_profile "${profile.id}" is basic/user_pass_split but the vault has no usable value for ${missing}. Ask the user for the credential with ask_secret, then retry.` };
+    }
+    return put('Authorization', `Basic ${Buffer.from(`${user}:${pass}`, 'utf-8').toString('base64')}`);
+  }
+
+  if (auth.type === 'bearer' || auth.type === 'header') {
+    // The last two types the model still had to attach by hand — and the reason a
+    // bexio connection could not be made at all on 2026-08-08. The model CAN compose
+    // these (the value goes on the wire as-is), but it cannot survive doing so: it
+    // holds only a `secret:NAME` ref that agent.ts resolves before this handler runs,
+    // so the scanner sees the real credential, and for a token shaped like one it
+    // knows (a JWT, `ghp_…`, `sk-…`) it blocks the request to the very host the
+    // operator authorised. bexio issues JWTs, so `bearer` there had NO working path.
+    //
+    // Below this line every exit is a `hint`, not a `refusal`, except the two that
+    // catch a profile reaching for something it may not have.
+    const tokenKey = auth.vault_keys?.[0];
+    if (!tokenKey) {
+      return { hint: () => `api_profile "${profile.id}" is auth.type="${auth.type}" but names no vault key, so the engine could not attach the credential. Set auth.vault_keys: ["YOUR_KEY_NAME"] via api_setup({ action: "update", ... }) and store the value with ask_secret.` };
+    }
+    // The bound the oauth2 branch gets for free by deriving its key from the profile
+    // id. This name comes from the PROFILE, which a prompt-injected agent can author:
+    // without it, `vault_keys: ['ANTHROPIC_API_KEY']` hands the tenant's own provider
+    // key to whatever host the profile names. `isProtectedSecretWrite`, not
+    // `isInfraSecret` — the provider slots live in a separate set that
+    // `isInfraSecret` does not cover, and they are exactly what such a profile wants.
+    if (isProtectedSecretWrite(tokenKey)) {
+      return { refusal: protectedKeyRefusal(profile.id, tokenKey) };
+    }
+    if (!hostVetted) {
+      return { hint: () => `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
+    }
+    if (!url.toLowerCase().startsWith('https://')) {
+      return { hint: () => `api_profile "${profile.id}" uses a stored credential and the engine will not attach it over a non-HTTPS URL. Use https://.` };
+    }
+    const token = secretStore.resolve(tokenKey);
+    // Truthiness, not a null check — an empty value would ship a bare `Bearer `,
+    // which reads on the wire as a bad token rather than as a missing one.
+    if (!token) {
+      return { hint: () => `api_profile "${profile.id}" is auth.type="${auth.type}" but the vault has no usable value for ${tokenKey}. Ask the user for the credential with ask_secret, then retry.` };
+    }
+    // `header` names its own slot and carries the raw token; `bearer` is the
+    // Authorization/`Bearer ` special case. The default matches what the profile
+    // description shows the model (api-store.ts) and what bootstrap writes
+    // (api-setup.ts) — defaulting to Authorization here would put the token in a
+    // header the model was told is called something else, i.e. a silent 401.
+    const slot = auth.type === 'bearer' ? 'Authorization' : (auth.header_name ?? 'X-Api-Key');
+    const value = auth.type === 'bearer' ? `Bearer ${token}` : token;
+    // The handler's CRLF check covers `input.headers` — the agent's own map. These
+    // two come from the PROFILE and the VAULT and would otherwise enter having
+    // passed nothing; `X-Key\r\nX-Evil: …` would smuggle a second header on a path
+    // that exists precisely to bypass the agent.
+    if (/[\r\n\0]/.test(slot) || /[\r\n\0]/.test(value)) {
+      return { refusal: `Error: api_profile "${profile.id}" produced an auth header containing CRLF/null — refusing to send it. Check auth.header_name and the stored value of ${tokenKey}.` };
+    }
+    return put(slot, value);
+  }
+
+  // Everything that reaches here is a shape the engine does NOT attach. It still
+  // gets a name — see modelOwnedAuthHint. `slotFilled` is read from the request as
+  // it stood at attach time (nothing writes `headers` after this point: every `put`
+  // returns immediately); the vault is not read until the 401 actually arrives.
+  const filled = modelFilledSlot(auth, headers, url);
+  return {
+    hint: ctx => modelOwnedAuthHint({
+      profileId: profile.id,
+      auth,
+      hostname,
+      hostVetted,
+      slotFilled: filled,
+      crossOriginRedirect: ctx.crossOriginRedirect,
+      secretStore,
+    }),
+  };
+}
+
+/**
+ * Header, query-param and vault-key names come from the PROFILE, and a
+ * prompt-injected agent can author one: `validateProfile` shape-checks
+ * `username_key`/`password_key`, checks `vault_keys` only for being a list of
+ * strings, and never checks `header_name` or `query_param`. These land in a
+ * hint that is appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the model is meant to
+ * trust — so a name carrying newlines can forge a reminder of its own.
+ *
+ * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`
+ * since they were written, and the root fix belongs in `validateProfile`, not here).
+ * What IS new is widening it to two fields never interpolated before across three
+ * more shapes, so the filter goes on everything this file prints, old hints included.
+ */
+const SAFE_PROFILE_TOKEN = /^[A-Za-z0-9._-]{1,64}$/;
+function safeToken(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return SAFE_PROFILE_TOKEN.test(value) ? value : '<name rejected: fix it via api_setup>';
+}
+
+/**
+ * Did the MODEL already put the profile's credential where this auth shape wants it?
+ *
+ * Read off the outgoing request, never predicted: `headers` here is the agent's own
+ * map, and for `query` the parameter is in the URL the agent composed. The caller
+ * needs "nothing authenticated this request" apart from "a value went out and came
+ * back rejected" — two different next steps that a 401 alone separates for nobody.
+ *
+ * Emptiness counts as absent on BOTH sides. `searchParams.has()` is true for a bare
+ * `?api_key=`, which would have reported a half-credential as a sent one — the same
+ * distinction the engine-owned branches make explicitly when they refuse an empty
+ * vault value rather than shipping `Basic base64("ck:")`.
+ */
+function modelFilledSlot(
+  auth: { type: string; header_name?: string | undefined; query_param?: string | undefined },
+  headers: Record<string, string>,
+  url: string,
+): boolean {
+  if (auth.type === 'query') {
+    try {
+      return (new URL(url).searchParams.get(auth.query_param ?? 'key') ?? '').trim() !== '';
+    } catch {
+      return false;
+    }
+  }
+  return Object.entries(headers).some(([k, v]) => k.toLowerCase() === modelOwnedSlot(auth).toLowerCase() && v.trim() !== '');
+}
+
+/**
+ * Which header this shape expects the model to fill.
+ *
+ * `basic` is `Authorization` by protocol — NOT `auth.header_name`. That field is
+ * meant for `auth.type: 'header'`, `validateProfile` neither validates it nor binds
+ * it to a type, and reading it here produced `headers: { "X-Foo": "Basic secret:K" }`
+ * for a profile that had set it: an instruction that cannot work, in the engine's
+ * own trusted voice, at the moment the model is looking for one to follow.
+ */
+function modelOwnedSlot(auth: { type: string; header_name?: string | undefined }): string {
+  if (auth.type === 'basic') return 'Authorization';
+  return safeToken(auth.header_name) ?? 'Authorization';
+}
+
+/**
+ * The 401-hint for the auth shapes the engine does NOT attach.
+ *
+ * `basic`+`pre_encoded_b64`, `basic` with no `basic_format`, and `query` are the
+ * MODEL's to set, on purpose and test-pinned ("leaves pre_encoded_b64 alone — that
+ * path is still the model's to set", "does NOT attach for a bare basic profile with
+ * no basic_format", "SECURITY: a pre_encoded_b64 basic profile keeps the model-set
+ * header"). Attaching them here would break integrations that work today and kill
+ * that security test; refusing would stop them outright, which the docstring above
+ * rules out for the same reason.
+ *
+ * What was missing is neither. It is a NAME for the failure. Every ENGINE-owned
+ * shape that declines to attach says why, and the reason rides along on the 401.
+ * The model-owned shapes returned an empty object, so a 401 there looked identical
+ * whether the credential was rejected or never sent — and nothing in the response
+ * separates those.
+ *
+ * Measured on a real thread (2026-09-02, engine 2.14.2, build 7e905219): a
+ * `pre_encoded_b64` DataForSEO profile 401'd on a request carrying no Authorization
+ * header. The agent read that as "the secret is missing or invalid", contradicting
+ * its own answer one turn earlier, and asked the user to re-supply a credential the
+ * vault already held. That is the loop the 401-hint was built to end — "three token
+ * rotations against a request that carried no credential" — running in the half it
+ * did not cover.
+ *
+ * ⚠ A WRONG name is worse than none: it carries the engine's authority into the
+ * moment the model is deciding what to do. Every claim below is therefore either
+ * read off this request or not made at all.
+ */
+function modelOwnedAuthHint(a: {
+  profileId: string;
+  auth: {
+    type: string;
+    basic_format?: string | undefined;
+    header_name?: string | undefined;
+    query_param?: string | undefined;
+    username_key?: string | undefined;
+    password_key?: string | undefined;
+    vault_keys?: string[] | undefined;
+  };
+  hostname: string;
+  hostVetted: boolean;
+  slotFilled: boolean;
+  crossOriginRedirect: boolean;
+  secretStore: { resolve(key: string): string | null | undefined };
+}): string {
+  const { auth } = a;
+  const slot = modelOwnedSlot(auth);
+
+  // The acceptance the ENGINE-owned shapes check before attaching. It does not gate
+  // this path — the model's own header was never blocked here, and that is what the
+  // security test pins — but telling it to send a stored credential to a host with no
+  // recorded acceptance, without saying so, is advice the engine would not take itself.
+  const vetting = a.hostVetted
+    ? ''
+    : ` Note: ${a.hostname} is not a vetted sub-processor and carries no recorded acceptance — for the shapes the ENGINE attaches, that alone stops the attach. Re-save the profile via api_setup({ action: "update", id: "${a.profileId}" }) and accept controller-responsibility before sending a stored credential there.`;
+
+  // `none` is not a model-owned shape — it is a profile claiming this API needs no
+  // credential while the host says otherwise.
+  if (auth.type === 'none') {
+    return a.slotFilled
+      ? `api_profile "${a.profileId}" declares auth.type="none" (no credentials required), yet this host answered 401 AND this request carried a ${slot} header you set. Both can be true: the profile may be wrong about this endpoint, or that credential may have been rejected. The engine cannot separate them — a "none" profile names no vault key to check. Correct the profile with api_setup({ action: "update", id: "${a.profileId}" }).${vetting}`
+      : `api_profile "${a.profileId}" declares auth.type="none" (no credentials required), but this host answered 401 — the profile is wrong about this endpoint, not the credential. Correct it with api_setup({ action: "update", id: "${a.profileId}" }), then store the credential with ask_secret.${vetting}`;
+  }
+
+  // Key precedence mirrors the engine's own (`auth.username_key ?? auth.vault_keys[0]`).
+  // Reading `vault_keys` alone told a profile that names username_key/password_key
+  // that it "names no vault key", and sent the model to ask_secret for a credential
+  // the vault already held — the very loop this hint exists to end.
+  const userKey = auth.username_key ?? auth.vault_keys?.[0];
+  const passKey = auth.password_key ?? auth.vault_keys?.[1];
+
+  // A basic profile naming TWO keys is a SPLIT credential with the format field
+  // missing, not a pre-encoded one. Naming `Basic secret:<username>` there is a
+  // string that can never authenticate; the fix is the format field, and the engine
+  // takes the header over once it is set.
+  if (auth.type === 'basic' && auth.basic_format === undefined && userKey !== undefined && passKey !== undefined) {
+    return `The engine did not attach a credential: api_profile "${a.profileId}" is auth.type="basic" with no basic_format recorded, and it names TWO vault keys (${safeToken(userKey) ?? '?'} + ${safeToken(passKey) ?? '?'}) — a split username/password credential whose format field is missing. Do NOT hand-build a header from one of them; Basic is base64(user:pass) and half of it never authenticates. Set auth.basic_format="user_pass_split" via api_setup({ action: "update", id: "${a.profileId}" }) and the ENGINE attaches it from both keys on every request.${vetting}`;
+  }
+
+  const key = auth.type === 'basic' ? userKey : auth.vault_keys?.[0];
+  const label = safeToken(key);
+
+  // The key NAME comes from the profile, so it can name a slot that belongs to the
+  // platform or holds the tenant's own provider key. The engine-owned branches refuse
+  // such a profile before resolving. Refusing HERE would block a request that works
+  // today, so this declines to look it up instead: the value never entered the string
+  // either way, but "the vault DOES hold a value under ANTHROPIC_API_KEY" is an
+  // existence oracle over exactly the slots that refusal exists to fence off — and it
+  // reaches `isInfraSecret` names too, which `listAgentVisibleNames` keeps out of the
+  // agent's view on purpose.
+  const vault = key === undefined
+    ? `This profile names no vault key, so there is nothing to reference yet — add one via api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.`
+    : isProtectedSecretWrite(key)
+      ? `This profile names the protected secret "${label}" as its credential. Those belong to the platform or hold the tenant's own provider key, are never attached to an outbound request, and the engine will not look one up to tell you whether it is set. Use a credential the user supplied for this API.`
+      : a.secretStore.resolve(key)
+        ? `The vault DOES hold a value under "${label}" — do NOT ask the user to supply or re-paste it, reference it as \`secret:${label}\`.`
+        : `The vault has NO value under "${label}" — collect it with ask_secret({ name: "${label}" }), then retry.`;
+
+  // "deliberately" is a claim about intent and is only true for the three shapes the
+  // engine excludes on purpose. An unknown type or a misspelled basic_format reaches
+  // here through `loadFromDirectory`, which validates none of it — that is a broken
+  // profile, and calling it deliberate would send the reader past the actual fault.
+  const known = auth.type === 'query'
+    || (auth.type === 'basic' && (auth.basic_format === undefined || auth.basic_format === 'pre_encoded_b64'));
+  const shape = auth.type === 'basic'
+    ? `auth.type="basic"${auth.basic_format === undefined ? ' with no basic_format recorded' : ` / basic_format="${safeToken(auth.basic_format) ?? '?'}"`}`
+    : `auth.type="${safeToken(auth.type) ?? '?'}"`;
+  const why = known
+    ? 'which is the MODEL\'s to set — deliberately, so a working hand-set credential is never overwritten'
+    : 'which the engine does not recognise, so it attached nothing. Check the profile: an unknown auth.type or a misspelled basic_format is a misconfiguration, not a design';
+
+  if (auth.type === 'query') {
+    const param = safeToken(auth.query_param) ?? 'key';
+    const carried = a.slotFilled
+      ? `This request already carried a non-empty "${param}" in the query string, so the 401 points at the value rather than at a missing parameter.`
+      : `This request carried no usable "${param}" query parameter — nothing authenticated it.${key === undefined ? '' : ` Put it in the URL yourself: ?${param}=secret:${label ?? ''}.`}`;
+    return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
+  }
+
+  // A cross-origin redirect strips Authorization/Cookie, so on that path the header
+  // the model set did not reach the host that answered — asserting "you set it, so
+  // the value was rejected" would send it to rotate a working credential.
+  const carried = a.crossOriginRedirect
+    ? `This request was redirected to a different origin, and ${slot} is stripped on such a hop — so a header you set did NOT reach the host that answered 401. Request the final URL directly before touching the credential.`
+    : a.slotFilled
+      ? `You set the ${slot} header on this request yourself; the engine neither added nor replaced it. Nothing here says the value is wrong — only that the engine is not the one supplying it.`
+      : `This request carried no usable ${slot} header — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${auth.type === 'basic' ? 'Basic ' : ''}secret:${label ?? ''}" }.`}`;
+  return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
+}
+
+/** Shared wording — the same refusal for basic and bearer/header. */
+function protectedKeyRefusal(profileId: string, keys: string): string {
+  return `Error: api_profile "${profileId}" names protected secret(s) ${keys} as its credentials. Those belong to the platform or hold the tenant's own provider key, and are never attached to an outbound request. Use a credential the user supplied for this API.`;
 }
 
 /**
@@ -376,9 +1356,29 @@ interface HttpRequestInput {
 }
 
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
+  // PUT/PATCH overwrite a resource that a prior GET can image. POST is `none`: it is as
+  // often an RPC (send, charge, trigger) as a create, and only the response can tell —
+  // a POST that returned a created id is compensatable per TARGET, which is the bulk
+  // ledger's call, not this declaration's. DELETE is `none`: re-creating a remote
+  // resource from its image is not generally possible (the id is the server's).
+  undo: (input) => {
+    const method = (input.method ?? 'GET').toUpperCase();
+    if (method === 'PUT' || method === 'PATCH') return 'restorable';
+    if (method === 'POST' || method === 'DELETE') return 'none';
+    return null;
+  },
   definition: {
     name: 'http_request',
-    description: 'Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead.',
+    // The cap is stated HERE because the model cannot plan around a limit it only
+    // discovers by hitting it. Before this line it learned about the ceiling at
+    // request 101 — mid-bulk, with no way to have batched differently.
+    //   The escape used to be named in the same breath — save a workflow and fire
+    // it per batch — and that sentence was REMOVED, not replaced: a workflow the
+    // model saves is no longer allowed to run unattended on its own say-so, so the
+    // route it described now stops at a consent step this text cannot grant. A
+    // wrong instruction is worse than none; naming a new one is a decision about
+    // who may give that consent, and that decision is not this file's to make.
+    description: `Make an HTTP request to a specific API endpoint. Use for authenticated APIs, custom endpoints, or structured data fetching. For general web search or reading public pages, use web_research instead. Capped at ${MAX_REQUESTS_PER_SESSION} per conversation, shared with sub-agents (so splitting into sub-agents buys nothing).`,
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -402,20 +1402,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (hourlyLimit < Infinity) {
         const hourlyCount = rateLimitProvider.getToolCallCountSince('http_request', 1);
         if (hourlyCount >= hourlyLimit) {
-          return friendlyBlockMessage(`Blocked: hourly HTTP request limit (${hourlyLimit}) exceeded. Count: ${hourlyCount}.`);
+          blockedFriendly(`Blocked: hourly HTTP request limit (${hourlyLimit}) exceeded. Count: ${hourlyCount}.`);
         }
       }
       if (dailyLimit < Infinity) {
         const dailyCount = rateLimitProvider.getToolCallCountSince('http_request', 24);
         if (dailyCount >= dailyLimit) {
-          return friendlyBlockMessage(`Blocked: daily HTTP request limit (${dailyLimit}) exceeded. Count: ${dailyCount}.`);
+          blockedFriendly(`Blocked: daily HTTP request limit (${dailyLimit}) exceeded. Count: ${dailyCount}.`);
         }
       }
     }
 
     // Check session rate limit before any validation — only increment on actual request attempt
     if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-      return friendlyBlockMessage(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+      blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
@@ -425,19 +1425,29 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Check per-API rate limit
         const apiBlock = toolContext.apiStore.checkRateLimit(reqHostname);
         if (apiBlock) {
-          return friendlyBlockMessage(apiBlock);
+          blockedFriendly(apiBlock);
         }
         // Soft-warning: note missing profile but let the request through
         // The agent sees the warning in the response and can create a profile for next time
         const SKIP_PROFILE_CHECK = new Set(['www.google.com', 'google.com', 'github.com', 'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'localhost', '127.0.0.1']);
-        if (!toolContext.apiStore.getByHostname(reqHostname) && !SKIP_PROFILE_CHECK.has(reqHostname)) {
+        // A shared host HAS profiles — two of them — and a create there is refused,
+        // so "create one" would be advice the model cannot follow.
+        if (!toolContext.apiStore.getByHostname(reqHostname) && !toolContext.apiStore.getHostConflict(reqHostname)
+            && !SKIP_PROFILE_CHECK.has(reqHostname)) {
           const looksLikeApi = reqHostname.startsWith('api.') || input.url.includes('/v1') || input.url.includes('/v2') || input.url.includes('/v3') || input.url.includes('/api/');
           if (looksLikeApi) {
             // Store warning — appended to response after the request completes
             (input as unknown as Record<string, unknown>)['_profileWarning'] = `Note: No API profile for "${reqHostname}". After this task, create one via api_setup to ensure correct usage next time.`;
           }
         }
-      } catch {
+      } catch (err) {
+        // A block raised INSIDE this try must not be swallowed by it. The catch
+        // exists for one thing — a malformed URL, which `assertHostPolicy`
+        // reports properly further down — and a bare `catch {}` around a
+        // `throw` turns a refusal into a request that proceeds. The per-API
+        // rate limit used to `return` from here, so the hazard arrived with
+        // this change; the guard covers any future throw in this block too.
+        if (err instanceof ToolSoftFailure) throw err;
         // Invalid URL — will be caught below
       }
     }
@@ -446,23 +1456,63 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(input.headers ?? {})) {
       if (/[\r\n\0]/.test(key) || /[\r\n\0]/.test(value)) {
-        return `Blocked: header '${key}' contains invalid characters (CRLF/null).`;
+        blockedVerbatim(`Blocked: header '${key}' contains invalid characters (CRLF/null).`);
       }
       headers[key] = value;
     }
 
+    // Engine-managed auth runs BEFORE the egress scan, and reports back the slot
+    // it actually filled. The scan then skips exactly that slot.
+    //
+    // The ordering is the whole design. Attaching after the scan needs someone to
+    // PREDICT, before the fact, which slot is about to be engine-owned so the scan
+    // can spare it — and a prediction that disagrees with the attach is a request
+    // sent with no credential at all. Attaching first replaces the prediction with
+    // an observation: `attachedAuthSlot` is set by the code that did the attaching.
+    //
+    // It also makes the change additive. When the engine cannot attach — no
+    // acceptance recorded, no vault key, no `secretStore` on this agent — nothing
+    // is dropped, the model's own header stands and is scanned exactly as it is
+    // today. A profile that works now keeps working; `custom_endpoint_ack` only
+    // exists since 2026-07-02 and the self→managed migration strips it on purpose,
+    // so anything else would break live integrations on upgrade.
+    const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);
+    // A refusal means nothing was sent — a failed call, not a quiet one. It is
+    // phrased for the model (`Error: api_profile "x" is oauth2 but the vault has
+    // no access_token …`), so it goes to the ledger verbatim.
+    if (auth.refusal) blockedVerbatim(auth.refusal);
+    const attachedAuthSlot = auth.slot;
+    // Which of the refusal's three cases this host is in — decided here, from what
+    // the attach did and whether a profile exists, so no profile text is needed.
+    const profileState = (): EgressProfileState => {
+      if (attachedAuthSlot !== undefined) return 'attached';
+      let profile;
+      try {
+        profile = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname);
+      } catch { return 'none'; }
+      if (!profile) return 'none';
+      const a = profile.auth;
+      // Auth types the engine attaches: when one reaches here unattached (no
+      // recorded acceptance, no vault value — or no secret store on this agent,
+      // which ends the attach before any branch), the profile needs checking.
+      const engineAttached = a?.type === 'bearer' || a?.type === 'header' || a?.type === 'oauth2'
+        || (a?.type === 'basic' && a.basic_format === 'user_pass_split');
+      return engineAttached ? 'not-attached' : 'model-owned';
+    };
+
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
     // Headers are an equally valid exfil channel as bodies — `Authorization:
     // Bearer sk-ant-…` on a GET to a third-party host hands the credential
-    // over just as plainly as POSTing it in JSON. Run BEFORE the OAuth2
-    // injection below so engine-managed access tokens (which may be JWT-
-    // shaped and would self-trip the scan) are never re-scanned: the
-    // engine-managed Authorization path is the trusted, profile-driven flow
-    // — anything the agent hand-set is what we're trying to catch here.
+    // over just as plainly as POSTing it in JSON. The engine-managed slot above
+    // is skipped: the engine put that value there from the vault, on the
+    // profile-driven path, and re-scanning it would flag the profile's OWN
+    // credential (a bexio PAT is a JWT). Anything the agent hand-set is what
+    // we're trying to catch here, and on every other header it still is.
     for (const [headerName, headerValue] of Object.entries(headers)) {
+      if (attachedAuthSlot !== undefined && headerName.toLowerCase() === attachedAuthSlot) continue;
       const headerMatch = detectSecretInContent(headerValue);
       if (headerMatch) {
-        return `Blocked: request header '${headerName}' appears to contain a ${headerMatch}. Sending secrets to external servers is not allowed.`;
+        blockedVerbatim(egressSecretRefusal(`request header '${headerName}'`, headerMatch, profileState()));
       }
     }
 
@@ -486,53 +1536,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
-        return `Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`;
+        blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch, profileState()));
       }
     }
 
-    // Engine-managed OAuth2 Authorization for matched api_profile.
-    // Profile drives — the agent should NOT have to remember which vault key
-    // holds the current access_token. Two failure modes this prevents:
-    //   1. Agent re-references the OLD vault key after api_setup recreates a
-    //      profile (staging 2026-05-18: SHOPIFY_ACCESS_TOKEN was stale, but
-    //      fetch_token had written the new token to SHOPIFY_SEO_ACCESS_TOKEN.
-    //      Agent kept reaching for the old key → 401 forever).
-    //   2. Token rotation: when fetch_token mints a fresh access_token, every
-    //      subsequent http_request to this profile should use it automatically.
-    // For oauth2 profiles, engine owns auth — override whatever the agent set.
-    if (toolContext?.apiStore && agent.secretStore) {
-      try {
-        const reqHostnameForAuth = new URL(input.url).hostname;
-        const oauthProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
-        if (oauthProfile?.auth?.type === 'oauth2') {
-          // Wave 5d runtime egress gate (base_url parity with fetch_token). The
-          // engine force-attaches the managed access_token below, so a profile
-          // that entered the store WITHOUT passing the save-time allowlist gate
-          // (loadFromDirectory at boot, or a JSON written into the apis dir)
-          // could hand the vault token to a non-vetted host. Fail-closed: refuse
-          // the attach unless the target host is allowlisted OR the profile
-          // carries a persisted acceptance covering it.
-          if (
-            !isAllowlistedEndpoint(input.url) &&
-            !isEndpointAcked(oauthProfile.custom_endpoint_ack, input.url)
-          ) {
-            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
-          }
-          const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
-          const resolvedToken = agent.secretStore.resolve(tokenKey);
-          if (resolvedToken) {
-            for (const k of Object.keys(headers)) {
-              if (k.toLowerCase() === 'authorization') delete headers[k];
-            }
-            headers['Authorization'] = `Bearer ${resolvedToken}`;
-          } else {
-            return `Error: api_profile "${oauthProfile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${oauthProfile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.`;
-          }
-        }
-      } catch {
-        // Invalid URL — caught by assertHostPolicy below
-      }
-    }
 
     // Under the `guarded` egress policy a full-control http_request may reach
     // only baseline ∪ the operator floor ∪ hosts a connected api_profile was
@@ -544,10 +1551,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const guardedAckHosts = resolveGuardedAckHosts(toolContext);
     if (toolContext?.networkPolicy === 'guarded') {
       try {
-        assertHostPolicy(input.url, 'full-control', toolContext, guardedAckHosts);
+        assertHostPolicy(input.url, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext);
       } catch (err) {
         if (err instanceof Error && err.message.startsWith('Blocked:')) {
-          return friendlyBlockMessage(err.message);
+          blockedFriendly(err.message);
         }
         // Non-Blocked (e.g. malformed URL) — defer to existing downstream handling.
       }
@@ -558,14 +1565,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const exfilWarning = detectGetExfiltration(input.url);
       if (exfilWarning) {
         if (!agent.promptUser) {
-          return `Blocked: ${exfilWarning}`;
+          blockedVerbatim(`Blocked: ${exfilWarning}`);
         }
         const answer = await agent.promptUser(
           pv`⚠ http_request: ${exfilWarning} — Allow?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: ${exfilWarning} — denied by user.`;
+          blockedVerbatim(`Blocked: ${exfilWarning} — denied by user.`);
         }
       }
     }
@@ -574,7 +1581,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (input.body && WRITE_METHODS.has(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
-        return `Blocked: request body appears to contain a ${secretMatch}. Sending secrets to external servers is not allowed.`;
+        blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileState()));
       }
     }
 
@@ -599,7 +1606,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
       if (!approved.has(hostname)) {
         if (!agent.promptUser) {
-          return `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`;
+          blockedVerbatim(`Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`);
         }
         const promptUser = agent.promptUser;
         let pending = pendingMap.get(hostname);
@@ -621,7 +1628,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const allowed = await pending;
         if (!allowed) {
-          return `Blocked: outbound ${method} to ${hostname} denied by user.`;
+          blockedVerbatim(`Blocked: outbound ${method} to ${hostname} denied by user.`);
         }
       }
     }
@@ -666,7 +1673,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
       const { response, finalUrl: finalRequestUrl } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;
@@ -781,6 +1788,27 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
 
+      // Engine-managed-auth 401-hint. When the engine DECLINED to attach a
+      // credential it did not fail the request — a profile that works today keeps
+      // working — so the reason would otherwise be invisible and the 401 would
+      // read as a bad token. That is the exact loop this whole change exists to
+      // end: three token rotations against a request that carried no credential.
+      // Outside the untrusted_data wrap: system guidance, not response data.
+      if (response.status === 401 && auth.hint !== undefined) {
+        // The hint is resolved HERE, not at attach time. Two facts it needs are only
+        // settled now: whether a cross-origin hop stripped the credential header
+        // (`redirectHopHeaders`), and — the reason this matters beyond wording —
+        // whether the vault should be read at all. Built eagerly it read the vault on
+        // every request to a model-owned profile, most of which never 401.
+        let crossOriginRedirect = false;
+        try {
+          crossOriginRedirect = new URL(finalRequestUrl).origin !== new URL(input.url).origin;
+        } catch {
+          // Either URL unparseable — treat as same-origin and make no redirect claim.
+        }
+        wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint({ crossOriginRedirect })}\nUntil then the request goes out with only the headers you set yourself.`;
+      }
+
       // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
       // agent treats it as system guidance, not external response data.
       // Fires when an http_request hits 401 against an URL matched by an
@@ -838,6 +1866,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
       return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
     } catch (err: unknown) {
+      // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
+      // the REASON as its message, and `blockedFriendly`'s reason starts with
+      // "Blocked:" — so the branch two lines down would match it, re-wrap it as
+      // an ordinary Error, and run `friendlyBlockMessage` over an already
+      // friendly string. The refusal would arrive as `is_error` with a
+      // double-mapped message, i.e. a behaviour change, silently.
+      //
+      // No refusal site is inside this try today (all fourteen are above line
+      // 900). This exists because `blockedFriendly`'s doc comment tells the next
+      // person to throw rather than return, and following that rule HERE would
+      // otherwise be the trap. A rule that is safe only outside one region of
+      // the file needs the region to enforce it, not the reader to remember.
+      if (err instanceof ToolSoftFailure) throw err;
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
       }
@@ -852,3 +1893,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
   },
 };
+
+/**
+ * The engine-managed credential attach for a caller with no agent — a bulk run's
+ * worker effect (`core/bulk-external.ts`). It is a CALL of the decision
+ * `http_request` makes, not a copy: the attach reads only the profile store and the
+ * vault, and both are the engine's own objects on either path.
+ *
+ * Only an attached credential counts. A `refusal`, a `hint` and no profile at all
+ * are one answer here — the bulk path has no model header to fall back on, so any
+ * of them would send the request without the credential the run was planned with.
+ * No text is returned: the caller reports a fixed reason, never a profile's wording.
+ */
+export async function attachStoredCredential(
+  url: string,
+  headers: Record<string, string>,
+  stores: { apiStore: NonNullable<ToolContext['apiStore']>; secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']> },
+): Promise<boolean> {
+  const auth = await attachEngineManagedAuth(
+    url,
+    headers,
+    { apiStore: stores.apiStore } as Pick<ToolContext, 'apiStore'> as ToolContext,
+    { secretStore: stores.secretStore } as Pick<import('../../types/index.js').IAgent, 'secretStore'> as import('../../types/index.js').IAgent,
+  );
+  return auth.slot !== undefined && auth.refusal === undefined;
+}

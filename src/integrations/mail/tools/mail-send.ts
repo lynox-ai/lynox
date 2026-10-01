@@ -124,8 +124,10 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
               `Pick a different account via the "account" parameter.`;
           case 'dedup_window':
             return result.message;
-          case 'secret_in_body':
-            return `mail_send blocked: ${result.message}. Strip the credential and retry.`;
+          case 'secret_in_body': {
+            const { mailSecretRefusal } = await import('../../../tools/builtin/http.js');
+            return mailSecretRefusal('mail_send', result.secretLabel ?? 'credential');
+          }
           case 'cancelled':
             // beforeSend returned false — user clicked No (or the answer
             // wasn't a positive token). Mass-send vs single-send is implicit

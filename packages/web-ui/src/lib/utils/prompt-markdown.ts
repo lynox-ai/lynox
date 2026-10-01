@@ -38,8 +38,7 @@ import DOMPurify from 'dompurify';
  *
  * Scope, stated honestly: this closes SUPPRESSION. It does not stop a value
  * from adding a plausible-looking FAKE line of its own — that needs the prompt
- * payload to separate system frame from interpolated value, which is a
- * different change (see DEF-confirm-prompt-value-spoofing).
+ * payload to separate system frame from interpolated value.
  */
 
 /** Schemes a link inside a prompt may point at. */
@@ -105,10 +104,9 @@ export function isSafePromptHref(href: string): boolean {
  *     looks exactly like a real field. Under the collapsed paragraph the same
  *     payload landed mid-sentence, where a second `Host:` reads as odd. So this
  *     makes an already-possible forgery more plausible; it does not create it.
- * Closing that asymmetry needs the payload to mark which spans are values —
- * see DEF-confirm-prompt-value-spoofing. It is deliberately NOT patched by
- * escaping newlines here: this layer receives one finished string and cannot
- * tell a frame newline from a value newline.
+ * Closing that asymmetry needs the payload to mark which spans are values. It
+ * is deliberately NOT patched by escaping newlines here: this layer receives
+ * one finished string and cannot tell a frame newline from a value newline.
  */
 const promptMarked = new Marked({
 	gfm: true,
@@ -349,12 +347,44 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 	const parts = html.split(VALUE_SLOT);
 	if (parts.length - 1 !== values.length) return plainTextPrompt(segments);
 
+	// A value may show its own line breaks only when it IS the whole prompt.
+	// See `escapeValueText`.
+	const lone = segments.length === 1 && segments[0]?.kind === 'value';
+
 	let index = 0;
 	return parts.reduce((acc, part, i) => {
 		if (i === 0) return part;
 		const value = values[index++] ?? '';
-		return acc + escapeHtml(value) + part;
+		return acc + escapeValueText(value, lone) + part;
 	}, '');
+}
+
+/**
+ * A value is text. Whether its line breaks are allowed to SHOW depends on what
+ * surrounds it, and the distinction is the whole of this function.
+ *
+ * **Alone** — the prompt is one value and nothing else — the text is prose the
+ * agent wrote, and its newlines are part of it. Escaping alone left them raw
+ * inside the `<p>`, where CSS collapses them, so `ask_user`'s three-line
+ * question rendered as one run-on line. That is invisible in the markup (the
+ * newline IS there) and only shows on the rendered page.
+ *
+ * **Inside a frame** they stay collapsed, and that is not a limitation — it is
+ * the guard. A frame with field structure (`google-calendar.ts` writes a
+ * literal `\nTime: `) is exactly what a value's newline can imitate: measured,
+ * `summary = 'Coffee\nTime: 09:00'` renders its forged `Time:` row on its own
+ * line, indistinguishable from the real one below. Collapsing was what made
+ * that impossible, and `prompt-value.ts` documents the attack it prevents.
+ * The same rule also keeps a value verbatim when a frame opened a code fence.
+ *
+ * So the test is structural, not per-caller: nobody has to remember to clip a
+ * field, and nobody has to remember to allow prose. The `<br>` is emitted by US
+ * after escaping either way, so it grants the value nothing — it cannot open a
+ * construct, close one, or introduce an element.
+ */
+function escapeValueText(value: string, lone: boolean): string {
+	const escaped = escapeHtml(value);
+	return lone ? escaped.split('\n').join('<br>') : escaped;
 }
 
 /**

@@ -366,8 +366,7 @@ describe('capture sinks refuse on a control-plane-provisioned instance', () => {
 
   it('an operator acknowledgement re-arms it — the recorded qa-managed workflow', () => {
     // A blanket refusal would break the managed-tenant capture the acceptance
-    // test and the wire-replay eval both use; DEF-wire-capture-prod-gate says so
-    // and is why that row was downgraded rather than closed this way before.
+    // test and the wire-replay eval both use.
     // The acknowledgement is an ENV edit through the control plane — an operator
     // action the in-container threat cannot perform on a running process.
     const env = armed({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: '1' });
@@ -450,8 +449,7 @@ describe('a sink dir that already exists is not trusted as found', () => {
   it('refuses a symlinked sink dir rather than following it, and says so', () => {
     // `mkdirSync(dir, {mode})` sets the mode only when it CREATES the dir, so a
     // pre-planted symlink survived the move off /tmp untouched and redirected
-    // the capture wherever it pointed. DEF-wire-capture-prod-gate asks for this
-    // explicitly ("incl. tightening a pre-existing loose/symlinked dir").
+    // the capture wherever it pointed.
     const base = mkdtempSync(join(tmpdir(), 'lynox-link-'));
     const elsewhere = join(base, 'elsewhere');
     mkdirSync(elsewhere);

@@ -14,17 +14,33 @@
 import { getApiBase } from '../../config.svelte.js';
 import { t } from '../../i18n.svelte.js';
 import { addToast } from '../toast.svelte.js';
+import {
+	scopeMismatch,
+	toggleForServerMode,
+	type ScopeMode,
+	type ServerScopeMode,
+} from './google-scope-labels.js';
+import { deleteClientPair, performSwitchToManaged } from './google-switch.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface GoogleStatus {
+	/** A Google credential exists in the engine. NOT "the broker is reachable". */
 	available: boolean;
 	authenticated?: boolean;
 	scopes?: string[];
 	expiresAt?: string | null;
 	hasRefreshToken?: boolean;
+	/** Which source supplied the client pair; `null` on a brokered tenant. */
+	client_source?: 'vault' | 'env' | 'config' | null;
+	/** Provisioned instance AND no client pair of its own. */
+	managed_broker?: boolean;
+	/** The control plane holds a Google client. Says nothing about consent. */
+	broker_available?: boolean;
+	/** Server-computed: the client cannot see the per-tenant scope override. */
+	mode?: ServerScopeMode | null;
 }
 
 export interface DeviceFlow {
@@ -32,7 +48,8 @@ export interface DeviceFlow {
 	userCode: string;
 }
 
-export type ScopeMode = 'readonly' | 'full';
+export type { ScopeMode, ServerScopeMode, ServiceGrant } from './google-scope-labels.js';
+export { grantedServices, driveIsAppFilesOnly } from './google-scope-labels.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -47,10 +64,20 @@ let googleClientId = $state('');
 let googleClientSecret = $state('');
 let googleCredSaving = $state(false);
 let googleCredSaved = $state(false);
-let scopeMode = $state<ScopeMode>('readonly');
+let scopeMode = $state<ScopeMode>('standard');
+/**
+ * Has the USER moved the toggle since the status was loaded?
+ *
+ * A mismatch is an expression of intent, not an observation. Deriving it from
+ * the grant alone — which is what `detectScopeMode` did — made every legacy
+ * connection render a permanent "re-authorize" prompt for a change nobody
+ * asked for.
+ */
+let scopeModeTouched = $state(false);
 
 // Managed-broker state
 let managedGoogleClaiming = $state(false);
+let switchingToManaged = $state(false);
 
 // Auth-poll handle — module-scoped so multiple consumers can clear it.
 let authPollInterval: ReturnType<typeof setInterval> | null = null;
@@ -97,36 +124,36 @@ export function getScopeMode(): ScopeMode {
 }
 export function setScopeMode(m: ScopeMode): void {
 	scopeMode = m;
+	scopeModeTouched = true;
 }
 export function isManagedGoogleClaiming(): boolean {
 	return managedGoogleClaiming;
 }
-
-// ---------------------------------------------------------------------------
-// Scope helpers — detect current scope mode from granted scopes
-// ---------------------------------------------------------------------------
-
-const WRITE_SCOPE_PREFIX = [
-	'.send',
-	'.modify',
-	'/spreadsheets',
-	'/drive',
-	'/calendar.events',
-	'/documents',
-];
-
-export function detectScopeMode(scopes: string[]): ScopeMode {
-	return scopes.some((s) =>
-		WRITE_SCOPE_PREFIX.some((w) => s.includes(w) && !s.includes('.readonly')),
-	)
-		? 'full'
-		: 'readonly';
+export function isSwitchingToManaged(): boolean {
+	return switchingToManaged;
 }
 
-/** `true` when the granted scopes don't match the user's current toggle. */
+// ---------------------------------------------------------------------------
+// Scope helpers — what the GRANT actually says
+// ---------------------------------------------------------------------------
+
+/**
+ * `true` only after the USER changed the toggle away from what is granted.
+ *
+ * `legacy` is deliberately not a mismatch: nothing was chosen, so there is
+ * nothing to reconcile until the user picks a mode.
+ */
 export function isScopeMismatch(): boolean {
-	if (!googleStatus?.authenticated || !googleStatus.scopes) return false;
-	return detectScopeMode(googleStatus.scopes) !== scopeMode;
+	return scopeMismatch({
+		touched: scopeModeTouched,
+		authenticated: googleStatus?.authenticated === true,
+		serverMode: googleStatus?.mode,
+		toggle: scopeMode,
+	});
+}
+
+export function getServerScopeMode(): ServerScopeMode | null {
+	return googleStatus?.mode ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +166,12 @@ export async function loadGoogleStatus(): Promise<void> {
 		const res = await fetch(`${getApiBase()}/google/status`);
 		if (!res.ok) throw new Error();
 		googleStatus = (await res.json()) as GoogleStatus;
-		if (googleStatus?.scopes?.length) {
-			scopeMode = detectScopeMode(googleStatus.scopes);
-		}
+		// The server decides the mode; the client only parks the toggle on it.
+		// A `legacy` grant parks at `standard` and is NOT a mismatch — see
+		// `isScopeMismatch`. Loading a status is not an act of intent, so the
+		// touched flag resets here.
+		scopeMode = toggleForServerMode(googleStatus?.mode);
+		scopeModeTouched = false;
 	} catch {
 		googleStatus = null;
 	}
@@ -277,10 +307,11 @@ export async function revokeGoogle(): Promise<void> {
 
 export async function resetGoogleCredentials(): Promise<void> {
 	try {
-		await Promise.all([
-			fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, { method: 'DELETE' }),
-			fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, { method: 'DELETE' }),
-		]);
+		if (!(await deleteClientPair(fetch, getApiBase()))) {
+			addToast(t('integrations.google_pair_delete_failed'), 'error', 10000);
+			await loadGoogleStatus();
+			return;
+		}
 		await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
 		flow = null;
 		googleCredSaved = false;
@@ -290,21 +321,59 @@ export async function resetGoogleCredentials(): Promise<void> {
 	}
 }
 
+/**
+ * D12 — give up this tenant's own Google client and land on the managed one.
+ *
+ * The order and the checks live in `google-switch.ts`; this owns the state and
+ * the message. The two failure stages get DIFFERENT messages on purpose: after
+ * the disconnect has already run, "nothing was switched over" is false — the
+ * grant is gone and the user has to re-authenticate.
+ */
+export async function switchToManagedGoogle(): Promise<boolean> {
+	switchingToManaged = true;
+	try {
+		const outcome = await performSwitchToManaged(fetch, getApiBase());
+		if (!outcome.ok) {
+			addToast(
+				t(outcome.stage === 'disconnect'
+					? 'integrations.google_switch_aborted'
+					: 'integrations.google_switch_half_done'),
+				'error',
+				12000,
+			);
+			return false;
+		}
+		flow = null;
+		googleCredSaved = false;
+		return true;
+	} catch {
+		addToast(t('integrations.google_switch_aborted'), 'error', 12000);
+		return false;
+	} finally {
+		switchingToManaged = false;
+		await loadGoogleStatus();
+	}
+}
+
 export async function startManagedGoogleOAuth(): Promise<void> {
 	try {
 		const res = await fetch(`${getApiBase()}/google/oauth-url`);
 		if (!res.ok) throw new Error();
 		const data = (await res.json()) as { url: string };
 		if (data.url) {
-			// Validate the control plane URL is reachable before redirecting.
-			// no-cors HEAD always "succeeds" — we redirect and let the user see
-			// the result. This is the original IntegrationsView behaviour.
-			try {
-				await fetch(data.url, { method: 'HEAD', mode: 'no-cors' }).catch(() => null);
-				window.location.href = data.url;
-			} catch {
-				addToast(t('integrations.google_oauth_unavailable'), 'error');
-			}
+			// ⚠ Do NOT probe this URL before navigating. A `HEAD` preflight stood
+			// here to "validate the control plane URL is reachable" — and its own
+			// comment admitted it could not: `mode: 'no-cors'` always succeeds, the
+			// result was swallowed by `.catch(() => null)`, and the redirect ran
+			// either way. It decided nothing.
+			//
+			// Since the start URL carries a one-time start token it is worse than
+			// useless: the control plane's replay guard consumes the nonce on the
+			// FIRST request it answers, and Hono routes `HEAD` to the `GET`
+			// handler. Measured against staging 2026-09-07 — HEAD returns 302, and
+			// the navigation that follows lands on `google_oauth_error=replayed`.
+			// The probe would have turned one broken Connect button into another.
+			window.location.href = data.url;
 		}
 	} catch {
 		addToast(t('integrations.google_oauth_unavailable'), 'error');

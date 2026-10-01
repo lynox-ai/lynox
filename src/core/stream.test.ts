@@ -64,6 +64,25 @@ describe('StreamProcessor', () => {
       });
     });
 
+    it('emits it on block stop even when the stream never reports a stop reason', async () => {
+      // No `message_delta`, so `stop_reason` falls back to its 'end_turn'
+      // default — the shape the openai-compat adapter produces when a provider
+      // ends a tool-calling stream without a `finish_reason`. The UI renders
+      // follow-up chips off this event, and the agent loop skips its recovery
+      // call for exactly this shape, so the two must not both depend on the
+      // stop reason: the event is a property of the BLOCK closing.
+      const { proc, collected } = createProcessor();
+
+      const result = await proc.process(mockStream([
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'abc123def', name: 'suggest_follow_ups', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"suggestions":[]}' } },
+        { type: 'content_block_stop', index: 0 },
+      ]) as AsyncIterable<never>);
+
+      expect(result.stop_reason).toBe('end_turn');
+      expect(collected.filter(e => e.type === 'tool_call')).toHaveLength(1);
+    });
+
     it('emits memory_recall tool_use as a discrete tool_call event (regression: HN trust-debug visibility)', async () => {
       // memory_recall must surface in the chat UI the same as web_research /
       // email_send / crm_* so users can SEE when prior memory shaped the
@@ -126,11 +145,18 @@ describe('StreamProcessor', () => {
 
       const errors = collected.filter(e => e.type === 'error');
       expect(errors).toHaveLength(1);
-      expect(errors[0]).toMatchObject({ type: 'error', agent: 'test-agent' });
+      // `fatal: false` is the load-bearing half: this path substitutes `input:{}`
+      // and the turn continues below, while agent.ts emits the SAME event type to
+      // say the run is dead. A receiver that could not tell them apart marked a
+      // live, billing run as failed — measured 2026-08-23 on run e2684d2e. That
+      // receiver was fixed the same day; this assert keeps the wire honest so the
+      // next one does not have to guess.
+      expect(errors[0]).toMatchObject({ type: 'error', fatal: false, agent: 'test-agent' });
 
       // Input should be set to empty object
       expect(result.content[0]).toMatchObject({ type: 'tool_use', input: {} });
     });
+
   });
 
   describe('server-side tool blocks (tool_search / web_search)', () => {

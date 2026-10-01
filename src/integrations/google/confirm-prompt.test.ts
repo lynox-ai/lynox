@@ -90,7 +90,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     // multi-line FIELD structure, which is exactly what makes a forged line
     // indistinguishable there. Frame: title line + Time line (+ invite notice).
     it.each(FORGERIES)('create_event keeps its frame with summary %#', async (forgery) => {
-      const tool = createCalendarTool(mockAuth([SCOPES.CALENDAR_EVENTS]));
+      const tool = createCalendarTool(() => mockAuth([SCOPES.CALENDAR_EVENTS]));
       const { agent, prompt } = capturingAgent();
 
       const result = await tool.handler(
@@ -105,7 +105,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it.each(FORGERIES)('create_event keeps its frame with an attendee %#', async (forgery) => {
-      const tool = createCalendarTool(mockAuth([SCOPES.CALENDAR_EVENTS]));
+      const tool = createCalendarTool(() => mockAuth([SCOPES.CALENDAR_EVENTS]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler(
@@ -124,7 +124,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it.each(FORGERIES)('create_event keeps its frame with start/end %#', async (forgery) => {
-      const tool = createCalendarTool(mockAuth([SCOPES.CALENDAR_EVENTS]));
+      const tool = createCalendarTool(() => mockAuth([SCOPES.CALENDAR_EVENTS]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler({ action: 'create_event', summary: 'Sync', start: forgery, end: forgery }, agent);
@@ -133,7 +133,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it.each(['update_event', 'delete_event'] as const)('%s stays single-line', async (action) => {
-      const tool = createCalendarTool(mockAuth([SCOPES.CALENDAR_EVENTS]));
+      const tool = createCalendarTool(() => mockAuth([SCOPES.CALENDAR_EVENTS]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler({ action, event_id: FORGERIES[0] as string }, agent);
@@ -149,7 +149,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     // passed a clean 'f1', so removing its guard changed nothing and the
     // mutation survived.
     it.each(FORGERIES)('share: forged file_id keeps the frame %#', async (forgery) => {
-      const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
+      const tool = createDriveTool(() => mockAuth([SCOPES.DRIVE]));
       const { agent, prompt } = capturingAgent();
 
       const result = await tool.handler(
@@ -163,7 +163,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it.each(FORGERIES)('share: forged email keeps the frame %#', async (forgery) => {
-      const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
+      const tool = createDriveTool(() => mockAuth([SCOPES.DRIVE]));
       const { agent, prompt } = capturingAgent();
 
       const result = await tool.handler({ action: 'share', file_id: 'f1', email: forgery, role: 'writer' }, agent);
@@ -176,7 +176,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     it('share: forged role keeps the frame', async () => {
       // `role` ends the line, so an unguarded value could append a sentence
       // that reads like a system-authored reassurance.
-      const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
+      const tool = createDriveTool(() => mockAuth([SCOPES.DRIVE]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler(
@@ -189,7 +189,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it('move stays single-line', async () => {
-      const tool = createDriveTool(mockAuth([SCOPES.DRIVE]));
+      const tool = createDriveTool(() => mockAuth([SCOPES.DRIVE]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler(
@@ -201,7 +201,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it.each(['upload', 'create_doc'] as const)('%s stays single-line', async (action) => {
-      const tool = createDriveTool(mockAuth([SCOPES.DRIVE_FILE]));
+      const tool = createDriveTool(() => mockAuth([SCOPES.DRIVE_FILE]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler({ action, file_name: FORGERIES[0] as string, content: 'x' }, agent);
@@ -212,7 +212,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
   describe('google_sheets', () => {
     it.each(['write', 'append'] as const)('%s stays single-line', async (action) => {
-      const tool = createSheetsTool(mockAuth([SCOPES.SHEETS]));
+      const tool = createSheetsTool(() => mockAuth([SCOPES.SHEETS]));
       const { agent, prompt } = capturingAgent();
 
       const result = await tool.handler(
@@ -225,7 +225,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
     });
 
     it('format stays single-line', async () => {
-      const tool = createSheetsTool(mockAuth([SCOPES.SHEETS]));
+      const tool = createSheetsTool(() => mockAuth([SCOPES.SHEETS]));
       const { agent, prompt } = capturingAgent();
 
       await tool.handler({ action: 'format', spreadsheet_id: FORGERIES[0] as string, format_requests: [] }, agent);

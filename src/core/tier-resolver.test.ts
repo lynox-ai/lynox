@@ -77,7 +77,7 @@ describe('resolveRunModel — gate → clamp → provider, the single chokepoint
     expect(r.tier).toBe('balanced'); // derived from default (no ceiling to clamp)
   });
 
-  it('REFUSES a genuine model id whose band exceeds the ceiling instead of running it (DEF-0080)', () => {
+  it('REFUSES a genuine model id whose band exceeds the ceiling instead of running it', () => {
     // A specific model id cannot be clamped DOWN (you cannot substitute a cheaper
     // model on a pinned endpoint), so an over-ceiling id is refused, not silently
     // run. This closes the raw pipeline `step.model` ingress (a `string`) that

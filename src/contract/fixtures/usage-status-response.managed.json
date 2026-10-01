@@ -2,5 +2,6 @@
   "balance_cents": 2985,
   "included_budget_cents": 3000,
   "allowed": true,
+  "spend_gate": "balance",
   "tier": "managed"
 }

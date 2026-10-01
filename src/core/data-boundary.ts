@@ -7,6 +7,327 @@ interface InjectionResult {
 }
 
 /**
+ * The untrusted-data CLOSING tag, in every encoding a model might still read as
+ * a close. ONE source, used by the detector AND the neutralizer.
+ *
+ * ## Why one, when there were three
+ *
+ * There used to be three patterns in each mechanism — literal, HTML-entity,
+ * numeric-entity — six declarations that had to stay in agreement, and the
+ * thoroughness was the bug: each pattern required BOTH delimiters in the SAME
+ * encoding and nothing between the token and the `>`. Six real forms therefore
+ * passed both mechanisms untouched, so a body could close the block with no
+ * `⚠ WARNING` and no `injection_detected` event:
+ *
+ *     </untrusted_data foo>      </untrusted_data/>      </untrusted_data bar="1">
+ *     </untrusted_data&gt;       &lt;/untrusted_data>     (and mixed numeric forms)
+ *
+ * Found by the security gate on core#1335, constructed end-to-end in the
+ * mail-batch preamble: a snippet closes the block and then emits a line shaped
+ * like the engine's own numbered locator, so everything after it reads as
+ * trusted framing.
+ *
+ * ## Recognition ENDS at the token, and that is the whole design
+ *
+ * The first repair kept demanding a closing `>` and merely allowed attributes in
+ * between, bounded at 200 characters. A third review round then produced a
+ * SEVENTH form — `</untrusted_data data-x="<230 chars>">` — which pads past the
+ * bound and passes untouched. That is not a missing case, it is the wrong cut:
+ * enumerating the shapes of a well-formed close tag never terminates, because
+ * the attacker picks the shape.
+ *
+ * `untrusted_data` is a COINED token. `</` followed by it is already the entire
+ * signal; whatever comes after is the attacker's choice and cannot be part of
+ * the recognition. So the pattern STOPS at the token — there is no terminator
+ * group and no attribute tail at all. A tag's attributes are simply left
+ * standing as inert text next to a delimiter that has been escaped, which is
+ * what kills it.
+ *
+ * ⚠ An earlier version of this section said the terminator was merely OPTIONAL
+ * and that a well-formed tag was "consumed whole, its attributes with it", and
+ * it instructed future editors about a terminator ALTERNATION. Both were true of
+ * a construct that no longer exists. The text outlived it by FOUR commits, with
+ * the neighbouring `closeTail` comment saying the opposite 79 lines below it the
+ * whole time — near enough to read in one screenful of scrolling, far enough that
+ * nobody did. Reaching for a terminator
+ * was removed because it DELETED PAYLOAD: the reach ran to any `>` within 200
+ * characters, and in JSON or in prose containing a `>` that terminator belongs
+ * to something else. Measured before the removal: 76 characters in, 35 out.
+ *
+ * What a future edit may not weaken is unchanged and is now the only rule:
+ * recognition rests on the delimiter, the separators, and the token — and the
+ * replacement must be a FUNCTION of the match, never a constant, because a
+ * constant standing in for a variable-length match is exactly how those 41
+ * characters disappeared.
+ *
+ * Either delimiter may be literal, HTML-entity or numeric-entity, and they need
+ * NOT match each other: a model is not a parser, and this defence exists exactly
+ * for the case where it reads one anyway. `\b` after the token keeps
+ * `</untrusted_datax>` out — the one thing still being recognised rather than
+ * assumed.
+ *
+ * ## The HEAD had the same defect as the tail, one round later
+ *
+ * Relaxing the tail left `\s*` between the delimiter and the token, and `\s` in
+ * JavaScript does NOT cover U+0085 (NEL) or the rest of the C1 range. So a
+ * close tag carrying a NEL between the `<` and the `/` — or between the
+ * `/` and the token — was an EIGHTH bypass, neither detected nor
+ * neutralised. The escape forms live in `data-boundary.test.ts`, built with
+ * `String.fromCharCode` rather than pasted, so no source file carries a raw
+ * control character. The separator class is now the same one {@link oneLine} in
+ * `chat-context.ts` uses and documents for exactly this reason. That comment
+ * predates this file's bug by months: the fact was written down here in the repo
+ * and applied to one caller instead of to the boundary itself.
+ *
+ * ## Cost
+ *
+ * The bounded attribute tail was slow as well as lossy: on 20 000 repeated
+ * `</untrusted_data ` tokens it costs roughly an order of magnitude more than
+ * the form without it, whether the scan matches or fails. That range is what
+ * two independent measurements agree on; it is the part worth writing down.
+ *
+ * ⚠ This section used to carry a precise pair — "0.0003 ms against 5.65 ms" —
+ * as the measurement that justified the design, and it was not a comparison:
+ * the two forms behave oppositely on that input, one matching immediately and
+ * one never matching and therefore scanning all of it, so the pair timed
+ * "does it match early", not "does it backtrack".
+ *
+ * Every attempt to restate it precisely was then wrong in a NEW way — four
+ * times, across three review rounds and two of my own re-measurements, each
+ * finding a different error in the previous correction. That is the signal
+ * that the text was claim-rich rather than inaccurate: a paragraph carrying a
+ * table, two ratios and a history claim needs all of them to stay true, and
+ * none of them decides anything this file does. So they are gone rather than
+ * corrected a fifth time.
+ *
+ * What must not come back is the tail itself, and the reason is above and is
+ * not about speed: it deleted payload.
+ *
+ * ⚠ The separator widening COSTS, and it took three measurements to say so
+ * correctly — the first quoted numbers taken before it landed, and two review
+ * rounds disagreed about whether the cost exists at all. What settles it is a
+ * SIZE SWEEP rather than a duel of single numbers, because a ratio that holds
+ * across input sizes is a throughput difference and a ratio at one size is not.
+ *
+ * Both patterns reconstructed from git (2e7ea12a vs HEAD), verified to differ in
+ * the property under test (the new one matches a NEL form, the old does not),
+ * interleaved on the same body object, min of 60 × 6 repeats, on content with no
+ * `<` and no `&`:
+ *
+ *     50 KB  0.0043 → 0.0157   110 KB 0.0094 → 0.0338   200 KB 0.0167 → 0.0604
+ *     410 KB 0.0346 → 0.1256   820 KB 0.0691 → 0.2510      ratio 3.61 – 3.63
+ *
+ * Constant ratio at every size, and the throughput says WHY: ~12 GB/s before,
+ * ~3.3 GB/s after. 12 GB/s is a SIMD scan for a single start byte — V8 can do
+ * that while the pattern's only entry is the `<`/`&` alternation, and the
+ * widened class defeats it. A review round called 12 GB/s implausible and read
+ * the old figure as a shorter input; it is neither, it is the fast path.
+ *
+ * Two things that round got RIGHT and are corrected here: the self-control on a
+ * tightened harness is **1.000**, not the 0.93 an earlier draft cited as grounds
+ * for doubting a 1.00 result — so 1.00 is the noise floor and that argument was
+ * wrong. And "isolated, the class alone costs 1.12 ms against 0.12 ms" is cut:
+ * isolating the class removes the delimiter alternation, which is the very thing
+ * whose optimisation is at issue, so it measured a different shape.
+ *
+ * The cost is bought deliberately, and the mitigation is smaller than a first
+ * draft claimed: `detectInjectionAttempt` windows at SCAN_WINDOW (64 KB), which
+ * caps the cost PER PASS, not in total — 410 KB is seven overlapping windows, so
+ * it scales with input rather than flattening. And the `.replace` in `agent.ts`
+ * is not windowed at all. In absolute terms this is still tenths of a
+ * millisecond on inputs orders of magnitude larger than a mail body, and what it
+ * buys is the NEL/C1 family — but the number is stated rather than smoothed,
+ * because the number that flatters the change is exactly the one to distrust.
+ */
+/** Separator class between the delimiter, the slash and the token. Deliberately
+ *  NOT `\\s`: that misses U+0085 (NEL) and the C1 range. Same class as
+ *  `chat-context.ts`'s `oneLine`, which documents why. */
+const BOUNDARY_SEP = '[\\s\\x00-\\x1f\\x7f-\\x9f]*';
+const closeTail = (token: string): string =>
+  // NO attribute tail. It used to consume `[^>]{0,200}?` up to any `>` in
+  // reach, so that a well-formed tag was replaced together with its attributes.
+  // That terminator usually belongs to something else: in JSON or in prose
+  // containing a `>`, the tail ate the bytes in between and the fixed-length
+  // replacement emitted nothing for them. Measured on this code: 76 chars in,
+  // 35 out — a url, an amount and two field names gone, leaving JSON that still
+  // parses and now says something the sender did not write.
+  // Dropping it costs no protection. The terminator was already optional, so
+  // recognition never rested on it, and the tag is equally dead whether its
+  // attributes are consumed or left standing as inert text.
+  `${BOUNDARY_SEP}\\/${BOUNDARY_SEP}${token}\\b`;
+const BOUNDARY_CLOSE_TAIL = closeTail('untrusted_data');
+const BOUNDARY_OPEN_ANY = '(?:<|&lt;|&#0*60;|&#x0*3c;)';
+// `BOUNDARY_OPEN_ENCODED` — the same alternation without the literal `<` — stood
+// here and is gone. It existed for one reason: the neutraliser ran two ordered
+// passes and the first had to match ONLY the pre-encoded opener, so that the
+// second could not re-match what the first had emitted. That ordering is no
+// longer a thing (see `neutralizeBoundaryTags`), which left the constant with
+// zero readers — lint caught it, and a constant whose only remaining job is to
+// look like it belongs is the kind of thing a later reader rebuilds a pass
+// around.
+
+/**
+ * Deaden a matched close tag by escaping ITS OWN opening delimiter, and change
+ * nothing else in the match.
+ *
+ * The previous form substituted a constant. That is wrong twice over. It made
+ * the replacement a different LENGTH from the match, which is how the attribute
+ * tail came to delete payload bytes; and for an entity-encoded opener it was an
+ * IDENTITY — `&lt;/x` was replaced by `&lt;/x`, so the tag was never neutralised
+ * at all. A test appeared to cover that: it asserted the raw closer did not
+ * survive, and passed only because the constant happened to differ from the
+ * input by the terminator it also ate. Remove the eating and the assertion fails
+ * and exposes the hole. `&` is escaped first, so `&lt;` becomes `&amp;lt;` and
+ * cannot be decoded back into `<` by a renderer downstream.
+ */
+const deadenOpener = (match: string, open: string): string =>
+  `${open.replace(/&/g, '&amp;').replace(/</g, '&lt;')}${match.slice(open.length)}`;
+
+/**
+ * Unicode FORMAT characters — the ones that occupy a position in a string and
+ * render as nothing. Recognition folds them away before it matches.
+ *
+ * ## Why a PROPERTY and not another list
+ *
+ * Everything around the token here is recognised by enumeration: the delimiter
+ * alternation, the separator class. That frame failed four review rounds in a
+ * row, and the shape of the failure is the argument for this constant: each
+ * round produced one further invisible character, each repair was a wider list,
+ * and the wider list did not contain the next one. A fifth list would be the
+ * same move.
+ *
+ * `\p{Cf}` is not a list. It is the Unicode category for format characters, so
+ * a codepoint assigned to that category in a future Unicode revision is folded
+ * by this code without anyone editing it — which is the property a list cannot
+ * have. Measured against the family this module previously named one by one:
+ * U+00AD, U+180E, U+200B, U+200C, U+200D, U+2060, U+FEFF are all `Cf`, and so
+ * are U+200E/U+202E, the bidi overrides, which no list here ever mentioned.
+ *
+ * ⚠ **U+FEFF was already covered, by accident** — JS `\s` happens to include it,
+ * so it fell inside `BOUNDARY_SEP` while its six siblings did not. Folding it
+ * here makes that coverage deliberate. It must NOT be removed from the
+ * separator class in exchange: `BOUNDARY_SEP` still has to match it for input
+ * that reaches a pattern without going through the fold.
+ *
+ * ⚠ **Bounded, and the bound is the point.** Folding closes the invisible half.
+ * It says nothing about re-encodings — percent form, double-encoded entities,
+ * fullwidth delimiters — which are a different substrate and are NOT addressed
+ * here. Do not read a green suite as more than the half it covers.
+ */
+const FORMAT_CHAR = /\p{Cf}/u;
+
+/**
+ * Drop every format character, and keep a map back to the ORIGINAL offsets.
+ *
+ * The map is what makes this usable for neutralisation and not only detection.
+ * A detector may match on a rewritten copy and throw it away; a neutraliser has
+ * to rewrite the caller's real bytes, and this module's whole repair history is
+ * about not losing bytes — the constant that ate payload, the attribute tail
+ * that deleted a url and an amount. So: match on the folded string, then map
+ * the match back and escape the delimiter WHERE IT REALLY SITS, leaving the
+ * invisible characters the sender wrote exactly where they were.
+ *
+ * `map[i]` is the index in `text` of the character at `folded[i]`. `null` means
+ * nothing was folded and `folded === text`, which is the common case and skips
+ * the allocation entirely.
+ */
+function foldFormatChars(text: string): { folded: string; map: number[] | null } {
+  if (!FORMAT_CHAR.test(text)) return { folded: text, map: null };
+  let folded = '';
+  const map: number[] = [];
+  for (let i = 0; i < text.length; ) {
+    const cp = text.codePointAt(i);
+    const ch = String.fromCodePoint(cp as number);
+    if (!FORMAT_CHAR.test(ch)) {
+      for (let k = 0; k < ch.length; k++) map.push(i + k);
+      folded += ch;
+    }
+    i += ch.length;
+  }
+  return { folded, map };
+}
+
+/**
+ * Escape the opening delimiter of every match of `pattern`, matching on the
+ * FOLDED text and rewriting the original.
+ *
+ * One function for both neutralisation sites, because the defect this closes is
+ * that they shared a pattern and would not have shared a repair: a fix applied
+ * to recognition alone leaves the neutraliser passing the tag through, and a
+ * fix applied to one fence leaves the other nineteen call sites of
+ * {@link renderFence} as they were. Sharing the CODE is the only form of that
+ * repair which cannot drift apart again.
+ *
+ * `pattern` must be global; its first capture group is the opener.
+ */
+function deadenMatches(text: string, pattern: RegExp): string {
+  const { folded, map } = foldFormatChars(text);
+  const cuts: Array<[number, number]> = [];
+  for (const m of folded.matchAll(pattern)) {
+    const open = m[1];
+    if (open === undefined || m.index === undefined) continue;
+    const s = m.index;
+    // The opener may itself be split by folded characters (`&l<ZWSP>t;`), so the
+    // original span runs from the first character of the opener to the last —
+    // whatever sits between them is inside the slice and survives verbatim.
+    const from = map ? (map[s] as number) : s;
+    const to = map ? (map[s + open.length - 1] as number) + 1 : s + open.length;
+    cuts.push([from, to]);
+  }
+  if (cuts.length === 0) return text;
+  let out = '';
+  let prev = 0;
+  for (const [from, to] of cuts) {
+    const slice = text.slice(from, to);
+    out += text.slice(prev, from) + deadenOpener(slice, slice);
+    prev = to;
+  }
+  return out + text.slice(prev);
+}
+
+/** Any encoding of the closing tag — the detector's single boundary-escape entry. */
+const BOUNDARY_CLOSE_ANY_SOURCE = `${BOUNDARY_OPEN_ANY}${BOUNDARY_CLOSE_TAIL}`;
+
+/**
+ * The closing tag of ANY coined fence element, in every encoding above.
+ *
+ * It is exported because this defect class has now been found in THREE places —
+ * the untrusted-data detector, the untrusted-data neutralizer, and `agent.ts`'s
+ * `</memory_blocks>` fence, whose comment says it mirrors the neutralizer and
+ * which carried the pre-repair shape (literal delimiters only, `\s*`, a
+ * mandatory `>`). Three instances of one pattern is the signal that the fix
+ * belongs to the CLASS, not to each site: a fourth fence should call this rather
+ * than hand-roll a fourth regex that is correct on the day it is written.
+ *
+ * `token` must be a coined element name (snake_case, no regex metacharacters);
+ * it is interpolated, not escaped, because every call site is a literal in this
+ * repo and an escaped-token API would invite passing user input.
+ *
+ * ## The two layers, and why the second one exists
+ *
+ * This pattern ENUMERATES the delimiters and separators around the token, and
+ * enumeration is a frame that failed four review rounds in a row here: each
+ * round produced one further form, and each repair was a wider list that did
+ * not contain the next. The answer was not a fifth list.
+ *
+ * So recognition now runs in two layers. This pattern is the first. The second
+ * is {@link foldFormatChars}, which removes Unicode format characters from the
+ * input before this pattern ever sees it, by PROPERTY rather than by listing
+ * codepoints — see that constant for why a property is the whole point and for
+ * what it deliberately does not reach.
+ *
+ * ⚠ **The fold is applied by the CALLER, not by this function**, and that is a
+ * seam worth knowing about: {@link detectInjectionAttempt} and
+ * {@link deadenMatches} both fold first, so every path that goes through them
+ * inherits it. A NEW call site that takes this pattern and runs it against raw
+ * input gets layer one only. Route new work through `deadenMatches` rather than
+ * matching by hand, and the second layer comes with it.
+ */
+export function closeTagPattern(token: string, flags = 'gi'): RegExp {
+  return new RegExp(`(${BOUNDARY_OPEN_ANY})${closeTail(token)}`, flags);
+}
+
+/**
  * Patterns that indicate an indirect prompt injection attempt.
  * These detect text in external data that tries to manipulate the agent.
  */
@@ -32,15 +353,11 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
   { pattern: /<\|endoftext\|>/i, label: 'end-of-text token injection' },
   { pattern: /<\|end\|>/i, label: 'end token injection' },
 
-  // Boundary escape — attacker tries to close untrusted_data wrapper (literal + entity encoded)
-  // `\s*` mirrors the entity variants below. Without it `</untrusted_data >`
-  // — which HTML accepts as a closing tag — passed both this detector and the
-  // neutralizer. Reachable since web_research began surfacing <meta> attribute
-  // values: `content="&lt;/untrusted_data &gt;"` is entity-decoded by the
-  // extractor into the literal form, landing at the TOP of the wrapped block.
-  { pattern: /<\s*\/\s*untrusted_data\s*>/i, label: 'boundary escape' },
-  { pattern: /&lt;\s*\/\s*untrusted_data\s*&gt;/i, label: 'boundary escape (entity)' },
-  { pattern: /(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/i, label: 'boundary escape (numeric entity)' },
+  // Boundary escape — the attacker tries to close the untrusted_data wrapper.
+  // ONE entry, built from {@link BOUNDARY_CLOSE_ANY_SOURCE}, which the neutralizer
+  // uses too. See that constant for why there used to be three here and why
+  // three was the bug rather than the thoroughness it looked like.
+  { pattern: new RegExp(BOUNDARY_CLOSE_ANY_SOURCE, 'i'), label: 'boundary escape' },
 
   // Role impersonation — assistant:/human: always flagged (rare in data), system:/user: only with instruction-like follow-up
   { pattern: /^(assistant|human):\s/im, label: 'role impersonation' },
@@ -74,8 +391,16 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
 // Overlapping scan window (mirrors output-guard's checkWriteContent): bounds the
 // per-pass cost of the wildcard patterns regardless of total input size, so a
 // multi-MB tool result / web page can't turn a linear-per-window scan into an
-// event-loop stall. The overlap (> any realistic injection payload) keeps a match
-// straddling a window boundary catchable.
+// event-loop stall.
+//
+// ⚠ The overlap does NOT make every straddling match catchable, though this
+// comment used to say so. `BOUNDARY_SEP` is unbounded, so a boundary-escape
+// match can be longer than any fixed overlap. Measured: 58 KB of filler, then
+// `&lt;`, then 8192 spaces, then `/untrusted_data>` — `detected: false`, no
+// warning, while the same shape at offset 0 is detected. Neutralisation is NOT
+// windowed and still fires, so the boundary holds; what is lost is the ⚠ signal
+// on that input. Not widened here, because raising the
+// overlap only moves the number the attacker has to beat.
 const SCAN_WINDOW = 64 * 1024;
 const SCAN_OVERLAP = 4 * 1024;
 
@@ -95,13 +420,24 @@ function scanWindowForInjection(content: string): string[] {
  * wildcard patterns stay cheap on arbitrarily long attacker-controlled content.
  */
 export function detectInjectionAttempt(content: string): InjectionResult {
-  if (content.length <= SCAN_WINDOW) {
-    const patterns = scanWindowForInjection(content);
+  // Fold BEFORE scanning, and fold once for the whole result rather than per
+  // pattern. This function returns labels and no offsets, so the folded copy can
+  // be thrown away — the reason the map in {@link foldFormatChars} exists for
+  // the neutraliser and is not needed here.
+  //
+  // Every pattern benefits, not only the boundary-escape entry: an invisible
+  // character inside `ignore previous instructions` defeated the override
+  // patterns in exactly the way it defeated the boundary one, and folding at
+  // this level means a pattern added later inherits the property instead of
+  // having to remember it.
+  const { folded } = foldFormatChars(content);
+  if (folded.length <= SCAN_WINDOW) {
+    const patterns = scanWindowForInjection(folded);
     return { detected: patterns.length > 0, patterns };
   }
   const found = new Set<string>();
-  for (let start = 0; start < content.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
-    for (const label of scanWindowForInjection(content.slice(start, start + SCAN_WINDOW))) {
+  for (let start = 0; start < folded.length; start += SCAN_WINDOW - SCAN_OVERLAP) {
+    for (const label of scanWindowForInjection(folded.slice(start, start + SCAN_WINDOW))) {
       found.add(label);
     }
   }
@@ -175,16 +511,53 @@ export function renderProvenanceFact(opts: {
  * Handles literal tags, HTML entity encoded tags, and numeric entity encoded tags.
  */
 function neutralizeBoundaryTags(text: string): string {
-  return text
-    // Pre-encoded variants first (before literal replacement creates entity-encoded output)
-    // HTML entity encoded: &lt;/untrusted_data&gt;
-    .replace(/&lt;\s*\/\s*untrusted_data\s*&gt;/gi, '[blocked:boundary_escape]')
-    // Numeric entity encoded: &#60;/untrusted_data&#62; or &#x3c;/untrusted_data&#x3e;
-    .replace(/(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/gi, '[blocked:boundary_escape]')
-    // Literal closing tag last — produces entity-escaped output that won't be
-    // re-matched. `\s*` mirrors the entity patterns above; without it the
-    // whitespace form `</untrusted_data >` escaped the wrapper untouched.
-    .replace(/<\s*\/\s*untrusted_data\s*>/gi, '&lt;/untrusted_data&gt;');
+  return (
+    // ⚠ The two passes this comment was written for are now ONE, and the
+    // ordering rule they needed is gone rather than reordered. They ran
+    // sequentially — encoded opener first, literal second — because the first
+    // pass emitted `&lt;` and the second would otherwise have re-matched its own
+    // output. {@link deadenMatches} collects its matches against the FOLDED text
+    // and then rebuilds from the ORIGINAL, so no pass ever reads another pass's
+    // output and the hazard has no place left to occur.
+    //
+    // This used to substitute a constant, `[blocked:boundary_escape]`. That was
+    // the one place left in this module still doing what `deadenOpener`'s own
+    // docstring calls wrong, and it had a reachable consequence: content that is
+    // wrapped TWICE — `spawn.ts` wraps a sub-agent result that may itself carry
+    // wrapped output — had its already-neutralised tag replaced by the marker on
+    // the second pass, so the sender's bytes were gone. Escaping the opener
+    // instead keeps every byte and converges: run 2 turns `&lt;` into
+    // `&amp;lt;`, and run 3 changes nothing, because `&amp;lt;` is not an opener.
+    //
+    // ⚠ TWO claims that stood here for one commit and were measured false, kept
+    // because they are the reason not to reach for the marker again:
+    //
+    //  - "the ⚠ warning appeared twice" was blamed on the constant. It is not
+    //    caused by it. Warnings go 1/2/3 for one/two/three wraps under the
+    //    CURRENT code, and even a harmless body wrapped twice yields one: the
+    //    inner block carries its own literal `</untrusted_data>`, and
+    //    `wrapUntrustedData` has no scan-region exemption. Untouched by this fix.
+    //  - "the blocked-escape SIGNAL is not lost, the ⚠ warning carries it" is
+    //    true in general and FALSE where it matters most. `detectInjectionAttempt`
+    //    scans in 64 KB windows with a 4 KB overlap while `BOUNDARY_SEP` is
+    //    unbounded, so a long-separator match can straddle a boundary and go
+    //    unreported: 58 KB of filler, `&lt;`, 8192 spaces, `/untrusted_data>` →
+    //    `detected: false`, no warning, where the same shape at offset 0 is
+    //    detected. Neutralisation is not windowed and still fires, so the
+    //    boundary holds — but on that input the constant WAS the only visible
+    //    trace, and this fix removes it. That is a real loss of signal, taken
+    //    knowingly: a marker that eats payload is the worse of the two, and the
+    //    detector's window is the defect to fix, not the neutraliser.
+    // Convergence is unchanged and still measured: run 2 turns `&lt;` into
+    // `&amp;lt;`, run 3 changes nothing, because `&amp;lt;` is not an opener.
+    //
+    // Only the delimiter is rewritten. Separators smuggled inside the tag are
+    // handed back verbatim along with everything after it. The previous wording
+    // here claimed that outcome while the code did the opposite, and the claim
+    // is why the defect stood through four review rounds: it was read as the
+    // measurement.
+    deadenMatches(text, new RegExp(`(${BOUNDARY_OPEN_ANY})${BOUNDARY_CLOSE_TAIL}`, 'gi'))
+  );
 }
 
 export function wrapUntrustedData(content: string, source: string): string {
@@ -216,6 +589,184 @@ ${safe}
   return `<untrusted_data source="${safeSource}">
 ${safe}
 </untrusted_data>`;
+}
+
+/**
+ * A rendered frame. Opaque on purpose: the string is behind a symbol this module
+ * does not export, so `compose` is the only way out of it.
+ *
+ * ## What this delivers
+ *
+ * Every fragment handed to {@link compose} is DECLARED — either a frame this
+ * module built, or text the author marked as engine-authored via
+ * {@link engineText}. The compiler enforces that, and it enforces that a `Fence`
+ * cannot be built by hand: no literal satisfies it, and there is no exported key
+ * to read or write. Four review rounds asked "which frames are exposed?" and each
+ * found one more, because that question needs dataflow and stays open. This asks
+ * a question the compiler can close instead.
+ *
+ * ## ⛔ What it does NOT deliver, stated because the last attempt claimed it did
+ *
+ * It does not stop a site from framing content WITHOUT ever calling
+ * `renderFence` — `` `<x>${payload}</x>` `` type-checks perfectly and always
+ * will. Provenance by construction says "if you use a frame, it is a real one";
+ * it cannot say "you used one". The withdrawn script guard claimed that second
+ * sentence and reported `0 hand-built` against three planted frames.
+ *
+ * The enforcement is asymmetric: TypeScript rejects ASSIGNING a `Fence` where a
+ * string belongs — that found 14 errors in 8 files — but accepts `` `${fence}` ``
+ * and `'a' + fence`, because interpolating an object is legal. The other FOUR of
+ * the 18 call sites were invisible to it for that reason and were found by
+ * reading; they sit in three files, because `worker-loop.ts` carried two of them
+ * on one line. That last detail is why an earlier version of this sentence said
+ * "three of the 17" and the arithmetic looked sound: it was counting lines on
+ * one side and occurrences on the other.
+ *
+ * Opacity softens exactly ONE of the two ways to bypass this, and it is worth
+ * saying which, because the reassuring reading is wrong. Measured, both cases:
+ *
+ *   A. A site that HAS a `Fence` and frames it by hand gets `[object Object]` —
+ *      the payload is not in the output at all. Broken, loudly, and no forgery.
+ *   B. A site that never calls `renderFence` and frames raw content gets a
+ *      working frame: payload intact, and a `</x_frame>` inside it leaves TWO
+ *      live closers, so the content closes the frame early. That is the same
+ *      security hole as before this type existed.
+ *
+ * B is also the likelier one. A site that does not know about `renderFence` has
+ * no `Fence` to interpolate, so it never reaches case A. Opacity turns the
+ * bypass-with-a-frame into a correctness bug; it does nothing for the
+ * bypass-without-one. `data-boundary.test.ts` pins both.
+ *
+ * Making the interpolation fail at CI needs `@typescript-eslint/no-base-to-string`,
+ * which currently reports 17 unrelated pre-existing violations and so is its own
+ * piece of work, not a rider on this one.
+ */
+const FENCE_TEXT = Symbol('fence.text');
+export interface Fence { readonly [FENCE_TEXT]: string }
+
+/** Engine-authored text. Not a security claim — a DECLARATION, visible in review. */
+export interface EngineText { readonly engine: string }
+
+/** A declared fragment of a model-facing string. */
+export type Part = Fence | EngineText;
+
+/** Mark a string as engine-authored so it can take part in a {@link compose}. */
+export function engineText(text: string): EngineText {
+  return { engine: text };
+}
+
+/**
+ * The only way to turn declared parts into a string a model will read.
+ *
+ * `sep` joins the parts; put separators here rather than smuggling them into an
+ * `engineText`, so the shape of the composition stays readable at the call site.
+ */
+export function compose(parts: readonly Part[], sep = ''): string {
+  return parts.map((p) => {
+    // Loud on a part that is neither. Test files are in no tsc project, so this
+    // runtime check is the only thing standing between a raw string and a
+    // composition — and a caller that swallows exceptions (engine-init does)
+    // would otherwise turn the mistake into a silently missing briefing.
+    if (typeof p === 'object' && p !== null && FENCE_TEXT in p) return p[FENCE_TEXT];
+    if (typeof p === 'object' && p !== null && 'engine' in p && typeof p.engine === 'string') {
+      return p.engine;
+    }
+    throw new TypeError(
+      'compose: part is neither a Fence nor engineText — a raw string cannot be composed',
+    );
+  }).join(sep);
+}
+
+/**
+ * Render a fenced block the MODEL reads: `<token …>payload</token>`, with the
+ * payload neutralised so it cannot close the frame.
+ *
+ * ## Why this exists at all, and why it is not a count
+ *
+ * Frames like `<memory_blocks>`, `<retrieved_context>` or `<task_overview>`
+ * promise the model something about their contents. A payload that closes the
+ * frame early voids the promise for everything after it, and the escape leaves
+ * no trace. Four review rounds tried to answer "which frames are exposed?" and
+ * each found one more; the question needs dataflow and stays open. This inverts
+ * it: every frame goes through one function, so the set is made EMPTY instead of
+ * counted.
+ *
+ * What does NOT yet hold that up is a gate. A script guard shipped here first and
+ * was withdrawn: it reported `0 hand-built` against three planted frames — one
+ * built with `+`, one whose tags came from a helper, one with opener and closer
+ * in separate functions — and did not even count them in its inventory. It
+ * recognised three syntactic construction shapes, which is the same enumeration
+ * one level down, and a gate that reads clean for exactly the thing it exists to
+ * catch is worse than none: it takes the pressure off the root fix. The
+ * enforcement belongs in the type system, where composition can only accept
+ * declared parts.
+ *
+ * ## The token may be a constant, and that is deliberate
+ *
+ * `token` is a plain string, so a caller may pass a module constant rather than
+ * a literal. The reason is to keep the signature from deciding who can migrate:
+ * `renderProvenanceFact` builds its `<fact …>` frame from `PROVENANCE_FACT_TAG`,
+ * and a signature demanding a literal would have excluded it for a reason about
+ * SPELLING rather than about the frame.
+ *
+ * It has NOT been migrated — it still assembles that frame by hand. An earlier
+ * version of this paragraph read as though it had, and cited a
+ * `renderFence(PROVENANCE_FACT_TAG, …)` call that does not exist; it also
+ * described a script guard resolving such constants, which was withdrawn. Both
+ * were removed rather than softened: text that survives the decision not to
+ * build the thing is how a reader ends up trusting a frame nobody built.
+ *
+ * ## ⛔ WHAT IT GUARANTEES, AND WHAT IT DOES NOT
+ *
+ * It guarantees ONE thing: **the payload cannot close its own frame.** Every
+ * encoding of `</token>` is neutralised before interpolation.
+ *
+ * It does **not** guarantee that the payload cannot fake OTHER engine framing. A
+ * payload that OPENS `<task_overview>` or `<untrusted_data>` passes through
+ * untouched, and from there the rest reads to the model as the engine's own
+ * frame — the same effect as closing its own frame, arriving through a
+ * different frame than the one the payload sits in.
+ *
+ * Say which of the two you mean when you cite this function. Measured on the
+ * migration that introduced it: of **18** call sites, **17 rely on renderFence
+ * alone** — `spawn.ts` is the eighteenth and adds `escapeXml`, which is why it keeps it
+ * even though the close tag is covered here. Do not drop an escaper at a call
+ * site on the grounds that "renderFence handles it": it handles the close tag.
+ *
+ * Why the stronger property is not simply added here: frames legitimately NEST —
+ * `<relevant_context>` carries `<scope>` blocks this same function produced.
+ * Neutralising every coined opening tag in a payload would destroy those, so the
+ * stronger property needs engine-provenance for nested frames, which is the same
+ * hard problem one level down.
+ *
+ * @param token   Coined element name. A literal or a module constant — never
+ *                attacker-influenced; it names the frame, it is not content.
+ * @param payload The content. Neutralised here; the caller does not have to
+ *                remember, which is the whole point.
+ * @param opts.preamble  Engine text placed INSIDE the frame above the payload
+ *                (the do-not-follow line, a ⚠ warning). Engine-authored: it is
+ *                interpolated as given.
+ * @param opts.attrs  Attributes for the opening tag. Values are XML-escaped,
+ *                because an attribute is the one place a stray quote breaks the
+ *                frame in a way neutralising the close tag does not cover.
+ */
+export function renderFence(token: string, payload: string, opts?: {
+  preamble?: string | undefined;
+  attrs?: Record<string, string | number | null | undefined> | undefined;
+}): Fence {
+  const attrs: string[] = [];
+  for (const [k, v] of Object.entries(opts?.attrs ?? {})) {
+    if (v === null || v === undefined) continue;
+    attrs.push(`${escapeXml(k)}="${escapeXml(String(v))}"`);
+  }
+  const open = `<${token}${attrs.length ? ' ' + attrs.join(' ') : ''}>`;
+  // The SAME routine the untrusted-data neutraliser uses, deliberately. This
+  // call site is the one with reach — nineteen `renderFence` callers across
+  // twelve files — so a repair that had landed only in `neutralizeBoundaryTags`
+  // would have looked complete and left every fence exactly as it was.
+  const safe = deadenMatches(payload, closeTagPattern(token));
+  const head = opts?.preamble ? `${opts.preamble}\n` : '';
+  return { [FENCE_TEXT]: `${open}\n${head}${safe}\n</${token}>` };
 }
 
 /**
@@ -262,9 +813,17 @@ export function wrapChannelMessage(opts: {
     if (trimmed.length === 0) continue;
     lines.push(`${label}: ${value}`);
   }
-  // Joining the labelled fields once means the injection scanner sees the
-  // exact text the LLM will read — a pattern that spans across two fields
-  // (e.g. subject ends with "Ignore previous", body starts with
-  // "instructions") still trips the detector.
+  // Joining once means the injection scanner sees the exact text the LLM will
+  // read, which is the property worth having: no field escapes the scan, and the
+  // scanned string is the rendered string.
+  //
+  // ⚠ CORRECTED 2026-09-07 — this comment used to claim the stronger thing, that
+  // "a pattern that spans across two fields (e.g. subject ends with 'Ignore
+  // previous', body starts with 'instructions') still trips the detector". It
+  // does NOT, and the reason is the labels this function adds: the two halves end
+  // up separated by `\nMessage: `, and the override pattern's `\s+`
+  // (`INJECTION_PATTERNS`, "instruction override") cannot cross a label. Measured:
+  // the labelled render is not detected, the unlabelled join of the same two
+  // values is, and the pattern does fire when both halves sit in ONE field.
   return wrapUntrustedData(lines.join('\n'), opts.source);
 }

@@ -48,6 +48,24 @@ describe('stepUsesHumanInTheLoopTool', () => {
   it('handles undefined task gracefully', () => {
     expect(stepUsesHumanInTheLoopTool({ id: 'x', task: '' })).toBeUndefined();
   });
+  it('detects a DECLARED ask_user even when the task prose never names it (F2)', () => {
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: 'Confirm the shortlist with a question.', tools: ['ask_user'] }))
+      .toBe('ask_user');
+  });
+  it('a declared non-HITL tool set does not trip the detector', () => {
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: 'Fetch data.', tools: ['http_request'] }))
+      .toBeUndefined();
+  });
+  it('a declaration is authoritative: prose mentioning ask_user does NOT trip it when the declared set excludes it', () => {
+    // The step cannot call a tool it did not declare (the runtime grants only
+    // declared names) — classifying it interactive would be a false positive.
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: 'Do NOT use ask_user here; summarize instead.', tools: ['http_request'] }))
+      .toBeUndefined();
+  });
+  it('a captured replay step whose literal tool is ask_user is detected', () => {
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: 'replay', tool: 'ask_user', tools: undefined }))
+      .toBe('ask_user');
+  });
 });
 
 describe('inferPipelineMode', () => {

@@ -21,8 +21,17 @@ import {
 // ── Preset table ───────────────────────────────────────────────────────────
 //
 // Source of truth: each preset's published IMAP/SMTP server documentation.
-// Prefer implicit TLS (993 / 465) over STARTTLS where both are offered, since
-// implicit TLS removes the cleartext upgrade race.
+//
+// The TLS preference is per protocol, not global:
+//   IMAP — prefer implicit TLS on 993. It removes the cleartext upgrade race
+//     and no network blocks 993.
+//   SMTP — prefer submission on 587 (STARTTLS + requireTLS), NOT implicit TLS
+//     on 465. Both encrypt; the difference that decides it is reachability.
+//     Outbound 465 is blocked as an anti-spam measure by many hosting
+//     providers, ours included, and the failure is a silent send timeout long
+//     after setup. 587 is the IETF submission port (RFC 6409) and every preset
+//     below supports it. Transports built from these values set
+//     `requireTLS: !secure`, so a 587 entry still refuses to send in the clear.
 
 interface PresetServers {
   imap: MailServerConfig;
@@ -94,7 +103,10 @@ export function describePreset(slug: MailPresetSlug): PresetDescriptor {
       slug: 'custom',
       label: 'Custom IMAP/SMTP',
       imap: { host: '', port: 993, secure: true },
-      smtp: { host: '', port: 465, secure: true },
+      // Suggestion only — the custom form lets the user set any port. 587 is
+      // the default because 465 is unreachable from a hosted instance; a
+      // self-hoster on their own network can still choose 465.
+      smtp: { host: '', port: 587, secure: false },
       appPasswordUrl: undefined,
       requires2FA: false,
       custom: true,
@@ -240,8 +252,10 @@ export async function autodiscover(emailAddress: string, fetchImpl: typeof fetch
  * Exposed for unit tests.
  */
 export function parseAutoconfigXml(xml: string): AutodiscoverResult {
-  const imap = pickFirstServer(xml, 'imap');
-  const smtp = pickFirstServer(xml, 'smtp');
+  // One section for both, so the two halves always describe the same provider.
+  const section = pairableSection(xml);
+  const imap = pickServer(section, 'imap');
+  const smtp = pickServer(section, 'smtp');
   if (!imap || !smtp) {
     throw new MailError('not_found', 'Autoconfig payload missing IMAP or SMTP server entry');
   }
@@ -259,11 +273,18 @@ interface ParsedServer {
   username: string | undefined;
 }
 
-function pickFirstServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
+/** IETF mail submission port (RFC 6409). See the TLS note on the preset table. */
+const SUBMISSION_PORT = 587;
+
+/**
+ * All usable servers of one kind, in the order the payload lists them.
+ * Entries without a hostname/port, or offering no TLS at all, are dropped.
+ */
+function parseServers(xml: string, kind: 'imap' | 'smtp'): ParsedServer[] {
   const blockTag = kind === 'imap' ? 'incomingServer' : 'outgoingServer';
   const blockRegex = new RegExp(`<${blockTag}\\s[^>]*type="${kind}"[^>]*>([\\s\\S]*?)<\\/${blockTag}>`, 'gi');
-  const matches = xml.matchAll(blockRegex);
-  for (const match of matches) {
+  const out: ParsedServer[] = [];
+  for (const match of xml.matchAll(blockRegex)) {
     const inner = match[1] ?? '';
     const host = innerTag(inner, 'hostname');
     const portStr = innerTag(inner, 'port');
@@ -272,14 +293,101 @@ function pickFirstServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | nul
     if (sslType !== 'SSL' && sslType !== 'STARTTLS') continue; // refuse plain
     const port = Number.parseInt(portStr, 10);
     if (!Number.isFinite(port) || port <= 0 || port > 65_535) continue;
-    return {
+    out.push({
       host,
       port,
       secure: sslType === 'SSL',
       username: innerTag(inner, 'username') ?? undefined,
-    };
+    });
   }
-  return null;
+  return out;
+}
+
+/**
+ * The `<emailProvider>` sections of an autoconfig payload, in order. A payload
+ * may describe several providers for one domain — a current one and an
+ * ISP-legacy one is the usual pair — and servers must never be mixed between
+ * them: pairing a primary IMAP host with some other provider's relay produces a
+ * setup that reads fine and cannot send, frequently because that relay only
+ * accepts mail from inside its own ISP's network.
+ *
+ * Payloads without the wrapper are returned whole, so they behave as before.
+ */
+function providerBlocks(xml: string): string[] {
+  const blocks = [...xml.matchAll(/<emailProvider\b[^>]*>([\s\S]*?)<\/emailProvider>/gi)].map(m => m[1] ?? '');
+  return blocks.length > 0 ? blocks : [xml];
+}
+
+/**
+ * The first provider section that can supply BOTH an IMAP and an SMTP server —
+ * and whether such a section was found at all.
+ *
+ * Choosing the section once, for both kinds together, is the point. Picking per
+ * kind independently is what a whole-payload scan does, and it lets an
+ * ISP-legacy section that happens to be listed first supply the SMTP server for
+ * a completely different provider's IMAP server.
+ *
+ * When no section carries both, the whole payload is returned rather than
+ * refused — refusing would be a new failure rather than a fix.
+ *
+ * Be precise about what that costs, because an earlier version of this comment
+ * claimed the path "behaves as it did before any of this" and that is measurably
+ * untrue: roughly half of generated fallback payloads differ, and a small
+ * fraction turn a single-provider pairing into a two-provider one. What actually
+ * happens there is first-published-587-wins, across sections — cross-provider
+ * pairing included.
+ *
+ * That is a deliberate trade, not an oversight; the reasoning and the
+ * measurement behind rejecting the alternative are on `pickServer` below. See
+ * also the characterisation test, which pins this behaviour rather than
+ * endorsing it.
+ */
+function pairableSection(xml: string): string {
+  for (const block of providerBlocks(xml)) {
+    if (parseServers(block, 'imap').length > 0 && parseServers(block, 'smtp').length > 0) return block;
+  }
+  return xml;
+}
+
+/**
+ * The chosen server of one kind.
+ *
+ * For SMTP: prefer submission when the payload offers it. Autoconfig lists the
+ * provider's own preference first and that is frequently 465, which a hosted
+ * instance cannot reach at all — the provider is describing its servers, not our
+ * network. Only entries that survived the TLS filter are eligible, so this never
+ * prefers a plaintext 587 over an encrypted 465, and a single entry is returned
+ * unchanged.
+ *
+ * **The preference decides a PORT and nothing else.** It ranges over every
+ * candidate it is given, hostnames included — one provider may publish
+ * submission under a second name (smtp-tls.example.com). Deciding WHICH provider
+ * the servers come from is not this function's job; that is settled by the
+ * caller, which scopes the payload to one `<emailProvider>` section.
+ *
+ * This line has now been written four ways, and the three that failed all tried
+ * to answer the provider question here — by comparing the candidate's host
+ * against the first SMTP entry's. That restricts the wrong thing: the first SMTP
+ * entry has no relation to the chosen IMAP server. And because the filtered set
+ * is a subset, the comparison can only ever LOSE a 587 — it can still change
+ * WHICH server is chosen, so it does sometimes land on a better-matched
+ * provider, just as often as on a worse one.
+ *
+ * Two independent measurements over generated payloads agreed on the shape:
+ * the filter costs a few hundred payloads their submission port, and its effect
+ * on provider-matching is a wash — as many pairings improved as regressed. (The
+ * exact split comes out symmetric because a payload generator with
+ * interchangeable provider labels forces it to; treat the symmetry as an
+ * artefact and the direction as the finding.) Losing the port is the failure
+ * this whole change exists to prevent. Where the caller cannot scope (a payload
+ * that splits the protocols across sections), the honest answer is that we
+ * cannot tell providers apart there, not a heuristic that reads as if we could.
+ */
+function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
+  const candidates = parseServers(xml, kind);
+  const first = candidates[0];
+  if (kind === 'imap' || !first) return first ?? null;
+  return candidates.find(s => s.port === SUBMISSION_PORT) ?? first;
 }
 
 function innerTag(xml: string, tag: string): string | undefined {

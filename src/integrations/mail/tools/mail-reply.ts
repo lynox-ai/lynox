@@ -16,6 +16,7 @@ import {
 } from '../provider.js';
 import type { MailContext } from '../context.js';
 import { buildBodyBlock, previewAddressList } from '../send-core.js';
+import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
@@ -85,10 +86,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // mail_send. The reply path is in fact the more likely place for
         // a leak: an agent quoting an inbound mail's "API key:" line back
         // to the sender as part of a reply confirmation.
-        const { detectSecretInContent } = await import('../../../tools/builtin/http.js');
+        const { detectSecretInContent, mailSecretRefusal } = await import('../../../tools/builtin/http.js');
         const secretMatch = detectSecretInContent(input.body);
         if (secretMatch) {
-          return `mail_reply blocked: body appears to contain a ${secretMatch}. Sending secrets via email is not allowed — strip the credential and retry.`;
+          return mailSecretRefusal('mail_reply', secretMatch);
         }
 
         // For the initial fetch, resolve the requested reading account (or default).
@@ -216,7 +217,12 @@ ${bodyPreview}`;
         const sendInput: MailSendInput = {
           to: toAddrs,
           subject,
-          text: input.body,
+          // Same wire rule as the send-core pipeline: reflow the model's hard
+          // editing-wrap (mail_reply sends directly, NOT via sendMail — the
+          // review found reflow placed in send-core covered mail_send + the
+          // scheduled poller but left this path, which is where agent-authored
+          // hard-wrapped bodies are most common).
+          text: reflowMailBody(input.body),
         };
         if (ccAddrs.length > 0) sendInput.cc = ccAddrs;
         if (origMessageId) sendInput.inReplyTo = origMessageId;

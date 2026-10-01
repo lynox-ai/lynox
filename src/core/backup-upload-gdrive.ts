@@ -9,6 +9,9 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { BackupManifest } from './backup.js';
+import { isProvisionedInstance } from './wire-capture.js';
+import { googleFetch } from './connector-egress.js';
+import type { HostPolicyContext } from './network-guard.js';
 
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -52,21 +55,99 @@ export interface DownloadResult {
 export interface BackupAuthProvider {
   getAccessToken(): Promise<string>;
   hasScope(scope: string): boolean;
+  /**
+   * The live host-policy view, so the backup upload is subject to the same
+   * `network_policy` as every other Google call (PRD Stage 1 §3.8). It lives on
+   * the provider rather than on the uploader's constructor because the engine
+   * builds this shim per boot and already has the context there — a second
+   * constructor parameter would be a second thing to forget.
+   *
+   * Optional: `undefined` means no policy configured, which is what a caller
+   * outside an engine has, and it keeps today's behaviour.
+   */
+  hostPolicy?: HostPolicyContext | undefined;
 }
 
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
+/**
+ * Whether this instance may upload backups to Google Drive at all.
+ *
+ * Self-hosted only. On a CP-provisioned instance the control plane already runs restic
+ * backups, so a second backup path to a third party adds exposure without adding safety —
+ * and since core#1240 that exposure is concrete: the backup carries the merge ledger, which
+ * embeds email, phone, vat_id and domain.
+ *
+ * ⚠ The boundary is who HOSTS, not the word "managed". BYOK (`hosted`, the cheapest tier)
+ * runs on lynox hosts too and gets the same CP backups; only the LLM key is the customer's.
+ * A check written against `managed`/`managed_pro` would leave the redundant path open for
+ * BYOK. `LYNOX_BILLING_TIER` is emitted to all three CP tiers and absent on self-host, which
+ * is the same signal the managed hook uses.
+ *
+ * It delegates to `isProvisionedInstance`, which this repo already uses to answer exactly this
+ * question — and answers it across THREE markers (`LYNOX_MANAGED_INSTANCE_ID`,
+ * `LYNOX_BILLING_TIER`, `LYNOX_MANAGED_MODE`), so a half-provisioned environment still counts as
+ * provisioned. The first version here read only `LYNOX_BILLING_TIER` and so failed OPEN on
+ * partial env: a CP instance missing that one variable would have uploaded to Drive. Same
+ * question, one answer — the earlier claim of "no new concept" was only true after this change.
+ *
+ * Extracted from the engine's wiring so the DECISION is testable independently of a boot. The
+ * one line that CALLS it is covered too, by `engine-init-wiring-boot.test.ts` — both directions,
+ * so neither dropping the call nor dropping the `if` around it can pass unnoticed.
+ */
+export function driveBackupAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !isProvisionedInstance(env);
+}
+
+/**
+ * Does the USER want backups uploaded to Drive?
+ *
+ * `driveBackupAllowed` above answers a different question — whether this DEPLOYMENT may upload at
+ * all. Both are required, because they are different questions: tier says a deployment may upload,
+ * the setting says its owner wants it to. Sending a copy of the whole data directory to a third
+ * party is a decision of its own and needs a switch of its own.
+ *
+ * `backup_gdrive` is not invented here. It is declared in `LynoxUserConfig` and in
+ * `LynoxUserConfigSchema`, and documented on two published pages — `features/backup.md`, which
+ * states the default as `false`, and `daily-use/configuration.md`, which shows it in an example —
+ * while nothing in the codebase read it. A documented setting that no code consults is a promise,
+ * not a control. This function is the reader.
+ *
+ * `=== true` rather than truthiness: the property is an EXPLICIT opt-in. `undefined` — the
+ * default, the field being `optional()` — and `false` both mean no, and so does a non-boolean
+ * that somehow reached this far.
+ *
+ * Deliberately NOT added to `PROJECT_SAFE_KEYS` in `config.ts`. That allowlist is what a
+ * PROJECT-local config may override, and its own comment says project config cannot override
+ * security-sensitive fields. A file sitting in a working directory must not be able to change this
+ * setting. It is a user-config setting, which is the path both documented pages show — and, on a
+ * self-hosted instance, `PUT /api/config` reaches it too, so API access to an instance is
+ * equivalent to config access.
+ *
+ * Extracted as a pure function for the same reason as the gate above: so the DECISION can be
+ * asserted without booting an engine, and — the part that matters here — without a test having
+ * to cause the very upload the gate exists to prevent. The lines that CALL it are covered
+ * separately, in `engine-init-wiring-boot.test.ts`, because a unit test that hands the setting in
+ * cannot see a dropped call.
+ */
+export function driveUploadOptedIn(
+  config: { backup_gdrive?: boolean | undefined } = {},
+): boolean {
+  return config.backup_gdrive === true;
+}
+
+
 /** Authenticated fetch helper for Drive API. */
 async function driveFetch(auth: BackupAuthProvider, url: string, options?: RequestInit): Promise<Response> {
   const token = await auth.getAccessToken();
-  return fetch(url, {
+  return googleFetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
       ...options?.headers,
     },
     signal: options?.signal ?? AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
-  });
+  }, auth.hostPolicy);
 }
 
 /**

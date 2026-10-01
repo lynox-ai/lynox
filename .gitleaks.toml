@@ -1,9 +1,17 @@
-[allowlist]
-  description = "Test fixtures with fake API keys"
-  paths = [
-    '''src/core/secret-store-vault\.test\.ts''',
-    '''src/core/secret-store\.test\.ts''',
-    '''src/core/secret-vault\.test\.ts''',
-    '''docs/docker\.md''',
-    '''docs/prd-auth-multiuser\.md''',
-  ]
+# gitleaks configuration for lynox core.
+#
+# `useDefault = true` is what turns the scanner on. A config file that has no
+# `[extend]` block and no rule tables of its own REPLACES the built-in ruleset
+# with nothing: gitleaks then scans every commit, finds nothing, and exits 0.
+# Until this block existed that was the state of this file, so both the CI job
+# and the pre-commit hook passed on anything. `scripts/gitleaks-config-canary.sh`
+# runs in the CI job and fails it if this file changes at all — it compares the
+# whole file, comments aside — or if the rules stop reporting a planted value.
+#
+# There is deliberately no allowlist here. Known findings are listed one by one
+# in `.gitleaksignore`, by fingerprint, so an exception covers a single line in
+# a single commit and never a whole file. A new fake credential in a test
+# fixture gets a `gitleaks:allow` comment on the same line as the value.
+
+[extend]
+useDefault = true

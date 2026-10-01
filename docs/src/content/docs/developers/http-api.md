@@ -206,6 +206,27 @@ GET    /api/artifacts/:id         # Get artifact
 DELETE /api/artifacts/:id         # Delete artifact
 ```
 
+### Subject merges
+
+```
+GET  /api/merges                  # Merges that can be taken back, newest first
+POST /api/merges/:id/rollback     # Take one merge back
+```
+
+A merge of two contacts or organisations writes a reversal record (`~/.lynox/sweeps/merge-*.json`). It holds both entries' detail rows (email and phone for a person, domain and VAT number for an organisation), because taking the merge back has to restore them. These routes never return those rows.
+
+A merge is listed with:
+- the two names. That includes the merged-away entry's name, which the merge removed from the contact views; a merge cannot be named for taking back without it.
+- its date;
+- how many data rows and conversation links it moved;
+- three flags. `applied` is false for a merge that did not complete. `inEffect` says the merge still holds and this record can take it back. `superseded` says the same two entries were merged again later, and only the newest record can take a merge back.
+
+`inEffect` is read from the contact graph, with the same check the rollback makes before it acts, so a merge already taken back says so. A rollback that would move data rows or conversation links is refused while those stores are not available, rather than reversing only the contact graph.
+
+Records older than 90 days are removed at the next merge or engine start, the newest one excepted. A merge whose record is gone is not listed and can no longer be taken back.
+
+An instance has one contact graph, so every signed-in user sees the same merges. A refusal is one of fixed reasons, never the store's own message.
+
 ### CRM
 
 ```

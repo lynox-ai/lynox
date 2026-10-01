@@ -20,10 +20,11 @@ import type {
   IKnowledgeLayer,
   LynoxUserConfig,
   ToolEntry,
-  StreamHandler,
+  EmittingStreamHandler,
   NetworkPolicy,
   StepHint,
 } from '../types/index.js';
+import type { HostPolicyContext } from './network-guard.js';
 
 /** Provider for cross-session HTTP rate limiting (implemented by RunHistory). */
 export interface ToolCallCountProvider {
@@ -53,7 +54,10 @@ export interface ToolContext {
 
   // ── Pipeline / process ──
   tools: ToolEntry[];
-  streamHandler: StreamHandler | null;
+  // Emitting: tools write their progress events into this, so it is an emit
+  // sink like every other handler core producers call. Assigning a plain
+  // StreamHandler still works — it accepts the wider published union.
+  streamHandler: EmittingStreamHandler | null;
 
   // ── Network policy (http tool) ──
   networkPolicy: NetworkPolicy | undefined;
@@ -74,6 +78,11 @@ export interface ToolContext {
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
+
+  // ── Bulk runs (bulk_plan / bulk_status) ──
+  /** The bulk-run ledger in engine.db. Null unless `bulk_runs_enabled` is on and
+   *  engine.db opened. */
+  bulkLedger: import('./bulk-ledger.js').BulkLedger | null;
 
   // ── Isolation (bash tool) ──
   isolationEnvOverride: Record<string, string> | undefined;
@@ -116,6 +125,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     enforceHttps: false,
     apiStore: null,
     artifactStore: null,
+    bulkLedger: null,
     isolationEnvOverride: undefined,
     isolationMinimalEnv: false,
     pendingStepHint: null,
@@ -124,8 +134,26 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
 }
 
 /**
+ * True iff `domain` (the part after `*.`) names a domain a wildcard entry can
+ * cover: non-empty, no empty label, no further `*`, no whitespace, and a last
+ * label that is not all digits (a URL whose host ends in a numeric label is an
+ * IPv4 literal, never a name under a domain). The floor
+ * matches a wildcard as `host === domain || host.endsWith('.' + domain)`, so
+ * the domain itself must be a real name for that match to mean "this domain
+ * and its subdomains".
+ */
+export function isWildcardDomain(domain: string): boolean {
+  if (/[*\s]/.test(domain)) return false;
+  const labels = domain.split('.');
+  if (!labels.every((label) => label.length > 0)) return false;
+  return !/^\d+$/.test(labels[labels.length - 1]!);
+}
+
+/**
  * Apply network policy to a ToolContext.
- * Splits wildcard hosts (*.example.com) from exact hosts.
+ * Splits wildcard hosts (*.example.com) from exact hosts. A wildcard entry
+ * whose domain fails `isWildcardDomain` is dropped with a warning: it
+ * covers nothing, and the allowlist stays as narrow as the valid entries.
  */
 export function applyNetworkPolicy(
   ctx: ToolContext,
@@ -138,7 +166,12 @@ export function applyNetworkPolicy(
     const wildcards: string[] = [];
     for (const h of hosts) {
       if (h.startsWith('*.')) {
-        wildcards.push(h.slice(2));
+        const domain = h.slice(2);
+        if (isWildcardDomain(domain)) {
+          wildcards.push(domain);
+        } else {
+          process.stderr.write(`⚠ network_allowed_hosts entry ${JSON.stringify(h)} has no valid domain after "*." — ignoring it\n`);
+        }
       } else {
         exact.add(h);
       }
@@ -172,6 +205,28 @@ export function applyHttpRateLimits(
  */
 export function applyEnforceHttps(ctx: ToolContext, enforce: boolean): void {
   ctx.enforceHttps = enforce;
+}
+
+/**
+ * Narrow a ToolContext to the host-policy fields `assertHostPolicy` reads.
+ *
+ * This is where the conformance is DECLARED, not the only place it is enforced,
+ * and the difference is worth being accurate about: eight other call sites pass
+ * a bare `ToolContext` where a `HostPolicyContext` is expected, so tsc already
+ * fails at each of them if a field goes missing. Measured — making
+ * `enforceHttps` optional produces nine errors, of which this function is one.
+ *
+ * What it adds is a HOME for the claim. `HostPolicyContext` used to be described
+ * in prose as "structurally satisfied by ToolContext", a claim nothing checked;
+ * the enforcement was real but incidental, spread across callers that could all
+ * be refactored away without anyone noticing the guarantee had gone with them.
+ * Since PRD Stage 1 §3.8 the interface also gates a CREDENTIALED surface, which
+ * is why it gets a stated obligation rather than an emergent one.
+ *
+ * Runtime no-op by construction. The value is the type error.
+ */
+export function hostPolicyOf(ctx: ToolContext): HostPolicyContext {
+  return ctx;
 }
 
 /**

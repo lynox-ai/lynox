@@ -51,9 +51,16 @@ search:
 server:
   port: 8080
   bind_address: "0.0.0.0"
-  # Internal-only (Docker network, not exposed to host). For production: openssl rand -base64 32
+  # ⚠ This key is CHECKED IN and therefore public — it is a placeholder, not a
+  # secret. `npx @lynox-ai/core` generates a random one per install; this file
+  # is the git-clone path, so replace it: openssl rand -base64 32
   secret_key: "dQw4w9WgXcQ8Zk3pR7mN2vB6hJ5fT1xL0cY9uA4oE8s="
-  limiter: false  # Safe: SearXNG is only reachable by lynox on Docker internal network
+  # No host port is published, so this is unreachable off the machine. It is
+  # NOT unreachable on the machine: on a Linux host, host processes and any
+  # container on the same Compose network can reach it (measured 2026-08-10).
+  # `limiter: false` therefore rests on the host being trusted, not on the
+  # service being isolated. Turn the limiter on if that does not hold for you.
+  limiter: false
   public_instance: false
   image_proxy: false
   method: "GET"

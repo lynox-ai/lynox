@@ -14,19 +14,23 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - name: Install gitleaks
-        env:
-          GITLEAKS_VERSION: '8.21.2'
-        run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
-          sudo mv gitleaks /usr/local/bin/
+        uses: ./.github/actions/install-gitleaks
+      - name: Check the gitleaks config still detects
+        # A config with no active rules passes every scan below without a sign.
+        run: bash scripts/gitleaks-config-canary.sh
       - name: Run gitleaks
         run: gitleaks detect --source . --verbose --redact
 
   test:
     runs-on: ubuntu-latest
+    # Scoped because this job downloads a third-party executable and runs it
+    # over the checkout, and because the install action is handed a token: the
+    # comment that calls it read-only is now enforced rather than asserted.
+    permissions:
+      contents: read
     # The suite spawns subprocesses (the cross-repo convention pins run workflow
     # shell against a stubbed curl). Their own timeout signals the shell it
     # started, not that shell's own children — an orphaned grandchild outlives
@@ -34,40 +38,44 @@ jobs:
     # default instead of failing. Matches `smoke` below.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: '22' }
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-        with: { version: '10' }
       - run: pnpm install --frozen-lockfile
 
       # Dependency audit via osv-scanner. audit-ci was replaced 2026-04-15
       # because it shells out to `pnpm audit`, and pnpm audit still hits the
       # retired npm legacy advisory endpoint (HTTP 410). osv-scanner reads
       # pnpm-lock.yaml natively and queries OSV.dev (aggregates GHSA + npm
-      # advisories + more). High/critical fail the job; moderate/low are
-      # reported as warnings to match the prior Phase 1 policy.
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
-          chmod +x /tmp/osv-scanner
-          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
-          osv-scanner --version
+      # advisories + more). High/critical fail the job; moderate/low are listed
+      # and do not block, which keeps the prior Phase 1 policy — and a finding
+      # whose severity the report does not state now fails too, which is the
+      # change, not a detail. scripts/osv-report-gate.mjs carries the
+      # measurement behind it.
+      #
+      # The install is a composite action so the pin has ONE home; release.yml
+      # and dep-scan-daily.yml call the same one.
+      - uses: ./.github/actions/install-osv-scanner
+        with:
+          token: ${{ github.token }}
+
+      # The exit code is CAPTURED and handed to the gate rather than discarded.
+      # Measured on 2.5.1: an unreadable lockfile exits 127 and a lockfile that
+      # yields no packages exits 128, and neither writes the report. Under the
+      # old `|| true` that was survivable only by accident — the missing file
+      # broke the jq that followed. The accident is what is being removed.
+      #
+      # `--output-file` because `--output` is deprecated in 2.5.1 and prints a
+      # warning; the file it writes is the same.
       - name: Scan dependencies (high+critical hard-fail)
         run: |
           set -euo pipefail
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
-          osv-scanner scan source --lockfile=pnpm-lock.yaml || true
-          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
-          TOTAL=$(jq '[.results[]?.packages[]?.vulnerabilities[]?] | length' /tmp/osv.json)
-          echo "total=${TOTAL} high_or_critical=${HIGH}"
-          if [ "${HIGH}" -gt 0 ]; then
-            echo "::error::${HIGH} high/critical vulnerability(ies) — failing CI"
-            exit 1
-          fi
-          if [ "${TOTAL}" -gt 0 ]; then
-            echo "::warning::${TOTAL} moderate/low vulnerability(ies) reported (not blocking)"
-          fi
+          set +e
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          OSV_RC=$?
+          set -e
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
 
       - run: pnpm run lint
       - run: pnpm run typecheck
@@ -78,7 +86,7 @@ jobs:
   docker-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -103,11 +111,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: '22' }
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-        with: { version: '10' }
       - run: pnpm install --frozen-lockfile
 
       - name: Start GreenMail
@@ -147,17 +154,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: '22' }
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-        with: { version: '10' }
       - run: pnpm install --frozen-lockfile
       - name: Run smoke (build + up + playwright + teardown)
         run: bash scripts/smoke-local.sh --verbose
       - name: Upload playwright trace artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: smoke-playwright-traces
           path: test-results/

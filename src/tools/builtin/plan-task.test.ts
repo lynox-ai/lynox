@@ -511,6 +511,17 @@ describe('plan_task — decoupled from execution (D4/D9)', () => {
   });
 });
 
+describe('plan_task schema (D2 mechanism)', () => {
+  it('requires a tools declaration on every phase', () => {
+    const schema = planTaskTool.definition.input_schema as {
+      properties: { phases: { items: { required: string[] } } };
+    };
+    // D2: the generator MUST declare its tool set — dropping 'tools' from the
+    // required list silently reverts new plans to the undeclared default.
+    expect(schema.properties.phases.items.required).toContain('tools');
+  });
+});
+
 describe('phasesToPipelineSteps', () => {
   it('should convert phases to pipeline steps with dependencies', () => {
     const steps = phasesToPipelineSteps([
@@ -533,6 +544,18 @@ describe('phasesToPipelineSteps', () => {
     ]);
     expect(steps[0]!.id).toBe('process');
     expect(steps[1]!.id).toBe('process-2');
+  });
+
+  it('carries the declared tools and model onto the pipeline step (F1/F2)', () => {
+    const steps = phasesToPipelineSteps([
+      { name: 'Fetch', steps: ['Call API'], model: 'fast', tools: ['http_request'] },
+      { name: 'Report', steps: ['Write summary'] },
+    ]);
+    expect(steps[0]!.tools).toEqual(['http_request']);
+    expect(steps[0]!.model).toBe('fast');
+    // An undeclared phase stays undeclared — the runtime supplies the F1 default.
+    expect(steps[1]!.tools).toBeUndefined();
+    expect(steps[1]!.model).toBeUndefined();
   });
 
   it('should include verification in task', () => {
@@ -677,6 +700,32 @@ describe('plan_task auto-planning fallback', () => {
     await planTaskTool.handler({ summary: 'Create a research report' }, agent);
     expect(onAfterRun).not.toHaveBeenCalled();
     expect(counters.costUSD).toBe(0);
+  });
+
+  it('carries planDAG\'s declared model AND tools into the stored pipeline (auto-plan)', async () => {
+    // The regression this pins: the auto-plan phase mapping used to drop
+    // `model` (and would drop `tools`), so every auto-planned step ran on the
+    // undeclared default despite the planner declaring a tier per step.
+    mockPlanDAG.mockResolvedValueOnce({
+      steps: [
+        { id: 's1', task: 'fetch pages', model: 'fast', tools: ['http_request'] },
+        { id: 's2', task: 'write report', model: 'balanced', tools: ['write_file'], input_from: ['s1'] },
+      ],
+      reasoning: 'r', estimatedCost: 0.01, actualCostUsd: 0,
+    });
+    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const agent = makeAgent({ promptUser }, mockConfig);
+
+    const result = await planTaskTool.handler({ summary: 'Sync the shop' }, agent);
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
+    expect(parsed.workflow_id).toBeDefined();
+
+    const pipeline = getPipeline(parsed.workflow_id);
+    expect(pipeline).toBeDefined();
+    expect(pipeline!.steps[0]!.model).toBe('fast');
+    expect(pipeline!.steps[0]!.tools).toEqual(['http_request']);
+    expect(pipeline!.steps[1]!.model).toBe('balanced');
+    expect(pipeline!.steps[1]!.tools).toEqual(['write_file']);
   });
 
   it('should skip auto-plan when planDAG returns null', async () => {

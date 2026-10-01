@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { applyPluginToolGate } from './session.js';
 import type { ToolEntry, IAgent } from '../types/index.js';
 import type { PluginManager } from './plugins.js';
+import { ToolSoftFailure } from './tool-soft-failure.js';
 
 /**
  * Regression guard for the plugin-instance agent loop: when a pluginManager is active
@@ -78,5 +79,24 @@ describe('applyPluginToolGate — preserves ToolEntry fields through the plugin 
     const [wrapped] = applyPluginToolGate([terminalTool], makePluginManager(false));
     await expect(wrapped!.handler({}, {} as IAgent)).rejects.toThrow(/blocked by plugin gate/);
     expect(terminalTool.handler).not.toHaveBeenCalledWith({}, expect.anything());
+  });
+
+  it('lets a ToolSoftFailure through UNCHANGED — the ledger signal must survive the wrapper', async () => {
+    // `bash`, `web_research` and every RETURNED refusal in `http_request`
+    // report a completed-but-failed call by throwing `ToolSoftFailure`; `agent.ts`
+    // unwraps it, returns the payload to the model and writes the reason into
+    // `tool_calls.output_json`, which is the only field `error_count` reads.
+    //
+    // This wrapper sits between the tool and that unwrap on every plugin-enabled
+    // instance. If it ever caught, re-wrapped or re-typed the throw, the signal
+    // would degrade back into the exact defect it was built to fix — silently,
+    // and only on plugin instances, which is where nobody would look. Asserting
+    // the CLASS survives (not just "it throws") is what makes that visible.
+    const soft = new ToolSoftFailure('what the model reads', 'what the ledger counts');
+    const [wrapped] = applyPluginToolGate(
+      [{ ...nonTerminalTool, handler: vi.fn().mockRejectedValue(soft) }],
+      makePluginManager(true),
+    );
+    await expect(wrapped!.handler({}, {} as IAgent)).rejects.toBe(soft);
   });
 });

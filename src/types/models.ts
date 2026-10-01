@@ -8,7 +8,7 @@ import type { ProviderDescriptor, ProviderKey, CacheProfile } from './provider-r
  * 2026-05-29 from the legacy Anthropic-brand names). The tier vocabulary +
  * `normalizeTier` are WIRE CONTRACT — the control plane emits tier values into
  * tenant envs — so their single source of truth lives in `src/contract/vocab.ts`
- * (K-W1, PRD-CORE-PRO-CONTRACT / DEF-0030). Re-exported here as a pure shim to
+ * (K-W1, PRD-CORE-PRO-CONTRACT). Re-exported here as a pure shim to
  * keep the public `@lynox-ai/core/types` surface unchanged. `ModelTierSchema`
  * in types/schemas.ts reuses `LEGACY_TIER_ALIASES`.
  */
@@ -21,9 +21,8 @@ export { LEGACY_TIER_ALIASES, normalizeTier, isModelProfile };
 export type { ModelTier, LLMProvider, ModelProfile };
 
 /**
- * Provenance of a thread's persisted `model_tier` (arc:model-selector Wave P1,
- * DEF-0095). Records WHO chose the tier so a sticky per-thread pick (D18) is
- * distinguishable from a machine default:
+ * Provenance of a thread's persisted `model_tier`. Records WHO chose the tier
+ * so a sticky per-thread pick (D18) is distinguishable from a machine default:
  *  - `'user'`    — a deliberate pick (the composer picker was touched, or the
  *                  mid-thread re-pick endpoint ran). STICKY: resume honours it.
  *  - `'default'` — a new thread whose creator did NOT touch the picker.
@@ -36,7 +35,7 @@ export type { ModelTier, LLMProvider, ModelProfile };
  * tier/cost/capability decision. The instant a policy keys off it, a client
  * could pin an expensive tier by lying. Kept a 3-value enum on purpose; because
  * the column is `TEXT`, a future value (e.g. `'inferred'`) is a zero-migration
- * string add (DEF-0127), so no speculative writers are named now.
+ * string add, so no speculative writers are named now.
  */
 export type ThreadModelSource = 'user' | 'default' | 'unknown';
 
@@ -102,6 +101,44 @@ export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
   'balanced': 'mistral-medium-2604',
   'fast':     'ministral-8b-2512',
 };
+
+/**
+ * Models MEASURED to be weak at durable-knowledge capture — they rarely invoke
+ * the `remember` tool, so on a DK-on tenant the durable tier stays effectively
+ * inert while the store still advertises itself (the silent under-capture).
+ * Measured by the capture-fitness benchmark (core#1130, 2026-08-06, live engine):
+ * `mistral-medium-2604` scored 2/12 against Sonnet's 12/12 and Haiku's 10/12.
+ *
+ * A POSITIVE, evidence-anchored set — NOT an inferred one: only a model with a
+ * MEASURED weak score belongs here, so a new or untested model never trips a
+ * false degradation warning (the fail-open direction here is "no warning", the
+ * safe one for a false positive). Add an entry ONLY from a measured benchmark run.
+ */
+export const CAPTURE_WEAK_MODEL_IDS: ReadonlySet<string> = new Set([
+  'mistral-medium-2604',
+]);
+
+/** True when `modelId` is a measured-weak durable-knowledge capture caller
+ *  (see {@link CAPTURE_WEAK_MODEL_IDS}). */
+export function isCaptureWeakModel(modelId: string): boolean {
+  return CAPTURE_WEAK_MODEL_IDS.has(modelId);
+}
+
+/**
+ * Whether a tenant's active setup leaves durable-knowledge capture silently
+ * degraded: DK is ON but the active `balanced` model is a measured-weak capture
+ * caller, so `remember` rarely fires and the knowledge store never grows while
+ * the UI advertises it. The couple is the whole point — DK OFF means capture is
+ * already inert (no warning owed), and a strong `balanced` model captures fine.
+ * Pure so the /api/config handler that surfaces the flag is unit-testable and
+ * both directions (DK-off, strong-model) can be pinned.
+ */
+export function isDurableCaptureDegraded(opts: {
+  hasDurableMemory: boolean;
+  activeBalancedModelId: string;
+}): boolean {
+  return opts.hasDurableMemory && isCaptureWeakModel(opts.activeBalancedModelId);
+}
 
 /**
  * True when `apiBaseURL`'s host is the Mistral API — `api.mistral.ai` or any
@@ -368,6 +405,17 @@ export interface ModelFeatures {
   toolUse: boolean;
   promptCaching: boolean;
   pdfInput: boolean;
+  /**
+   * The openai wire accepts `reasoning_effort` (low|medium|high) for this model
+   * (Fireworks hybrid-reasoning convention). OPT-IN per model and deliberately
+   * absent everywhere until a replay measurement justifies the flip: the Agent
+   * sends `output_config.effort` (default 'high') on every request, and the
+   * adapter forwarding that blindly would pin every hybrid-reasoning model to
+   * maximum thinking — the opposite of the model-adaptive default this flag
+   * exists to preserve. Absent/false → the adapter drops effort, the model
+   * decides its own thinking depth per request (today's behaviour).
+   */
+  reasoningEffort?: boolean;
 }
 
 /** Where a model's WEIGHTS originate (supply-chain provenance) — axis (c) of the
@@ -421,6 +469,64 @@ export interface ModelCapability {
    *  three axes per model). Absent on models the presets don't surface, where the
    *  host implies it. */
   provenance?: WeightsOrigin | undefined;
+  /**
+   * The `reasoning_effort` this model gets on the openai wire for calls whose
+   * `max_tokens` is at or below `REASONING_SUPPRESSION_MAX_TOKENS`. It WINS over
+   * `features.reasoningEffort`, and it does not care what the caller asked for —
+   * see the adapter for why both are deliberate. Only `'none'` is expressible
+   * here, and it exists for one measured failure mode: a hybrid-reasoning model whose thinking floor is
+   * larger than the output budget its callers give it returns `finish_reason:
+   * 'length'` with an EMPTY string and HTTP 200 — no error anywhere.
+   *
+   * Measured on `deepseek-v4-flash-0731` against the live Fireworks API,
+   * 2026-08-18, at each fast-tier caller's real `max_tokens`: 4 of 6 came back
+   * empty (title/64, retrieval-HyDE/256, entity-extraction/512, search-rerank/
+   * 512), each having spent 100% of its budget on reasoning tokens. With
+   * `'none'` all six answer, in roughly half the tokens and half the latency.
+   *
+   * `'low'` is NOT a substitute — measured, it still spent the full 512 and
+   * still returned empty, which is why this field takes the wire's `'none'`
+   * rather than reusing the low/medium/high ladder in `features.reasoningEffort`.
+   *
+   * Precedence: this field wins where a model sets BOTH — `features` is a shared
+   * object across six Fireworks entries, so flagging any one of them for the
+   * ladder would otherwise silently un-suppress this one, and `'low'` (the
+   * ladder's floor) was measured not to suppress the thinking floor at all.
+   */
+  defaultReasoningEffort?: 'none' | undefined;
+
+  /**
+   * The provider REFUSES to let thinking be disabled on this model, so there is no
+   * `defaultReasoningEffort` escape hatch — and below `emptyAtOrBelow` output tokens it
+   * answers HTTP 200 with no content at all, the whole budget spent thinking.
+   *
+   * The bound is PER MODEL because one number does not fit the class. Measured
+   * 2026-09-30, three runs per budget on a hard extraction prompt:
+   *   glm-5p3        empty at 64 · 256 · 512, and 2 of 3 at 1024   → 1024
+   *   gpt-oss-120b   empty 3/3 at 64, 2/3 at 256, none at 512+     →  256
+   * A shared bound would either refuse gpt-oss calls that work (512, 1024) or leave
+   * glm-5p3 unprotected where it is silent. The first draft of this field WAS a shared
+   * bound, and the number that made it look fine — "gpt-oss answers from 256 up" — did
+   * not survive its own re-measurement: empty in 5 of 6 runs at 64 and 256.
+   *
+   * Declaring it makes the adapter REFUSE such a call instead of returning the silence.
+   * That direction is the point: an empty success is indistinguishable from a success, so
+   * a caller that lands here gets nothing and reports nothing — and four of the six
+   * callers below the bound swallow errors in a bare `catch`, so the throw changes the
+   * failure MODE at the wire rather than making it visible downstream.
+   *
+   * Deliberately not a budget bump and not a tier fallback: either would serve the call
+   * at a size or on a model nobody chose, which is how a cost or a quality change arrives
+   * without a decision.
+   *
+   * ⚠ The emptiness tracks prompt DIFFICULTY, not a token count. A trivial prompt answers
+   * far below these bounds. The numbers are therefore the largest budget at which a HARD
+   * prompt was still silent, i.e. deliberately pessimistic — they refuse some calls that
+   * an easy prompt would have survived, which is the safe direction for a path whose
+   * failure mode is silence.
+   */
+  thinkingOnly?: { readonly emptyAtOrBelow: number } | undefined;
+
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -465,13 +571,28 @@ const MISTRAL_FEATURES_GEN3: ModelFeatures = {
   pdfInput: false,
 };
 
-// Fireworks-hosted openai-compat text models (GLM 5.2, DeepSeek v4 Pro). Text +
-// tool-use + prompt-cache; NO vision (Fireworks model pages state "image input:
-// not supported" for both — so vision:false yields a clean pre-flight throw on an
-// image-attach, never a silent drop). extendedThinking is the Anthropic-specific
-// mechanism → false on the openai wire.
+// Fireworks-hosted openai-compat text models. Text + tool-use + prompt-cache;
+// vision:false for the models that genuinely have none: GLM 5.2, DeepSeek
+// v4 Pro/Flash and gpt-oss-120b (their Fireworks pages state "image input:
+// not supported"). vision:false yields a clean pre-flight throw on an
+// image-attach, never a silent drop. extendedThinking is the
+// Anthropic-specific mechanism → false on the openai wire.
 const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
   vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
+// Fireworks candidates whose pages list image input — validated live
+// 2026-08-14 via tests/online/fireworks-vision.test.ts (red/blue split PNG →
+// the model names both halves through the real adapter + Fireworks endpoint).
+// Same shape as FIREWORKS_TEXT_FEATURES except vision:true. A model that
+// later proves non-multimodal on the wire rolls back to the text object —
+// the online test is the tripwire.
+const FIREWORKS_VISION_FEATURES: ModelFeatures = {
+  vision: true,
   extendedThinking: false,
   toolUse: true,
   promptCaching: true,
@@ -505,7 +626,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // === Anthropic Claude (direct + custom proxy) ===
   // Claude Opus 5 — the new flagship deep model (GA 2026-07; Opus 4.8 is now
   // Legacy). Additive OPT-IN only: MODEL_MAP.deep stays opus-4-6, and the
-  // max-quality deep preset stays fable-5 — re-pointing either is a deliberate
+  // max-quality deep preset is opus-5 since 2026-08-10 (fable stays catalog-selectable) — re-pointing either is a deliberate
   // behavior change gated on a bench/canary pass, NOT this catalog wave. Pricing
   // $5/$25 (= Opus 4.8), 1M native ctx, vision (CLAUDE_FEATURES). TTL contract:
   // cacheWrite=input×2=10, cacheRead=input×0.1=0.50 (models.test.ts pins it).
@@ -753,6 +874,14 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
     uiLabel: 'Mistral Large 3',
+    // Was MISSING until 2026-08-10, and it mattered: eu-sovereign pins this model,
+    // and `buildTierPresetSignal` omits the key when undefined — so the one preset
+    // that exists to make EU processing EXPLICIT could not show the chip on the slot
+    // this model serves. NOT every Mistral entry carries the field — `ministral-3b`
+    // and the older/legacy entries still lack it, so the same gap is open wherever
+    // they are catalog-selectable. Nothing enforces it registry-wide; the guard that
+    // exists covers preset slots only (tier-presets.test.ts).
+    provenance: 'EU',
   },
   // DEPRECATED by Mistral — magistral-medium-2509 retires 2026-07-31. No longer
   // tier-routed (tier:null); kept for cost-guard + back-compat of legacy configs
@@ -921,17 +1050,17 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
     uiLabel: 'Magistral Small (latest)',
   },
-  // === Fireworks-hosted (openai-compat) — model-presets hybrid deep/big-context ===
+  // === Fireworks-hosted (openai-compat) — preset slots + picker candidates ===
   // CN-provenance weights served from a WESTERN fixed host (Fireworks/US), never a
   // direct CN API — the affirmative sourcing rule (host residency US, weights CN).
-  // Pricing VERIFIED against the Fireworks model pages (2026-07-19): the harness
-  // estimates were ~2.5-4× low. cacheRead = $0.14 is the PUBLISHED Fireworks
-  // cached-input rate for BOTH models (a flat rate, NOT input×0.1) — so DeepSeek's
-  // 0.14 (≠ 1.74×0.1 = 0.174) is correct as read from its page, not a copy of GLM's.
-  // Both are text-only (Fireworks: "image input: not supported"). Reached via
+  // Pricing VERIFIED against each model's own Fireworks page — the cached-input
+  // rate is PER MODEL, never derived: for GLM 5.2 + DeepSeek v4 Pro (read
+  // 2026-07-19) it is a flat $0.14 (so DeepSeek's 0.14 ≠ 1.74×0.1 = 0.174 is
+  // correct as read from its page, not a copy of GLM's), while the 2026-08-09
+  // candidates carry their own published rates (0.30 / 0.028 / 0.08). Reached via
   // provider:'openai' + api_base_url=api.fireworks.ai + the full
-  // `accounts/fireworks/models/*` id; no Fireworks tier map yet (they are preset
-  // -slot models, tier:null — a preset's tier_set pins them explicitly).
+  // `accounts/fireworks/models/*` id; no Fireworks tier map (all are preset-slot
+  // /candidate models, tier:null — a preset's tier_set pins them explicitly).
   'accounts/fireworks/models/glm-5p2': {
     id: 'accounts/fireworks/models/glm-5p2',
     provider: 'openai',
@@ -956,6 +1085,226 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: FIREWORKS_TEXT_FEATURES,
     pricing: { input: 1.74, output: 3.48, cacheWrite: 1.74, cacheRead: 0.14 },
     uiLabel: 'DeepSeek v4 Pro',
+    provenance: 'CN',
+  },
+  // Kimi K3 (Moonshot). Pricing read from its Fireworks page 2026-08-09 —
+  // cacheRead $0.30 here IS input×0.1, unlike the flat $0.14 of the two above
+  // (each page is its own source of truth). Fireworks lists image-input support,
+  // validated live 2026-08-14 (fireworks-vision online test) → vision:true.
+  // Context: the page says "1040k"; pinned to the round 1M the sibling entries
+  // use — a conservative floor for compaction, not a capability claim.
+  'accounts/fireworks/models/kimi-k3': {
+    id: 'accounts/fireworks/models/kimi-k3',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_VISION_FEATURES,
+    pricing: { input: 3.00, output: 15.00, cacheWrite: 3.00, cacheRead: 0.30 },
+    uiLabel: 'Kimi K3',
+    provenance: 'CN',
+  },
+  // Balanced/main-chat CANDIDATES (2026-08-09, rafael canary): mistral-medium
+  // underperforms as the main on real requests (rafael), so the picker offers
+  // alternatives to test. Pricing read from each model's Fireworks page — the
+  // cached rates differ per model (0.028 / 0.08), never derived.
+  // Fireworks retired the UNSUFFIXED alias on 2026-08-14: the last successful call
+  // on a production instance was 09:05:49 that day, the first 404 at 09:44:31, and
+  // every call since has failed with `Model not found, inaccessible, and/or not
+  // deployed`. The model list now offers only the dated snapshot, so the id carries
+  // the date. Verified against the live API on 2026-08-18: the bare id 404s, this
+  // one answers 200.
+  //
+  // A dated id is the thing this codebase normally avoids (see the Mistral
+  // stable-tag rule) — but here the choice is not between dated and floating. The
+  // floating alias is GONE; the only alternative is no fast slot at all.
+  'accounts/fireworks/models/deepseek-v4p1-flash': {
+    id: 'accounts/fireworks/models/deepseek-v4p1-flash',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    // ⚠ TEXT features, and that UNDER-claims the model: the provider advertises it as
+    // multimodal in two places (`supports_image_input: true` on the inference listing,
+    // and its model page calls it multimodal with native image input). Its predecessor
+    // -0731 was genuinely text-only, so this object is INHERITED, not measured — the one
+    // thing this change otherwise avoided. The flip needs `FIREWORKS_VISION_FEATURES`
+    // plus the house procedure (`tests/online/fireworks-vision.test.ts` validates vision
+    // on the wire before a model claims it), so it is filed rather than guessed. The
+    // direction is safe: images are refused on this slot, not silently mishandled.
+    features: FIREWORKS_TEXT_FEATURES,
+    // Read off the provider's public MODEL PAGE 2026-09-30 (the pricing OVERVIEW
+    // page does not carry this id at all — a different page). $0.22/M uncached, $0.007/M
+    // cached, $0.66/M output. The mapping was verified against two models whose rows
+    // already existed — glm-5p2 (1.40/0.14/4.40) and minimax-m3 (0.30/0.06/1.20) —
+    // so `input` is the uncached rate and `cacheRead` the cached one, not guessed.
+    //
+    // ⚠ NOT the predecessor's price, which is why carrying it forward would have been
+    // wrong rather than merely unverified: -0731 was 0.14/0.28, so this successor is
+    // 1.6x the input and 2.4x the OUTPUT. A carried number would have under-billed
+    // every fast-tier call on both presets.
+    pricing: { input: 0.22, output: 0.66, cacheWrite: 0.22, cacheRead: 0.007 },
+    uiLabel: 'DeepSeek v4.1 Flash',
+    provenance: 'CN',
+    // Same hybrid-reasoning defect as the -0731 predecessor it replaces, measured on
+    // 2026-09-30 at the real fast-tier budgets: `max_tokens: 64` without this field
+    // returns HTTP 200 with an EMPTY string and `finish_reason: 'length'`, the whole
+    // budget spent on thinking. With it the same call answers. (An earlier draft named
+    // exact lengths and token counts here; re-measured they do not reproduce — they vary
+    // with the prompt, which is the same overspecification this field's doc warns about
+    // two paragraphs up. The reproducible claim is the DIRECTION: silent without the
+    // suppression on a hard prompt at that budget, answering with it.)
+    // The suppression is therefore not inherited by habit — it was re-measured.
+    defaultReasoningEffort: 'none',
+  },
+  'accounts/fireworks/models/glm-5p3': {
+    id: 'accounts/fireworks/models/glm-5p3',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    // Read off the provider's public MODEL PAGE 2026-09-30: $1.40/M uncached,
+    // $0.26/M cached, $4.40/M output. Uncached and output match glm-5p2 exactly; the
+    // CACHED rate nearly doubled (0.14 → 0.26), which is the one field a carried-over
+    // price would have got wrong.
+    pricing: { input: 1.40, output: 4.40, cacheWrite: 1.40, cacheRead: 0.26 },
+    uiLabel: 'GLM 5.3',
+    provenance: 'CN',
+    thinkingOnly: { emptyAtOrBelow: 1024 },
+    // NO `defaultReasoningEffort`, and its absence is load-bearing rather than an
+    // omission: the provider refuses the suppression outright — `HTTP 400: GLM-5.3
+    // is a thinking-only model; disabling thinking (reasoning_effort='none') is not
+    // supported`. Measured 2026-09-30, it returns an EMPTY string below the bound on
+    // HARD prompts — at 64, 256 and 512 on an extraction prompt, and even at exactly
+    // 1024 on a harder one — while a trivial prompt answers at 256. The emptiness tracks
+    // prompt DIFFICULTY, not a token threshold, so the bound is the largest small-budget
+    // caller rather than an observed cut-off.
+    // `'low'` is accepted by the provider and
+    // works, but `defaultReasoningEffort` is deliberately typed `'none'`-only, and
+    // widening it for one model would un-narrow a decision taken for another.
+    //
+    // Safe in the balanced MAIN slot because no caller reaches that slot below the
+    // suppression bound — enumerated 2026-09-30, all six small-budget callers are
+    // `fast`-tier. That enumeration is what makes it safe TODAY; the `thinkingOnly`
+    // refusal in `openai-adapter.ts` is what keeps it safe. (`tier-presets.test.ts`
+    // holds the EVIDENCE labels for the pin, not this guard — an earlier draft sent its
+    // reader there, where they would have found a membership allowlist and concluded the
+    // small-budget case was unprotected.)
+  },
+  'accounts/fireworks/models/deepseek-v4-flash-0731': {
+    id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 },
+    uiLabel: 'DeepSeek v4 Flash',
+    provenance: 'CN',
+    // Hybrid-reasoning: it thinks before it answers, and the floor is task-
+    // dependent (54 tokens for a one-word question, 512+ for entity extraction,
+    // 727 for memory extraction). The single-shot utility callers budget
+    // 64-1024, so without this the slot silently returns "" on the tight ones.
+    // A `spawn_agent` on this tier runs far above that bound and keeps its
+    // thinking. See the field doc for the measurement.
+    defaultReasoningEffort: 'none',
+  },
+  // Fireworks lists image input for Qwen3.7 Plus — validated live 2026-08-14
+  // (fireworks-vision online test) → vision:true. 262k context.
+  'accounts/fireworks/models/qwen3p7-plus': {
+    id: 'accounts/fireworks/models/qwen3p7-plus',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_VISION_FEATURES,
+    pricing: { input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 },
+    uiLabel: 'Qwen3.7 Plus',
+    provenance: 'CN',
+  },
+  // The only non-CN entry in this section: OpenAI's open-weight gpt-oss-120b,
+  // US provenance. Already this catalog's Fireworks tile placeholder AND the
+  // model the provider-preset-reachability suite proved the full tool_use
+  // round-trip on — the one candidate whose WIRE is verified, not just priced.
+  // (gpt-oss-20b was evaluated too and rejected: its Fireworks page lists
+  // function calling as not supported, which disqualifies it for an agent.)
+  'accounts/fireworks/models/gpt-oss-120b': {
+    id: 'accounts/fireworks/models/gpt-oss-120b',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 131_072,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.014 },
+    uiLabel: 'GPT-OSS 120B',
+    provenance: 'US',
+    // Second member of the thinking-only class, measured 2026-09-30 (3 runs per budget,
+    // hard extraction prompt): `reasoning_effort: 'none'` → `HTTP 400: Invalid reasoning
+    // effort: none`; content empty 3/3 at 64, 2/3 at 256, never at 512 or 1024. Its bound
+    // is therefore 256, not the 1024 that fits glm-5p3.
+    //
+    // It is pinned by no preset — but it IS served and it IS an option in the Fireworks
+    // per-tier picker, so a user who selects it for the fast tier reaches `session.ts`
+    // (64) and `retrieval-engine.ts` (256), where both budgets are inside the silent
+    // region and four of the six callers swallow the result. That made this a LIVE gap on
+    // a selectable model rather than a filed one, which is why the bound became per-model
+    // here instead of later.
+    thinkingOnly: { emptyAtOrBelow: 256 },
+  },
+  'accounts/fireworks/models/kimi-k2p6': {
+    id: 'accounts/fireworks/models/kimi-k2p6',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.95, output: 4.00, cacheWrite: 0.95, cacheRead: 0.16 },
+    uiLabel: 'Kimi K2.6',
+    provenance: 'CN',
+  },
+  // Coding/agentic-specialized sibling of K2.6 — no non-thinking mode (it
+  // reasons on every turn), so expect per-turn latency as a MAIN candidate.
+  'accounts/fireworks/models/kimi-k2p7-code': {
+    id: 'accounts/fireworks/models/kimi-k2p7-code',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.95, output: 4.00, cacheWrite: 0.95, cacheRead: 0.19 },
+    uiLabel: 'Kimi K2.7 Code',
+    provenance: 'CN',
+  },
+  // MiniMax M3 — Fireworks lists image input; validated live 2026-08-14
+  // (fireworks-vision online test) → vision:true.
+  'accounts/fireworks/models/minimax-m3': {
+    id: 'accounts/fireworks/models/minimax-m3',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 524_288,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_VISION_FEATURES,
+    pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.059 },
+    uiLabel: 'MiniMax M3',
     provenance: 'CN',
   },
 };
@@ -1164,7 +1513,7 @@ export function clampTier(requested: ModelTier, maxTier: ModelTier | undefined):
 /**
  * Does an explicit model id resolve to a cost band ABOVE the ceiling? A raw model
  * id carries no tier to clamp — it names a specific model/endpoint that cannot be
- * substituted — so an over-ceiling id must be REFUSED, not clamped (DEF-0080). An
+ * substituted — so an over-ceiling id must be REFUSED, not clamped. An
  * id unknown to the registry has no tier and is treated as `deep` (fail closed),
  * matching FALLBACK_PRICING's conservative Opus default. Shared by the tier
  * chokepoint (`resolveRunModel`) and the spawn profile guard (`profileExceedsMaxTier`).

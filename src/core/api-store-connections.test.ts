@@ -66,7 +66,7 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     const w = new ApiStore();
     w.setConnectionStore(cs);
     const p = richProfile();
-    expect(w.save(p)).toBe(true); // isNew
+    expect(w.save(p)).toEqual({ ok: true, isNew: true });
 
     // A fresh store projecting from connections reconstructs the exact profile.
     const r = new ApiStore();
@@ -76,13 +76,17 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     expect(r.getByHostname('api.stripe.com')?.id).toBe('stripe');
   });
 
-  it('save derives vault_keys from auth.vault_keys + oauth key fields', () => {
+  it('save derives vault_keys from auth.vault_keys, the oauth key fields, and the runtime token slots', () => {
     const { cs } = makeCs();
     const w = new ApiStore();
     w.setConnectionStore(cs);
     w.save(richProfile());
     const keys = cs.get('stripe')?.vaultKeys ?? [];
-    expect([...keys].sort()).toEqual(['STRIPE_CLIENT_ID', 'STRIPE_CLIENT_SECRET', 'STRIPE_REFRESH']);
+    // The last two are what `fetch_token` writes at runtime — named here because
+    // no configuration field ever carries them.
+    expect([...keys].sort()).toEqual([
+      'STRIPE_ACCESS_TOKEN', 'STRIPE_CLIENT_ID', 'STRIPE_CLIENT_SECRET', 'STRIPE_REFRESH', 'STRIPE_REFRESH_TOKEN',
+    ]);
   });
 
   it('save stores kind=api, direction=outbound, subject_id=null', () => {
@@ -100,8 +104,8 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     const { cs } = makeCs();
     const w = new ApiStore();
     w.setConnectionStore(cs);
-    expect(w.save(richProfile())).toBe(true);
-    expect(w.save(richProfile({ description: 'Updated' }))).toBe(false);
+    expect(w.save(richProfile())).toEqual({ ok: true, isNew: true });
+    expect(w.save(richProfile({ description: 'Updated' }))).toEqual({ ok: true, isNew: false });
     expect(cs.count('api')).toBe(1);
     // fresh projection reflects the update.
     const r = new ApiStore();
@@ -170,7 +174,7 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
   it('degraded (no ConnectionStore): save/remove fall back to the flat-JSON directory', () => {
     const dir = apisDir();
     const w = new ApiStore(); // no setConnectionStore
-    expect(w.save(richProfile(), dir)).toBe(true);
+    expect(w.save(richProfile(), dir)).toEqual({ ok: true, isNew: true });
     expect(existsSync(join(dir, 'stripe.json'))).toBe(true);
     // fallback delete removes the file.
     expect(w.remove('stripe', dir)).toBe(true);

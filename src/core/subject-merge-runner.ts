@@ -1,3 +1,4 @@
+import { readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type { SubjectStore, MergeLedgerEntry } from './subject-store.js';
@@ -13,6 +14,18 @@ import type { ThreadStore } from './thread-store.js';
  * and a merge must repoint all three or a thread stays anchored to the archived dup. The
  * caller OWNS every store handle's lifecycle (this never opens or closes them).
  */
+
+/**
+ * The one name shape a merge ledger has, as {@link runMerge} writes it below:
+ * `merge-<ISO with : and . replaced by ->-<suffix>.json`. Exported here so backup,
+ * migration-export and migration-import all decide "is this a merge ledger?" from the
+ * writer's own definition instead of three drifting copies — and because it doubles as
+ * the importer's path-traversal guard: it admits a BASENAME only, so no separator, no
+ * `..`, no absolute path can survive it.
+ */
+export function isMergeLedgerFileName(name: string): boolean {
+  return /^merge-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-z0-9]{1,16}\.json$/.test(name);
+}
 
 /** A persisted merge — same `~/.lynox/sweeps/` home + `version` shape as the archive ledger. */
 export interface MergeLedgerFile {
@@ -43,6 +56,88 @@ export type MergeRunResult =
  * (never half-reverses) — the state is fully-forward (the merge applied as far as it got)
  * and `resolveActiveSubject` forwards any dangling id. Reversible via {@link rollbackMergeRun}.
  */
+/**
+ * How long a merge stays undoable. Ledgers older than this are removed on the next merge.
+ *
+ * The directory grew forever before this: nothing in the tree deleted a ledger, and since
+ * core#1243 `sweeps` is declared `{ backup: true, migrate: true }`, so every entry also
+ * travels into every backup and every tenant migration. Each one embeds the full detail row
+ * of both subjects — for `people` that is email and phone, for `organizations` domain and
+ * vat_id. Personal data with no deletion path is the Art-17 problem, and an unbounded one is
+ * the same problem multiplied by time.
+ *
+ * 90 days is the trade: long enough that a merge noticed weeks later is still reversible,
+ * short enough that the data does not accumulate indefinitely. It is a constant rather than
+ * a setting on purpose — a per-instance knob here would be an env-ABI change, and the value
+ * only matters as a bound, not as a tuning parameter.
+ */
+export const LEDGER_RETENTION_DAYS = 90;
+
+/**
+ * Delete merge ledgers older than the retention window. Best-effort by design.
+ *
+ * ⚠ Ages by the ledger's OWN `createdAt`, not by mtime. The first version used mtime with the
+ * stated reason that "a rollback rewrites the file" — which is simply false: `rollbackMergeRun`
+ * never writes, the `applied` flip happens inside `runMerge` before anyone can roll back. Worse,
+ * the premise pointed the wrong way. Copies do NOT preserve mtime, so a backup restore and a
+ * migration import both hand every ledger a fresh full window — the one bound that exists for
+ * this personal data would have been reset by the very operations that spread it. `pruneBackups`
+ * already ages by `manifest.created_at` for the same reason; this follows it.
+ *
+ * Two safety rails, both from that same neighbour:
+ *   · the newest ledger is NEVER deleted, whatever the clock says — one forward clock jump
+ *     would otherwise unlink every reversal record in a single pass, irreversibly;
+ *   · a ledger whose `createdAt` cannot be read or parsed is KEPT. Unreadable is not expired,
+ *     and this function's failure mode must be "kept too long", never "deleted too early".
+ *
+ * A merge must never fail because a cleanup could not run, so every error is swallowed.
+ *
+ * The name filter is `isMergeLedgerFileName` — the writer's own definition, shared with
+ * migration export and import. The first version rolled its own `startsWith('merge-') &&
+ * endsWith('.json')`, a fourth and looser copy, and it would have deleted `merge-plan-notes.json`
+ * — a file runMerge never wrote — while its comment claimed it touched nothing it did not write.
+ * A delete path does not get its own definition of what it owns.
+ */
+export function pruneExpiredLedgers(sweepsDir: string, nowIso: string): void {
+  const now = Date.parse(nowIso);
+  if (!Number.isFinite(now)) return;
+  const cutoff = now - LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+  let names: string[];
+  try {
+    names = readdirSync(sweepsDir);
+  } catch {
+    return;
+  }
+
+  const aged: Array<{ full: string; createdMs: number }> = [];
+  for (const name of names) {
+    if (!isMergeLedgerFileName(name)) continue;
+    const full = join(sweepsDir, name);
+    try {
+      const parsed = JSON.parse(readFileSync(full, 'utf8')) as { createdAt?: unknown };
+      const createdMs = typeof parsed.createdAt === 'string' ? Date.parse(parsed.createdAt) : NaN;
+      if (!Number.isFinite(createdMs)) continue;   // unreadable age ⇒ keep
+      aged.push({ full, createdMs });
+    } catch {
+      continue;                                     // unreadable file ⇒ keep
+    }
+  }
+  if (aged.length === 0) return;
+
+  // Never the newest, even if the clock claims it is ancient.
+  const newest = aged.reduce((a, b) => (b.createdMs > a.createdMs ? b : a));
+  for (const { full, createdMs } of aged) {
+    if (full === newest.full) continue;
+    if (createdMs >= cutoff) continue;
+    try {
+      unlinkSync(full);
+    } catch {
+      // Someone else's concurrent delete, or a file we may not remove. Neither is our problem.
+    }
+  }
+}
+
 export function runMerge(
   store: SubjectStore, dataStore: DataStore | null, threadStore: ThreadStore | null, dataDir: string,
   dupId: string, canonicalId: string,
@@ -65,6 +160,10 @@ export function runMerge(
   // Persist the reversal record BEFORE mutating, atomically (temp+fsync+rename) so a torn
   // write can't corrupt the sole record that makes the merge reversible.
   writeFileAtomicSync(ledgerPath, JSON.stringify(file, null, 2));
+
+  // Retention runs HERE, coupled to writing, because that is the only thing that makes the
+  // directory grow — no scheduler to forget, and an instance that never merges never needs it.
+  pruneExpiredLedgers(join(dataDir, 'sweeps'), createdAt);
 
   // Mutate all three stores + stamp applied inside ONE guard so any store throw folds into
   // the Result contract instead of escaping runMerge and crashing the operator CLI: an
@@ -120,4 +219,142 @@ export function rollbackMergeRun(
     return { ok: false, reason: `engine un-merged but a datastore/thread reversal failed (partial rollback): ${err instanceof Error ? err.message : String(err)}` };
   }
   return engine;
+}
+
+/**
+ * A merge as an owner's surface shows it: who was merged into whom, when, what else it
+ * repointed, and whether it can still be taken back. **Deliberately not the ledger entry.**
+ * The entry carries both subjects' full detail rows (for `people` email and phone, for
+ * `organizations` domain and `vat_id`) and the canonical's aliases verbatim, because the
+ * rollback needs them. Whether those are ciphertext depends on a vault key being set, and
+ * `domain` never is — so nothing here passes them on, whatever the storage looks like.
+ * The duplicate's name does come back, although the merge took it out of the contact
+ * views: a merge cannot be named for taking back without it.
+ */
+export interface MergeRunView {
+  /** The ledger's file name without `.json`, which is also what a rollback names. */
+  id: string;
+  createdAt: string;
+  kind: string;
+  dupName: string;
+  canonicalName: string;
+  /** False for a merge that crashed half way: it is not reversible. */
+  applied: boolean;
+  /** The merge holds and this ledger is the one that can take it back: the duplicate still
+   *  redirects onto the canonical, both rows exist, and no newer ledger names the same pair. */
+  inEffect: boolean;
+  /** A newer ledger names the same two entries (merged, taken back, merged again). This one's
+   *  before-image is stale, and replaying it would write old values over the newer merge. */
+  superseded: boolean;
+  dataStoreRows: number;
+  threadRows: number;
+}
+
+/** Read one ledger by its id, or null — an id that is not a ledger's name reads nothing,
+ *  so no path can be built from it. A file whose shape the views and the rollback rely on
+ *  is not there reads as null too, rather than throwing later. */
+export function readMergeLedger(sweepsDir: string, id: string): MergeLedgerFile | null {
+  const name = `${id}.json`;
+  if (!isMergeLedgerFileName(name)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(join(sweepsDir, name), 'utf8')) as Partial<MergeLedgerFile>;
+    const entry = parsed.entry as Partial<MergeLedgerEntry> | undefined;
+    if (parsed.phase !== 'merge' || typeof parsed.createdAt !== 'string' || !entry) return null;
+    if (typeof entry.dupId !== 'string' || typeof entry.canonicalId !== 'string' || typeof entry.kind !== 'string') return null;
+    if (!Array.isArray(parsed.dataStore) || !parsed.dataStore.every((r) => Array.isArray((r as { ids?: unknown }).ids))) return null;
+    if (parsed.threadAnchors !== undefined && !Array.isArray(parsed.threadAnchors)) return null;
+    return parsed as MergeLedgerFile;
+  } catch {
+    return null;
+  }
+}
+
+interface MergeRunRecord { view: MergeRunView; file: MergeLedgerFile }
+
+function readAll(store: SubjectStore, sweepsDir: string): MergeRunRecord[] {
+  let names: string[];
+  try {
+    names = readdirSync(sweepsDir);
+  } catch {
+    return [];
+  }
+  const records: MergeRunRecord[] = [];
+  for (const name of names) {
+    if (!isMergeLedgerFileName(name)) continue;
+    const id = name.slice(0, -'.json'.length);
+    const file = readMergeLedger(sweepsDir, id);
+    if (!file) continue;
+    const { dupId, canonicalId, kind } = file.entry;
+    const dup = store.getSubject(dupId);
+    const canonical = store.getSubject(canonicalId);
+    records.push({
+      file,
+      view: {
+        id, createdAt: file.createdAt, kind,
+        dupName: dup?.name ?? '', canonicalName: canonical?.name ?? '',
+        applied: file.applied !== false,
+        inEffect: dup?.merged_into === canonicalId && canonical !== null,
+        superseded: false,
+        dataStoreRows: file.dataStore.reduce((n, r) => n + r.ids.length, 0),
+        threadRows: file.threadAnchors?.length ?? 0,
+      },
+    });
+  }
+  // Newest first, by the id: the file name, which carries the writer's clock in the fixed
+  // format `isMergeLedgerFileName` enforces, so its text order is its time order. "Newest"
+  // decides which ledger may take a merge back. A file name can be edited too; this orders by
+  // the name the writer chose, nothing more.
+  records.sort((a, b) => (a.view.id < b.view.id ? 1 : a.view.id > b.view.id ? -1 : 0));
+  // Only the newest ledger of a pair can take the merge back.
+  const seen = new Set<string>();
+  for (const r of records) {
+    const pair = `${r.file.entry.dupId}\u0000${r.file.entry.canonicalId}`;
+    if (seen.has(pair)) {
+      r.view.superseded = true;
+      r.view.inEffect = false;
+    }
+    seen.add(pair);
+  }
+  return records;
+}
+
+/** The merges an owner can see, newest first. Unreadable ledgers are left out, not shown half. */
+export function listMergeRuns(store: SubjectStore, sweepsDir: string): MergeRunView[] {
+  return readAll(store, sweepsDir).map((r) => r.view);
+}
+
+/** Why a rollback did not happen, in a fixed vocabulary — the store's own reasons name ids. */
+export type MergeRollbackRefusal =
+  | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'unavailable' | 'partial' | 'failed';
+
+/**
+ * Take one merge back for its owner. Refuses up front what the store would refuse, or get
+ * wrong, so the answer is a category and not the store's wording:
+ *   · a merge that never fully applied, or whose entries are no longer in this graph;
+ *   · an older ledger of a pair merged again since — the store's own check would let it
+ *     through and write a stale before-image over the newer merge;
+ *   · a merge no longer in effect;
+ *   · a ledger that moved data rows or conversation links while those stores are not
+ *     available — reversing only the contact graph would report success with the rows
+ *     still pointing at the merged entry.
+ * A split result — engine reversed, a satellite store not — is `partial`.
+ */
+export function rollbackMergeById(
+  store: SubjectStore, dataStore: DataStore | null, threadStore: ThreadStore | null, sweepsDir: string, id: string,
+): { ok: true; view: MergeRunView } | { ok: false; reason: MergeRollbackRefusal } {
+  const record = readAll(store, sweepsDir).find((r) => r.view.id === id);
+  if (!record) return { ok: false, reason: 'not_found' };
+  const { view, file } = record;
+  if (!view.applied) return { ok: false, reason: 'not_applied' };
+  if (store.getSubject(file.entry.dupId) === null || store.getSubject(file.entry.canonicalId) === null) {
+    return { ok: false, reason: 'missing' };
+  }
+  if (view.superseded) return { ok: false, reason: 'superseded' };
+  if (!view.inEffect) return { ok: false, reason: 'not_in_effect' };
+  if ((file.dataStore.length > 0 && !dataStore) || ((file.threadAnchors?.length ?? 0) > 0 && !threadStore)) {
+    return { ok: false, reason: 'unavailable' };
+  }
+  const out = rollbackMergeRun(store, dataStore, threadStore, file);
+  if (!out.ok) return { ok: false, reason: out.reason?.startsWith('engine un-merged') ? 'partial' : 'failed' };
+  return { ok: true, view: { ...view, inEffect: false } };
 }

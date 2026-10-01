@@ -36,7 +36,8 @@ set -uo pipefail
 # lines is the exact failure it was written to prevent, and this one did it silently.
 #
 # So each pattern demands the shape of the real trailer:
-#   Co-Authored-By: Claude … <someone@somewhere>   → must end in an email in angle brackets
+#   Co-Authored-By: Claude … <someone@somewhere>   → must start the line and end in an email
+#                                                    in angle brackets
 #   Claude-Session: https://…                      → must be a bare URL
 #   🤖 Generated with [Claude Code](…)             → must start the line
 # Prose that merely mentions or quotes them does not match.
@@ -53,14 +54,44 @@ strip_file() {
   [ -n "$f" ] || usage
   [ -f "$f" ] || { echo "no-ai-attribution: no such file: $f" >&2; exit 0; }
 
-  grep -viE "$PATTERN" -- "$f" > "$f.tmp" || true
+  # A FRESH temp file, and that is the point rather than tidiness. The fixed path
+  # `$f.tmp` can survive a hard interruption between the grep and the cleanup; if such
+  # a leftover is then unwritable, the redirect fails with 1 — not 2 — and the file
+  # exists, so neither guard below fires and `cat` reads SOMEBODY ELSE'S content over
+  # the commit message, silently and with exit 0. Measured against both the old and the
+  # first version of this fix: the message became the stale line. `mktemp` gives a name
+  # nothing can have left behind, so the class is closed rather than the instance.
+  local tmp
+  tmp="$(mktemp "${f}.XXXXXX" 2>/dev/null)" || {
+    echo "no-ai-attribution: cannot create a temp file next to $f — leaving the message untouched" >&2
+    exit 0
+  }
+
+  # `|| true` used to cover both of grep's non-zero exits, and they are not the same
+  # thing. Exit 1 means "no line survived the filter" — legitimate, and the empty
+  # result is the correct answer. Exit 2 means the SEARCH failed, and the old line
+  # then wrote an empty temp file, which the printf below copied over the commit
+  # message. Same for a failed redirect: nothing written, and an empty `body`.
+  #
+  # The direction that made this worth fixing is not data loss — git refuses an empty
+  # message, so the commit aborts and the committer sees it. It is that the abort says
+  # nothing about the cause, in a hook whose whole design is to be silent and never
+  # block. So: on anything but 0 or 1, warn on stderr and leave the file ALONE.
+  # Stripping still fails open — the CI job is the gate for the unstripped case.
+  local rc=0
+  grep -viE "$PATTERN" -- "$f" > "$tmp" || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$tmp" ]; then
+    echo "no-ai-attribution: grep exited $rc for $f — leaving the message untouched" >&2
+    rm -f "$tmp"
+    exit 0
+  fi
 
   # Deleting a trailer block can leave the message ending in blank lines. Trim them
   # (command substitution eats trailing newlines), then restore exactly one.
   local body
-  body="$(cat "$f.tmp")"
+  body="$(cat "$tmp")"
   printf '%s\n' "$body" > "$f"
-  rm -f "$f.tmp"
+  rm -f "$tmp"
   exit 0
 }
 
@@ -68,11 +99,49 @@ check_range() {
   local base="${1:-}" head="${2:-}"
   [ -n "$base" ] && [ -n "$head" ] || usage
 
-  local bad=0
-  local sha
+  local bad=0 scanned=0
+  local sha revs
   # `git rev-list base..head` — only the commits this PR ADDS.
-  for sha in $(git rev-list "${base}..${head}" 2>/dev/null); do
-    if git show -s --format='%B' "$sha" | grep -qiE "$PATTERN"; then
+  #
+  # Captured WITH ITS STATUS rather than interpolated into the `for` header. In
+  # that position the exit code belongs to the loop, not to git: an unresolvable
+  # base exits 128 with an empty list, the body never runs, and this function
+  # reported `clean ✓ (0 commits scanned)` and exit 0 on a range it could not
+  # read. Measured on a fixture with identical substrate — the same
+  # trailer-bearing commit gave exit 1 against a resolvable base and exit 0
+  # against an unresolvable one. This check is REQUIRED in both repos, so that
+  # direction of failure hands out a green tick for an unscanned range.
+  #
+  # `exit 2`, not 1: "could not run" is a different fact from "found something"
+  # and from "clean". Same three-way split `scripts/lib/guard-file-list.sh`
+  # makes for the file-listing guards. Its helpers are not reused here on
+  # purpose — they wrap `git ls-files`, and their refusal says "could not list
+  # the files to scan", which would name the wrong cause for a commit range.
+  if ! revs="$(git rev-list "${base}..${head}" 2>&1)"; then
+    {
+      echo "❌ no-ai-attribution: could not enumerate ${base}..${head}."
+      echo "   ${revs}"
+      echo "   Refusing to report a clean range this check could not read."
+    } >&2
+    exit 2
+  fi
+  local msg
+  for sha in $revs; do
+    scanned=$((scanned + 1))
+    # Read the message with its OWN status before matching. Piped straight into
+    # `grep -q`, a `git show` that failed for one commit (missing object, shallow
+    # gap) handed grep an empty stream, grep answered "no match", and that commit
+    # counted as scanned and clean. Here-string rather than `printf | grep -q`:
+    # under `pipefail`, grep closing the pipe early fails the printf side.
+    if ! msg="$(git show -s --format='%B' "$sha" 2>/dev/null)"; then
+      {
+        echo "❌ no-ai-attribution: could not read commit ${sha}."
+        echo "   $(git show -s --format='%B' "$sha" 2>&1 >/dev/null | head -1)"
+        echo "   Refusing to report a clean range this check could not read."
+      } >&2
+      exit 2
+    fi
+    if grep -qiE "$PATTERN" <<< "$msg"; then
       if [ "$bad" -eq 0 ]; then
         echo ""
         echo "✗ AI self-attribution found in commit messages:"
@@ -101,7 +170,10 @@ EOF
     exit 1
   fi
 
-  echo "no-ai-attribution: clean ✓ ($(git rev-list --count "${base}..${head}" 2>/dev/null || echo 0) commits scanned)"
+  # Counted in the loop, not by a second `rev-list --count`: that call carried
+  # its own `|| echo 0`, so a failure printed the same "0 commits scanned" the
+  # bug above produced. One enumeration, one number, both already validated.
+  echo "no-ai-attribution: clean ✓ (${scanned} commits scanned)"
   exit 0
 }
 

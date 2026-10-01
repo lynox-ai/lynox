@@ -3,6 +3,7 @@ import { parseScopeString } from '../../core/scope-resolver.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { channels } from '../../core/observability.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
+import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 
 // DataStore accessed via agent.toolContext.dataStore
 
@@ -21,6 +22,7 @@ interface CreateInput {
 }
 
 export const dataStoreCreateTool: ToolEntry<CreateInput> = {
+  undo: 'compensatable',
   definition: {
     name: 'data_store_create',
     description: 'Set up a table for structured, quantitative data — metrics, KPIs, records with typed columns. Data persists across sessions. NOT for qualitative knowledge or preferences (use memory_store).',
@@ -122,6 +124,7 @@ interface InsertInput {
 }
 
 export const dataStoreInsertTool: ToolEntry<InsertInput> = {
+  undo: 'restorable',
   definition: {
     name: 'data_store_insert',
     description: 'Add or update rows in a data table. Cleans up duplicates automatically when a unique key is set. Max 1000 rows per call.',
@@ -293,7 +296,11 @@ export const dataStoreQueryTool: ToolEntry<QueryInput> = {
 
       // Append raw JSON for precision
       const rawJson = JSON.stringify(rows);
-      return `${meta}\n\n${table}\n\n<raw_json>${rawJson}</raw_json>`;
+      // JSON.stringify escapes `"` but NOT `<` — a row value containing
+      // `</raw_json>` closed this block before renderFence neutralised it.
+      return compose([
+        engineText(meta), engineText(table), renderFence('raw_json', rawJson),
+      ], '\n\n');
     } catch (err) {
       return `Error working with data table: ${getErrorMessage(err)}`;
     }
@@ -371,6 +378,7 @@ interface DeleteInput {
 }
 
 export const dataStoreDeleteTool: ToolEntry<DeleteInput> = {
+  undo: 'restorable',
   destructive: { mode: 'data' },
   definition: {
     name: 'data_store_delete',
@@ -422,6 +430,7 @@ interface DropInput {
 }
 
 export const dataStoreDropTool: ToolEntry<DropInput> = {
+  undo: 'restorable',
   destructive: { mode: 'data' },
   definition: {
     name: 'data_store_drop',

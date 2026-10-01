@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
-import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS } from './knowledge-store.js';
+import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS, MAX_HINT_LOOKUPS_PER_BATCH, knowledgeEvidence } from './knowledge-store.js';
+import { deriveProvenanceTier } from './provenance.js';
 import { channels } from './observability.js';
 import { MEMORY_BLOCK_CHAR_LIMITS } from '../types/memory.js';
 
@@ -145,6 +146,41 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(hits.some(h => h.text.includes('net-30'))).toBe(true);
   });
 
+  it('an AMBIGUOUS organization scope does not fall through to the person ALIAS arm', () => {
+    // The explicit-subject lookup is a chain: organization canonical → organization
+    // alias → person canonical → person alias. An ambiguous organization alias used to
+    // read as "no organization" and drop into the person arm, so a query scoped to a
+    // company answered out of a person's facts — a wrong-scope read the caller cannot
+    // see happened. Ambiguity ends the chain rather than continuing into the next
+    // namespace: no answer beats an answer from the wrong one.
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    // A person reachable ONLY by alias — the arm the ambiguous org must not fall into.
+    // (A person canonically NAMED "Meridian" is a different case; see the next test.)
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    ks.write({ text: 'Zorin owes a personal favour', subjectName: 'Zorin Marek', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(subjects.findByAlias('Meridian', 'person')?.name).toBe('Zorin Marek');
+    // Anchors the assertion: the fact IS recallable, so an empty result below means the
+    // scope refused rather than the store being empty.
+    expect(ks.recall({ query: 'personal favour' }).some(h => h.text.includes('favour'))).toBe(true);
+    expect(ks.recall({ query: 'personal favour', subjectName: 'Meridian' })).toEqual([]);
+  });
+
+  it('but an ambiguous alias does NOT suppress a CANONICAL hit in the other namespace', () => {
+    // Precedence, not just direction. `subjectName` carries no kind, so the org-first
+    // order is a heuristic — a person who canonically BEARS the name is a
+    // higher-confidence match than a name two organizations merely share as an alias.
+    // Refusing before the canonical stages let alias-tier ambiguity in one namespace
+    // erase certainty in the other; a first version of this fix did exactly that.
+    const { ks, subjects } = make();
+    ks.write({ text: 'Meridian prefers morning calls', subjectName: 'Meridian', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'person')).not.toBeNull();
+    expect(ks.recall({ query: 'morning calls', subjectName: 'Meridian' }).some(h => h.text.includes('morning calls'))).toBe(true);
+  });
+
   // ── Focus derivation (H2-gated) ──
 
   it('focus is H2-gated: a ghost subject with no active entries renders nothing', () => {
@@ -252,13 +288,42 @@ describe('KnowledgeStore review queue (DK.2)', () => {
     return ks.write({ text, subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true }).id;
   }
 
-  it('listPending returns queued entries oldest-first, decrypted', () => {
+  it('pendingCountForSubjectHint answers 0 for an absent subject, so callers need no guard', () => {
+    // Load-bearing for `knowledge_recall`, which delegates here rather than checking the
+    // subject itself: a caller-side guard on the same condition is a line no test can tell
+    // from its own removal.
+    //
+    // What this pins is the BEHAVIOUR, and two independent things deliver it: the early
+    // return, and the query's exact `= ?`. Measured, and the honest version is less tidy than
+    // it first looked — removing EITHER one alone leaves this green, because the other still
+    // answers 0. It fails only when both go, which is exactly when the count would start
+    // meaning "waiting anywhere" instead of "waiting about this subject".
+    //
+    // So this is a behavioural guard, not a line-level one: it does not defend the early
+    // return, and a comment claiming it did would be describing a test that does not exist.
+    const { ks } = make();
+    queueOne(ks);
+    expect(ks.pendingCountForSubjectHint('')).toBe(0);
+    expect(ks.pendingCountForSubjectHint('   ')).toBe(0);
+    expect(ks.pendingCountForSubjectHint('ACME')).toBe(1);
+  });
+
+  it('listPending returns queued entries NEWEST-first, decrypted', () => {
+    // Flipped 2026-09-04, and the direction is the point rather than a preference: the
+    // queue is served under a LIMIT and read as an inbox, so oldest-first meant a reviewer
+    // scrolling past every deferred entry to reach what the assistant proposed today — and
+    // past the cap, never reaching it at all.
+    //
+    // The two entries here share a `created_at` to the second (same-millisecond writes are
+    // the COMMON case: the recovery pass writes up to four facts per turn), so this also
+    // pins the `rowid` tiebreaker. Without it the assertion is a coin flip that happens to
+    // land right, which is what an order test must never be.
     const { ks } = make();
     const a = queueOne(ks, 'first fact');
     const b = queueOne(ks, 'second fact');
     const pending = ks.listPending();
-    expect(pending.map(e => e.id)).toEqual([a, b]);
-    expect(pending[0]?.text).toBe('first fact');
+    expect(pending.map(e => e.id)).toEqual([b, a]);
+    expect(pending[0]?.text).toBe('second fact');
     expect(pending[0]?.subjectHint).toBe('ACME');
   });
 
@@ -276,6 +341,65 @@ describe('KnowledgeStore review queue (DK.2)', () => {
     expect(subjects.findCanonical('ACME', 'organization')).not.toBeNull(); // minted ON approval
     // Now agent-readable via recall.
     expect(ks.recall({ query: 'ACME IBAN', subjectName: 'ACME' }).length).toBe(1);
+  });
+
+  it('an approved entry RE-DERIVES its stored tier from its own persisted evidence', () => {
+    // `deriveProvenanceTier`'s contract is that the tier is
+    // a pure function of the stored evidence — which is what makes a derivation bug a
+    // recomputation instead of a migration. Approve used to hardcode `user_asserted` while
+    // leaving `source_untrusted` set, so re-deriving the very same row produced
+    // `external_unverified`: the two ENDS of the ordering, from one row's own columns.
+    const { ks } = make();
+    const id = queueOne(ks);
+    const queued = ks.getEntry(id)!;
+    expect(queued.sourceType).toBe('external_unverified');
+    expect(deriveProvenanceTier(knowledgeEvidence(queued))).toBe(queued.sourceType);
+
+    const approved = ks.reviewEntry(id, 'approve')!;
+    expect(approved.sourceType).toBe('user_asserted');
+    // The invariant, driven through the SAME mapping the write side uses — so a hardcoded tier
+    // the evidence cannot reproduce fails here rather than agreeing with a second definition.
+    expect(deriveProvenanceTier(knowledgeEvidence(approved))).toBe(approved.sourceType);
+  });
+
+  it('a never-queued entry re-derives too — the invariant is not approval-only', () => {
+    // Covers the CHANNEL leg of the shared mapping, which the approved/rejected cases cannot:
+    // there rule 0 or rule 1 answers first and the channel never decides. A trusted `ui` write
+    // is the case where it does, so dropping the channel from `knowledgeEvidence` shows up here
+    // and nowhere else.
+    const { ks } = make();
+    const id = ks.write({ text: 'ACME renews in March.', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false }).id;
+    const e = ks.getEntry(id)!;
+    expect(e.status).toBe('active');
+    expect(e.sourceType).toBe('user_asserted');
+    expect(e.reviewAction).toBeNull();
+    expect(deriveProvenanceTier(knowledgeEvidence(e))).toBe(e.sourceType);
+  });
+
+  it('approval does NOT erase the untrusted evidence it was reviewed out of', () => {
+    // The rejected alternative fix was to clear `source_untrusted` on approve. It destroys a
+    // fact — the turn really did read untrusted content — to make a derivation come out right,
+    // which inverts the write-once-evidence invariant. And for an agent-channel entry it would
+    // not even have worked: with rule 1 silenced the CHANNEL decides, so this row re-derives to
+    // `agent_inferred`, not `user_asserted`. (A `ui`-channel entry would have landed on
+    // `user_asserted` by luck — which is the weaker reason to reject that fix, not the reason.)
+    const { ks } = make();
+    const approved = ks.reviewEntry(queueOne(ks), 'approve')!;
+    expect(approved.sourceUntrusted).toBe(true);
+    expect(approved.sourceChannel).toBe('agent');
+    expect(deriveProvenanceTier({ sourceChannel: 'agent', sourceUntrusted: false })).toBe('agent_inferred');
+  });
+
+  it('edit_approve re-derives the same way; reject vouches for nothing', () => {
+    const { ks } = make();
+    const edited = ks.reviewEntry(queueOne(ks, 'acme ibaan (typo)'), 'edit_approve', 'ACME pays via IBAN CHXX.')!;
+    expect(deriveProvenanceTier(knowledgeEvidence(edited))).toBe('user_asserted');
+
+    // `reject` is an audit action, not a vouching one: the tier must stay at the floor, or
+    // rejecting an injected entry would raise it to the tier the whole guard exists to protect.
+    const rejected = ks.reviewEntry(queueOne(ks), 'reject')!;
+    expect(rejected.sourceType).toBe('external_unverified');
+    expect(deriveProvenanceTier(knowledgeEvidence(rejected))).toBe('external_unverified');
   });
 
   it('approval NEVER inherits a pin (H6 stays a deliberate act)', () => {
@@ -634,5 +758,714 @@ describe('KnowledgeStore write-path dedup — subject-null resolution (completes
     expect(ks.hasActiveFactWithPrefix('Primary goal: ')).toBe(false); // pending is not active
     expect(ks.hasActiveFactWithPrefix('Role: ')).toBe(false);         // absent
     expect(ks.hasActiveFactWithPrefix('company: ')).toBe(false);      // exact, case-sensitive prefix
+  });
+
+  // ── Erasure ──
+  // Before these existed the store had no delete path at all: `retireEntry` sets a
+  // status flag and its docstring says the entry is never deleted. The published
+  // retention text promised a purge with nothing behind it on this side.
+
+  it('a retired entry is KEPT — `memory_retire` promises "never deleted" and nothing may sweep it', () => {
+    // Guards the absence of a purge. The legacy store hard-deletes its deactivated rows on
+    // the maintenance cycle; this store deliberately does not, because `memory_retire` tells
+    // the user the entry stays on record and `KnowledgeStatus` calls superseded auditable.
+    // A future "symmetry" sweep would break both promises silently — this test is what stops it.
+    const { ks } = make();
+    const retired = ks.write({ text: 'ACME renews in March', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.retireEntry(retired.id, 'user_asserted');
+
+    const stored = ks.getEntry(retired.id);
+    expect(stored).not.toBeNull();
+    expect(stored!.status).toBe('superseded'); // hidden from recall, still on record
+    expect(ks.recall({ query: 'ACME' }).some(e => e.id === retired.id)).toBe(false);
+  });
+
+  it('deleteEntry removes an ACTIVE entry — retire-then-purge cannot answer an erasure request', () => {
+    const { ks } = make();
+    const entry = ks.write({ text: 'Jana Reber lives in Bern', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(entry.status).toBe('active');
+
+    expect(ks.deleteEntry(entry.id)).toBe(true);
+
+    expect(ks.getEntry(entry.id)).toBeNull();
+    expect(ks.deleteEntry(entry.id)).toBe(false); // second call reports nothing removed
+  });
+
+  it('deleteBySubject removes every entry for one subject, whatever its status, and nothing else', () => {
+    const { ks, subjects } = make();
+    const target = ks.write({ text: 'Jana Reber lives in Bern', subjectName: 'Jana Reber', sourceChannel: 'ui', sourceUntrusted: false });
+    const alsoTarget = ks.write({ text: 'Jana Reber prefers email', subjectName: 'Jana Reber', sourceChannel: 'ui', sourceUntrusted: false });
+    const other = ks.write({ text: 'ACME pays by invoice', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.retireEntry(alsoTarget.id, 'user_asserted'); // a retired row must be erased too
+    const subjectId = target.subjectId;
+    expect(subjectId).not.toBeNull();
+    expect(alsoTarget.subjectId).toBe(subjectId); // both entries resolved to the same subject
+
+    expect(ks.deleteBySubject(subjectId!)).toBe(2);
+
+    expect(ks.getEntry(target.id)).toBeNull();
+    expect(ks.getEntry(alsoTarget.id)).toBeNull();
+    expect(ks.getEntry(other.id)).not.toBeNull(); // the neighbouring subject is untouched
+  });
+
+  it('deleteBySubject does NOT reach an entry that was never resolved to a subject', () => {
+    // The honest limit, asserted so it cannot regress into a false promise: an entry
+    // whose subject never resolved carries a plaintext `subject_hint` instead of a
+    // `subject_id`, so a subject-scoped erasure misses it. That is why `deleteEntry`
+    // exists alongside this, and why the erasure procedure has to name both.
+    const { ks } = make();
+    const hinted = ks.write({ text: 'Jana Reber lives in Bern', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(hinted.subjectId).toBeNull();
+    const anchored = ks.write({ text: 'ACME pays by invoice', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(anchored.subjectId).not.toBeNull();
+
+    expect(ks.deleteBySubject(anchored.subjectId!)).toBe(1);
+    expect(ks.getEntry(anchored.id)).toBeNull();
+    expect(ks.getEntry(hinted.id)).not.toBeNull(); // reachable only via deleteEntry
+  });
+
+  it('deleteBySubject follows a MERGE — an erasure keyed on the merged-away id still erases', () => {
+    // A merge repoints knowledge_entries.subject_id onto the canonical (subject-store
+    // REPOINT_TARGETS). Without resolving first, an erasure request that arrives with the
+    // duplicate's id deletes zero rows and returns 0 — reporting success while the data
+    // stays. Every other subject read in this file resolves; this one has to as well.
+    const { ks, subjects } = make();
+    const dup = subjects.findOrCreate({ kind: 'organization', name: 'ACME Ltd' }).id;
+    const canonical = subjects.findOrCreate({ kind: 'organization', name: 'ACME' }).id;
+    const entry = ks.write({ text: 'ACME pays by invoice', subjectName: 'ACME Ltd', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(entry.subjectId).toBe(dup);
+
+    subjects.mergeSubjects(dup, canonical);
+
+    // The caller still holds the OLD id — the realistic case, since that is what an
+    // export or an earlier request handed them.
+    expect(ks.deleteBySubject(dup)).toBe(1);
+    expect(ks.getEntry(entry.id)).toBeNull();
+  });
+});
+
+describe('pendingCountForThread', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  function mk(): KnowledgeStore {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-thread-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return new KnowledgeStore(engine, new SubjectStore(engine));
+  }
+
+  it('counts ONLY this thread — the whole point of asking per-thread', () => {
+    // A global number already exists (`pendingCount`). This one answers "is anything from
+    // HERE waiting", which is the question someone has after coming back to one conversation.
+    const ks = mk();
+    ks.write({ text: 'from thread A', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    ks.write({ text: 'also from thread A', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    ks.write({ text: 'from thread B', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'B' });
+    expect(ks.pendingCountForThread('A')).toBe(2);
+    expect(ks.pendingCountForThread('B')).toBe(1);
+    expect(ks.pendingCount()).toBe(3);
+  });
+
+  it('counts only what is WAITING — an approved fact is no longer a reason to nag', () => {
+    const ks = mk();
+    ks.write({ text: 'queued', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    ks.write({ text: 'already trusted', sourceChannel: 'ui', sourceThreadId: 'A' });
+    expect(ks.pendingCountForThread('A')).toBe(1);
+  });
+
+  it('returns 0 for an unknown or empty thread instead of falling back to the global count', () => {
+    const ks = mk();
+    ks.write({ text: 'queued', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    expect(ks.pendingCountForThread('nope')).toBe(0);
+    expect(ks.pendingCountForThread('')).toBe(0);
+    expect(ks.pendingCountForThread('   ')).toBe(0);
+  });
+});
+
+describe('an ambiguous subject name on an ACTIVE write', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-amb-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    return { ks: new KnowledgeStore(engine, subjects), subjects };
+  }
+
+  /** Two organizations sharing the alias `Meier` — the shape that makes `findOrCreate` refuse
+   *  to pick one. Both need an active entry, because an alias only becomes ambiguous once more
+   *  than one subject actually answers to it. */
+  function twoMeiers(ks: KnowledgeStore, subjects: SubjectStore): void {
+    for (const name of ['Meier Bau AG', 'Meier Transport GmbH']) {
+      subjects.findOrCreate({ kind: 'organization', name, aliases: ['Meier'] });
+      ks.write({ text: `${name} is a client`, subjectName: name, sourceChannel: 'agent' });
+    }
+  }
+
+  it('parks the fact on a hint, reports the ambiguity, and still finds it by that name', () => {
+    const { ks, subjects } = make();
+    twoMeiers(ks, subjects);
+
+    const res = ks.write({ text: 'Meier owes 5000 CHF', subjectName: 'Meier', sourceChannel: 'agent' });
+
+    // Refusing to guess is correct — binding the fact to whichever row came first is the bug
+    // this replaced. What must NOT follow is silence about it.
+    expect(res.status).toBe('active');
+    expect(res.subjectId).toBeNull();
+    expect(res.subjectAmbiguous).toBe(true);
+
+    // The half that matters to the user: asking by the very name it was filed under finds it.
+    // Before this, the scoped read matched on `subject_id` only and an ambiguous name resolved
+    // to an EMPTY scope, so this returned nothing — the fact was stored, reported as
+    // remembered, and unreachable by the one question anyone would ask.
+    const hits = ks.recall({ query: 'What does Meier owe?', subjectName: 'Meier' });
+    expect(hits.map(h => h.text)).toContain('Meier owes 5000 CHF');
+  });
+
+  it('does not leak either namesake\'s own facts into the other\'s scope', () => {
+    const { ks, subjects } = make();
+    twoMeiers(ks, subjects);
+    ks.write({ text: 'Meier owes 5000 CHF', subjectName: 'Meier', sourceChannel: 'agent' });
+
+    // The opposite direction, and it is the one the empty scope was protecting. Pulling hint
+    // rows in must not turn an ambiguous query into a global scan across both clients.
+    const hits = ks.recall({ query: 'What does Meier owe?', subjectName: 'Meier' });
+    expect(hits.map(h => h.text)).not.toContain('Meier Bau AG is a client');
+    expect(hits.map(h => h.text)).not.toContain('Meier Transport GmbH is a client');
+  });
+
+  it('an UNAMBIGUOUS name still links and reports no ambiguity', () => {
+    const { ks } = make();
+    const res = ks.write({ text: 'Nordberg pays monthly', subjectName: 'Nordberg AG', sourceChannel: 'agent' });
+
+    // The boundary. A guard that flagged every write would satisfy the assertions above while
+    // telling the model a plain name was ambiguous — and the model would start asking users to
+    // disambiguate names that were never in doubt.
+    expect(res.subjectId).not.toBeNull();
+    expect(res.subjectAmbiguous).toBeUndefined();
+  });
+});
+
+describe('an ambiguous name is not silently replaced by one the TEXT mentions', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('files nothing against the third party the fact merely names', () => {
+    // The trap, and the first version of this fix walked straight into it: two "Meier"
+    // organizations make the explicit name ambiguous, so no link is made — and the
+    // subject-null derivation below then resolves the ONE known subject the text mentions,
+    // which here is the party the money is owed TO. It also cleared the hint, so the name was
+    // gone, `subjectAmbiguous` was suppressed by the now-set id, and the model was told
+    // "Remembered and linked to the named subject". Wrong client, no signal, unrecoverable.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-amb2-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
+
+    for (const name of ['Meier Bau AG', 'Meier Transport GmbH']) {
+      subjects.findOrCreate({ kind: 'organization', name, aliases: ['Meier'] });
+      ks.write({ text: `${name} is a client`, subjectName: name, sourceChannel: 'agent' });
+    }
+    const nordberg = subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' });
+    ks.write({ text: 'Nordberg AG is a client', subjectName: 'Nordberg AG', sourceChannel: 'agent' });
+
+    // The TEXT must name exactly ONE known subject and must NOT contain the ambiguous name —
+    // otherwise "Meier" itself resolves to two subjects, `mentioned.length` is never 1, and the
+    // derivation block never runs at all. A first version of this test said "Meier owes
+    // Nordberg AG 5000 CHF" and passed under BOTH implementations for exactly that reason: the
+    // fixture, not the assertion, was what made it green.
+    const text = 'Owes Nordberg AG 5000 CHF';
+    const res = ks.write({ text, subjectName: 'Meier', sourceChannel: 'agent' });
+
+    expect(res.subjectId, 'must not be filed against the party merely named in the text').toBeNull();
+    expect(res.subjectAmbiguous).toBe(true);
+    // And it stays recoverable under the name the caller actually used.
+    expect(ks.recall({ query: 'What does Meier owe?', subjectName: 'Meier' }).map(h => h.text)).toContain(text);
+    // The fact must not surface as one of Nordberg's own — that is the wrong-client outcome.
+    expect(ks.recall({ query: 'debts', subjectName: 'Nordberg AG' }).map(h => h.text)).not.toContain(text);
+    expect(nordberg.ambiguous).toBeFalsy();
+  });
+});
+
+describe('the always-loaded profile block and who may reach into it', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-block-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { ks: new KnowledgeStore(engine, new SubjectStore(engine)) };
+  }
+
+  const LINE = 'Operator prefers terse replies';
+
+  /** Put LINE into the profile block, and return an entry whose text matches it verbatim. */
+  function seed(ks: KnowledgeStore, channel: 'agent' | 'user'): string {
+    ks.setBlockContent('profile', LINE);
+    return ks.write({ text: LINE, sourceChannel: channel }).id;
+  }
+
+  it('an AGENT retire does not delete an operator line from the block', () => {
+    // `memory_block_edit` guards this block with an untrusted-refuse and a preview the
+    // operator confirms, because it loads into every single turn. Dropping a line by verbatim
+    // TEXT match was a second way in, and `memory_retire`'s confirmation never mentions the
+    // block — so the agent could retire an entry it wrote itself and take an operator-authored
+    // preference with it, through a dialogue that said nothing about it.
+    const { ks } = make();
+    const id = seed(ks, 'agent');
+    ks.retireEntry(id, 'agent_inferred');
+    expect(ks.getBlock('profile')?.content).toContain(LINE);
+  });
+
+  it('a USER retire still does — that path is the one that seeded the line', () => {
+    // The other direction, and it is what keeps the fix from being a blanket refusal: the
+    // UI/HTTP retire must go on working, or retiring an onboarding answer leaves it in the
+    // block forever.
+    const { ks } = make();
+    const id = seed(ks, 'user');
+    ks.retireEntry(id, 'user_asserted');
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('ERASURE removes the line whatever wrote it — that is what erasure means', () => {
+    // `deleteEntry`/`deleteBySubject` skipped the block entirely, so an erasure request
+    // deleted the row and left the text loading into every future turn — the one place it
+    // was guaranteed to keep being read.
+    const { ks } = make();
+    const id = seed(ks, 'agent');
+    expect(ks.deleteEntry(id)).toBe(true);
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+});
+
+describe('kind-agnostic subject resolution on the durable surface', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-kind-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    return { ks: new KnowledgeStore(engine, subjects), subjects };
+  }
+
+  function countSubjects(subjects: SubjectStore, name: string): number {
+    let n = 0;
+    for (const kind of ['person', 'organization', 'product', 'service', 'engagement'] as const) {
+      const r = subjects.findByNameAnyKind(name, { kinds: [kind] });
+      if (r.ambiguous) n += r.candidateIds.length;
+      else if (r.row) n += 1;
+    }
+    return n;
+  }
+
+  it('remember about an existing PRODUCT reuses it instead of minting an organization twin', () => {
+    const { ks, subjects } = make();
+    const product = subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    expect(product.ambiguous).toBe(false);
+
+    const res = ks.write({ text: 'Vireo launches in Q4', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: false });
+
+    expect(res.subjectId).toBe(product.ambiguous ? null : product.id);
+    // The twin-mint IS the measured live defect (3 of 573 subjects on the first
+    // audited instance): the old kind-scoped findOrCreate could not see the product.
+    expect(countSubjects(subjects, 'Vireo')).toBe(1);
+  });
+
+  it('remember about an existing PERSON reuses the person', () => {
+    const { ks, subjects } = make();
+    const person = subjects.findOrCreate({ kind: 'person', name: 'Ada Fischer' });
+
+    const res = ks.write({ text: 'Ada Fischer prefers morning calls', subjectName: 'Ada Fischer', sourceChannel: 'agent', sourceUntrusted: false });
+
+    expect(res.subjectId).toBe(person.ambiguous ? null : person.id);
+    expect(countSubjects(subjects, 'Ada Fischer')).toBe(1);
+  });
+
+  it('an unknown name still mints an organization (the unchanged default)', () => {
+    const { ks, subjects } = make();
+    const res = ks.write({ text: 'Fresh client', subjectName: 'Neuland GmbH', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).not.toBeNull();
+    const found = subjects.findByNameAnyKind('Neuland GmbH', { kinds: ['organization'] });
+    expect(!found.ambiguous && found.row?.id).toBe(res.subjectId);
+  });
+
+  it('a name already living under TWO kinds is ambiguous: hint-only, no third twin', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+    subjects.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+
+    const res = ks.write({ text: 'Wikipedia fact', subjectName: 'Wikipedia', sourceChannel: 'agent', sourceUntrusted: false });
+
+    expect(res.subjectId).toBeNull();
+    expect(res.subjectAmbiguous).toBe(true);
+    expect(countSubjects(subjects, 'Wikipedia')).toBe(2); // no third row minted
+  });
+
+  it('an explicit subjectKind still binds kind-scoped (the caller said what it means)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Orion' });
+    const res = ks.write({ text: 'Orion the company', subjectName: 'Orion', subjectKind: 'organization', sourceChannel: 'agent', sourceUntrusted: false });
+    const org = subjects.findByNameAnyKind('Orion', { kinds: ['organization'] });
+    expect(!org.ambiguous && org.row?.id).toBe(res.subjectId); // a deliberate org twin — kind was explicit
+  });
+
+  it('approving a queued entry whose hint names a product links the product, mints nothing', () => {
+    const { ks, subjects } = make();
+    const product = subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+
+    const queued = ks.write({ text: 'Vireo pricing changes', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: true });
+    expect(queued.status).toBe('pending_review');
+
+    const approved = ks.reviewEntry(queued.id, 'approve');
+    expect(approved.subjectId).toBe(product.ambiguous ? null : product.id);
+    expect(countSubjects(subjects, 'Vireo')).toBe(1);
+  });
+
+  it('recall by name reaches an entry linked to a product', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    ks.write({ text: 'Vireo launches in Q4', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: false });
+
+    const hits = ks.recall({ query: 'When does it launch?', subjectName: 'Vireo' });
+    expect(hits.map(h => h.text)).toContain('Vireo launches in Q4');
+  });
+
+  it('recall by name reaches an entry linked to an engagement — via the ENGAGEMENT, not a twin', () => {
+    const { ks, subjects } = make();
+    // findOrCreateEngagement stores the NORMALIZED name ("Projekt Orion" → "Orion",
+    // surface form as alias). The first cut of this test was green for the wrong
+    // reason: the raw-name probe missed, write minted an org twin "Projekt Orion",
+    // and recall found THAT — the very defect class this PR removes, recurring for
+    // every "Projekt X". The subjectId assert is what makes the test honest.
+    const eng = subjects.findOrCreateEngagement('Projekt Orion', null);
+    const res = ks.write({ text: 'Orion go-live is in March', subjectName: 'Projekt Orion', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).toBe(eng.id);
+    expect(countSubjects(subjects, 'Projekt Orion')).toBe(1); // no org twin minted
+
+    const hits = ks.recall({ query: 'go-live?', subjectName: 'Projekt Orion' });
+    expect(hits.map(h => h.text)).toContain('Orion go-live is in March');
+  });
+
+  it('an ambiguous PERSON alias stops the chain — the tail must not pick a same-named product', () => {
+    const { ks, subjects } = make();
+    // Two persons answer to "Nimbus"; a product "Nimbus" exists with a real entry.
+    // The pre-tail chain refused this name (findByAlias → null → empty scope); with
+    // the tail appended, that refusal must survive — falling through would read the
+    // product's facts while the name is genuinely three-way ambiguous.
+    subjects.findOrCreate({ kind: 'person', name: 'Nina Nimbus-Keller', aliases: ['Nimbus'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Norbert Nimbus', aliases: ['Nimbus'] });
+    subjects.findOrCreate({ kind: 'product', name: 'Nimbus' });
+    ks.write({ text: 'Nimbus product fact', subjectName: 'Nimbus', subjectKind: 'product', sourceChannel: 'agent', sourceUntrusted: false });
+
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Nimbus' });
+    expect(hits.map(h => h.text)).not.toContain('Nimbus product fact');
+  });
+
+  it('recall via a PERSON alias still works (the resolved form did not lose the row)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'person', name: 'Ada Fischer', aliases: ['Ada'] });
+    ks.write({ text: 'Ada prefers morning calls', subjectName: 'Ada Fischer', sourceChannel: 'agent', sourceUntrusted: false });
+    const hits = ks.recall({ query: 'calls?', subjectName: 'Ada' });
+    expect(hits.map(h => h.text)).toContain('Ada prefers morning calls');
+  });
+
+  it('org precedence is untouched: a name that is BOTH org and product still reads the org scope', () => {
+    const { ks, subjects } = make();
+    const org = subjects.findOrCreate({ kind: 'organization', name: 'Meridian' });
+    subjects.findOrCreate({ kind: 'product', name: 'Meridian' });
+    // Link via explicit kind so the entry sits on the ORG (the pre-existing twin case).
+    const res = ks.write({ text: 'Meridian org fact', subjectName: 'Meridian', subjectKind: 'organization', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).toBe(org.ambiguous ? null : org.id);
+
+    // The read chain hits org-canonical FIRST — the product never shadows it.
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Meridian' });
+    expect(hits.map(h => h.text)).toContain('Meridian org fact');
+  });
+
+  it('an ambiguous remaining-kind name with a REAL entry behind it still reads as a miss, not a pick', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Nimbus' });
+    subjects.findOrCreate({ kind: 'service', name: 'Nimbus' });
+    // The entry exists and sits on the product — a resolver that "picks the first
+    // candidate" WOULD find it, which is exactly the silent wrong-scope read the
+    // ambiguity stop exists to prevent. A miss here must be a refusal, not luck.
+    ks.write({ text: 'Nimbus fact', subjectName: 'Nimbus', subjectKind: 'product', sourceChannel: 'agent', sourceUntrusted: false });
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Nimbus' });
+    expect(hits.map(h => h.text)).not.toContain('Nimbus fact');
+  });
+
+  it('an ambiguous remaining-kind name (two engagements) reads as a miss, not a pick', () => {
+    const { ks, subjects } = make();
+    const clientA = subjects.findOrCreate({ kind: 'organization', name: 'Alpha AG' });
+    const clientB = subjects.findOrCreate({ kind: 'organization', name: 'Beta AG' });
+    subjects.findOrCreateEngagement('Website', clientA.ambiguous ? null : clientA.id);
+    subjects.findOrCreateEngagement('Website', clientB.ambiguous ? null : clientB.id);
+
+    const hits = ks.recall({ query: 'status?', subjectName: 'Website' });
+    expect(hits).toHaveLength(0);
+  });
+});
+
+/**
+ * The review surface must name the subject an approval
+ * WOULD bind to, before the human decides. `reviewEntry` resolves the hint AFTER the
+ * decision, so the reviewer used to approve a link nobody had shown them.
+ *
+ * The whole risk of a preview here is that the resolution it previews MUTATES:
+ * `_resolveWriteSubject` mints an organization for an unknown name, so a preview routed
+ * through it would create the subject as a side effect of LOOKING. Two of the tests below
+ * exist for that alone, and the last one is the one that matters most: the preview and the
+ * approval must agree, or the preview is a well-formatted guess.
+ */
+describe('previewHintTarget — the approve target, resolved without performing it', () => {
+  const tmpDirs: string[] = [];
+
+  function make(): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-preview-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    return { ks: new KnowledgeStore(engine, subjects), subjects };
+  }
+
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Rows carrying `name` across every resolvable kind — the mint detector. */
+  function countSubjects(subjects: SubjectStore, name: string): number {
+    let n = 0;
+    for (const kind of ['person', 'organization', 'product', 'service', 'engagement'] as const) {
+      const r = subjects.findByNameAnyKind(name, { kinds: [kind] });
+      if (r.ambiguous) n += r.candidateIds.length;
+      else if (r.row) n += 1;
+    }
+    return n;
+  }
+
+  it('names the existing subject AND its kind — the kind is what tells a product from an org', () => {
+    const { ks, subjects } = make();
+    const vireo = subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    if (vireo.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+
+    expect(ks.previewHintTarget('Vireo')).toEqual({
+      resolution: 'existing', id: vireo.id, name: 'Vireo', kind: 'product',
+    });
+  });
+
+  /**
+   * The one field this whole surface exists to show — the CANONICAL name behind the hint
+   * that found it. Every other fixture here uses a hint identical to the stored name,
+   * which makes `found.row.name` and `hint` indistinguishable: a mutation swapping them
+   * SURVIVED the suite until this case existed. Two ways the two can differ, both real:
+   * `findCanonical` matches case-insensitively, and `findByAliasResolved` matches a
+   * surface form stored as an alias.
+   */
+  it.each([
+    ['a case variant', 'nordberg ag'],
+    ['an alias', 'NBAG'],
+  ])('shows the canonical subject name, not the hint — %s', (_case, hint) => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG', aliases: ['NBAG'] });
+
+    expect(ks.previewHintTarget(hint)).toMatchObject({
+      resolution: 'existing', name: 'Nordberg AG', kind: 'organization',
+    });
+  });
+
+  it('reports the MINT for an unknown name instead of performing it', () => {
+    const { ks } = make();
+
+    expect(ks.previewHintTarget('Nordberg AG')).toEqual({
+      resolution: 'new', name: 'Nordberg AG', kind: 'organization',
+    });
+  });
+
+  /**
+   * The gegen-Richtung the preview's whole design rests on, and the one a later
+   * convenience would break first: looking must leave the graph untouched. Without this
+   * test "pure lookup" is a claim about code that was just written — and swapping the body
+   * for `_resolveWriteSubject` (the tempting one-liner) passes every other test here.
+   */
+  it('LOOKING does not create: a name absent before the preview is absent after it', () => {
+    const { ks, subjects } = make();
+    expect(countSubjects(subjects, 'Nordberg AG')).toBe(0);
+
+    ks.previewHintTarget('Nordberg AG');
+    ks.previewHintTarget('Nordberg AG');
+
+    expect(countSubjects(subjects, 'Nordberg AG')).toBe(0);
+  });
+
+  it('an ambiguous name is reported as ambiguous, with how many candidates carry it', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+    subjects.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+
+    expect(ks.previewHintTarget('Wikipedia')).toEqual({
+      resolution: 'ambiguous', name: 'Wikipedia', candidates: 2,
+    });
+  });
+
+  it('an empty or whitespace hint has no target at all', () => {
+    const { ks } = make();
+    expect(ks.previewHintTarget('   ')).toBeNull();
+  });
+
+  /**
+   * The requirement: the resolution must appear in the shape the review
+   * surface is served. A hintless entry carries an explicit `null` — "binds nothing" and
+   * "this engine does not compute targets" must not look alike to the UI.
+   */
+  it('withHintTargets pairs every queued entry with its target, null included', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'ACME' });
+    ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    ks.write({ text: 'a fact about nobody', sourceChannel: 'agent', sourceUntrusted: true });
+
+    const served = ks.withHintTargets(ks.listPending());
+
+    expect(served).toHaveLength(2);
+    const acme = served.find(e => e.subjectHint === 'ACME');
+    expect(acme?.subjectTarget).toMatchObject({ resolution: 'existing', name: 'ACME', kind: 'organization' });
+    const hintless = served.find(e => e.subjectHint === null);
+    expect(hintless).toHaveProperty('subjectTarget', null);
+  });
+
+  /**
+   * The dedup cache is the one line in `withHintTargets` that can be wrong QUIETLY. It
+   * exists because a queue is usually several facts about the same client and
+   * `findByNameAnyKind` scans a table per call — but a cache keyed on anything other than
+   * the name shows every entry the FIRST entry's subject, which on a consent surface is a
+   * wrong promise rather than a slow one. Two hints, two targets, one call: found as a
+   * surviving mutant, not by reading the code.
+   */
+  it('two different hints in one call get their OWN targets (the dedup cache is name-keyed)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'ACME' });
+    subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    ks.write({ text: 'Vireo pricing changes', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: true });
+
+    const byHint = new Map(ks.withHintTargets(ks.listPending()).map(e => [e.subjectHint, e.subjectTarget]));
+
+    expect(byHint.get('ACME')).toMatchObject({ resolution: 'existing', name: 'ACME', kind: 'organization' });
+    expect(byHint.get('Vireo')).toMatchObject({ resolution: 'existing', name: 'Vireo', kind: 'product' });
+  });
+
+  /**
+   * The lookup batch is BOUNDED because a pending hint is authored on an untrusted turn:
+   * how many distinct names sit in the queue is not the operator's choice, and a miss is
+   * the most expensive path through the resolver. Past the cap the field is OMITTED
+   * rather than nulled — `null` means "binds nothing", which would be a different wrong
+   * promise about an entry that was simply never looked up.
+   */
+  it('bounds the distinct lookups per batch, and omits the field beyond it', () => {
+    const { ks } = make();
+    for (let i = 0; i < MAX_HINT_LOOKUPS_PER_BATCH + 3; i++) {
+      ks.write({ text: `fact ${i}`, subjectName: `Client ${i}`, sourceChannel: 'agent', sourceUntrusted: true });
+    }
+
+    const served = ks.withHintTargets(ks.listPending(500));
+
+    const resolved = served.filter(e => 'subjectTarget' in e);
+    expect(resolved).toHaveLength(MAX_HINT_LOOKUPS_PER_BATCH);
+    expect(served).toHaveLength(MAX_HINT_LOOKUPS_PER_BATCH + 3);
+    // OMITTED, not null — the shape an older engine sends, which the UI already renders
+    // as the bare hint.
+    expect(served[MAX_HINT_LOOKUPS_PER_BATCH]).not.toHaveProperty('subjectTarget');
+  });
+
+  it('a repeated hint is free: 500 entries about one client stay under the cap', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'ACME' });
+    for (let i = 0; i < MAX_HINT_LOOKUPS_PER_BATCH + 10; i++) {
+      ks.write({ text: `ACME fact ${i}`, subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    }
+
+    const served = ks.withHintTargets(ks.listPending(500));
+
+    expect(served.every(e => 'subjectTarget' in e)).toBe(true);
+    expect(served.at(-1)?.subjectTarget).toMatchObject({ resolution: 'existing', name: 'ACME' });
+  });
+
+  /**
+   * THE test. A preview that disagrees with the approval is worse than no preview: it is a
+   * wrong promise on a surface whose whole job is informed consent. Each of the three arms
+   * is driven through the REAL `reviewEntry` and checked against what it actually did.
+   */
+  it.each([
+    {
+      arm: 'existing',
+      seed: (s: SubjectStore) => { s.findOrCreate({ kind: 'product', name: 'Vireo' }); },
+      hint: 'Vireo',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        const t = target as { resolution: string; id: string };
+        expect(t.resolution).toBe('existing');
+        expect(subjectId).toBe(t.id);
+        expect(countSubjects(subjects, 'Vireo')).toBe(1);   // nothing minted alongside
+      },
+    },
+    {
+      arm: 'new',
+      seed: () => { /* the graph does not know this name */ },
+      hint: 'Nordberg AG',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        expect(target).toMatchObject({ resolution: 'new', kind: 'organization' });
+        expect(subjectId).not.toBeNull();                    // the approval DID mint
+        const org = subjects.findByNameAnyKind('Nordberg AG', { kinds: ['organization'] });
+        expect(!org.ambiguous && org.row?.id).toBe(subjectId);
+      },
+    },
+    {
+      arm: 'ambiguous',
+      seed: (s: SubjectStore) => {
+        s.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+        s.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+      },
+      hint: 'Wikipedia',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        expect(target).toMatchObject({ resolution: 'ambiguous', name: 'Wikipedia', candidates: 2 });
+        expect(subjectId).toBeNull();                        // linked to none of them
+        expect(countSubjects(subjects, 'Wikipedia')).toBe(2); // and no third twin
+      },
+    },
+    {
+      // The case a review found and the first version got WRONG in the expensive
+      // direction. `findByNameAnyKind` has no normalized fallback; `findOrCreate` does
+      // (`subject-store.ts`, the `normalized !== params.name` re-probe). So a punctuated
+      // hint previewed as "will be created" while approval quietly folded it into the
+      // existing subject — a warning about a mint that never happens, and silence about
+      // the subject that actually receives the fact. Every other arm here uses a hint
+      // IDENTICAL to the stored name and therefore cannot see it.
+      arm: 'existing via the normalized fallback',
+      seed: (s: SubjectStore) => { s.findOrCreate({ kind: 'organization', name: 'Meridian AG' }); },
+      hint: 'Meridian AG.',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        // The CANONICAL name, not the punctuated hint — that is what the reviewer needs
+        // to recognise the subject.
+        expect(target).toMatchObject({ resolution: 'existing', name: 'Meridian AG', kind: 'organization' });
+        expect(subjectId).toBe((target as { id: string }).id);
+        expect(countSubjects(subjects, 'Meridian AG')).toBe(1);   // nothing minted
+      },
+    },
+  ])('the preview matches what approval actually does — $arm', ({ seed, hint, expect_ }) => {
+    const { ks, subjects } = make();
+    seed(subjects);
+
+    const queued = ks.write({ text: `${hint} pricing changes`, subjectName: hint, sourceChannel: 'agent', sourceUntrusted: true });
+    expect(queued.status).toBe('pending_review');
+
+    const previewed = ks.withHintTargets(ks.listPending())[0]?.subjectTarget;
+    const approved = ks.reviewEntry(queued.id, 'approve');
+
+    expect(approved?.status).toBe('active');
+    expect_(previewed, approved?.subjectId ?? null, subjects);
   });
 });

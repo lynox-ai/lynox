@@ -398,6 +398,29 @@ describe('projectMessages — usage', () => {
     expect(msg?.usage).toBeUndefined();
   });
 
+  /** A reloaded thread must show the same cost as the live one. `parseUsage`
+   *  maps field-by-field rather than spreading, so a new usage field is dropped
+   *  on resume unless it is named here — which is exactly how the footer would
+   *  silently revert to the main-run-only figure after a refresh. */
+  it('carries spawnCostUsd through a resume', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'delegated'),
+      usage_json: JSON.stringify({
+        tokensIn: 258200, tokensOut: 3177, cacheRead: 20528, cacheWrite: 0,
+        costUsd: 0.3834, spawnCostUsd: 0.0698,
+      }),
+    };
+    expect(projectMessages([r])[0]?.usage?.spawnCostUsd).toBe(0.0698);
+  });
+
+  it('omits spawnCostUsd for a turn that delegated nothing', () => {
+    const r: ThreadMessageRecord = {
+      ...rec(0, 'assistant', 'solo'),
+      usage_json: JSON.stringify({ tokensIn: 100, tokensOut: 20, cacheRead: 0, cacheWrite: 0, costUsd: 0.01 }),
+    };
+    expect(projectMessages([r])[0]?.usage).not.toHaveProperty('spawnCostUsd');
+  });
+
   it('drops malformed usage_json instead of throwing', () => {
     const r: ThreadMessageRecord = { ...rec(0, 'assistant', 'x'), usage_json: 'not-json' };
     const [msg] = projectMessages([r]);

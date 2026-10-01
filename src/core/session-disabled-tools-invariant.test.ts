@@ -28,6 +28,8 @@
  * `disabled_tools` per-test.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 // === Mocks ===
 
@@ -177,6 +179,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
@@ -275,7 +279,9 @@ vi.mock('./embedding.js', () => ({
 
 vi.mock('./project.js', () => ({
   detectProjectRoot: vi.fn().mockReturnValue({ root: '/mock/project', id: 'abc123def456' }),
-  generateBriefing: vi.fn().mockReturnValue(''),
+  // `generateBriefing` returns `Fence | undefined`; `''` passed only because it
+  // is falsy, and a non-empty string would reach `compose` and throw.
+  generateBriefing: vi.fn().mockReturnValue(undefined),
   buildFileManifest: vi.fn().mockReturnValue(new Map()),
   diffManifest: vi.fn().mockReturnValue({ added: [], modified: [], removed: [] }),
   formatManifestDiff: vi.fn().mockReturnValue(''),
@@ -494,5 +500,131 @@ describe('disabled_tools invariant: narrow-only, never widens', () => {
     const exclude = lastAgentExcludeTools();
     expect(exclude).toContain('mail_send'); // user disable still in force
     expect(exclude).not.toContain('spawn_agent'); // session disable correctly lifted
+  });
+});
+
+/**
+ * Follow-up chip recovery — the WIRING, not the behaviour.
+ *
+ * Lives in this file because it needs the same thing the tests above need: a
+ * real Engine + Session with the heavy dependencies mocked, so `_createAgent`
+ * actually runs and we can inspect what the Session handed the Agent.
+ *
+ * These exist because the first version of this feature shipped with twelve
+ * green tests that all called the recovery method directly — so when the wiring
+ * from `SessionOptions` through `agentOverrides` to `Agent.followUpFallback`
+ * was severed at BOTH ends, the entire suite (9000 tests) stayed green and the
+ * feature was silently dead. The behaviour is covered in
+ * `agent-follow-up-fallback.test.ts`; what follows covers the chain that
+ * decides whether that behaviour is ever reached.
+ */
+describe('followUpFallback wiring: SessionOptions → agentOverrides → Agent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegister.mockReturnThis();
+    currentUserConfig = {};
+  });
+
+  /** The flag lands on the Agent INSTANCE (not the ctor config), so read it back. */
+  function agentFlag(session: import('./session.js').Session): boolean | undefined {
+    const inner = session as unknown as { agent: { followUpFallback?: boolean } | null };
+    return inner.agent?.followUpFallback;
+  }
+
+  it('a Web-UI session (followUpFallback: true) reaches the Agent', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ followUpFallback: true });
+    expect(agentFlag(session)).toBe(true);
+  });
+
+  it('a session that did NOT ask for it leaves the Agent default-off (CLI / headless)', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    // Not `undefined`-tolerant on purpose: the Agent field defaults to false, and
+    // a surface that never asked must never pay for a recovery call.
+    expect(agentFlag(session)).toBeFalsy();
+  });
+
+  it('SURVIVES a rebuild — the flag is session identity, not a per-rebuild option', async () => {
+    // `_recreateAgent` rebuilds the Agent on a registry hot-reload, a provider
+    // swap, a tier change. It reconstructs `agentOverrides` field by field, so a
+    // flag omitted from that list is silently dropped and the thread stops
+    // recovering chips mid-conversation.
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ followUpFallback: true });
+    session._recreateAgent({});
+    expect(agentFlag(session)).toBe(true);
+  });
+
+  it('a rebuild does not INVENT it for a session that never asked', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    session._recreateAgent({});
+    expect(agentFlag(session)).toBeFalsy();
+  });
+});
+
+/**
+ * The SAME chain for the turn-end capture pass, and it is here for the same reason
+ * twice over: the sibling above was written after a severed wiring shipped green, and
+ * the capture pass then repeated the failure in a WORSE form — the surface opt-in was
+ * never written at all, so `http-api.ts` had `followUpFallback: true` and no
+ * `captureFallback` line beside it. Seventeen green behaviour tests, a flag that was
+ * false in every production process, and nothing to say so.
+ *
+ * The last test is the one that would have caught it: it asserts the Web-UI surface
+ * actually asks. A wiring test that only proves `createSession({captureFallback:true})`
+ * works proves nothing about whether anyone passes it.
+ */
+describe('captureFallback wiring: SessionOptions → agentOverrides → Agent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegister.mockReturnThis();
+    currentUserConfig = {};
+  });
+
+  function captureFlag(session: import('./session.js').Session): boolean | undefined {
+    const inner = session as unknown as { agent: { captureFallback?: boolean } | null };
+    return inner.agent?.captureFallback;
+  }
+
+  it('a Web-UI session (captureFallback: true) reaches the Agent', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ captureFallback: true });
+    expect(captureFlag(session)).toBe(true);
+  });
+
+  it('a session that did NOT ask for it leaves the Agent default-off', async () => {
+    // Also the spawned-child case: a fan-out of three researchers must not each run
+    // a paid extraction pass on top of the parent's.
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    expect(captureFlag(session)).toBeFalsy();
+  });
+
+  it('SURVIVES a rebuild — a tier change mid-thread must not stop the capture', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ captureFallback: true });
+    session._recreateAgent({});
+    expect(captureFlag(session)).toBe(true);
+  });
+
+  it('a rebuild does not INVENT it for a session that never asked', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    session._recreateAgent({});
+    expect(captureFlag(session)).toBeFalsy();
+  });
+
+  it('the Web-UI SURFACE asks for it — the half that was actually missing', () => {
+    // Source-read, not a session drive: this asserts that the HTTP surface passes the
+    // option at all. Every test above can be green while no caller ever opts in, which
+    // is exactly the state this branch was in until an adversarial round counted the
+    // callers. Pinned next to its sibling so the two cannot drift apart again.
+    const src = readFileSync(path.join(__dirname, '../server/http-api.ts'), 'utf8');
+    expect(src, 'http-api no longer opts the Web-UI session into follow-up recovery')
+      .toMatch(/followUpFallback:\s*true/);
+    expect(src, 'http-api does not opt the Web-UI session into turn-end capture — the pass is DEAD in production')
+      .toMatch(/captureFallback:\s*true/);
   });
 });

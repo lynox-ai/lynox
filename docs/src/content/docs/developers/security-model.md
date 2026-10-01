@@ -28,7 +28,8 @@ For a full audit of the running code, run `pnpm run security` (security scan + v
 
 ## SSRF protection
 
-Every outbound URL from the agent flows through `fetchWithPublicRedirects` in `src/core/network-guard.ts`:
+Every outbound URL from the agent's **HTTP tools** — `http_request`, `api_setup`, `web_research` — flows through
+`fetchWithPublicRedirects` in `src/core/network-guard.ts`:
 
 - DNS is resolved once; the connection is pinned to the validated IP at TCP-connect time (rebind-safe).
 - Each redirect hop is re-validated against the same allowlist.
@@ -36,7 +37,15 @@ Every outbound URL from the agent flows through `fetchWithPublicRedirects` in `s
 - Scheme restricted to `http` / `https`.
 - 5-second connect timeout per hop.
 - Private IP ranges (RFC 1918, loopback, link-local) blocked by default; an opt-in escape hatch exists for Docker / LAN deployments via configured allow-list.
-- Outbound egress can be further restricted via the configurable network policy (`allow-all` / `deny-all` / `allow-list`) — see [Configuration](/daily-use/configuration/#network-policy).
+- Traffic from those three tools can be further restricted via the configurable network policy
+  (`allow-all` / `deny-all` / `allow-list` / `guarded`) — see [Configuration](/daily-use/configuration/#network-policy).
+
+:::caution[This is not a machine-level control]
+The list above describes the HTTP tool path. It is **not** every way traffic leaves the container: the engine's
+own connections (LLM provider, mail, push, backup, connected Google services) and any program started by the
+`bash` tool do not pass through it. Treat `deny-all` as "these three tools refuse", never as "this machine is
+offline" — the stronger property has to come from the network the container runs on.
+:::
 
 ## Bash tool guard
 

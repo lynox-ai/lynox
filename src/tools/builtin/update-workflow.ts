@@ -30,6 +30,7 @@ interface UpdateWorkflowInput {
  * resets the first-run-confirm (the human consented to the OLD steps).
  */
 export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
+  undo: 'restorable',
   definition: {
     name: 'update_workflow_steps',
     description:
@@ -150,6 +151,16 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const wasConfirmed = planned.confirmedAt !== undefined;
     if (wasConfirmed) {
       updated.confirmedAt = undefined;
+    }
+    // The grant rests on the same confirm, so it cannot outlive it. A minted
+    // contract describes the steps it was derived from; once those change it
+    // describes nothing, and a grant with no confirm behind it is exactly the
+    // pair this codebase must not hold. It fails CLOSED either way — a pinned
+    // grant can never be broader than what it pinned, so a stale one denies the
+    // edited step's write — but "denies for the wrong reason" is still a state
+    // nobody should have to reason about.
+    if (updated.capabilityContract !== undefined) {
+      updated.capabilityContract = undefined;
     }
 
     // Persist (INSERT OR REPLACE, same id) — insertPlannedPipeline re-runs the

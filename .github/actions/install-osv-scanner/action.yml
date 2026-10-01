@@ -1,0 +1,75 @@
+name: Install osv-scanner
+description: >
+  Install a pinned, checksummed and provenance-verified osv-scanner onto PATH.
+
+# ONE COPY, ON PURPOSE. Three workflows install this binary — ci.yml (the
+# required `test` gate), release.yml (the publish gate) and dep-scan-daily.yml
+# (the between-release watch). Until 2026-09-02 all three pulled
+# `releases/latest` and each carried its own hand-copied lines; dep-scan-daily
+# even documented itself as "mirrored verbatim from ci.yml" with nothing
+# checking that. A fix that has to be applied per copy is cut in the wrong
+# place, so the copies are gone and the pin lives here.
+#
+# The hash is written down HERE rather than fetched beside the artefact: the
+# release publishes `osv-scanner_SHA256SUMS`, but taking the expectation from
+# the same place as the bytes only proves the transfer. Written here it is under
+# review like an action SHA. Taken from that published file AND recomputed from
+# the downloaded binary, 2026-09-02.
+#
+# ⚠ Bounded. The attestation refuses bytes that no google/osv-scanner release
+# attested. It does NOT bind them to this tag — a downgrade to a genuinely
+# published older release would pass provenance, and passes the checksum only
+# because the checksum moves with the pin. Nothing here covers that.
+
+inputs:
+  version:
+    description: The osv-scanner release to install.
+    required: false
+    default: '2.5.1'
+  sha256:
+    description: Expected SHA-256 of osv-scanner_linux_amd64 for that release.
+    required: false
+    default: 'f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be'
+  token:
+    description: >
+      Passed to `gh attestation verify` only. Bundle verification reads a
+      signature rather than the API and needed no token when this was measured
+      on 2026-09-02, so this exists to keep a future `gh` that reinstates auth
+      from turning a security gate permanently red — the state that earns a
+      `|| true`. It is set on that one command, never for the whole step, so the
+      binary just downloaded never runs with it in its environment.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and install osv-scanner
+      shell: bash
+      env:
+        OSV_SCANNER_VERSION: ${{ inputs.version }}
+        OSV_SCANNER_SHA256: ${{ inputs.sha256 }}
+        OSV_GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" -o /tmp/osv-scanner
+        echo "${OSV_SCANNER_SHA256}  /tmp/osv-scanner" | sha256sum -c -
+        # After the checksum, which is local and free, and before `sudo mv`,
+        # because neither control is worth anything once the file is on PATH.
+        # `--bundle` is load-bearing: without it the command queries the
+        # attestations API, which 404s for a SLSA-generator artefact — a check
+        # that measures the wrong thing and passes for the wrong reason.
+        curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/multiple.intoto.jsonl" -o /tmp/osv-provenance.jsonl
+        GH_TOKEN="${OSV_GH_TOKEN}" gh attestation verify /tmp/osv-scanner \
+          --bundle /tmp/osv-provenance.jsonl \
+          --repo google/osv-scanner \
+          --predicate-type https://slsa.dev/provenance/v0.2 \
+          --signer-repo slsa-framework/slsa-github-generator
+        chmod +x /tmp/osv-scanner
+        sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+        # Diagnostic, not a control — the checksum already fixes the bytes, and
+        # a pin edited without its hash fails there first. What this catches is
+        # narrower: a release whose binary does not report the version it is
+        # published under.
+        osv-scanner --version | tee /tmp/osv-version
+        grep -qx "osv-scanner version: ${OSV_SCANNER_VERSION}" /tmp/osv-version

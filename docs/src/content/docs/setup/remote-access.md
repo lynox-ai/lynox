@@ -104,6 +104,11 @@ services:
     depends_on:
       lynox:
         condition: service_healthy
+    # Required — without it the sidecar joins Compose's implicit `default`
+    # network instead, and cannot resolve or reach `lynox`. Compose accepts the
+    # file and the containers start, so the failure is silent.
+    networks:
+      - internal
 ```
 
 Get the tunnel token from the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com/) → Tunnels → Create.

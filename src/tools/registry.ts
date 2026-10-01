@@ -21,6 +21,26 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /**
+   * ⚠ A SECOND resolution of the same allow/deny vocabulary, and it stays one on purpose.
+   *
+   * Routing it through `resolveTools` — the exit every route that derives a tool list FROM
+   * another agent's list goes through — was built and then pulled back out of the hardening
+   * change, for a reason worth keeping:
+   * the two are equivalent in all four shapes (`[]` admits nothing in both, `undefined`
+   * filters in neither, same for the denylist), so **no test can tell them apart** and a
+   * mutant reverting the routing survives by construction. An unobservable change in a
+   * security diff is a liability rather than an improvement — nobody can review what nothing
+   * can witness.
+   *
+   * Deleting it instead is the other honest answer and is NOT available here: `ToolRegistry`
+   * is public API (`src/index.ts`, and `package.json` exports `.`), so a method nothing in
+   * this repo calls may still have a consumer outside it.
+   *
+   * What remains is the shape this duplication has: a template for the next route that
+   * forgets the bound. The delete-or-route decision is tracked outside this repo, because it
+   * needs an answer about external consumers that this repo cannot give.
+   */
   scopedView(config: ToolScopeConfig): ToolEntry[] {
     let entries = this.getEntries();
     if (config.allowedTools) {

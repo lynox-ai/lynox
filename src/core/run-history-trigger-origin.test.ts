@@ -2,10 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { RunHistory } from './run-history.js';
 
 /**
- * Run attribution (arc:model-selector P1, DEF-0097): `insertRun` persists
- * `trigger_origin` (v48). A WorkerLoop turn carries its trigger source; a user
- * chat turn passes nothing → NULL = "unattributed / legacy". Verified against the
- * REAL migration path.
+ * `insertRun` persists `trigger_origin` (v48). A WorkerLoop turn carries its
+ * trigger source; a user chat turn passes nothing → NULL = "unattributed /
+ * legacy". Verified against the REAL migration path.
  */
 describe('RunHistory trigger_origin (P1 run attribution)', () => {
   it('persists a supplied trigger_origin and leaves a user turn NULL', () => {

@@ -1,23 +1,24 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
-import { Agent, RunAbortedError } from '../../core/agent.js';
-import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { Agent, RunAbortedError, type SendStop } from '../../core/agent.js';
+import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
-import { getRole, getRoleNames } from '../../core/roles.js';
+import { getRole, getRoleNames, roleToolProfile } from '../../core/roles.js';
+import { scopeSecretStore, defaultVaultScope, narrowVaultScope, vaultScopeOf, providerKeySlotReader } from '../../core/secret-scope.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRoutingMode } from '../../core/tier-resolver.js';
-import { resolveProviderApiKey } from '../../core/llm/provider-keys.js';
+import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
-import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId } from '../../core/prompts.js';
+import { compose, engineText, escapeXml, wrapUntrustedData, renderFence } from '../../core/data-boundary.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -55,6 +56,32 @@ export function abortSpawnedAgents(): void {
 }
 
 /**
+ * Map the child's `send()` outcome onto the `runs.stop_reason` column. Until
+ * 2026-08-20 spawn stamped `'end_turn'` unconditionally on the completed path,
+ * so a child stopped by its turn cap with a tool call still pending was
+ * indistinguishable in the ledger from one that finished on its own — every
+ * empty sub-agent of the production thread this was found in read `end_turn`
+ * while in truth `max_turns` had run out. The column is free text (the failure
+ * path already writes error messages into it) and nothing in either repo
+ * switches on its value (the debug export passes it through; the web-ui reads
+ * the live `turn_end` stream field, not this column), so two new words here
+ * break nothing and name the knob the operator has to turn.
+ */
+export function ledgerStopReason(stop: SendStop | null): string {
+  switch (stop?.cause) {
+    case 'iteration_cap':
+    case 'absolute_cap':
+      return 'max_turns';
+    case 'budget_cap':
+      return 'max_budget';
+    case 'max_tokens':
+      return 'max_tokens';
+    default:
+      return 'end_turn';
+  }
+}
+
+/**
  * Estimate the cost for a single spawn agent so `checkSessionBudget` can
  * refuse a fan-out that would blow the session ceiling. Models input as
  * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
@@ -77,6 +104,45 @@ function estimateSpawnCost(model: string, maxIterations: number): number {
 
 interface SpawnAgentInput {
   agents: SpawnSpec[];
+}
+
+/**
+ * A profile's model runs at the DEEP band, OR its band is UNKNOWN (the model_id
+ * is not in `MODEL_CAPABILITIES` — common for BYOK / openai-compat custom
+ * endpoints). Both are gated conservatively: a profile pins an arbitrary
+ * model_id whose cost modelCapability cannot prove, so treating unknown as
+ * "not deep" would let an expensive custom model run unconsented (the exact
+ * asymmetry `spawn_agent({model:'deep'})` is gated but `spawn_agent({profile:
+ * custom-expensive})` is not). Mirrors `profileExceedsMaxTier`, which refuses
+ * unknown bands under a restrictive ceiling for the same reason. Single source
+ * of truth for the rule — the check, the actual-tier report, and the headless
+ * refuse all read it.
+ */
+function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
+  const band = modelCapability(profile.model_id)?.tier;
+  return band === 'deep' || band === undefined;
+}
+
+/**
+ * Does a spawn spec route a child onto a tier that needs consent? The consent
+ * `check` (permission guard) + the headless clamp (handler) MUST agree, so they
+ * share this one predicate. Two paths:
+ *  1. a profile whose band is deep OR unknown — A2: `resolveSpawnChildRouting.tier`
+ *     reflects the CLAMPED tier, not the profile's band, so a profile pinning a
+ *     deep model returns `.tier='balanced'` while `.model=<deep id>`. Read the
+ *     band directly via `modelCapability` (and treat unknown conservatively).
+ *  2. the resolved tier is deep. `resolveSpawnChildRouting` already clamps
+ *     `spec.model` against the tenant `max_tier`, so the resolved tier is both
+ *     necessary and sufficient — a bare `spec.model === 'deep'` shortcut would
+ *     OVER-trigger when a ceiling clamps deep→balanced (warning about a deep
+ *     cost the run demonstrably does not incur), so it is deliberately NOT used.
+ */
+function specResolvesDeep(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider): boolean {
+  const profile = spec.profile ? userConfig.model_profiles?.[spec.profile] : undefined;
+  if (profile && profileBandIsDeepOrUnknown(profile)) return true;
+  const role = spec.role ? getRole(spec.role) : undefined;
+  const { tier } = resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider });
+  return tier === 'deep';
 }
 
 /**
@@ -209,7 +275,12 @@ export function resolveSpawnChildProviderConfig(input: {
 // Control characters (incl. CR/LF) that could be used to spoof log lines or
 // break terminal rendering when `name` is echoed in error messages, channel
 // events, or the `## ${name}` markdown header.
-const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+// U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are line
+// breaks that `[\x00-\x1f\x7f]` does not cover. They matter here for the same
+// reason CR/LF do: a name is echoed one-per-line in the all-failed message, so a
+// name carrying a line break forges an extra row — and a forged row can claim a
+// child SUCCEEDED inside a message whose whole job is to report that none did.
+const CONTROL_CHARS = /[\x00-\x1f\x7f\u0085\u2028\u2029]/;
 
 function validateSpawnInput(input: SpawnAgentInput): void {
   if (!Array.isArray(input.agents) || input.agents.length === 0) {
@@ -248,6 +319,22 @@ function validateSpawnInput(input: SpawnAgentInput): void {
         );
       }
     }
+    if (spec.secret_scope !== undefined && spec.secret_scope !== null) {
+      // The JSON schema's `oneOf` is advice to the model, not a gate: the value
+      // arriving here is whatever the model emitted. Unchecked, a bare string
+      // spreads into its characters and becomes a scope of single letters — a
+      // nonsense scope that happens to fail closed, which is the kind of accident
+      // that reads as working until the day it does not.
+      const sc: unknown = spec.secret_scope;
+      const ok = sc === 'all'
+        || (Array.isArray(sc) && sc.every((n) => typeof n === 'string' && n.length > 0));
+      if (!ok) {
+        throw new Error(
+          `spawn_agent "${spec.name}": secret_scope must be an array of vault key names, or the string "all". `
+          + `Got ${Array.isArray(sc) ? 'an array with a non-string entry' : typeof sc === 'string' ? `the string "${sc}"` : typeof sc}.`,
+        );
+      }
+    }
   }
 }
 
@@ -260,11 +347,118 @@ function validateSpawnInput(input: SpawnAgentInput): void {
  * makes a silent sub-agent failure undiagnosable after the fact (the exact gap
  * that hid the v2.1.1 hybrid 404s until the DB was read by hand).
  */
-export function formatSpawnError(err: unknown): string {
+/** How deep a `cause` chain is rendered before it is cut. Foreign data. */
+const MAX_CAUSE_DEPTH = 8;
+
+/** Per-child ceiling on the rendered error. Bytes, because depth does not bound them. */
+const MAX_RENDERED_ERROR_CHARS = 2_000;
+
+/** Everything the name gate rejects, flattened wherever a field is rendered on
+ *  its own line. Deliberately the SAME class as `CONTROL_CHARS`: a subset would
+ *  hold the wide, unvalidated field to a looser rule than the narrow, already
+ *  validated one. */
+const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
+
+export function formatSpawnError(err: unknown, depth = 0): string {
   if (!(err instanceof Error)) return String(err);
-  const status = (err as { status?: unknown }).status;
-  const statusPrefix = typeof status === 'number' ? `[${status}] ` : '';
-  return `${statusPrefix}${err.name}: ${err.message}`;
+  // A cause chain is foreign data — an SDK may hand back a cycle, and this
+  // function also runs on the PARTIAL-failure path, where a throw would discard
+  // the results of children that SUCCEEDED. That is the failure direction this
+  // file exists to remove, one level down.
+  //
+  // ONE bound, not two. A seen-set sat beside this depth stop and no test could
+  // tell them apart — deleting the seen-set left the suite green, because after
+  // eight levels the depth stop cuts a cycle anyway. Two guards where one
+  // suffices is a guard nobody is checking: it survives every mutation and
+  // reads as defence.
+  const cutStatus = (err as { status?: unknown }).status;
+  const cutPrefix = typeof cutStatus === 'number' ? `[${cutStatus}] ` : '';
+  if (depth >= MAX_CAUSE_DEPTH) {
+    // The prefix survives the cut. Dropping it loses the status — the one field
+    // this whole change exists to keep in front of the reader.
+    return `${cutPrefix}${err.name}: ${err.message} (cause chain truncated)`;
+  }
+  const statusPrefix = cutPrefix;
+  // The cause is formatted by THIS function too, not string-interpolated by the
+  // caller: `${err.cause}` on an Error renders as "Error: msg" and drops the
+  // status, which is the one field that separates a mis-route from a bad task.
+  const { cause } = err;
+  const causeSuffix = cause === undefined || cause === null
+    ? ''
+    : ` (cause: ${cause instanceof Error ? formatSpawnError(cause, depth + 1) : String(cause)})`;
+  return `${statusPrefix}${err.name}: ${err.message}${causeSuffix}`;
+}
+
+/**
+ * The message for the case where EVERY child died, which is the case the parent
+ * is least able to act on and was until now told the least about.
+ *
+ * The partial-failure path already renders each child as `## name — FAILED` with
+ * `formatSpawnError`, and the comment at that call says why: the HTTP status is
+ * what makes a provider mis-route read as a config failure rather than a vague
+ * one. When all of them failed, that rendering was built and then thrown away —
+ * the throw joined bare `err.message`s, so a real fan-out reported
+ * `All sub-agents failed: 404 no Route matched with those values; 404 no Route
+ * matched with those values; 404 no Route matched with those values` and named
+ * neither the children nor the status (dogfood 2026-09-24).
+ *
+ * It reports and does not explain, and that took four rounds to accept. Each
+ * round wrote a sentence naming the cause; each was wrong for a case the next
+ * round found; and each fix was a better SENTENCE rather than a different kind
+ * of statement. The summary is now a count, and the reader draws the conclusion
+ * from the lines above it.
+ */
+export function formatAllFailedMessage(failures: readonly { name: string; err: unknown }[]): string {
+  if (failures.length === 0) return 'No sub-agent results to report.';
+
+  // BOTH fields get the SAME treatment, and the wide one is the reason. The
+  // NAME is narrow — `validateSpawnInput` length-caps it and rejects the whole
+  // control range. `err.message` is wide: gateway bodies, HTML pages, nested
+  // failures, none of it validated. In a one-per-line list anything that ends a
+  // line in either field invents a row, and a forged row can claim a child
+  // SUCCEEDED inside a message whose whole job is to report that none did.
+  // Giving one field two guards and the other none is worse than giving neither
+  // any, because it reads as closed.
+  //
+  // The flattened set is the same class the name gate REJECTS, not a subset: an
+  // earlier round flattened five characters while the gate rejected thirty-five,
+  // so vertical tab, form feed and ESC reached the output untouched.
+  const clean = (v: string): string => escapeXml(v).replace(UNSAFE_IN_LINE, ' ');
+  // Per-error byte cap. The depth bound on the cause chain terminates it; it
+  // does not bound it — eight levels of a 100 KB message, times ten children,
+  // measured at 9 MB, and this string is thrown into the parent's context on
+  // the one path that deliberately never truncates. Depth was the wrong axis:
+  // the cost is bytes.
+  const cap = (v: string): string =>
+    v.length <= MAX_RENDERED_ERROR_CHARS ? v : `${v.slice(0, MAX_RENDERED_ERROR_CHARS)}… (${String(v.length)} chars, truncated)`;
+  const formatted = failures.map((f) => cap(clean(formatSpawnError(f.err))));
+  const lines = failures.map((f, i) => `- ${clean(f.name)}: ${formatted[i] as string}`);
+
+  // Counted off the RENDERED line, not off a field beside it. A status is used
+  // when there is one — the motivating gateway 404 would otherwise be called
+  // unrelated the moment the gateway echoed a request id. Without a status the
+  // discriminator is the line the reader actually sees, so the count and the
+  // list cannot disagree: reading `err.message` alone called three undici
+  // failures identical (the difference lives in `cause.code`, which the line
+  // shows and the message does not).
+  const classOf = (err: unknown, rendered: string): string => {
+    const status = err instanceof Error ? (err as { status?: unknown }).status : undefined;
+    return typeof status === 'number' ? `status:${String(status)}` : `line:${rendered}`;
+  };
+  const distinct = new Set(failures.map((f, i) => classOf(f.err, formatted[i] as string))).size;
+
+  // A COUNT, not a sentence. Four rounds wrote a sentence naming the cause and
+  // every one was wrong for a case the next round found — most recently "one
+  // condition to look at rather than N tasks to re-check", which is exactly
+  // backwards for N oversized tasks that all return the same 400, and "they do
+  // not share one cause", which is wrong when one abort hits an idle child and
+  // a mid-flight one differently. Each fix was a better sentence rather than a
+  // different kind of statement. The data does not determine the cause; the
+  // reader has the lines above and draws it. A number cannot overclaim.
+  const errs = failures.length === 1 ? '1 error' : `${String(failures.length)} errors`;
+  const count = failures.length === 1 ? '1 sub-agent' : `${String(failures.length)} sub-agents`;
+  return `All ${count} failed and none returned a result.\n\n` +
+    `${lines.join('\n')}\n\n${errs}, ${String(distinct)} distinct.`;
 }
 
 /**
@@ -274,7 +468,7 @@ export function formatSpawnError(err: unknown): string {
  * an agent-set (hence prompt-injectable) profile from escaping the cost ceiling.
  *
  * REFUSE, not clamp: a profile is a specific endpoint, so you cannot substitute a
- * cheaper model on it (DEF-0080). Semantics:
+ * cheaper model on it. Semantics:
  *  - no ceiling (`max_tier` unset, i.e. self-host default) → never exceeds.
  *  - `max_tier: 'deep'` → not restrictive (nothing is above deep) → never exceeds,
  *    including an unregistered model.
@@ -285,7 +479,7 @@ export function formatSpawnError(err: unknown): string {
 export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier | undefined): boolean {
   // Delegates to the shared predicate — the same rule now guards the tier
   // chokepoint (`resolveRunModel`), so a raw pipeline `step.model` id is refused
-  // the same way a profile is (DEF-0080). (`spec.model` here is separately enum-
+  // the same way a profile is. (`spec.model` here is separately enum-
   // gated to tiers, so it never reaches the chokepoint's raw-id branch.) Kept as a
   // domain-named wrapper.
   return modelIdExceedsMaxTier(profileModelId, maxTier);
@@ -386,11 +580,11 @@ function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfi
   if (!profile) return;
 
   // A profile sets `model = profile.model_id`, bypassing the `max_tier` clamp
-  // that `resolveRunModel` applies to a tier. That is the injection lever
-  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
+  // that `resolveRunModel` applies to a tier. That is the injection lever:
+  // a prompt-injected `spawn({profile})` could route a child to a
   // model above the tenant's cost ceiling. A profile cannot be clamped DOWN (you
   // cannot substitute a different model on someone's endpoint), so the
-  // enforcement is REFUSE, not clamp (DEF-0080). Cross-provider hybrid spawn is
+  // enforcement is REFUSE, not clamp. Cross-provider hybrid spawn is
   // unaffected — that runs on the tier path.
   if (profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
     const band = modelCapability(profile.model_id)?.tier;
@@ -405,10 +599,76 @@ function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfi
   }
 }
 
+/**
+ * The parent's prompt callbacks, wrapped so every prompt a child raises names
+ * the child as its cause.
+ *
+ * WHY A WRAPPER AND NOT A SENTENCE IN THE TOOL. A consent dialog is answered on
+ * what it shows, and what it shows is "Allow / Deny" over a question whose
+ * asker the user cannot see. From a child the asker is not the person's own
+ * turn, and that single circumstance is what would make an otherwise ordinary
+ * request suspicious. Fourteen call sites raise such dialogs; this is the one
+ * place all fourteen pass through.
+ *
+ * WHY THE ORIGIN CANNOT CARRY THE WARNING. `spec.name` and `spec.task` are
+ * written by the parent model — the same model an injected instruction is
+ * steering when this matters. A parent free to name its child names it
+ * "Main assistant". So these two travel as VALUES: the renderer frames them
+ * ("A sub-agent asked"), and that frame is true whatever the name claims.
+ *
+ * Merge order is `{...ours, ...m}`, matching `buildSubAgentPromptCallbacks`:
+ * a caller-supplied meta wins, and in a nested spawn the DEEPEST wrapper is the
+ * innermost caller, so the immediate asker ends up named rather than the
+ * outermost one. A child inside a pipeline step keeps both sets — the step
+ * fields come from the parent's own wrapper, one frame further out.
+ */
+function promptCallbacksWithOrigin(
+  parent: IAgent,
+  spec: SpawnSpec,
+): { promptUser?: PromptUserFn | undefined; promptSecret?: PromptSecretFn | undefined; promptTabs?: PromptTabsFn | undefined } {
+  // `subagent: true` is the claim; the two names are decoration on it. Keep them
+  // in that order in your head, because the first version had only the names and
+  // a child called "​" then rendered no origin line at all.
+  const origin: PromptMeta = { subagent: true, subagentName: spec.name, subagentTask: spec.task };
+  const { promptUser, promptSecret, promptTabs } = parent;
+  return {
+    // Each stays undefined when the parent had none — an autonomous or headless
+    // parent has no channel, and manufacturing a callback here would turn every
+    // tool's "no interactive channel" refusal into a hang.
+    promptUser: promptUser ? (q, opts, m) => promptUser(q, opts, { ...origin, ...m }) : undefined,
+    promptSecret: promptSecret ? (n, p, k, m) => promptSecret(n, p, k, { ...origin, ...m }) : undefined,
+    promptTabs: promptTabs ? (qs, m) => promptTabs(qs, { ...origin, ...m }) : undefined,
+  };
+}
+
+/**
+ * Tell the parent which vault keys its child asked for and did not get.
+ *
+ * Without this the parent reads whatever the failing tool said, and every tool
+ * that meets a scoped-out key sees the same thing an empty vault produces —
+ * `resolve()` returning null. `http.ts`, for one, turns that into "the vault has
+ * no access_token under X, mint one first", which is a correct sentence for a
+ * missing key and the wrong instruction for a scoped-out one: the token exists.
+ * The note names the actual cause and the actual remedy, beside that message.
+ */
+function appendDeniedKeyNote(result: string, denied: ReadonlySet<string>): string {
+  if (denied.size === 0) return result;
+  const names = [...denied].join(', ');
+  // "Refused", not "not resolved": a denial can come from a read, a delete or a
+  // consent record, and a sentence that names only the read sends the parent
+  // looking for a missing value when the child was turned away from a delete.
+  return `${result}\n\n[secret_scope] This sub-agent asked for ${denied.size === 1 ? 'a vault key' : 'vault keys'} its spawn order did not name: ${names}. `
+    + `${denied.size === 1 ? 'It was' : 'They were'} refused — if the key exists, this is a scope decision, not a missing secret. `
+    + `To grant ${denied.size === 1 ? 'it' : 'them'}, re-spawn with secret_scope: [${[...denied].map(n => `"${n}"`).join(', ')}].`;
+}
+
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
-  parentOnStream: StreamHandler | null,
+  // Emitting: this handler is wired onto the CHILD agent, i.e. it is the sink a
+  // core producer writes into. Keeping it loose here would reintroduce at the
+  // boundary exactly what the child was forced to decide.
+  parentOnStream: EmittingStreamHandler | null,
   childDepth: number,
   /**
    * The child's actual spend, reported once it stops for ANY reason — done,
@@ -416,7 +676,7 @@ async function executeThinker(
    * and the caller needs that number even though it never receives a result.
    */
   onSettled?: (costUsd: number) => void,
-): Promise<{ result: string; childRunId: string | undefined; model: string }> {
+): Promise<{ result: string; childRunId: string | undefined; model: string; stop: SendStop | null }> {
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
 
@@ -425,6 +685,52 @@ async function executeThinker(
   // and a fifth refusal added to one and not the other is exactly how the UI came
   // to announce a model the run refused.
   assertSpawnRoutingPermitted(spec, userConfig);
+
+  // The child's reach into the vault. Default = the keys THIS spawn order names
+  // and nothing else; the parent's own vault is not inherited by omission.
+  //
+  // Resolved here rather than in the handler on purpose: the comment above says
+  // the two paths must never diverge, and a second copy of this decision is
+  // exactly how they would. This is the path that builds the child, so this is
+  // where its reach is decided.
+  const parentScope = vaultScopeOf(parentAgent.secretStore);
+  // Read from the fields the caller writes as INSTRUCTION, never from `context`.
+  // `context` is documented on the schema as carrying verbatim excerpts of source
+  // material, so it is the one field of the order that routinely holds text
+  // somebody else wrote. Scanning it would let a pasted document widen the scope
+  // of the child that reads it — the wrong direction for a default to fail in.
+  // A key genuinely needed for material quoted in `context` is named in
+  // `secret_scope`, and the denial note says so when one is missing.
+  const requestedScope = spec.secret_scope
+    ?? defaultVaultScope({ task: spec.task, system_prompt: spec.system_prompt });
+  const narrowed = narrowVaultScope(parentScope, requestedScope);
+  if ('refusal' in narrowed) {
+    throw new Error(`spawn_agent "${spec.name}": ${narrowed.refusal}`);
+  }
+  // Names the child asked for and did not get. Collected so the PARENT is told
+  // the real reason — a tool that only sees `resolve() === null` reports the key
+  // as missing from the vault and sends the user off to create one they already
+  // have.
+  const deniedKeys = new Set<string>();
+  const childSecretStore = parentAgent.secretStore
+    ? scopeSecretStore(parentAgent.secretStore, narrowed.scope, (n) => deniedKeys.add(n))
+    : undefined;
+
+  // The ONE read that happens outside the child's scope, named here rather than
+  // left to be discovered: the child's own LLM credential. It is provisioned by
+  // the spawner exactly as the parent's is, resolved here in the parent's context
+  // and handed to the child as a configured wire credential — never as a vault
+  // name the child can address. Scoping it would not narrow the child's reach; it
+  // would stop the child from running at all wherever the key lives in the vault
+  // rather than the environment, which is every BYOK tenant.
+  //
+  // Bounded anyway. Before this, the closure below carried the parent's WHOLE
+  // vault, so the exception was unlimited in what it could have read even though
+  // it only ever read one slot. `PROVIDER_KEY_SLOTS` is derived from the model
+  // catalog, so a preset that introduces a new slot stays covered.
+  const wireKeyReader = parentAgent.secretStore
+    ? providerKeySlotReader(parentAgent.secretStore, PROVIDER_KEY_SLOTS)
+    : undefined;
 
   const resolved = spec.role ? getRole(spec.role) : undefined;
   const profile: ModelProfile | undefined = spec.profile
@@ -446,7 +752,7 @@ async function executeThinker(
     parent: readParentProviderConfig(parentAgent),
     baseProvider,
     userConfig,
-    resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: parentAgent.secretStore, userConfig }),
+    resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: wireKeyReader, userConfig }),
   });
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
@@ -459,10 +765,11 @@ async function executeThinker(
   const effort = profile ? undefined : (spec.effort ?? resolved?.effort);
   const maxIterations = spec.max_turns;
 
-  // Tool scoping — map RoleConfig fields to resolveTools interface
-  const roleProfile = resolved
-    ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
-    : null;
+  // Tool scoping — one shared mapping (`roleToolProfile`), so a role's grant shape
+  // cannot differ between this path and the inline pipeline path in
+  // orchestrator/runtime-adapter.ts. A `readOnly` role resolves to
+  // READ_ONLY_TOOL_SURFACE here.
+  const roleProfile = resolved ? roleToolProfile(resolved) : null;
   // Use the parent's FILTERED tool list (honours user-disabled tools from
   // Settings → Tool Toggles). Without this, a spawn from a prompt-injected
   // parent could re-introduce tools the user explicitly disabled — the
@@ -471,7 +778,9 @@ async function executeThinker(
 
   // Context injection (XML-escaped to prevent tag injection)
   const task = spec.context
-    ? `<context>${escapeXml(spec.context)}</context>\n\n${spec.task}`
+    // escapeXml stays: it also inerts tags OTHER than this one. renderFence adds
+    // the close-tag neutralisation in every encoding, from one place.
+    ? compose([renderFence('context', escapeXml(spec.context)), engineText(spec.task)], '\n\n')
     : spec.task;
 
   // Isolated memory
@@ -608,19 +917,44 @@ async function executeThinker(
     // parent's autonomy, and a researcher spawned to query the user's
     // Stripe/Notion API must be able to authenticate and persist a refresh
     // token. Surfaced explicitly in the PR body, not hidden.
-    secretStore: parentAgent.secretStore,
+    // T2-X1 part 2, NARROWED: the child gets a scoped VIEW of the parent's
+    // SecretStore, not the store itself. Everything the old comment described
+    // still holds inside the scope — `ask_secret`, vault reads, credential
+    // lookups and `secretStore.set` all work, because a sub-agent told to query
+    // the user's Stripe account must be able to authenticate and persist a
+    // refreshed token. What changed is the SIZE of "the vault" for that child:
+    // by default only the keys its own spawn order named. Masking is deliberately
+    // NOT scoped (see secret-scope.ts) — a child that stopped masking the keys it
+    // cannot read would spill them into its output instead of containing them.
+    secretStore: childSecretStore,
     // T2-X1 part 3: pass the three prompt callbacks so an `ask_user`/
     // `ask_secret`/`ask_tabs` invoked by the child surfaces to the same UI
     // the parent uses. Without these, child tool invocations that need user
     // input silently fail (the prompt callback is undefined).
-    promptUser: parentAgent.promptUser,
-    promptSecret: parentAgent.promptSecret,
-    promptTabs: parentAgent.promptTabs,
+    //
+    // WRAPPED, not passed through: a prompt raised inside a child otherwise
+    // arrives at the dialog indistinguishable from one the user's own turn
+    // raised. The pipeline path has stamped its origin since the workflow
+    // spawners started wrapping (`buildSubAgentPromptCallbacks`); this is the
+    // same treatment for the OTHER way a sub-agent comes into being. It covers
+    // every consent surface at once — there are fourteen `promptUser` call
+    // sites across thirteen modules, and putting the sentence in any one tool
+    // would leave the other thirteen exactly as they are.
+    ...promptCallbacksWithOrigin(parentAgent, spec),
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
-    // onto the child and the child's downstream code (memory writes,
-    // tool-call recording in engine-init's toolEnd subscriber, etc.) can
-    // attribute work to this run.
+    // onto the child and the child's downstream code (memory writes, tool-call
+    // recording) can attribute work to this run.
     currentRunId: childRunId,
+    // Inherit the parent's tool-call sink. Together with `currentRunId` above,
+    // this is what finally puts a child's calls on the CHILD's row: the sink
+    // books whatever run id the caller hands it, and the child hands its own.
+    //
+    // Inheriting rather than building a fresh sink is deliberate — the parent's
+    // closure holds the Session's RunHistory and per-run sequence counters, and
+    // it is also the thing that keeps counting these calls toward the
+    // http_request and mail rate limits. A child with no sink would run its
+    // fan-out unmetered.
+    recordToolCall: parentAgent.recordToolCall,
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
@@ -641,12 +975,29 @@ async function executeThinker(
     // without this an injected write would launder to active+pinned through the child. Arm the
     // child's STICKY conversation latch (survives its send() per-run reset, unlike sawUntrustedData)
     // so any such write routes to pending_review. Over-taints in the safe direction only.
-    if (deriveTurnUntrusted(parentAgent)) {
+    // Propagate the parent's CAUSE, not a blanket marker. `noteUntrustedData()` arms the
+    // run-scoped marker as well as the sticky latch — which claims "this run handled wrapped
+    // external content" for a child that merely inherited a conversation's history. The gate
+    // is identical either way (both OR into `deriveTurnUntrusted`), but the marker is also
+    // what gets REPORTED: the review chip names the cause, so a wrong one tells the operator
+    // this turn read something external when nothing did. `agent.ts` says as much where it
+    // introduces `restoreConversationTaint` for exactly this distinction.
+    const parentCause = describeTurnUntrusted(parentAgent);
+    if (parentCause === 'conversation') {
+      childAgent.restoreConversationTaint?.();
+    } else if (parentCause !== 'none') {
       childAgent.noteUntrustedData();
     }
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
+    // Built HERE, not at the return: `runHistory.updateRun` below stores
+    // `responseText`, and appending the note only on the way out left the run row
+    // holding a version of the result the parent never saw — the one place
+    // somebody looks when asking afterwards why a key came back empty.
+    const notedResult = appendDeniedKeyNote(result, deniedKeys);
+    // Why the child stopped — the string above cannot say (see `SendStop`).
+    const stop: SendStop | null = childAgent.getLastStop();
 
     // Wave 1.2 replay (b): a spawned child shares the parent's Memory by default
     // (`memory` above resolves to `parentAgent.memory` unless `isolated_memory`). If the
@@ -656,8 +1007,22 @@ async function executeThinker(
     // FULL union, not the bare marker — a child that read external content via a non-wrapping
     // tool (web_research/mail/read_file) must taint the parent too, symmetric with the
     // parent→child seed above. No-op when the child ran with isolated memory (`memory === undefined`).
-    if (memory !== undefined && deriveTurnUntrusted(childAgent)) {
-      parentAgent.noteUntrustedData?.();
+    if (memory !== undefined) {
+      // Same distinction on the way back: a child tainted only by the inherited conversation
+      // must not hand the parent a marker it never earned.
+      const childCause = describeTurnUntrusted(childAgent);
+      if (childCause === 'conversation') {
+        // `restoreConversationTaint` is OPTIONAL on IAgent, and an implementation
+        // that omits it would lose the child→parent hand-off SILENTLY — no error,
+        // just a turn that looks clean and is not (pipeline.ts already calls
+        // `noteUntrustedData` optionally, so partial IAgent implementations have
+        // precedent). Fall back to the coarser signal: over-tainting the parent's
+        // run marker is the safe direction; losing the taint is not.
+        if (parentAgent.restoreConversationTaint) parentAgent.restoreConversationTaint();
+        else parentAgent.noteUntrustedData?.();
+      } else if (childCause !== 'none') {
+        parentAgent.noteUntrustedData?.();
+      }
     }
 
     // T2-X1 part 5: record the child's actual LLM spend into the same
@@ -671,13 +1036,20 @@ async function executeThinker(
       try {
         const snap = childAgent.getCostSnapshot();
         runHistory.updateRun(childRunId, {
-          responseText: result,
+          responseText: notedResult,
           tokensIn: snap?.inputTokens ?? 0,
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
+          // The child's calls are now written to the child's own run, so this
+          // column has to be written too — otherwise the rows exist while the
+          // count beside them reads 0, and the aggregates that SUM it
+          // (`run-history-analytics.ts`) lose every sub-agent call. Before the
+          // sink they landed in the PARENT's count, so the total was right even
+          // though the attribution was not.
+          toolCallCount: childAgent.getRecordedToolCallCount(),
           status: 'completed',
-          stopReason: 'end_turn',
+          stopReason: ledgerStopReason(stop),
         });
       } catch {
         // Persistence failure — non-fatal. The child's result still
@@ -702,7 +1074,7 @@ async function executeThinker(
       reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
     }
 
-    return { result, childRunId: childAgent.currentRunId, model };
+    return { result: notedResult, childRunId: childAgent.currentRunId, model, stop };
   } catch (err) {
     // Mark the child run failed/aborted so the cost cap and history UI don't
     // show it as still-running. Fires for BOTH ctor failures (childAgent
@@ -720,12 +1092,19 @@ async function executeThinker(
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
+          // Same column on the terminal-failure path: a child that made 60 calls
+          // and then died must not read as "0 tools", which is exactly the
+          // misreading that started this whole investigation (a customer instance, 2026-08-10).
+          toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
           status: childAborted ? 'aborted' : 'failed',
           stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
           // Record the FULL structured error so a failed sub-agent is diagnosable
           // (not just status=failed + a null error_text). Skipped for an abort —
           // an intentional interruption isn't an error to store.
-          errorText: childAborted ? undefined : formatSpawnError(err),
+          // A child that died after being refused a key still owes that reason:
+          // "it failed" and "it failed after the vault refused it X" send the
+          // reader to different repairs.
+          errorText: childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys),
         });
       } catch { /* swallow */ }
     }
@@ -779,10 +1158,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               thinking: { type: 'object' },
               effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
               max_tokens: { type: 'number' },
-              tools: { type: 'array', items: { type: 'string' } },
+              tools: { type: 'array', items: { type: 'string' }, description: 'Narrows the child to these of your tools; it cannot widen a grant.' },
               max_turns: { type: 'number', minimum: 1, maximum: MAX_SPAWN_TURNS },
               max_budget_usd: { type: 'number', minimum: 0, maximum: MAX_SPAWN_BUDGET_USD },
               profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },
+              secret_scope: { oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'string', enum: ['all'] }], description: 'Vault keys this sub-agent may resolve. Default: only keys this task names via secret:NAME — not your whole vault. "all" passes on the full vault.' },
             },
             required: ['name', 'task'],
           },
@@ -830,14 +1210,65 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // ceiling was charged for.
     const subAgents: SpawnedSubAgent[] = [];
     let totalEstimate = 0;
-    // Refuse BEFORE announcing, not after. `executeThinker` used to own these
-    // checks, and it runs after the `spawn` event is already on the wire — so a
-    // ceiling-exceeding or blocked profile was announced with its model id and
-    // only then refused. A whole batch is refused if any one spec is: the reserve
-    // + announce step is atomic, and half-announcing is worse than not starting.
-    input.agents.forEach((spec) => { assertSpawnRoutingPermitted(spec, cfg); });
-    input.agents.forEach((spec, i) => {
-      const { model } = resolveSpawnChildRouting({
+    // Refuse AND clamp BEFORE announcing, not after. `assertSpawnRoutingPermitted`
+    // used to live only in `executeThinker`, which runs after the `spawn` event is
+    // on the wire — so a refused/blocked profile was announced with its model id
+    // and only then rejected. The D2 clamp lives here for the same reason the
+    // refuses do: the announced tier, the budget estimate, and the child's actual
+    // run must all name the SAME tier (a deep announcement that runs balanced is
+    // exactly the announce≠run gap the shared-resolution work closed).
+    //
+    // D2 itself: a headless (autonomous) run never executes the deep tier without
+    // consent. The consent `check` returns null in autonomous, so the permission
+    // guard does not gate; THIS clamp is the control. A deep tier requested via
+    // `model:'deep'` is substituted down to balanced; a deep-band PROFILE pins a
+    // specific endpoint and cannot be substituted, so it is REFUSED rather than
+    // silently run deep. The deep test matches `specResolvesDeep` so the gate and
+    // the clamp agree on what "deep" means.
+    const isHeadless = agent.autonomy === 'autonomous';
+    // Read (and clear) a tier downgrade the user chose at the GO prompt
+    // ("Run on balanced"). Only the deep-consent check produces one; undefined
+    // for headless (the D2 clamp below is the headless control) and for any
+    // non-spawn call. Consumed here so it can never leak to a later tool call.
+    const downgradeTier = agent.consumePendingDowngrade?.();
+    // Indices of specs clamped down by the interactive choice, so the announce
+    // tier, the budget estimate, and the labelled result all agree the child
+    // ran on the cheaper tier (predicate 5).
+    const downgradedIdx = new Set<number>();
+    const specs: SpawnSpec[] = input.agents.map((spec, i) => {
+      assertSpawnRoutingPermitted(spec, cfg);
+      if (isHeadless && specResolvesDeep(spec, cfg, provider)) {
+        const deepProfile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
+        // A deep-band OR unknown-band profile pins a specific endpoint and cannot be
+        // substituted down to balanced, so it is REFUSED headless (not clamped). This
+        // is the security control for the unknown-band case: without it, a profile
+        // pinning an expensive unregistered model would run unconsented headlessly —
+        // `specResolvesDeep` treats unknown bands as deep, so this refuse must too.
+        if (deepProfile && profileBandIsDeepOrUnknown(deepProfile)) {
+          throw new Error(
+            `Spawn "${spec.name}" uses model profile "${spec.profile}" (${deepProfile.model_id}), ` +
+            `whose tier cannot run autonomously without explicit consent — a profile pins a specific ` +
+            `endpoint and cannot be substituted down to balanced. Run this delegation interactively ` +
+            `(where you can approve it), or use the \`model\` tier parameter (fast/balanced) for an ` +
+            `autonomous child.`,
+          );
+        }
+        return { ...spec, model: 'balanced' as const };
+      }
+      // Interactive "Run on balanced": clamp substitutable deep specs down. A
+      // deep-band profile is UNREACHABLE here — the check offers downgrade only
+      // when canDowngrade (no deep-band profile in the batch), so every deep spec
+      // is substitutable. Clamping before the announce loop means totalEstimate,
+      // the session budget reservation, and the announced tier all reflect the
+      // cheaper run (predicate 7 — no separate reconcile needed).
+      if (downgradeTier === 'balanced' && specResolvesDeep(spec, cfg, provider)) {
+        downgradedIdx.add(i);
+        return { ...spec, model: 'balanced' };
+      }
+      return spec;
+    });
+    specs.forEach((spec, i) => {
+      const { model, tier } = resolveSpawnChildRouting({
         spec,
         role: spec.role ? getRole(spec.role) : undefined,
         profile: spec.profile ? cfg.model_profiles?.[spec.profile] : undefined,
@@ -857,6 +1288,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         id: `${spawnId}:${i}`,
         name: spec.name,
         role: spec.role,
+        tier,
+        ...(downgradedIdx.has(i) ? { downgraded: true } : {}),
         ...(wireModel ? { model: wireModel } : {}),
       });
     });
@@ -870,6 +1303,14 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     if (agent.onStream) {
       await agent.onStream({ type: 'spawn', spawnId, subAgents, estimatedCostUSD: totalEstimate, agent: agent.name });
+      // Hand the activity label over from "delegating" to "waiting". Dispatch is
+      // over by this line; everything after it is the parent BLOCKED on
+      // `Promise.allSettled` below. Without this the status sits on "Delegating
+      // to sub-agents…" for the entire child run — measured at 212s on a real
+      // deep review, describing a step that took about a second. `api_setup`
+      // already uses this same tool_progress channel for a 5-8s gap; the
+      // minutes-long one had no phase at all.
+      await agent.onStream({ type: 'tool_progress', tool: 'spawn_agent', phase: 'waiting', agent: agent.name });
     }
 
     // Sub-agent progress state — visible to the UI via forwarded events.
@@ -886,7 +1327,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const spawnStart = Date.now();
 
     const parentStream = agent.onStream;
-    const makeChildStream = (sub: SpawnedSubAgent): StreamHandler | null => {
+    // Emitting, not plain: this handler IS a core producer — it is what the child
+    // agent calls — so the error it forwards must already carry `fatal`. Typing it
+    // loosely here would have let the passthrough launder a decision the child was
+    // forced to make back into an unknown.
+    const makeChildStream = (sub: SpawnedSubAgent): EmittingStreamHandler | null => {
       if (!parentStream) return null;
       return (event) => {
         // Forward only high-signal, low-frequency events. Text and thinking
@@ -926,7 +1371,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     }
 
     const results = await Promise.allSettled(
-      input.agents.map((spec, i) => {
+      specs.map((spec, i) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), SPAWN_TIMEOUT);
         const childStart = Date.now();
@@ -976,20 +1421,17 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     const sections: string[] = [];
     const errors: Error[] = [];
+    // Paired with `errors` so the all-failed message can name WHICH child died
+    // of what. `errors` alone cannot: it holds only the ones that failed, so its
+    // index does not line up with `specs`.
+    const failures: { name: string; err: Error }[] = [];
     const childRunIds: Array<string | undefined> = [];
 
     for (let i = 0; i < results.length; i++) {
       const outcome = results[i]!;
-      const spec = input.agents[i]!;
+      const spec = specs[i]!;
 
       if (outcome.status === 'fulfilled') {
-        // Wrap sub-agent return value in untrusted-data envelope. A sub-agent
-        // can ingest attacker-controlled content (read_file output, web pages,
-        // mail bodies) and return it verbatim — without the envelope, the
-        // parent would see that content as trusted framing rather than data.
-        // See H-002 (OVERNIGHT-PUNCH-LIST-2026-05-25) — spawn_agent used to
-        // be exempt from the wrap via the INTERNAL_TOOLS allowlist in agent.ts.
-        const wrapped = wrapUntrustedData(outcome.value.result, `sub_agent:${spec.name}`);
         // Surface the concrete model this sub-agent actually ran on. Without
         // this the parent only knows the *tier* it requested (e.g. "fast") and
         // would mislabel the sub-agent's model when reporting back — on a
@@ -1004,25 +1446,148 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // an empty code span in a heading claims a model with no name.
         const safeModel = safeModelId(outcome.value.model);
         const ranOn = safeModel ? ` (ran on \`${safeModel}\`)` : '';
-        sections.push(`## ${spec.name}${ranOn}\n\n${wrapped}`);
+        // Predicate 5: a child the user downgraded from deep is labelled, not
+        // silently degraded. The note rides the header OUTSIDE the untrusted
+        // envelope (engine wording, not child output).
+        const downgradeNote = downgradedIdx.has(i)
+          ? ' — ran on balanced because you declined deep; quality may be lower'
+          : '';
+        // `spec.name` is AGENT INPUT and is validated for length (64) and
+        // control chars only — no charset gate, unlike `safeModelId` beside it.
+        // It lands in a heading OUTSIDE the untrusted-data envelope, so a name
+        // like `x<untrusted_data source="web">` (30 chars) opens a tag that
+        // nothing closes and swallows the engine prose plus every section after
+        // it. The section that ends in `</untrusted_data>` used to close it by
+        // accident; the two that do not — FAILED, and now NO OUTPUT — never did.
+        const safeName = escapeXml(spec.name);
+        const stop = outcome.value.stop;
+
+        // A sub-agent that RETURNS but returns nothing is the third outcome,
+        // and it was the only one the parent could not see: `rejected` gets a
+        // FAILED section, a real answer gets the untrusted-data envelope, and
+        // an empty string got a heading followed by an EMPTY envelope —
+        // formally a success, indistinguishable from "worked, found nothing to
+        // say".
+        //
+        // Measured on a production instance (engine 2.14.2, 2026-08-18): 3 of 8 sub-agents returned `''` at
+        // `status=completed`, `stop_reason=end_turn`, `error_text=NULL`,
+        // `tokens_out` 113-669 — on TWO different models, one of them the
+        // instance's own balanced default. The parent could only guess, and
+        // guessed wrong: it reported a model defect the ledger does not
+        // support.
+        //
+        // It is NAMED, not re-branded as a failure. An empty return is not a
+        // dead child — a side-effect-only task ("write the file") or an honest
+        // "nothing matched" can legitimately produce it — so the section states
+        // only what is knowable here, which is that no text came back and not
+        // why. `REASONING_SUPPRESSION_MAX_TOKENS` (openai-adapter.ts) suppressed
+        // one CAUSE of this class and says at its own definition that the
+        // empty-response class "deserves its own detector rather than this
+        // constant carrying the whole defence". This is that detector, and it is
+        // cause-agnostic on purpose: it fires below that constant's bound as
+        // well as far above it, on models that declare no reasoning effort at
+        // all.
+        //
+        // `— NO OUTPUT` precedes `downgradeNote` so the outcome reads before the
+        // provenance when a downgraded child also comes back empty; otherwise
+        // two ` — ` clauses queue up and the important one lands last.
+        //
+        // The empty branch emits no envelope, so it also emits no untrusted
+        // marker — `agent.ts` seats `_sawUntrustedData` on that marker. That is
+        // not a taint regression: the marker it stops emitting wrapped ZERO
+        // bytes of child content, and the real child→parent taint hand-off is
+        // content-based, one frame up (`describeTurnUntrusted` → the parent's
+        // `noteUntrustedData`, above), not marker-based.
+        // `absolute_cap` is deliberately not here: a child never runs with
+        // unlimited iterations (`maxIterations` is always set above), so the
+        // 500-call backstop cannot be what stopped it.
+        if ((stop?.cause === 'iteration_cap' || stop?.cause === 'budget_cap') && stop.pendingToolCount > 0) {
+          // 2026-08-20: the cause behind the empties measured above turned out to
+          // be THIS — the child was STOPPED by its turn cap while still calling
+          // tools (each had made exactly `max_turns - 1` tool calls; the last
+          // turn's tool_use was dropped). `pendingToolCount > 0` is load-bearing:
+          // a cap that coincides with a turn the model finished by itself is a
+          // legitimate successful shape and takes the normal path below. The
+          // section is read by the parent model, which acts on it: it has to name
+          // the knob and the remedy, or the parent keeps diagnosing a model defect.
+          // Tool names arrive charset-gated and capped from `SendStop`; escaped
+          // again here because they land OUTSIDE the envelope (the class of hole
+          // #1237 closed for `spec.name`).
+          //
+          // Why "at least 2N" — a heuristic, not a measured value: a failed tool
+          // call costs two more model calls to recover from (the retry, and the
+          // turn that reads its result), so doubling is the smallest step that
+          // turns "one more call" into "one more recoverable failure". N+1 moves
+          // the cap by exactly the call that was dropped; larger factors only
+          // raise the bill of the re-spawn loop the "once" below asks the parent
+          // not to enter. The code enforces only `min(2N, schema maximum)` —
+          // prescribing a value the validator rejects would send the parent into
+          // an error instead.
+          const isBudget = stop.cause === 'budget_cap';
+          const turns = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
+          const budget = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
+          const knob = isBudget ? `max_budget_usd=${String(budget)}` : `max_turns=${String(turns)}`;
+          const tools = stop.pendingTools.map((t) => escapeXml(t)).join(', ');
+          const whileDoing = ` and was still calling tools (${tools || 'unnamed'}) when it was stopped`;
+          const raisedTurns = Math.min(turns * 2, MAX_SPAWN_TURNS);
+          const raisedBudget = Math.min(budget * 2, MAX_SPAWN_BUDGET_USD);
+          const raise = isBudget
+            ? (budget <= 0
+              ? `a positive max_budget_usd (it was 0, so the child could not complete a single call; the default is ${String(DEFAULT_SPAWN_BUDGET_USD)})`
+              : raisedBudget > budget
+                ? `a higher max_budget_usd (at least ${String(raisedBudget)})`
+                : `a narrower task (max_budget_usd is already at its maximum of ${String(MAX_SPAWN_BUDGET_USD)})`)
+            : (raisedTurns > turns
+              ? `a higher max_turns (at least ${String(raisedTurns)})`
+              : `a narrower task (max_turns is already at its maximum of ${String(MAX_SPAWN_TURNS)})`);
+          const partial = stop.text.trim().length > 0
+            ? `\n\nPartial text it produced before stopping:\n\n${wrapUntrustedData(stop.text, `sub_agent:${spec.name}`)}`
+            : '';
+          sections.push(
+            `## ${safeName}${ranOn} — ${isBudget ? 'COST BUDGET' : 'TURN LIMIT'} REACHED (${knob})${downgradeNote}\n\n` +
+            `**The sub-agent used up its ${isBudget ? 'cost budget' : `${String(turns)} turns`}${whileDoing} — it never produced a final answer.** ` +
+            `This is neither a crash nor a model defect: the ${isBudget ? 'budget' : 'turn budget'} ran out. ` +
+            `To get the result, re-run THIS sub-agent once with ${raise}, or narrow its task so it needs fewer tool calls. ` +
+            `Do not retry it unchanged, and do not switch models because of this.${partial}`,
+          );
+        } else if (outcome.value.result.trim() === '') {
+          sections.push(
+            `## ${safeName}${ranOn} — NO OUTPUT${downgradeNote}\n\n` +
+            `**The sub-agent finished without returning any text.** This is not a crash — ` +
+            `it ran to completion. Do not present its result as an answer, and do not infer ` +
+            `a cause (model, prompt, or tooling) from this alone: the engine cannot tell ` +
+            `"nothing came back" apart from "the answer was that there is nothing". ` +
+            `Say what happened; re-run it at most once before reporting it instead.`,
+          );
+        } else {
+          // Wrap sub-agent return value in untrusted-data envelope. A sub-agent
+          // can ingest attacker-controlled content (read_file output, web pages,
+          // mail bodies) and return it verbatim — without the envelope, the
+          // parent would see that content as trusted framing rather than data.
+          // See H-002 (OVERNIGHT-PUNCH-LIST-2026-05-25) — spawn_agent used to
+          // be exempt from the wrap via the INTERNAL_TOOLS allowlist in agent.ts.
+          const wrapped = wrapUntrustedData(outcome.value.result, `sub_agent:${spec.name}`);
+          sections.push(`## ${safeName}${ranOn}${downgradeNote}\n\n${wrapped}`);
+        }
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error
           ? outcome.reason
           : new Error(String(outcome.reason));
         errors.push(err);
+        failures.push({ name: spec.name, err });
         // Mark the section as a FAILURE unambiguously so the parent can't mistake
         // a dead sub-agent for one that returned nothing useful — a silent
         // sub-agent failure is more dangerous than a loud one. `formatSpawnError`
         // adds the HTTP status (e.g. `[404] …`) so a provider mis-route reads as
         // a config failure, not a vague error.
-        sections.push(`## ${spec.name} — FAILED\n\n**Error:** ${formatSpawnError(err)}`);
+        sections.push(`## ${escapeXml(spec.name)} — FAILED\n\n**Error:** ${formatSpawnError(err)}`);
         childRunIds.push(undefined);
       }
     }
 
     // Publish spawn end with genealogy data for orchestrator to record
-    const spawnRecords = input.agents.map((spec, i) => ({
+    const spawnRecords = specs.map((spec, i) => ({
       childName: spec.name,
       childRunId: childRunIds[i],
     }));
@@ -1036,11 +1601,77 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       spawnRecords,
     });
 
-    if (errors.length === input.agents.length) {
-      const details = errors.map(e => `${e.message}${e.cause ? ` (cause: ${e.cause})` : ''}`).join('; ');
-      throw new AggregateError(errors, `All sub-agents failed: ${details}`);
+    if (errors.length === specs.length) {
+      throw new AggregateError(errors, formatAllFailedMessage(failures));
     }
 
     return sections.join('\n\n---\n\n');
+  },
+  destructive: {
+    mode: 'external',
+    check: (input: SpawnAgentInput, ctx) => {
+      // D2: in autonomous (headless) mode the guard does NOT gate deep spawns —
+      // returning null means no warning and no [BLOCKED]. The handler's deep→balanced
+      // clamp is the actual headless control (it substitutes a cheaper run the user
+      // never had the chance to pick interactively); gating here would only REFUSE,
+      // denying that fallback.
+      if (ctx?.autonomy === 'autonomous') return null;
+      const cfg = loadConfig();
+      const baseProvider = getActiveProvider();
+      const deepSpecs = input.agents.filter((spec) => specResolvesDeep(spec, cfg, baseProvider));
+      if (deepSpecs.length === 0) return null;
+
+      let costUsd = 0;
+      const providers = new Set<LLMProvider>();
+      let resolvedTier: ModelTier = 'deep';
+      let hasUnknownBand = false;
+      // "Run on balanced" is offered (downgradeTo set) only when EVERY deep spec
+      // is substitutable — i.e. none pins a deep/unknown-band model profile,
+      // which cannot be clamped down without silently changing the configured
+      // endpoint. A profile present → the GO stays two-way (Allow deep / Cancel).
+      let canDowngrade = true;
+      for (const spec of deepSpecs) {
+        const role = spec.role ? getRole(spec.role) : undefined;
+        const profile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
+        const r = resolveSpawnChildRouting({ spec, role, profile, userConfig: cfg, baseProvider });
+        // A profile's band hides behind the clamp-resolved tier. The payload names
+        // the ACTUAL classification — deep for a known-deep profile, deep
+        // (conservatively) for an unknown-band profile whose cost can't be proven.
+        if (profile && profileBandIsDeepOrUnknown(profile)) {
+          resolvedTier = 'deep';
+          canDowngrade = false;
+          if (modelCapability(profile.model_id)?.tier === undefined) hasUnknownBand = true;
+        } else {
+          resolvedTier = r.tier;
+        }
+        costUsd += estimateSpawnCost(r.model, spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS);
+        // The deep child's REAL provider. A cross-provider hybrid slot runs on the
+        // slot's provider (a Mistral main with a deep→Sonnet slot runs on Anthropic);
+        // a profile forces hybridSlot to {crossProviderSlot:false} but routes via its
+        // OWN provider, so read profile.provider — naming the base provider in either
+        // case would be a transparency lie. Predicate 6 is load-bearing.
+        providers.add(profile?.provider ?? (r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider));
+      }
+      const providerList = [...providers].map((p) => providerFamilyLabel(p)).join(', ');
+      const childWord = deepSpecs.length === 1 ? 'One child would run' : `${deepSpecs.length} children would run`;
+      const tierWord = hasUnknownBand
+        ? 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)'
+        : 'the DEEP tier (a stronger reasoning model, more capable but more expensive)';
+      // The trailing clause must match the buttons offered (predicate 6,
+      // non-phishing): promise "Run on balanced" only when the engine can honour it.
+      const tail = canDowngrade
+        ? `Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".`
+        : `A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.`;
+      return {
+        message:
+          `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
+          `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
+          `Provider: ${providerList}. ${tail}`,
+        tier: resolvedTier,
+        costUsd,
+        provider: providerList,
+        ...(canDowngrade ? { downgradeTo: 'balanced' as const } : {}),
+      };
+    },
   },
 };

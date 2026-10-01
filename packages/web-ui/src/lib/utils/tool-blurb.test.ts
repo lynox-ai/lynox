@@ -4,8 +4,8 @@ import { toolBlurb } from './tool-blurb.js';
 describe('toolBlurb', () => {
   it('drops the LLM-facing tail after the first sentence', () => {
     // The exact jargon tails rafael flagged in the Settings → Tools screenshots.
-    expect(toolBlurb('Execute a shell command for system operations, package management, git, or process control. NEVER use for file reads/writes (use read_file/write_file).'))
-      .toBe('Execute a shell command for system operations, package management, git, or process control.');
+    expect(toolBlurb('Execute a shell command for system operations, git, or process control. NEVER use for file reads/writes (use read_file/write_file).'))
+      .toBe('Execute a shell command for system operations, git, or process control.');
     expect(toolBlurb('Delegate tasks to specialist roles working in parallel. If no role fits, omit role — unrecognised roles error out.'))
       .toBe('Delegate tasks to specialist roles working in parallel.');
   });

@@ -1,15 +1,36 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { createDocsTool } from './google-docs.js';
 import type { IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
+import { FULL_SCOPES, SCOPES } from './google-auth.js';
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+
+// §3.8 moved this module's calls onto the connector egress surface, so they now
+// go through the pinned transport instead of `globalThis.fetch`. The bridge
+// hands them back to the stub these tests already install; the policy gate is
+// NOT bypassed. See the helper for why this is adapted rather than rewritten.
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-function createMockAuth(scopes: string[] = []): GoogleAuth {
+// Default: a FULLY granted BYO connection. These tests exercise the tool's
+// mechanics, not its scope gate — the gate has its own tests, which pass a
+// narrow list explicitly. Before the per-action gate existed the default was
+// `[]`, i.e. every one of these read paths ran on a connection that had
+// granted nothing, which is precisely the hole this wave closes.
+function createMockAuth(scopes: string[] = [...FULL_SCOPES], ownPair = true): GoogleAuth {
   return {
     getAccessToken: vi.fn().mockResolvedValue('mock-token'),
     hasScope: vi.fn().mockImplementation((s: string) => scopes.includes(s)),
+    hasOwnClientPair: vi.fn().mockReturnValue(ownPair),
   } as unknown as GoogleAuth;
 }
 
@@ -34,7 +55,7 @@ describe('google_docs tool', () => {
   describe('read', () => {
     it('reads document and converts to markdown', async () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -86,7 +107,7 @@ describe('google_docs tool', () => {
 
     it('requires document_id', async () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
       const result = await tool.handler({ action: 'read' }, createMockAgent());
       expect(result).toContain('"document_id" is required');
     });
@@ -95,7 +116,7 @@ describe('google_docs tool', () => {
   describe('create', () => {
     it('requires write scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       const result = await tool.handler({
         action: 'create',
@@ -103,12 +124,12 @@ describe('google_docs tool', () => {
         content: 'Hello',
       }, createMockAgent('Yes'));
 
-      expect(result).toContain('requires document write permissions');
+      expect(result).toContain(SCOPES.DOCS);
     });
 
     it('creates document via Drive HTML upload', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       // Drive multipart upload
       mockFetch.mockResolvedValueOnce({
@@ -137,7 +158,7 @@ describe('google_docs tool', () => {
   describe('append', () => {
     it('appends text to existing document', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       // Read doc for end index
       mockFetch.mockResolvedValueOnce({
@@ -176,7 +197,7 @@ describe('google_docs tool', () => {
   describe('replace', () => {
     it('replaces text with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -198,7 +219,7 @@ describe('google_docs tool', () => {
 
     it('requires find and replace_with', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       let result = await tool.handler({
         action: 'replace',
@@ -218,7 +239,7 @@ describe('google_docs tool', () => {
   describe('tool definition', () => {
     it('has correct name and schema', () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       expect(tool.definition.name).toBe('google_docs');
       expect(tool.definition.input_schema.required).toEqual(['action']);
@@ -228,7 +249,7 @@ describe('google_docs tool', () => {
   describe('destructive guard', () => {
     it('gates every write action (append included) but not read', () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
       const check = tool.destructive?.check;
       expect(check).toBeDefined();
       // append mutates the doc — it must fire the "modifies external data"

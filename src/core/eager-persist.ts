@@ -7,6 +7,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import type { ThreadStore } from './thread-store.js';
 import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
 import { getErrorMessage } from './utils.js';
+import type { SendStopCause } from './agent.js';
 
 export interface EagerPersistInput {
   /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
@@ -124,12 +125,24 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
     const notes: { role: 'user' | 'assistant'; content: unknown }[] = [];
     if (!footprint.hadUserMessage) notes.push({ role: 'user', content: task });
     // An intentional interruption shows a calm note with no raw provider detail;
-    // a genuine failure keeps the sanitized provider-error snippet for debugging.
+    // a genuine failure keeps the sanitized provider-error snippet for debugging;
+    // a hard loop break names the stuck call (ToolLoopBreakError.loopKey carries
+    // `tool\x00input` — read duck-typed to keep this module free of an agent
+    // import) so the user sees WHICH call was repeated, not just that one was.
+    const loopKey = (error as { loopKey?: unknown }).loopKey;
+    const loopPrefix = (error as { loopPrefix?: unknown }).loopPrefix;
+    const loopDetail = typeof loopKey === 'string'
+      ? `repeated call: ${loopKey.split('\x00').join(' ')}`
+      : typeof loopPrefix === 'string' && loopPrefix.trim().length > 0
+        ? `repeated truncated response: ${loopPrefix.slice(0, 140)}…`
+        : undefined;
     notes.push({
       role: 'assistant',
       content: noteCode === 'provider_error'
         ? buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error)))
-        : buildDisplayNoteContent(noteCode),
+        : (noteCode === 'tool_loop_break' || noteCode === 'continuation_loop') && loopDetail !== undefined
+          ? buildDisplayNoteContent(noteCode, sanitizeNoteDetail(loopDetail))
+          : buildDisplayNoteContent(noteCode),
     });
     const totalCount = threadStore.getMessageCount(sessionId);
     threadStore.appendDisplayNotes(sessionId, notes, threadStore.getNextSeq(sessionId));
@@ -165,4 +178,55 @@ export function persistCompactionMarker(
   } catch {
     return false;
   }
+}
+
+/** What `Agent.getLastStop()` reports, narrowed to what the note decision needs. */
+export interface CapStopLike {
+  readonly cause: SendStopCause;
+  readonly pendingTools: readonly string[];
+  readonly pendingToolCount: number;
+}
+
+/**
+ * The display note a cap-stopped turn owes the thread, or null.
+ *
+ * WHY THIS EXISTS. `Agent._finishOnCap` appends its explanation to the value
+ * `send()` RETURNS — and nothing persists that. The assistant turns were already
+ * written per iteration by the eager checkpoint, so the thread keeps every
+ * repetition and loses the sentence explaining them. Measured on a prod export
+ * 2026-09-24: twenty identical turns, the marker present in the run record and
+ * in ZERO of the 213 message rows. The reporter saw the repetitions and no
+ * reason, which was the whole complaint.
+ *
+ * Only a cap that fired WITH tool calls still pending earns a note. A cap that
+ * lands on a finished answer is an ordinary end of turn — `_finishOnCap` itself
+ * says so and returns the bare text — and announcing it would train the reader
+ * to ignore the banner.
+ *
+ * An internal (compaction) run is silent for the same reason the failure path
+ * is: its footprint is neutralized and a note would surface machinery the user
+ * never asked for.
+ */
+export function capStopNote(
+  stop: CapStopLike | null,
+  opts: { isInternalRun: boolean },
+): { code: string; detail: string | undefined } | null {
+  if (opts.isInternalRun || stop === null) return null;
+  if (stop.pendingToolCount <= 0) return null;
+  const code = stop.cause === 'iteration_cap' ? 'turn_limit'
+    : stop.cause === 'budget_cap' ? 'cost_budget'
+      : null;
+  if (code === null) return null;
+  // The tool NAMES come from `safeToolNames` upstream (charset-gated), so the
+  // detail carries no model-authored text into the banner. It still goes
+  // through `sanitizeNoteDetail`, for the LENGTH — and the honest figure is
+  // bounded, not unbounded: `MAX_REPORTED_TOOL_NAMES` is 8 and the charset gate
+  // allows 64 chars each, so the worst case is 541 characters. Ordinary builtin
+  // names never reach 300; eight MCP-length names (`mcp__…__create_event`) do.
+  // `buildDisplayNoteContent` passes `detail` straight through, so the cap lives
+  // here or nowhere.
+  const detail = stop.pendingTools.length > 0
+    ? sanitizeNoteDetail(`still calling: ${stop.pendingTools.join(', ')}`)
+    : undefined;
+  return { code, detail };
 }

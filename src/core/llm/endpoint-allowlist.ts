@@ -45,23 +45,42 @@ const ALLOWLISTED_HOSTS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Hostname patterns that vouch for a class of endpoints rather than a single
- * host: Azure OpenAI deployments, RFC1918 private LAN, mDNS.
+ * Private-LAN / on-premise names. Split out from the provider patterns because
+ * the two carry different risk: a `.local` name resolves inside the operator's
+ * own network and exposes nothing to a third party, whereas `*.openai.azure.com`
+ * is a namespace ANY account can register — so a caller that must not vouch for
+ * an attacker-registerable host can still safely vouch for these.
  *
- * NOTE: there is deliberately NO `*.amazonaws.com` entry. It was added to vouch
- * for AWS Bedrock, but Bedrock was removed as a provider and the apex pattern
- * over-vouched — it silently allowlisted ANY self-hosted model behind a default
- * AWS hostname (`ec2-*.compute-*.amazonaws.com`, SageMaker), letting a BYOK
- * customer point the engine at an uncensored cloud model WITHOUT triggering the
- * controller-shift disclosure. Such endpoints now correctly fall through to the
- * disclosure gate like any other customer-configured endpoint.
+ * Each pattern is prefix-anchored (`^`) or suffix-anchored (`$`) to defeat
+ * suffix-spoof attacks like `evil.local.attacker.com`.
  *
- * IMPORTANT: each pattern is suffix-anchored (`$`) or prefix-anchored (`^`)
- * to defeat suffix-spoof attacks like `evil.openai.azure.com.attacker.com`,
- * which would still match a naive `.openai.azure.com` substring check.
+ * WHAT MEMBERSHIP HERE DOES AND DOES NOT MEAN. "Exposes nothing to a third
+ * party" above answers sub-processor exposure — the question this file was
+ * built for. It says nothing about whether the address is REACHABLE, and it
+ * carries no connect-time guarantee to whoever reads the set.
+ *
+ * That distinction is easy to lose because the consumers genuinely differ: some
+ * reach the network through `assertHostPolicy` + `fetchPinned` and are guarded
+ * at connect time, some only evaluate a URL and never fetch it, and the LLM
+ * endpoint path performs no connect-time private-IP check at all (its
+ * openai-compatible branch calls global `fetch` directly; its Anthropic branch
+ * hands `baseURL` to the SDK without a fetch override). Deliberately not
+ * enumerated further here: a list of who-guards-what goes stale silently, and
+ * the point survives without it — **derive your path's behaviour from your own
+ * call chain, never from membership in this set.** Note also that these
+ * patterns are not unique to this file: a hand-synced copy lives in
+ * `packages/web-ui/src/lib/utils/endpoint-disclosure.ts`, whose function of the
+ * same name differs on empty input, so a copy is not automatically a mirror.
+ *
+ * One property worth stating because it is checkable: "private" here is
+ * NARROWER than `isPrivateIP` (`network-guard.ts`). These patterns match
+ * RFC1918 in dotted-quad form plus the three name suffixes below — nothing
+ * else. Addresses `isPrivateIP` rejects but these do not vet (link-local,
+ * CGNAT, IPv6, and others) fall through to the non-allowlisted branch of
+ * whatever gate is asking. `localhost` / `127.0.0.1` / `0.0.0.0` are vetted by
+ * `ALLOWLISTED_HOSTS` above, not by this set.
  */
-const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
-  /\.openai\.azure\.com$/,
+const PRIVATE_LAN_PATTERNS: readonly RegExp[] = [
   // RFC1918 — IP-octet form only. The numeric-octet anchors prevent a public
   // DNS name like `10.example.com` from being mistaken for the 10.0.0.0/8
   // block. `\d{1,3}` is bounded by the dotted-quad terminator (`$`) so we
@@ -73,6 +92,106 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
   /\.lan$/,
   /\.intranet$/,
 ];
+
+/**
+ * Hostname patterns that vouch for a class of endpoints rather than a single
+ * host: Azure OpenAI deployments plus the private-LAN set above.
+ *
+ * The azure entry is suffix-anchored (`$`) to defeat suffix-spoof attacks like
+ * `evil.openai.azure.com.attacker.com`. Anchoring is not the same as safety
+ * here — the namespace itself is open to registration, which is why
+ * {@link isVettedEgressHost} declines to vouch for it.
+ *
+ * NOTE: there is deliberately NO `*.amazonaws.com` entry. It was added to vouch
+ * for AWS Bedrock, but Bedrock was removed as a provider and the apex pattern
+ * over-vouched — it silently allowlisted ANY self-hosted model behind a default
+ * AWS hostname (`ec2-*.compute-*.amazonaws.com`, SageMaker), letting a BYOK
+ * customer point the engine at an uncensored cloud model WITHOUT triggering the
+ * controller-shift disclosure. Such endpoints now correctly fall through to the
+ * disclosure gate like any other customer-configured endpoint.
+ */
+const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
+  /\.openai\.azure\.com$/,
+  ...PRIVATE_LAN_PATTERNS,
+];
+
+/**
+ * @internal — the membership behind the gates, as STRINGS, for the membership tests.
+ *
+ * What `isVettedEgressHost` vouches for is pinned positively, not by subtraction.
+ * An earlier attempt asserted the declined set (`all` minus `privateLan`), which
+ * does not move under the change that matters: adding a pattern to `privateLan` —
+ * or a host to `exactHosts` — WIDENS what the credential attach accepts with no
+ * acceptance on record. Measured: both widenings left 393 tests green.
+ *
+ * Strings, not the RegExp objects, and that is the whole point. Handing out the
+ * objects gives an importer a mutable handle on internals the gates read every
+ * call: `Object.freeze` is shallow, so the array was safe while its elements were
+ * not, and `privateLan[3].test = () => true` flipped `isVettedEgressHost` false→
+ * true for an attacker host from outside this module. A string cannot do that.
+ *
+ * These pin MEMBERSHIP only. The gate functions' own logic — protocol checks,
+ * exact-match vs. suffix — is not visible here, and membership assertions stayed
+ * green through four logic mutations that survived the entire 9778-test suite.
+ * The test file carries behavioural cases for that; they cover those mutants,
+ * not every mutant of their class.
+ *
+ * GETTERS, not fields: a snapshot taken at module load decouples from what the
+ * gates actually read. `ALLOWLISTED_HOSTS.add(...)` after this declaration then
+ * widens the gate while the pinned membership still reports the old contents —
+ * verified, 532 tests green. Recomputing per read keeps the assertion pointed at
+ * the live structures.
+ */
+export const GATE_MEMBERSHIP_FOR_TESTS = Object.freeze({
+  get allPatterns(): readonly string[] { return ALLOWLISTED_PATTERNS.map(String); },
+  get privateLan(): readonly string[] { return PRIVATE_LAN_PATTERNS.map(String); },
+  get exactHosts(): readonly string[] { return [...ALLOWLISTED_HOSTS].sort(); },
+});
+
+/**
+ * Does an api_profile pointed at `url` need a human acceptance before the engine
+ * will hand it a stored credential?
+ *
+ * ONE question, asked in TWO places that must agree: `api_setup` decides here
+ * whether to raise the controller-responsibility prompt and persist an ack, and
+ * the credential attach in `http.ts` decides here whether an ack was required.
+ * When they disagreed, the result was an unrecoverable dead end — `api_setup`
+ * read `*.openai.azure.com` as vetted, so it never prompted AND deleted any ack
+ * that existed, while the attach refused for want of exactly that ack and told
+ * the user to "re-save and accept when prompted". No prompt was reachable.
+ *
+ * Narrower than {@link isAllowlistedEndpoint} by exactly one entry, and that one
+ * is the point: `*.openai.azure.com` is a namespace ANY account can register, so
+ * vouching for it silently lets a prompt-injected profile collect a vault
+ * credential. It gets the disclosure prompt like any other third-party host.
+ *
+ * Private-LAN names stay vetted — an operator's own `.local` endpoint is not a
+ * sub-processor. Note that `http_request` cannot actually reach one:
+ * `assertHostPolicy` rejects private IPs and `fetchPinned` rejects hosts that
+ * resolve to one. They are kept here for the save gate, which evaluates the URL
+ * without fetching it, so an on-premise profile is not made to answer a
+ * third-party disclosure prompt it has no business being asked.
+ *
+ * That last point is scoped to the tool-surface callers this function was
+ * written for, whose fetching paths go through `assertHostPolicy` and
+ * `fetchPinned` — and note that one caller here is the save gate itself, which
+ * never fetches at all. None of it is a property of the pattern set; see the
+ * note on `PRIVATE_LAN_PATTERNS`.
+ */
+export function isVettedEgressHost(url: string): boolean {
+  return isGuardedBaselineHost(url) || isPrivateLanEndpoint(url);
+}
+
+/** True for a private-LAN / on-premise host — no third-party exposure. */
+export function isPrivateLanEndpoint(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return PRIVATE_LAN_PATTERNS.some((p) => p.test(u.hostname));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Returns true iff the given URL points at a vetted endpoint that lynox can
@@ -110,6 +229,12 @@ export function isAllowlistedEndpoint(url: string): boolean {
  * human-accepted api_profile (`custom_endpoint_ack`), never a wildcard the
  * agent can register a match for. The RFC1918 IP patterns are moot here — the
  * caller's `isPrivateIP` early-out blocks them regardless.
+ *
+ * "Moot" is scoped to that caller, and the early-out is `assertHostPolicy`'s
+ * (`network-guard.ts`), which runs for every policy — it is not something
+ * `guarded` adds. This function has other callers, including ones that decide
+ * about credentials rather than about egress, so the sentence above does not
+ * generalise. See the note on `PRIVATE_LAN_PATTERNS`.
  */
 export function isGuardedBaselineHost(url: string): boolean {
   try {
@@ -158,6 +283,24 @@ export interface CustomEndpointAck {
   accepted: true;
   /** Non-allowlisted hostnames the user accepted controller-responsibility for. */
   hosts: string[];
+  /**
+   * Hosts the user accepted being SENT TO, in their own browser, to authorize.
+   *
+   * A second field rather than a second use of {@link hosts}, because they
+   * record two different acts and {@link hosts} records the wrong one for this
+   * question. Accepting a sub-processor is a statement about where DATA goes;
+   * it says nothing about whether the person in front of the browser agreed to
+   * be handed to that site and asked for their provider password. While one
+   * list answered both, an acceptance earned by a `base_url` authorised a
+   * redirect the moment the two hostnames coincided — and the text the human
+   * read never mentioned a redirect at all.
+   *
+   * Stamped ONLY from the derived authorize URL of a preset profile, and only
+   * when the prompt that names that act was answered. Absent on every profile
+   * saved before the redirect flow existed, which is the correct default: those
+   * people were never asked.
+   */
+  redirect_hosts?: string[] | undefined;
   /** ISO-8601 timestamp of acceptance. */
   accepted_at: string;
 }
@@ -172,6 +315,30 @@ export interface CustomEndpointAck {
  * this module stays free of an `api-store` import — no dependency cycle.
  */
 export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
+  return ackCovers(ack, url, (a) => a.hosts);
+}
+
+/**
+ * True iff the user accepted being sent to the host of `url` in their browser.
+ *
+ * Deliberately NOT `isEndpointAcked` with a different list passed in, and
+ * deliberately not a parameter on it: the two questions are asked by different
+ * code for different reasons, and a shared function with a flag is how they
+ * drift back together. Same fail-closed rules — no ack, no list, a list that is
+ * not one, a wrong host or an unparseable URL all answer false.
+ */
+export function isRedirectAcked(ack: CustomEndpointAck | undefined, url: string): boolean {
+  return ackCovers(ack, url, (a) => a.redirect_hosts);
+}
+
+function ackCovers(
+  ack: CustomEndpointAck | undefined,
+  url: string,
+  // `unknown`, because what comes back is whatever was on disk. A signature
+  // promising `readonly string[]` here would make every caller look safe and
+  // move the lie one line up.
+  pick: (ack: CustomEndpointAck) => unknown,
+): boolean {
   if (!ack || ack.accepted !== true) return false;
   let host: string;
   try {
@@ -179,7 +346,18 @@ export function isEndpointAcked(ack: CustomEndpointAck | undefined, url: string)
   } catch {
     return false;
   }
-  return ack.hosts.includes(host);
+  // `Array.isArray`, not `?? []`. A profile enters the store as
+  // `JSON.parse(…) as ApiProfile` with no schema behind it — from the apis
+  // directory, from engine.db, from a hand-edited migration — so the literal
+  // type here promises nothing about what is actually in the field. The two
+  // ways it goes wrong point in opposite directions and both are bad: a STRING
+  // makes this a SUBSTRING test, so an ack naming `shop.example.com` would
+  // answer yes for `p.example.com`; a number has no `.includes` at all and the
+  // TypeError leaves the caller with neither an allow nor a refusal. The same
+  // package already guards exactly this shape for the same reason
+  // (`api-store.ts`, `getAcceptedEgressHosts`).
+  const list: unknown = pick(ack);
+  return Array.isArray(list) && list.includes(host);
 }
 
 /**

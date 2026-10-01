@@ -15,7 +15,7 @@
  *  - Migration token is one-time use
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
@@ -23,6 +23,8 @@ import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
+import { isMergeLedgerFileName } from './subject-merge-runner.js';
+import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -41,7 +43,9 @@ import {
   type HandshakeServerPayload,
   type MigrationManifest,
   type MigrationChunkMeta,
+  type MigrationChunkType,
   type EncryptedChunk,
+  MIGRATION_CHUNK_TYPES,
 } from './migration-crypto.js';
 
 // ── Types ──
@@ -61,6 +65,10 @@ export interface ImportVerification {
   databasesRestored: string[];
   artifactsImported: number;
   memoryFilesImported: number;
+  /** Merge ledgers restored — the reversal records `rollbackMergeRun` consumes. */
+  mergeLedgersImported: number;
+  /** Files restored into the generic portable directories (`apis/`, `workspace/`). */
+  portableDirFilesImported: number;
   configApplied: boolean;
 }
 
@@ -99,12 +107,25 @@ const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
  * `scopeDirs × 4 namespaces × MAX_MEMORY_FILE_BYTES`, so this allows 64 scopes.
  */
 const MAX_MEMORY_BUNDLE_BYTES = 64 * 1024 * 1024;
+/**
+ * Ledger COUNT cap. One merge writes one ledger, so this is generous for a real instance
+ * and still bounds the file/inode blast radius the byte cap alone leaves open.
+ */
+const MAX_MERGE_LEDGERS = 50_000;
 
 /** Whitelist of allowed database file names — prevents path traversal via crafted manifests.
  *  engine.db (Foundation Rework v2 subject-graph) is portable user data — mirrors the export set. */
-const ALLOWED_DB_NAMES = new Set(['history.db', 'agent-memory.db', 'datastore.db', 'engine.db']);
+// DERIVED — the importer's whitelist is the exporter's set, so a database can never be
+// shipped by one side and refused by the other.
+const ALLOWED_DB_NAMES = new Set<string>(MIGRATE_SQLITE_DBS);
 
 /** Config fields the importer will accept — defense-in-depth re-validation (matches exporter allowlist). */
+/**
+ * The declared chunk types as a lookup. `setManifest` refuses anything outside it, which is the
+ * only point where an export from a NEWER lynox can be told apart from a corrupt one.
+ */
+const KNOWN_CHUNK_TYPES: ReadonlySet<string> = new Set(MIGRATION_CHUNK_TYPES);
+
 const SAFE_CONFIG_FIELDS = new Set([
   'default_tier', 'thinking_mode', 'effort_level',
   'max_session_cost_usd', 'max_daily_cost_usd', 'max_monthly_cost_usd',
@@ -231,8 +252,35 @@ export class MigrationImporter {
       throw new Error(`Total data size exceeds limit: ${String(totalSize)} > ${String(MAX_TOTAL_BYTES)}`);
     }
 
-    // Validate DB names against whitelist (path traversal prevention)
     for (const chunk of manifest.chunks) {
+      // A type this build does not know means the export came from a NEWER lynox. Refusing
+      // here — before a single chunk is transferred — is the whole point: the alternative is
+      // what shipped versions do, which is to accept everything, restore what they recognise,
+      // and report `done` with the manifest's chunk count. A partial instance that looks
+      // complete is worse than a migration that refuses to start, and the message has to name
+      // the type, because otherwise the operator cannot tell "too old" from "corrupt".
+      if (!KNOWN_CHUNK_TYPES.has(chunk.type)) {
+        // The type is echoed because the operator cannot act without it — and it is BOUNDED
+        // and QUOTED at the source, not one function away. `errorResponse` does mask and cap
+        // at 600 chars on the way out, but a throw site that relies on its caller for that is
+        // safe only for as long as every caller keeps doing it; two sibling errors in this
+        // file already lean on the same single mitigation. `JSON.stringify` also escapes
+        // control characters, so a crafted type cannot forge a line wherever this text lands.
+        //
+        // The wording states what the code KNOWS. An earlier draft said the export "was
+        // written by a newer lynox" — which a corrupt or hostile manifest produces just as
+        // well, so the sentence asserted a cause the check cannot establish. Naming both and
+        // ranking them is the difference between a diagnosis and a guess.
+        throw new Error(
+          `Unknown chunk type ${JSON.stringify(String(chunk.type).slice(0, 64))} in the `
+          + `manifest. Most likely this export was written by a newer lynox than this `
+          + `instance — upgrade this instance before restoring. Otherwise the manifest is `
+          + `corrupt. Either way, restoring now would silently leave out everything this `
+          + `build cannot place.`,
+        );
+      }
+
+      // Validate DB names against whitelist (path traversal prevention)
       if (chunk.type === 'sqlite_db') {
         const baseName = chunk.name.split(':')[0]!;
         if (!ALLOWED_DB_NAMES.has(baseName)) {
@@ -319,6 +367,8 @@ export class MigrationImporter {
       databasesRestored: [],
       artifactsImported: 0,
       memoryFilesImported: 0,
+      mergeLedgersImported: 0,
+      portableDirFilesImported: 0,
       configApplied: false,
     };
 
@@ -360,6 +410,31 @@ export class MigrationImporter {
       verification.memoryFilesImported = this.restoreMemory(chunksByType.memory);
     }
 
+    // 4b. Merge ledgers — the reversal records for `subjects_merge`. After memory and
+    // before secrets: they reference subject ids that live in engine.db, already
+    // restored in step 2, so a ledger landing here is usable the moment it lands.
+    if (chunksByType.sweeps.length > 0) {
+      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.sweeps[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
+      verification.mergeLedgersImported = this.restoreSweeps(chunksByType.sweeps);
+    }
+
+    // 4c. Generic portable directories (`apis/`, `workspace/`) — opaque file trees, so
+    // they carry no ordering constraint against the databases.
+    // Grouped BY DIRECTORY, not per chunk. `splitIntoChunks` turns a bundle over
+    // MAX_CHUNK_BYTES into `workspace:part0`, `workspace:part1`, … and handing those to
+    // JSON.parse one at a time throws on the first part — uncaught, aborting the import
+    // AFTER the databases have already landed. ~6 MB of files is enough to trigger it
+    // (the payload is base64, so ×4/3), and `workspace/` is the agent's own file area.
+    const portableByDir = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
+    for (const c of chunksByType.portable_dir) {
+      const base = c.meta.name.split(':')[0]!;
+      portableByDir.set(base, [...(portableByDir.get(base) ?? []), c]);
+    }
+    for (const [dirName, parts] of portableByDir) {
+      onProgress?.({ phase: 'restoring', currentChunk: parts[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: dirName });
+      verification.portableDirFilesImported += this.restorePortableDir(parts);
+    }
+
     // 5. Secrets (most sensitive — last)
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
@@ -376,6 +451,31 @@ export class MigrationImporter {
     // dropping the secret restore. No-op unless engine.db was in the set.
     if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
       ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
+    }
+
+    // 6b. The SAME re-gate for the flat `apis/*.json` profiles, which now travel too.
+    // Without this the gate has a hole with a precise shape: a source from BEFORE the
+    // connections cutover ships `apis/` and no `engine.db`, so the block above no-ops, the
+    // destination boots with empty `connections`, `importFromDirectoryIfNeeded` reads the
+    // flat JSON — and the ack rides in intact, defeating the managed BYOK-endpoint
+    // disclosure gate for an operator who never saw the dialog. Same condition, same
+    // reasoning, same idempotence; a self-hosted destination keeps the ack because it is
+    // the same data owner.
+    if (readEnvAlias('LYNOX_BILLING_TIER')) {
+      const apisDir = join(this.lynoxDir, 'apis');
+      if (existsSync(apisDir) && lstatSync(apisDir).isDirectory()) {
+        for (const file of readdirSync(apisDir)) {
+          if (!file.endsWith('.json')) continue;
+          const path = join(apisDir, file);
+          try {
+            if (!lstatSync(path).isFile()) continue;
+            const profile = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+            if (profile['custom_endpoint_ack'] === undefined) continue;
+            delete profile['custom_endpoint_ack'];
+            writeFileSync(path, JSON.stringify(profile, null, 2), { mode: FILE_MODE_PRIVATE });
+          } catch { continue; }   // unparseable or vanished — it cannot carry an ack either
+        }
+      }
     }
 
     onProgress?.({ phase: 'done', currentChunk: manifest.totalChunks, totalChunks: manifest.totalChunks, currentName: '' });
@@ -414,23 +514,25 @@ export class MigrationImporter {
   private groupChunksByType(
     metas: MigrationChunkMeta[],
     data: Map<number, Buffer>,
-  ): Record<MigrationChunkMeta['type'], Array<{ meta: MigrationChunkMeta; data: Buffer }>> {
-    const groups: Record<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>> = {
-      secrets: [],
-      sqlite_db: [],
-      artifacts: [],
-      memory: [],
-      config: [],
-    };
+  ): Record<MigrationChunkType, Array<{ meta: MigrationChunkMeta; data: Buffer }>> {
+    // DERIVED from the declared list, not restated. The hand-written table was the defect:
+    // a type in the union with no bucket here fell through `if (group)` without a word, and a
+    // v2.14.2 importer reading a v2.15 export lost `sweeps` and two `portable_dir` chunks that
+    // way while reporting `done` at 5 of 5 (measured 2026-09-24 across two real trees).
+    const groups = Object.fromEntries(
+      MIGRATION_CHUNK_TYPES.map((t) => [t, [] as Array<{ meta: MigrationChunkMeta; data: Buffer }>]),
+    ) as Record<MigrationChunkType, Array<{ meta: MigrationChunkMeta; data: Buffer }>>;
 
     for (const meta of metas) {
       const buf = data.get(meta.seq);
       if (!buf) continue;
-      const group = groups[meta.type];
-      if (group) group.push({ meta, data: buf });
+      // No `if (group)` guard, and its absence is the point: `meta.type` is a declared type and
+      // every declared type has a bucket above, so the lookup cannot miss. A guard here would
+      // re-create the silent drop it is meant to prevent.
+      groups[meta.type].push({ meta, data: buf });
     }
 
-    return groups as Record<MigrationChunkMeta['type'], Array<{ meta: MigrationChunkMeta; data: Buffer }>>;
+    return groups;
   }
 
   /**
@@ -608,6 +710,169 @@ export class MigrationImporter {
       written++;
     }
 
+    return written;
+  }
+
+  /**
+   * Restore the merge ledgers. Bounded like the memory bundle because reassembly holds
+   * several copies of the payload at once.
+   *
+   * Deliberately NOT claimed: that throwing here leaves nothing half-written. This runs at
+   * step 4b, so config, the SQLite databases and memory have already landed — a throw here
+   * aborts the import with those in place. That is the pre-existing shape of `restore()`,
+   * not something this step introduces, and the operator retries; the bound exists to stop
+   * the heap being exhausted, not to make the import transactional.
+   */
+  private restoreSweeps(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(
+        `Merge-ledger bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
+      );
+    }
+
+    // A part boundary can fall mid-UTF-8-sequence, so concatenate the Buffers, never
+    // decoded strings — same reason as the memory bundle.
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
+    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const sweepsDir = join(this.lynoxDir, 'sweeps');
+    const sweepsPrefix = sweepsDir + sep;
+
+    // A bundle arrives from another machine and its contents are attacker-shaped in the
+    // threat model this importer already assumes. Two symlink shapes defeat a purely
+    // lexical path check, so both are closed before anything is written:
+    //   1. `sweeps/` ITSELF a symlink — `resolve()` is lexical and `mkdirSync(recursive)`
+    //      no-ops on an existing link, so every ledger would land outside the data dir
+    //      while `startsWith(sweepsPrefix)` still passed.
+    //   2. an individual `merge-*.json` already a symlink — `writeFileSync` opens
+    //      O_CREAT|O_TRUNC, which FOLLOWS, so bundle content would overwrite the target.
+    if (existsSync(sweepsDir) && !lstatSync(sweepsDir).isDirectory()) {
+      throw new Error('Refusing to restore merge ledgers: ~/.lynox/sweeps is not a real directory.');
+    }
+
+    // Bound the FILE COUNT, not only the bytes. A minimal entry costs ~43 bytes, so the
+    // byte cap alone permits ~1.4M files — each one a separate write, and each one then
+    // copied + SHA-256'd + manifested by every future backup, which would brick the
+    // backup path from a single import.
+    const fileCount = Object.keys(bundle.files).length;
+    if (fileCount > MAX_MERGE_LEDGERS) {
+      throw new Error(`Too many merge ledgers: ${String(fileCount)} > ${String(MAX_MERGE_LEDGERS)}`);
+    }
+
+    let written = 0;
+
+    for (const [fileName, content] of Object.entries(bundle.files)) {
+      if (typeof content !== 'string') continue;
+      // The writer's own name shape, which admits a basename only — so a crafted
+      // bundle cannot smuggle `../` or an absolute path through this key.
+      if (!isMergeLedgerFileName(fileName)) continue;
+
+      // The filename says "merge ledger"; that is not evidence the payload is one. The
+      // export doc-comment claims sweep/archive ledgers are deliberately not carried, and
+      // enforcing that on the NAME alone leaves a `phase: 'archive'` body importable under
+      // a `merge-*.json` name — which `subject-sweep --rollback` then dispatches on by
+      // name. Cheap to close, so close it.
+      let parsed: unknown;
+      try { parsed = JSON.parse(content); } catch { continue; }
+      const led = parsed as { version?: unknown; phase?: unknown };
+      if (led?.version !== 1 || led.phase !== 'merge') continue;
+
+      const filePath = resolve(sweepsDir, fileName);
+      // Defense-in-depth, exactly as the memory restore does it: the resolved path must
+      // sit strictly inside sweeps/. A bare startsWith would also accept `sweepsEVIL/`.
+      if (!filePath.startsWith(sweepsPrefix)) continue;
+
+      mkdirSync(sweepsDir, { recursive: true, mode: DIR_MODE_PRIVATE });
+      // Drop any existing entry rather than truncating it: `writeFileSync` follows a
+      // symlink, so writing onto one would put bundle content into its target. unlink
+      // removes the LINK, and 'wx' then refuses to follow anything raced in afterwards.
+      try { unlinkSync(filePath); } catch { /* not there — the normal case */ }
+      writeFileSync(filePath, content, { encoding: 'utf-8', mode: FILE_MODE_PRIVATE, flag: 'wx' });
+      written++;
+    }
+
+    return written;
+  }
+
+  /**
+   * Restore one generic portable directory. Every guard the sweeps restore earned from an
+   * adversarial round applies here too, for the same reasons: the bundle comes from another
+   * machine, `writeFileSync` follows symlinks, `resolve()` is purely lexical, and
+   * `mkdirSync(recursive)` no-ops on an existing link.
+   */
+  private restorePortableDir(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    // Sum the REASSEMBLED payload, not individual chunks: `encryptChunk` already caps each
+    // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit — the check
+    // was unreachable. The bundle is base64, so the ceiling is expressed on the encoded
+    // size the importer actually holds in memory.
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_PORTABLE_DIR_BYTES * 2) {
+      throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES * 2)}`);
+    }
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
+    const bundle = JSON.parse(data.toString('utf-8')) as { dir?: unknown; files?: Record<string, string> };
+    // The directory name comes from the bundle, so it is attacker-shaped: accept only the
+    // ones this build declares portable, never whatever the payload asks for.
+    if (typeof bundle.dir !== 'string' || !GENERIC_PORTABLE_DIRS.includes(bundle.dir)) return 0;
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const entries = Object.entries(bundle.files);
+    if (entries.length > MAX_PORTABLE_DIR_ENTRIES) {
+      throw new Error(`Too many entries in ${bundle.dir}: ${String(entries.length)} > ${String(MAX_PORTABLE_DIR_ENTRIES)}`);
+    }
+
+    const root = join(this.lynoxDir, bundle.dir);
+    const rootPrefix = root + sep;
+    if (existsSync(root) && !lstatSync(root).isDirectory()) {
+      throw new Error(`Refusing to restore ${bundle.dir}: it is not a real directory.`);
+    }
+
+    // The root itself, once — the per-segment walk below deliberately does NOT use
+    // `recursive`, so it cannot create a chain through a link, and therefore cannot create
+    // the root either.
+    mkdirSync(root, { recursive: true, mode: DIR_MODE_PRIVATE });
+
+    let written = 0;
+    for (const [rel, b64] of entries) {
+      if (typeof b64 !== 'string') continue;
+      if (!isPortableDirEntryName(rel)) continue;
+
+      const filePath = resolve(root, rel);
+      if (!filePath.startsWith(rootPrefix)) continue;
+
+      // EVERY ancestor, not just the immediate parent. `resolve()` is lexical and
+      // `existsSync` FOLLOWS links, so checking only `dirname(filePath)` misses a link one
+      // level up: with `apis/sub` a symlink, the key `sub/deeper/pwn.txt` resolves to a
+      // path that still starts with the root, and `mkdirSync(recursive)` then creates
+      // `deeper` THROUGH the link and the write lands outside the data dir. Entries are
+      // written in object order, so an earlier entry could also plant the link the next
+      // one walks through — hence the check runs per entry, not once up front.
+      const segments = rel.split('/');
+      let cursor = root;
+      let ancestorEscape = false;
+      for (const segment of segments.slice(0, -1)) {
+        cursor = join(cursor, segment);
+        let st;
+        try { st = lstatSync(cursor); } catch { st = null; }   // absent — mkdir will create it
+        if (st && !st.isDirectory()) { ancestorEscape = true; break; }
+        if (!st) mkdirSync(cursor, { mode: DIR_MODE_PRIVATE });
+      }
+      if (ancestorEscape) continue;
+
+      // unlink first, then 'wx': writeFileSync opens O_CREAT|O_TRUNC and FOLLOWS a symlink,
+      // so writing onto one would put bundle content into its target.
+      try { unlinkSync(filePath); } catch { /* not there — the normal case */ }
+      try {
+        writeFileSync(filePath, Buffer.from(b64, 'base64'), { mode: FILE_MODE_PRIVATE, flag: 'wx' });
+      } catch { continue; } // raced, or the parent vanished
+      written++;
+    }
     return written;
   }
 

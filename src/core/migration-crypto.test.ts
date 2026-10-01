@@ -199,7 +199,22 @@ describe('chunk encryption', () => {
     const plaintext = randomBytes(1024 * 1024);
     const encrypted = encryptChunk(plaintext, transferKey, 0, manifestHash);
     const decrypted = decryptChunk(encrypted, transferKey, manifestHash);
-    expect(decrypted).toEqual(plaintext);
+    // `Buffer.equals` (a memcmp), not `toEqual`, and only because these are a MEGABYTE each.
+    // Measured on this test: the crypto round-trip costs 6ms, `toEqual` over the two buffers
+    // 5447ms, `equals` 0.5ms — so the comparison outweighs the thing it checks by ~900x, and the
+    // test ran ~3.7s against the 10s `testTimeout`, which is why it tipped on a busy machine.
+    //
+    // The cost is the structural equality WALK, not diff rendering: a FAILING 1MB `toEqual` is
+    // cheaper than a passing one, because proving 1,048,576 indices equal has no early exit while
+    // finding one difference does. Naming it "the differ" points at the wrong half.
+    //
+    // The siblings above keep `toEqual` on purpose: at 17 and 0 bytes it costs 0.3ms and 0.15ms,
+    // and on failure its reporter block names the differing BYTE while `equals().toBe(true)` can
+    // only say `- true / + false`. The rule is the size of a typed array, not the matcher — large
+    // STRINGS are not in this class, `toEqual` short-circuits them via `Object.is`.
+    // Same idiom already in use on a 7MB buffer: `portable-dir-migration.test.ts` › the
+    // `portableDirFilesImported` case.
+    expect(decrypted.equals(plaintext)).toBe(true);
   });
 
   it('rejects chunk exceeding MAX_CHUNK_BYTES', () => {

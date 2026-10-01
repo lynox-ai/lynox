@@ -18,7 +18,6 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
-  DataStoreColumnDef,
 } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -36,7 +35,6 @@ import { createEmbeddingProvider } from './embedding.js';
 import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import type { EngineDb } from './engine-db.js';
-import { DataStoreBridge } from './datastore-bridge.js';
 import { getLynoxDir } from './config.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
 import {
@@ -47,31 +45,51 @@ import {
   loadManifest,
 } from './project.js';
 import { getWorkspaceDir, isWorkspaceActive } from './workspace.js';
+import { compose, engineText, renderFence, type Part } from './data-boundary.js';
 // setMemoryKnowledgeLayer removed — knowledgeLayer now on ToolContext
 
 // ── History + Budget + Subscriptions ────────────────────────────
 
+/**
+ * Apply the boot-time cost, rate and egress settings to the ToolContext.
+ *
+ * The HTTP/mail rate limits and the daily/monthly caps count against
+ * RunHistory, so they need it. The session cap and the egress settings
+ * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
+ * applied whether or not RunHistory opened: an engine that boots without its
+ * history must still enforce the limits it was configured with.
+ */
 export function configureBudgetAndRateLimits(
-  runHistory: RunHistory,
+  runHistory: RunHistory | null,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
-  // Env vars override config (managed hosting sets tier-specific limits via env)
-  const envFloat = (key: string): number | undefined => {
-    const v = parseFloat(process.env[key] ?? '');
-    return Number.isFinite(v) && v > 0 ? v : undefined;
-  };
-  const envInt = (key: string): number | undefined => {
-    const v = parseInt(process.env[key] ?? '', 10);
-    return Number.isFinite(v) && v > 0 ? v : undefined;
-  };
-
   configurePersistentBudget({
     costProvider: runHistory,
     sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
     dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
     monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
+  if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
+  configureEgressPolicy(userConfig, toolContext);
+}
+
+// Env vars override config (managed hosting sets tier-specific limits via env)
+function envFloat(key: string): number | undefined {
+  const v = parseFloat(process.env[key] ?? '');
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+function envInt(key: string): number | undefined {
+  const v = parseInt(process.env[key] ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+function configureHistoryBackedLimits(
+  runHistory: RunHistory,
+  userConfig: LynoxUserConfig,
+  toolContext: ToolContext,
+): void {
   applyHttpRateLimits(
     toolContext,
     runHistory,
@@ -90,13 +108,25 @@ export function configureBudgetAndRateLimits(
     dailyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_DAY') ?? userConfig.max_mail_sends_per_day,
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
+}
+
+function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolContext): void {
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
-  // Outbound egress policy for the agent's HTTP tool surface. Default
-  // 'allow-all' = unchanged behaviour. 'allow-list'/'deny-all' are opt-in
-  // operator/CP controls enforced in http.ts assertHostPolicy + the web-search
-  // egress gate (assertEgressAllowed) — covering http_request, api_setup, and
-  // web_research (query + content). Other egress surfaces (LLM, mail, push,
-  // backup, Google, voice) are out of scope — see the network_policy doc.
+  // Outbound egress policy. Default 'allow-all' = unchanged behaviour.
+  // 'allow-list'/'deny-all'/'guarded' are opt-in operator/CP controls enforced
+  // in the network-guard SSOT (assertHostPolicy), reached from http.ts, the
+  // web-search egress gate (assertEgressAllowed) and core/connector-egress.ts.
+  //
+  // ⚠ Scope WIDENED by PRD Stage 1 §3.8 — this sentence used to name Google and
+  // backup as out of scope and no longer can. Covered: http_request, api_setup,
+  // web_research (query + content), every authenticated Google Workspace call
+  // (incl. Gmail-over-OAuth and the Drive backup upload), and this instance's
+  // control-plane calls. Still out of scope: the LLM provider call, push
+  // notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, and
+  // anything a shell command starts. The same list is stated in
+  // network-guard.ts's deny-all case and in the `network_policy` doc comment.
+  // The three move together: whoever edits one and not the others leaves two
+  // statements behind that claim the opposite.
   const resolvedPolicy = userConfig.network_policy ?? 'allow-all';
   applyNetworkPolicy(
     toolContext,
@@ -114,35 +144,24 @@ export function configureBudgetAndRateLimits(
   process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
 }
 
+/**
+ * Genealogy recording for a Session.
+ *
+ * Tool calls used to be recorded here too, from a `lynox:tool:end` subscriber.
+ * They are not any more: that channel is process-global, so every Session's
+ * callback ran for every tool call in the process and each booked what arrived
+ * onto its own open run. A thread-id filter narrowed it to one conversation but
+ * could not separate a spawned child from its parent — they share a thread by
+ * design — so a child's calls landed on the parent's run. Persistence now goes
+ * through a sink the agent is given (`AgentConfig.recordToolCall`), which
+ * receives the caller's own run id instead of inferring one.
+ *
+ * `spawn:end` stays on the channel because its payload already names both runs
+ * it is relating, so a listener needs nothing from its own ambient state.
+ */
 export function setupHistorySubscriptions(
   history: RunHistory,
-  getCurrentRunId: () => string | null,
-  getAndIncrementSeq: () => number,
-  addUserWaitMs?: (ms: number) => void,
 ): void {
-  // tool:end → fire-and-forget tool call recording
-  channels.toolEnd.subscribe((msg: unknown) => {
-    const runId = getCurrentRunId();
-    if (!runId) return;
-    const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined };
-    // Track user wait time from interactive tools
-    if (data.name === 'ask_user' && addUserWaitMs) {
-      addUserWaitMs(Math.round(data.duration));
-    }
-    try {
-      history.insertToolCall({
-        runId,
-        toolName: data.name,
-        inputJson: data.input ?? '{}',
-        outputJson: data.success ? '' : (data.error ?? 'unknown error'),
-        durationMs: Math.round(data.duration),
-        sequenceOrder: getAndIncrementSeq(),
-      });
-    } catch {
-      // Fire-and-forget
-    }
-  });
-
   // spawn:end → genealogy tracking
   channels.spawnEnd.subscribe((msg: unknown) => {
     const data = msg as {
@@ -191,7 +210,7 @@ export async function generateInitBriefing(
   }
 
   try {
-    const parts: string[] = [];
+    const parts: Part[] = [];
 
     // Run history briefing (highest priority — kept intact)
     if (runHistory) {
@@ -207,12 +226,12 @@ export async function generateInitBriefing(
     if (prevManifest) {
       const diff = diffManifest(prevManifest, manifest);
       diffText = formatManifestDiff(diff);
-      if (diffText) parts.push(diffText);
+      if (diffText) parts.push(engineText(diffText));
     }
 
     // Workspace awareness
     if (isWorkspaceActive()) {
-      parts.push(`<workspace>\nYour workspace directory is ${getWorkspaceDir()}. All file operations (read_file, write_file, batch_files) are sandboxed to this directory and /tmp. Bash commands default to this directory. The workspace persists across container restarts.\n</workspace>`);
+      parts.push(renderFence('workspace', `Your workspace directory is ${getWorkspaceDir()}. All file operations (read_file, write_file, batch_files) are sandboxed to this directory and /tmp. Bash commands default to this directory. The workspace persists across container restarts.`));
     }
 
     // NB: the `<task_overview>` summary moved OUT of this CLI-gated function to
@@ -223,7 +242,7 @@ export async function generateInitBriefing(
       return { briefing: undefined, manifest };
     }
 
-    let assembled = parts.join('\n\n');
+    let assembled = compose(parts, '\n\n');
 
     // Cap total briefing size — trim manifest diff first (most verbose, least critical)
     if (assembled.length > MAX_BRIEFING_CHARS && diffText && diffText.length > 200) {
@@ -231,10 +250,11 @@ export async function generateInitBriefing(
       const nonDiffLen = assembled.length - diffText.length; // other parts + separators
       const budgetForDiff = Math.max(200, MAX_BRIEFING_CHARS - nonDiffLen - suffix.length);
       const trimmedDiff = diffText.slice(0, budgetForDiff) + suffix;
-      const partsWithoutDiff = parts.filter(p => p !== diffText);
-      const diffIdx = parts.indexOf(diffText);
-      partsWithoutDiff.splice(diffIdx, 0, trimmedDiff);
-      assembled = partsWithoutDiff.join('\n\n');
+      const diffPart = parts.find(p => 'engine' in p && p.engine === diffText);
+      const diffIdx = diffPart ? parts.indexOf(diffPart) : -1;
+      const partsWithoutDiff = parts.filter(p => p !== diffPart);
+      partsWithoutDiff.splice(diffIdx < 0 ? partsWithoutDiff.length : diffIdx, 0, engineText(trimmedDiff));
+      assembled = compose(partsWithoutDiff, '\n\n');
     }
 
     // Hard cap if still over budget
@@ -257,7 +277,7 @@ export async function generateInitBriefing(
 export interface SecretResult {
   vault: SecretVault | null;
   store: SecretStore | null;
-  briefingParts: string[];
+  briefingParts: Part[];
 }
 
 /**
@@ -398,7 +418,7 @@ export function ensureVaultKey(): void {
 }
 
 export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
-  const parts: string[] = [];
+  const parts: Part[] = [];
   let vault: SecretVault | null = null;
   let store: SecretStore | null = null;
 
@@ -412,7 +432,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
       vault = new SecretVault();
       const migrated = vault.migrateFromFile();
       if (migrated > 0) {
-        parts.push(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`);
+        parts.push(engineText(`Migrated ${migrated} secret(s) from secrets.json to encrypted vault.`));
       }
 
       // Migrate secrets from plaintext config to vault
@@ -437,10 +457,11 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
       }
 
-      const vaultGoogleSecret = vault.get('GOOGLE_CLIENT_SECRET');
-      if (vaultGoogleSecret && !process.env['GOOGLE_CLIENT_SECRET']) {
-        userConfig.google_client_secret = vaultGoogleSecret;
-      }
+      // The vault→userConfig copy for GOOGLE_CLIENT_SECRET was removed with the pair
+      // resolver: it put a vault secret next to an env id in userConfig and produced
+      // a 'config' tier holding a pair neither source ever had. The resolver reads the
+      // vault directly, and the migration below now carries the ID too, so the vault
+      // holds a COMPLETE pair rather than half of one.
 
       // Tavily backend removed 2026-05-24 — `SEARCH_API_KEY` / `TAVILY_API_KEY`
       // vault entries left behind by older installs are ignored on read. They
@@ -500,7 +521,7 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
     const visibleNames = store.listAgentVisibleNames();
     if (visibleNames.length > 0) {
       const names = visibleNames.map(n => `secret:${n} (${store!.getMasked(n)})`).join(', ');
-      parts.push(`<secrets>${names}</secrets>`);
+      parts.push(renderFence('secrets', names));
     }
   } catch {
     store = null;
@@ -521,7 +542,9 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     envVar: string;
   }> = [
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
-    { vaultName: 'GOOGLE_CLIENT_SECRET', configField: 'google_client_secret', envVar: 'GOOGLE_CLIENT_SECRET' },
+    // The Google pair is NOT in this list — see the paired migration below. The loop
+    // is per-field and this value is a pair, and mixing those two shapes is exactly
+    // the defect google-client-pair.ts exists to prevent.
     // SEARCH_API_KEY / TAVILY_API_KEY migration entry removed 2026-05-24
     // when the Tavily backend was retired.
   ];
@@ -535,6 +558,42 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     if (process.env[m.envVar]) continue; // Don't store env-sourced keys
     vault.set(m.vaultName, value, 'any');
     fieldsToRemove.push(m.configField);
+  }
+
+  // ── The Google client pair migrates atomically or not at all ────────────────
+  //
+  // The loop above decides per FIELD: it skips a name the vault already holds and
+  // migrates the rest. For a pair that is wrong in a way that destroys data. With
+  // an old secret in the vault and the operator's current pair in config.json, the
+  // secret entry is skipped, the id is moved in beside the OLD secret, and the id
+  // is then deleted from config.json — leaving a vault pair assembled from two
+  // eras (PROJECT-B id with PROJECT-A secret, i.e. invalid_client) and no way back,
+  // because the correct id is gone from disk.
+  //
+  // So: migrate both only when the vault holds NEITHER and config.json holds BOTH.
+  // In every other shape, migrate neither and delete neither — a half-migrated pair
+  // is worse than an unmigrated one, and config.json is the only remaining copy.
+  const gId = userConfig.google_client_id;
+  const gSecret = userConfig.google_client_secret;
+  const vaultHasNeither = !vault.has('GOOGLE_CLIENT_ID') && !vault.has('GOOGLE_CLIENT_SECRET');
+  const configHasBoth = typeof gId === 'string' && !!gId && typeof gSecret === 'string' && !!gSecret;
+  const envHasNeither = !process.env['GOOGLE_CLIENT_ID'] && !process.env['GOOGLE_CLIENT_SECRET'];
+  if (vaultHasNeither && configHasBoth && envHasNeither) {
+    // Two writes, and a half-completed pair is the thing to avoid: a lone vault
+    // half is inert today (the resolver needs both), but a later half stored
+    // through the UI would complete it ACROSS ERAS — the exact two-era pair this
+    // change exists to prevent. If the second write throws, undo the first and
+    // leave config.json untouched, so the operator's pair stays in one piece.
+    // A hard kill between the two is not reachable from here.
+    try {
+      vault.set('GOOGLE_CLIENT_ID', gId, 'any');
+      vault.set('GOOGLE_CLIENT_SECRET', gSecret, 'any');
+      fieldsToRemove.push('google_client_id', 'google_client_secret');
+    } catch (err) {
+      try { vault.delete('GOOGLE_CLIENT_ID'); } catch { /* nothing to undo */ }
+      try { vault.delete('GOOGLE_CLIENT_SECRET'); } catch { /* nothing to undo */ }
+      throw err;
+    }
   }
 
   if (fieldsToRemove.length === 0) return;
@@ -728,42 +787,6 @@ export async function initKnowledgeLayer(
     process.stderr.write(`[lynox:knowledge] Agent memory init failed: ${getErrorMessage(err)}\n`);
     return null;
   }
-}
-
-export function initDataStoreBridge(
-  knowledgeLayer: KnowledgeLayer,
-  dataStore: import('./data-store.js').DataStore,
-): DataStoreBridge {
-  const bridge = new DataStoreBridge(
-    knowledgeLayer.getDb(),
-    knowledgeLayer.getEntityResolver(),
-    dataStore,
-  );
-  knowledgeLayer.setDataStoreBridge(bridge);
-
-  // Subscribe to dataStoreInsert for async entity indexing
-  channels.dataStoreInsert.subscribe((msg: unknown) => {
-    const data = msg as {
-      event: string;
-      collection: string;
-      columns?: DataStoreColumnDef[];
-      records?: Record<string, unknown>[];
-      scopeType?: string;
-      scopeId?: string;
-    };
-    const scope: MemoryScopeRef = {
-      type: (data.scopeType as MemoryScopeRef['type']) ?? 'context',
-      id: data.scopeId ?? '',
-    };
-
-    if (data.event === 'collection_created' && data.columns) {
-      void bridge.registerCollection(data.collection, data.columns, scope).catch(() => {});
-    } else if (data.event === 'records_inserted' && data.records) {
-      void bridge.indexRecords(data.collection, data.records, scope).catch(() => {});
-    }
-  });
-
-  return bridge;
 }
 
 // ── Memory Store Subscription ───────────────────────────────────

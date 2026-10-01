@@ -1,6 +1,6 @@
 {
   "name": "@lynox-ai/core",
-  "version": "2.11.0",
+  "version": "2.14.2",
   "description": "source-available professional agent that learns your business — connect any API, remember everything, run while you sleep",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
@@ -29,6 +29,7 @@
   "engines": {
     "node": ">=22"
   },
+  "packageManager": "pnpm@10.34.5",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -46,13 +47,12 @@
   },
   "files": [
     "dist/",
-    "data/",
     "scripts/postinstall.cjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
     "dev": "node --env-file-if-exists=.env --watch --import tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
@@ -77,10 +77,11 @@
     "@sentry/node": "^10.46.0",
     "better-sqlite3": "^12.6.2",
     "email-reply-parser": "^2.3.5",
+    "ical.js": "^2.2.1",
     "iconv-lite": "^0.7.2",
     "imapflow": "^1.0.181",
     "mammoth": "^1.12.0",
-    "nodemailer": "^9.0.1",
+    "nodemailer": "^10.0.10",
     "unpdf": "^1.6.2",
     "web-push": "^3.6.7",
     "zod": "^4.3.6"
@@ -92,9 +93,11 @@
       "onnxruntime-node"
     ],
     "overrides": {
+      "nanoid@3": "^3.3.17",
       "path-to-regexp": "^8.4.0",
-      "brace-expansion": ">=5.0.8",
+      "brace-expansion": ">=5.0.11",
       "postcss": ">=8.5.18",
+      "devalue": ">=5.9.3 <6",
       "lodash-es": ">=4.18.0",
       "cookie": ">=0.7.0",
       "esbuild": ">=0.28.1",
@@ -102,13 +105,14 @@
       "@hono/node-server": ">=1.19.13",
       "vite": ">=8.0.16",
       "protobufjs": ">=8.6.0",
-      "sharp": ">=0.35.0",
+      "sharp": "^0.35.4",
       "@opentelemetry/core": ">=2.8.0",
-      "nodemailer": ">=9.0.1",
+      "nodemailer": ">=10.0.10 <11",
       "fast-uri": ">=3.1.2",
-      "ip-address": ">=10.1.1",
+      "ip-address": ">=10.3.1",
       "uuid": ">=11.1.1",
-      "adm-zip": ">=0.6.0"
+      "adm-zip": "^0.6.1",
+      "@xmldom/xmldom": "^0.8.15"
     }
   },
   "peerDependencies": {
@@ -127,16 +131,17 @@
     "@anthropic-ai/vertex-sdk": "^0.16.0",
     "@evilmartians/lefthook": "^2.1.4",
     "@playwright/test": "^1.48.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@types/better-sqlite3": "^7.6.13",
     "@types/email-reply-parser": "^1.4.2",
-    "@types/node": "^25.3.5",
-    "@types/nodemailer": "^8.0.0",
+    "@types/node": "^22.19.15",
     "@types/web-push": "^3.6.4",
     "@typescript-eslint/eslint-plugin": "^8.57.2",
     "@typescript-eslint/parser": "^8.57.2",
     "@vitest/coverage-v8": "^4.1.4",
     "eslint": "^10.1.0",
     "google-auth-library": "^10.6.2",
+    "svelte": "^5.55.7",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4",

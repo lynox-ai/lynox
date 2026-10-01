@@ -6,7 +6,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
 
-	interface Contact { name: string; email?: string; phone?: string; company?: string; type?: string; source?: string; tags?: string[]; notes?: string; _created_at?: string; }
+	interface Contact { _id?: number; name: string; email?: string; phone?: string; company?: string; type?: string; source?: string; tags?: string[]; notes?: string; _created_at?: string; }
 	interface Interaction { type: string; channel: string; summary: string; date?: string; }
 	interface Deal { title: string; contact_name: string; value?: number; currency?: string; stage?: string; next_action?: string; }
 
@@ -39,6 +39,34 @@
 			deals = data.deals;
 		} catch { error = t('common.load_failed'); }
 		loading = false;
+	}
+
+	let removingId = $state<number | null>(null);
+
+	/**
+	 * Remove a contact outright. Until the route behind this existed the CRM had no removal
+	 * path at all: `contacts_save` upserts on EMAIL, so a wrong contact could only be
+	 * overwritten — and only if it has one. A NULL email never collides, so re-saving an
+	 * email-less contact (which is most of what lead research produces) added another row
+	 * instead of fixing the first.
+	 */
+	async function removeContact(c: Contact) {
+		if (c._id === undefined) return;
+		if (!confirm(t('crm.remove_confirm').replace('{name}', () => c.name))) return;
+		removingId = c._id;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/crm/contacts/${String(c._id)}`, { method: 'DELETE' });
+			// A 404 means it is already gone and this list is stale — reload rather than tell
+			// the person to retry something that can never succeed.
+			if (!res.ok && res.status !== 404) throw new Error();
+			selected = null;
+			await loadContacts();
+		} catch {
+			error = t('crm.remove_failed');
+		} finally {
+			if (removingId === c._id) removingId = null;
+		}
 	}
 
 	async function selectContact(c: Contact) {
@@ -161,6 +189,16 @@
 							<button onclick={() => { if (selected) editInChat(selected); }} class="w-full inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-border-hover hover:text-text"><Icon name="chat" size="xs" /> {t('crm.edit_in_chat')}</button>
 						{/if}
 						{#if selected.company}<p class="text-xs text-text-muted">{selected.company}</p>{/if}
+						<!-- Where this row came from. `source` used to read 'manual' for every
+						     agent-written contact, which said the person entered it themselves —
+						     never true on that path. It matters most for lead research, where the
+						     contact comes off a page the agent read rather than out of a
+						     conversation the operator had. -->
+						{#if selected.source === 'agent_external'}
+							<p class="text-[10px] font-mono text-amber-600 dark:text-amber-400">{t('crm.source.agent_external')}</p>
+						{:else if selected.source === 'agent'}
+							<p class="text-[10px] font-mono text-text-subtle">{t('crm.source.agent')}</p>
+						{/if}
 						{#if parseTags(selected.tags).length > 0}
 							<div class="flex flex-wrap gap-1">{#each parseTags(selected.tags) as tag}<span class="rounded-[var(--radius-sm)] bg-accent/10 text-accent-text px-2 py-0.5 text-xs">{tag}</span>{/each}</div>
 						{/if}
@@ -190,6 +228,17 @@
 									</div>
 								{/each}
 							</div>
+						{/if}
+						<!-- Last, and visually quiet: removal is the rare act, not the primary one.
+						     Only offered when the row has an id — an older list payload without
+						     one would otherwise render a button that cannot work. -->
+						{#if selected._id !== undefined}
+							<button
+								type="button"
+								class="w-full inline-flex items-center justify-center gap-1.5 rounded-[var(--radius-sm)] border border-border px-3 py-1.5 text-xs text-text-subtle transition-colors hover:border-danger/40 hover:text-danger disabled:opacity-40 disabled:cursor-not-allowed"
+								disabled={removingId !== null}
+								onclick={() => { if (selected) void removeContact(selected); }}
+							>{removingId === selected._id ? t('crm.removing') : t('crm.remove')}</button>
 						{/if}
 					</div>
 				{/if}

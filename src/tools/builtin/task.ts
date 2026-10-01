@@ -1,4 +1,4 @@
-import type { ToolEntry, IAgent, TaskPriority, TaskStatus, MemoryScopeRef } from '../../types/index.js';
+import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { logErrorChain } from '../../core/utils.js';
@@ -19,6 +19,7 @@ interface TaskCreateInput {
   watch_url?: string | undefined;
   watch_interval_minutes?: number | undefined;
   workflow_id?: string | undefined;
+  params?: Record<string, unknown> | undefined;
 }
 
 interface TaskUpdateInput {
@@ -42,15 +43,163 @@ interface TaskListInput {
   limit?: number | undefined;
 }
 
+/** How much of a failed run's stored reason is rendered in the listing. */
+const FAILURE_REASON_CHARS = 300;
+
+/** How much of the stored parameter set is rendered. Shorter than the reason:
+ *  it is a pointer to what was configured, not the configuration itself. */
+const PARAMS_CHARS = 200;
+
+/** Flattened wherever a stored value is rendered inside a one-per-line listing:
+ *  a line break in it would invent a row, and the value comes from a provider. */
+const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
+
+/** What separates the fields of the detail line. Named because the reason has to
+ *  be stripped of it — a value that can contain the separator can invent a field. */
+const FIELD_SEPARATOR = ' · ';
+
+/** Flatten anything that could end a line or forge a field. */
+const clean = (v: string): string => v.replace(UNSAFE_IN_LINE, ' ');
+
+/** Cut at a CODEPOINT boundary. `slice` counts UTF-16 units, so a provider whose
+ *  error text puts an emoji across the limit leaves a lone surrogate in the
+ *  model's context — the offset is chosen by the far end, not by us. */
+const cut = (v: string, max: number): string => {
+  const points = [...v];
+  return points.length <= max ? v : `${points.slice(0, max).join('')}…`;
+};
+
+/**
+ * The second line a scheduled trigger gets when the listing alone would mislead.
+ *
+ * WHY IT EXISTS. `status` said `open` for a schedule that had been switched off
+ * in July and for one whose last run died at the provider, and said the same
+ * thing for a healthy one. The record carries the difference — `enabled`,
+ * `last_run_status`, `last_run_result`, `pipeline_id` all ride on
+ * {@link TriggerRecord} and reached `listTriggers` — and this function dropped
+ * every one of them. Measured on a real instance (2026-09-24): three schedules
+ * in `failed`, three unrelated causes, all three stored, none reachable. Asked
+ * to repair them, the model wrote that it could not reconstruct the
+ * configuration and replaced all three with invented ones.
+ *
+ * Returns '' when there is nothing to add, so an ordinary TODO and a healthy
+ * schedule render exactly as before.
+ */
+export function triggerDetailLine(t: {
+  enabled?: number | undefined;
+  last_run_status?: string | undefined;
+  last_run_result?: string | undefined;
+  last_run_at?: string | undefined;
+  pipeline_id?: string | undefined;
+  pipeline_params?: string | undefined;
+  effect?: string | undefined;
+  next_run_at?: string | undefined;
+  status?: string | undefined;
+}): string {
+  const parts: string[] = [];
+  // `enabled` is a 0/1 column and ABSENT means enabled — the column defaults to
+  // 1, so `=== 0` is the test, not falsiness. A todo has no such field at all.
+  if (t.enabled === 0) parts.push('SCHEDULE OFF — it will not fire');
+  // NOT a whitelist of failure words. The writer stores 'success', 'failed' and
+  // 'timeout' (task-manager: "preserves the actual outcome ('failed' vs
+  // 'timeout')"), and an earlier draft here checked for 'failed' or 'error' —
+  // a word nothing writes — while missing 'timeout', a word something does. A
+  // whitelist also fails in the wrong DIRECTION: a status added later would
+  // render as healthy. Anything recorded that is not success is a run the
+  // reader needs to see; absent means never run, which is not a failure.
+  const failed = t.last_run_status !== undefined && t.last_run_status !== 'success';
+  if (failed) {
+    const when = t.last_run_at ? ` (${clean(t.last_run_at).slice(0, 16)})` : '';
+    // The FIELD SEPARATOR is neutralised inside the reason, not only line
+    // breaks. `parts.join(' · ')` means a reason carrying ` · workflow X` reads
+    // as another field — two workflow attributions on one line, at the moment
+    // the reader is deciding which workflow a repair must preserve. It costs a
+    // middle dot in a provider's prose and removes the ambiguity entirely.
+    const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
+    const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
+    parts.push(`last run FAILED${when}: ${reason}`);
+    // …and whether that failure was the last word. `last run FAILED` alone does
+    // not say: a cron row keeps its next run through a failure and tries again, a
+    // one-shot loses it (`task-manager.ts` nulls the column) and does not. That is
+    // the question a reader has after seeing a failure, and nothing here answered it.
+    //
+    // The test is per ROW. It lives inside the failure branch so a row that never
+    // ran cannot reach it — a reminder created without a schedule, or a schedule
+    // dropped before it ever fired, is not a broken one. `waiting` and `completed`
+    // are then excluded by name, because those rows DID run: a parked one comes back
+    // when its answer lands (`worker-loop.ts` re-arms it), a triaged one is finished.
+    //
+    // KNOWN RESIDUAL, pinned by a test rather than left to be found: a schedule that
+    // ran, failed and was un-subscribed AFTERWARDS still gets the note. True there,
+    // just louder than the situation calls for. `triggers.source` does separate the
+    // two, but reading it alone would not serve — `deriveSourceEffect` stamps 'cron'
+    // on every reminder and backup row too, so that carve-out would silence a
+    // genuinely dead one.
+    //
+    // "on its own" is load-bearing: `runTriggerNow` consults neither this column nor
+    // `enabled`, so Run-now still works. The sentence says what will not happen by
+    // itself and promises no repair — a new time is necessary and not sufficient,
+    // since `enabled` and `status` gate the row too.
+    //
+    // The `effect` test is defensive typing, not what keeps a TODO out: `TaskRecord`
+    // carries no `last_run_status`, so the branch above already does. It guards a
+    // hand-built object, not a store row.
+    if (t.effect !== undefined && !t.next_run_at
+      && t.status !== 'completed' && t.status !== 'waiting') {
+      parts.push('NO NEXT RUN — it will not try again on its own');
+    }
+  }
+  // The WORKFLOW ID IS NOT THE FIELD TO LEAN ON, and an earlier revision of
+  // this comment claimed the opposite — "the thing a repair has to preserve".
+  // `target_workflow_id` is `REFERENCES workflows(id) ON DELETE SET NULL`, so
+  // deleting the workflow NULLS it: in the one cause that names a missing
+  // workflow, the id is already gone by the time anyone reads the row. Measured
+  // on a real instance — the schedule that reported "target workflow no longer
+  // exists" had an empty id, and I first read that as "it never had one".
+  //
+  // `params_json` has no foreign key and SURVIVES. It is the stored
+  // configuration — the thing that was actually lost when a repair rewrote
+  // three schedules from scratch — so it is rendered too, and its absence is
+  // reported rather than inferred: an empty id beside stored params is a fact
+  // the reader can act on, not a conclusion this line should draw.
+  //
+  // Both are cleaned like every other rendered field. Neither is reachable with
+  // a line break today, but each is safe because of an invariant enforced two
+  // modules away for a different reason and written down nowhere near here.
+  if (t.pipeline_id) parts.push(`workflow ${clean(t.pipeline_id)}`);
+  // A schedule whose EFFECT is to run a workflow and which has none is broken
+  // as a matter of its own record, not by inference: the WorkerLoop dispatches
+  // on `effect`, so this one dispatches to a workflow that is not there.
+  //
+  // Keyed on the effect and NOT on stored params, which was the first attempt
+  // and would have missed the real case. Checked against the instance that
+  // started this: of its three failing schedules, exactly the one reporting
+  // "target workflow no longer exists" has effect=run_workflow with an empty
+  // id — its params are `{}`. The other two are effect=run_agent and need no
+  // workflow at all, so a params-keyed test would have said nothing about the
+  // broken one and something about the healthy ones.
+  else if (t.effect === 'run_workflow') parts.push('NO WORKFLOW LINKED — it dispatches to one and has none');
+  if (t.pipeline_params) parts.push(`params ${cut(clean(t.pipeline_params), PARAMS_CHARS)}`);
+  return parts.length === 0 ? '' : `\n    ↳ ${parts.join(FIELD_SEPARATOR)}`;
+}
+
 // Accepts both a TODO (TaskRecord: has priority + due_date) and an agent-trigger
 // (TriggerRecord: neither) since v42 split them — priority/due_date are optional
 // so a trigger renders without them.
-function formatTaskLine(t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined }): string {
+function formatTaskLine(
+  t: { id: string; title: string; status: string; assignee: string | null; scope_type: string; scope_id: string; priority?: string | undefined; due_date?: string | null | undefined; enabled?: number | undefined; last_run_status?: string | undefined; last_run_result?: string | undefined; last_run_at?: string | undefined; pipeline_id?: string | undefined; pipeline_params?: string | undefined; effect?: string | undefined; next_run_at?: string | undefined },
+  // Callers used to append their own suffix to the RESULT of this function.
+  // That was harmless while the result was one line; with a detail line it put
+  // "— next run: …" underneath "workflow <id>", where it reads as a property of
+  // the workflow. The suffix belongs on the head line, so it is passed in
+  // rather than concatenated on.
+  suffix = '',
+): string {
   const scope = t.scope_type === 'context' && !t.scope_id ? '' : ` (${t.scope_type}:${t.scope_id})`;
   const due = t.due_date ? ` — due ${t.due_date}` : '';
   const assign = t.assignee ? ` @${t.assignee}` : '';
   const prio = t.priority ? `[${t.priority.toUpperCase()}] ` : '';
-  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]`;
+  return `${prio}${t.id} ${t.title}${assign}${scope}${due} [${t.status}]${suffix}${triggerDetailLine(t)}`;
 }
 
 // Catches an LLM output failure mode where the model emits an escaped close-quote
@@ -76,7 +225,33 @@ function detectEmbeddedParams(field: string, value: string | undefined): string 
   return `Error: ${field} contains what looks like escaped JSON fragments of other task_create parameters (matched: "${paramName}"). These must be passed as separate top-level parameters, not embedded inside ${field}. Retry the call with schedule, priority, assignee, tags, etc. as their own fields.`;
 }
 
+/**
+ * The sentence a reported row owes the reader when the scheduler will NOT run it
+ * yet.
+ *
+ * Drawn over the BEHAVIOUR, not over the branch: `getDue` holds back every
+ * `run_agent` row with no `confirmed_at`, with no carve-out for how it was made
+ * (`trigger-store.ts`). Each branch used to speak for itself — one said
+ * "watching <url> every 60min", others reported a next run — and each was wrong
+ * the same way for the same reason. One predicate, appended wherever a row is
+ * reported, is the only shape that cannot drift apart again: a branch that
+ * forgets it says nothing extra, and a row that is not held back gets no
+ * sentence it does not deserve. A workflow trigger is NOT held back by this gate
+ * (its consent sits on the workflow), and an edit that changes what a trigger
+ * runs clears the stamp, so the update path needs it too.
+ */
+function pendingConsent(task: object): string {
+  // Takes the union both creators return (a TODO has neither field) and reads
+  // the two fields the gate reads. Narrowed here rather than cast per call site:
+  // a caller that has to shape its argument is a caller that can shape it wrong.
+  const row = task as { effect?: unknown; confirmed_at?: unknown };
+  return row.effect === 'run_agent' && !row.confirmed_at
+    ? ' — it runs once you confirm it in Triggers.'
+    : '';
+}
+
 export const taskCreateTool: ToolEntry<TaskCreateInput> = {
+  undo: 'compensatable',
   definition: {
     name: 'task_create',
     description: 'Create a task for a concrete deliverable with a deadline or assignee. Not for general notes (use memory_store with status namespace). Only create tasks when the user requests it or a clear action item emerges.',
@@ -97,6 +272,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', minimum: 5, description: 'How often to check the watched URL (in minutes). Default: 60. Minimum: 5.' },
         workflow_id: { type: 'string', description: 'ID of a stored workflow to execute on this schedule.' },
+        params: { type: 'object', description: 'Values for the workflow\'s {{params.<name>}} placeholders, re-targeting THIS firing (needs workflow_id).' },
       },
       required: ['title'],
     },
@@ -109,6 +285,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       ?? detectEmbeddedParams('title', input.title);
     if (embeddedErr) return embeddedErr;
 
+    // `params` only reaches a workflow run. Silently dropping it would look like
+    // a successful batch schedule that in fact re-targets nothing.
+    if (input.params !== undefined && !input.workflow_id) {
+      return 'Error: `params` re-targets a stored workflow and only applies together with `workflow_id`. Pass the workflow to run, or drop `params`.';
+    }
+
     // Injection defense-in-depth (triggers-consent / SEC leg): an agent that
     // ingested poisoned content (mail / web / doc) could be steered into SCHEDULING
     // a trigger whose instruction IS the attack, which then runs autonomously under
@@ -120,12 +302,27 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     // auto-trigger) — a plain user-TODO fires nothing, so it isn't gated (no FP on a
     // legit "mail X to a@b.com" reminder). The human HTTP create route is NOT scanned
     // (the human is the trusted author + the confirmer).
+    //
+    // `workflow_id` joins the list because a pipeline task FIRES: createPipelineTask
+    // forces `assignee: 'lynox'` internally, and a lynox-assignee task with no
+    // run_at fires immediately — so a caller who passed neither assignee nor
+    // schedule slipped past this scan while creating a firing trigger. Pre-existing;
+    // surfaced by adding `params`, which is the payload that makes it worth having.
     const willFire = Boolean(input.schedule) || Boolean(input.watch_url)
-      || Boolean(input.run_at) || input.assignee === 'lynox';
+      || Boolean(input.run_at) || input.assignee === 'lynox' || Boolean(input.workflow_id);
     if (willFire) {
-      const scan = detectInjectionAttempt(`${input.title}\n${input.description ?? ''}`);
+      // `params` is scanned with the rest: its values are interpolated into the
+      // step tasks of a workflow that then runs UNATTENDED, so it is the same
+      // channel the title/description scan exists to close — an agent that
+      // ingested poisoned content must not be able to steer a confirmed workflow
+      // through its re-target values. The patterns are instruction- and
+      // marker-shaped (the exfil one needs a URL verb clause, the mail one an
+      // `@`), so an ordinary batch range or API base URL matches nothing.
+      const scan = detectInjectionAttempt(
+        `${input.title}\n${input.description ?? ''}\n${input.params !== undefined ? JSON.stringify(input.params) : ''}`,
+      );
       if (scan.detected) {
-        return `Error: refused to schedule this trigger — its title/description matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, set it up from the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
+        return `Error: refused to schedule this trigger — its title/description/params matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, set it up from the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
       }
     }
 
@@ -161,14 +358,30 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       if (input.workflow_id) {
         // The tool param is `workflow_id`; the TaskManager + DB column remain
         // `pipelineId` / `tasks.pipeline_id` (no migration — see PRD §6.6).
+        // Re-target values for THIS firing. The column, the TaskManager field and
+        // the WorkerLoop read (`task.pipeline_params` → bindWorkflowParameters)
+        // all existed already; only the agent-facing surface did not, so an agent
+        // could schedule "run workflow X" but never "run workflow X for batch 3"
+        // — which is the whole shape of a batched bulk job.
+        //
+        // Serialised here rather than in the manager because the storage contract
+        // is a JSON string.
+        //
+        // An EMPTY object needs no special case: the trigger store already
+        // round-trips '{}' back to `undefined` on read (trigger-store.ts), which is
+        // what the WorkerLoop money-path guard `if (task.pipeline_params)` reads. A
+        // guard here for that case survived its own mutation test — it changed
+        // nothing — so it is not written.
+        const pipelineParams = input.params !== undefined ? JSON.stringify(input.params) : undefined;
         const task = managerRef.createPipelineTask({
           ...baseParams,
           pipelineId: input.workflow_id,
           scheduleCron: input.schedule,
+          ...(pipelineParams !== undefined ? { pipelineParams } : {}),
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
         const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';
-        return `Workflow task created: ${formatTaskLine(task)}${nextRun}${scheduleInfo}`;
+        return `Workflow task created: ${formatTaskLine(task, `${nextRun}${scheduleInfo}${pendingConsent(task)}`)}`;
       }
 
       if (input.schedule) {
@@ -177,7 +390,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           scheduleCron: input.schedule,
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
-        return `Scheduled task created: ${formatTaskLine(task)}${nextRun}`;
+        return `Scheduled task created: ${formatTaskLine(task, `${nextRun}${pendingConsent(task)}`)}`;
       }
 
       if (input.watch_url) {
@@ -189,7 +402,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           watchUrl: input.watch_url,
           watchIntervalMinutes: intervalMinutes,
         });
-        return `Watch task created: ${formatTaskLine(task)} — watching ${input.watch_url} every ${String(intervalMinutes)}min`;
+        return `Watch task created: ${formatTaskLine(task, ` — it checks ${input.watch_url} every ${String(intervalMinutes)}min${pendingConsent(task)}`)}`;
       }
 
       if (input.run_at) {
@@ -197,11 +410,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           return `Error: invalid run_at "${input.run_at}". Use ISO 8601 datetime (e.g. "2026-04-25T09:00:00").`;
         }
         const task = managerRef.create({ ...baseParams, nextRunAt: input.run_at });
-        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task)}`;
+        return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
       }
 
       const task = managerRef.create(baseParams);
-      return `Task created: ${formatTaskLine(task)}`;
+      return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
     } catch (e: unknown) {
       logErrorChain('task_create', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -210,6 +423,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
 };
 
 export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
+  undo: 'restorable',
   definition: {
     name: 'task_update',
     description: 'Update task fields including its execution schedule. Use `run_at` to reschedule a one-shot task ("move it to tomorrow 9am") or `schedule` to switch a recurring cadence — preferred over delete-and-recreate.',
@@ -275,7 +489,10 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         : 'schedule_cron' in task && task.schedule_cron
           ? ` — schedule: ${task.schedule_cron}`
           : '';
-      return `Task updated: ${formatTaskLine(task)}${scheduleNote}`;
+      // An edit can re-open consent: changing what a trigger RUNS clears the stamp
+      // (`trigger-store.ts`), so the row just edited may be held back again — and
+      // this report is the only place that says so.
+      return `Task updated: ${formatTaskLine(task, `${scheduleNote}${pendingConsent(task)}`)}`;
     } catch (e: unknown) {
       logErrorChain('task_update', e);
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -292,7 +509,13 @@ export const taskListTool: ToolEntry<TaskListInput> = {
       type: 'object' as const,
       properties: {
         scope: { type: 'string', description: 'Filter by scope ("client:acme"). Omit for all active scopes.' },
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed'], description: 'Filter by status' },
+        // `waiting` is READABLE but not SETTABLE, and the split is deliberate.
+        // A parked trigger renders as `[waiting]` in the lines below, so without
+        // it here the model can see a state it cannot ask for — the one shape a
+        // filter enum must never have. `task_update`'s enum (above) does NOT get
+        // it: parking is the engine's to do, and `TaskManager.update` rejects the
+        // value outright.
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },
@@ -337,13 +560,19 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // tables. task_list shows the agent's FULL picture — its own scheduled
     // triggers plus the user-TODOs. An explicit assignee filter narrows:
     // triggers are all 'lynox', so a non-lynox assignee filter drops them.
-    const todos = managerRef.list({
-      status: input.status as TaskStatus | undefined,
-      assignee: input.assignee,
-      scope,
-    });
+    // No user-TODO is ever parked — `waiting` lives on the trigger type only
+    // (§0 E1a). Filtering for it must therefore return NO todos, which is not the
+    // same as passing the value down: `list` types its filter `TaskStatus`, and
+    // casting a non-member through it would be a lie that happens to work.
+    const todos = input.status === 'waiting'
+      ? []
+      : managerRef.list({
+        status: input.status as TaskStatus | undefined,
+        assignee: input.assignee,
+        scope,
+      });
     const triggers = input.assignee === undefined || input.assignee === 'lynox'
-      ? managerRef.listTriggers({ status: input.status as TaskStatus | undefined, scope })
+      ? managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope })
       : [];
     // Triggers FIRST: the agent's active scheduled work is fewer rows and more
     // relevant to surface. Appending them after the todos would let an install

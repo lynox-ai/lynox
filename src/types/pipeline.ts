@@ -20,6 +20,31 @@ export interface WorkflowLimits {
   maxIterations?: number | undefined;
   /** Abort once cumulative run cost exceeds this (opt-in; unset = no per-run cap). */
   maxSpendUsd?: number | undefined;
+  /**
+   * Max steps of one parallel phase running *concurrently* (backpressure).
+   *
+   * UNSET (or `Infinity`, the explicit "no limit" sentinel) = unbounded — every
+   * step of a phase launches at once (the existing v1.1 behaviour). A MALFORMED
+   * value (`0`, negative, `NaN`, `null`) is NOT a way to say unbounded: it is
+   * normalized to a real bound by `parallelStepCapFor`, because a limiter that
+   * silently disables itself on a bad value is worse than no limiter. This
+   * doc-comment used to say "unset (or non-positive) = unbounded", which
+   * documented the fail-open as the contract.
+   *
+   * When set, `runParallel` launches at
+   * most this many steps per phase, starting the next as each completes. The
+   * phase barrier is preserved: a phase still fully settles before the next
+   * begins. Backpressure against unbounded per-phase fan-out: a phase of N
+   * independent steps would otherwise launch N concurrent sub-agents (each a
+   * live LLM run) — capping bounds instance load + memory. (Workflows validate
+   * to ≤ MAX_STEPS=20 steps total; this bounds fan-out *within* a phase.)
+   *
+   * Distinct from the `workflowBoundExceeded` fields above — those bound
+   * spend / iterations / wall-clock *between* steps; this bounds *simultaneous*
+   * execution *within* a phase, so it is read directly in `runParallel`, not
+   * by `workflowBoundExceeded`.
+   */
+  maxParallelSteps?: number | undefined;
 }
 
 export interface InlinePipelineStep {
@@ -32,6 +57,14 @@ export interface InlinePipelineStep {
   effort?: EffortLevel | undefined;
   /** Role for agent specialization. Used by YAML manifests — not exposed to LLM. */
   role?: string | undefined;
+  /**
+   * Tools this step declared it needs (F2, PRD-COST-CONTROLS-V2 D2). The
+   * generator declares the set; the inline runtime grants ONLY these (drawn
+   * from the inline-safe pool — a declaration can narrow the pool or opt into
+   * `bash`, never widen past it). Absent (legacy manifests) = the pool minus
+   * `bash`: bash is never granted silently.
+   */
+  tools?: string[] | undefined;
   input_from?: string[] | undefined;
   timeout_ms?: number | undefined;
   /**
@@ -192,6 +225,21 @@ export interface ProcessRecord {
 // === Task Management ===
 
 export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
+
+/** A TRIGGER's status. The four {@link TaskStatus} values plus `waiting` — the
+ *  parked state of a trigger whose run asked a question and is waiting for the
+ *  answer (PRD-DURABLE-WAIT-STATE §0 E1a).
+ *
+ *  `waiting` is ENGINE-ONLY and the widening is deliberately confined to this
+ *  type. It is NOT in `VALID_STATUSES` (task-manager.ts), NOT in the task tool's
+ *  status enums, and NOT a value any caller may pass to `TaskManager.update` —
+ *  that still rejects it as an invalid status, which is the intended contract.
+ *  It is written on the engine's own path (`history.updateTrigger` →
+ *  `TriggerStore.updateFields`) and read back by the store's queries.
+ *
+ *  Widening {@link TaskStatus} itself would have widened {@link TaskRecord.status}
+ *  along with it — the USER-TODO, which has no parked state and must not gain one. */
+export type TriggerStatus = TaskStatus | 'waiting';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
 /** A USER-TODO — project-management work lynox tracks FOR the user (the
@@ -225,8 +273,20 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
  *  `notify` are deterministic side-effects that mint NO Run. This axis IS the
  *  money-vs-deterministic boundary, made legible in the schema. `backup`/`notify`
  *  are BUILT-IN effects (fixed capabilities, not user-formable) — distinct in kind
- *  from the user-formable `run_*`, but co-located here as the single dispatch axis. */
-export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify';
+ *  from the user-formable `run_*`, but co-located here as the single dispatch axis.
+ *  `bulk_apply` / `bulk_undo` are deterministic too: they write an APPROVED bulk run's
+ *  targets (PRD bulk-changes-reversible §3.4/§3.5) and mint no Run. Only the bulk
+ *  approval route creates them — `deriveSourceEffect` never yields them, so no
+ *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them.
+ *  `bulk_preview` reads an external run's targets and mints no Run either; only the
+ *  owner starting or resuming the read arms it. */
+export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo' | 'bulk_preview';
+/** The bulk-run effects. `bulk_preview` reads an external run's targets into its ledger
+ *  (build plan B §3) and writes nothing to them; only the owner's start or resume of the
+ *  read arms it. */
+export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo' | 'bulk_preview'>;
+/** The bulk effects that write targets. */
+export type BulkWriteEffect = Exclude<BulkTriggerEffect, 'bulk_preview'>;
 
 /** An AGENT-TRIGGER — a rule the WorkerLoop fires to DO work for the user (the
  *  "act" side of the agent loop). Lives in the `triggers` table. Split from
@@ -241,7 +301,7 @@ export interface TriggerRecord {
   id: string;
   title: string;
   description: string;
-  status: TaskStatus;
+  status: TriggerStatus;
   assignee: string | null;      // 'lynox' for fired rows (kept for parity)
   scope_type: string;
   scope_id: string;
@@ -256,6 +316,10 @@ export interface TriggerRecord {
   last_run_at?: string | undefined;
   last_run_result?: string | undefined;
   last_run_status?: string | undefined;
+  /** When a parked trigger stops waiting (ISO-8601). Set only while `status` is
+   *  `waiting`; undefined otherwise. Written by the park, read by the expiry
+   *  sweep — see {@link TriggerStatus}. */
+  waiting_until?: string | undefined;
   watch_config?: string | undefined;
   max_retries?: number | undefined;
   retry_count?: number | undefined;
@@ -277,4 +341,8 @@ export interface TriggerRecord {
    *  exempt). Fail-closed: a trigger created by anything other than an explicit
    *  human action lands unconfirmed. */
   confirmed_at?: string | undefined;
+  /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes (or a `bulk_preview`
+   *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
+   *  and, for a preview, the external bulk plan. */
+  bulk_run_id?: string | undefined;
 }

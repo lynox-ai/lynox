@@ -3,6 +3,7 @@ import { getBetasForProvider, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { calculateCost } from './pricing.js';
 import { debitInRunHelperCost } from './metered-request.js';
+import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 import type { HookHost } from './metered-request.js';
 import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter, SessionCounters } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
@@ -15,7 +16,7 @@ const INTERNAL_TOOLS = new Set([
   // suggest_follow_ups is a terminal UI action mandated on every web-ui turn — a workflow
   // capture must not freeze it into the deterministic step spine (it would replay as a real
   // step). Same rationale as ask_user/plan_task.
-  'ask_user', 'plan_task', 'save_workflow', 'suggest_follow_ups',
+  'ask_user', 'plan_task', 'save_workflow', FOLLOW_UP_TOOL_NAME,
 ]);
 
 const MAX_INPUT_CHARS = 500;
