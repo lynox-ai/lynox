@@ -6449,6 +6449,49 @@ export class LynoxHTTPApi {
       jsonResponse(res, 201, { ...withBinding(out.status), checksum: ledger.computeChecksum(out.status.id) });
     }));
 
+    // ── Subject merges, as runs an owner can take back (PRD bulk-changes-reversible §3.7, form B) ──
+    // What these return is a merge's names, counts and state — never the ledger entry, which
+    // holds both subjects' detail rows (email, phone, domain, vat_id) for the rollback's sake.
+    // A merge whose ledger the 90-day retention removed is not listed: without the ledger there
+    // is nothing to take it back with, and it must not read as "taken back".
+    const MERGE_REFUSALS: Record<string, [number, string]> = {
+      not_found: [404, 'No merge with this id can be taken back.'],
+      not_applied: [409, 'This merge did not complete, so there is nothing to take back.'],
+      missing: [409, 'The entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
+      superseded: [409, 'The same two entries were merged again later. Only the newest merge can be taken back.'],
+      not_in_effect: [409, 'This merge is no longer in effect — it was taken back already, or the entry was merged elsewhere since.'],
+      unavailable: [409, 'This merge moved data rows or conversation links, and that part of the instance is not available right now. Nothing was taken back.'],
+      partial: [409, 'The merge was taken back in the contact graph, but data rows or conversation links still point at the merged entry. Taking it back again will not repair that.'],
+      failed: [409, 'The merge could not be taken back.'],
+    };
+    const mergeStores = (res: import('node:http').ServerResponse) => {
+      const store = engine.getSubjectStore();
+      if (!store) { errorResponse(res, 404, 'Subject merges are not available on this instance.'); return null; }
+      return { store, dataStore: engine.getDataStore(), threadStore: engine.getThreadStore() };
+    };
+
+    this.addStatic('user', 'GET /api/merges', async (_req, res) => {
+      const stores = mergeStores(res);
+      if (!stores) return;
+      const { getLynoxDir } = await import('../core/config.js');
+      const { listMergeRuns } = await import('../core/subject-merge-runner.js');
+      jsonResponse(res, 200, { merges: listMergeRuns(stores.store, join(getLynoxDir(), 'sweeps')) });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/merges/:id/rollback', async (_req, res, params) => {
+      const stores = mergeStores(res);
+      if (!stores) return;
+      const { getLynoxDir } = await import('../core/config.js');
+      const { rollbackMergeById } = await import('../core/subject-merge-runner.js');
+      const out = rollbackMergeById(stores.store, stores.dataStore, stores.threadStore, join(getLynoxDir(), 'sweeps'), params['id']!);
+      if (!out.ok) {
+        const [code, msg] = MERGE_REFUSALS[out.reason] ?? [409, 'Refused.'];
+        errorResponse(res, code, msg);
+        return;
+      }
+      jsonResponse(res, 200, { merge: out.view });
+    }));
+
     // ── Artifacts ──
     this.addStatic('user', 'GET /api/artifacts', async (_req, res) => {
       const store = engine.getArtifactStore();

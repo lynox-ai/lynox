@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -7,7 +7,7 @@ import { SubjectStore } from './subject-store.js';
 import { DataStore } from './data-store.js';
 import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
-import { runMerge, rollbackMergeRun, pruneExpiredLedgers, LEDGER_RETENTION_DAYS, type MergeLedgerFile } from './subject-merge-runner.js';
+import { runMerge, rollbackMergeRun, pruneExpiredLedgers, listMergeRuns, rollbackMergeById, readMergeLedger, LEDGER_RETENTION_DAYS, type MergeLedgerFile } from './subject-merge-runner.js';
 
 /**
  * The subject spine spans THREE SQLite files: engine.db (SubjectStore), datastore.db
@@ -112,9 +112,9 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
   // which is why the predicate is `merged_into === canonicalId` and not row presence.
   it('rollback REFUSES a stale ledger after the entry was merged somewhere else', () => {
     const { dir, store, threadStore } = setup();
-    const a = store.createSubject({ kind: 'organization', name: 'Aurelva AG' });
-    const b = store.createSubject({ kind: 'organization', name: 'Aurelva' });
-    const c = store.createSubject({ kind: 'organization', name: 'Aurelva Group' });
+    const a = store.createSubject({ kind: 'organization', name: 'Northwind AG' });
+    const b = store.createSubject({ kind: 'organization', name: 'Northwind' });
+    const c = store.createSubject({ kind: 'organization', name: 'Northwind Group' });
 
     expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
     const staleLedger = readLedger(dir);
@@ -446,3 +446,272 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
     }
   });
 });
+
+describe('the owner\'s view of merges, and taking one back by id (PRD bulk-changes-reversible §3.7, form B)', () => {
+  const dirs: string[] = [];
+  const closers: Array<() => void> = [];
+  const EMAIL = 'zxq-ada@example.invalid';
+  const PHONE = '+41 00 000 00 00';
+  const DOMAIN = 'zxq-domain.example.invalid';
+  const VAT = 'CHE-000.000.000';
+
+  // No vault key: the detail rows sit in the ledger as plaintext. The view must not depend
+  // on encryption to keep them out.
+  function setup(): { dir: string; sweeps: string; store: SubjectStore; threadStore: ThreadStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mergeview-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const history = new RunHistory(join(dir, 'history.db'));
+    closers.push(() => { try { engine.close(); } catch { /* noop */ } try { history.close(); } catch { /* noop */ } });
+    return { dir, sweeps: join(dir, 'sweeps'), store: new SubjectStore(engine), threadStore: new ThreadStore(history.getDb()) };
+  }
+
+  afterEach(() => {
+    for (const c of closers) c();
+    closers.length = 0;
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  function mergePeople(s: ReturnType<typeof setup>): { dup: string; canon: string; id: string } {
+    const dup = s.store.createSubject({ kind: 'person', name: 'Ada L.' });
+    const canon = s.store.createSubject({ kind: 'person', name: 'Ada Lovelace' });
+    s.store.setPersonDetail(dup, { email: EMAIL, phone: PHONE });
+    s.store.setPersonDetail(canon, { role: 'founder' });
+    const r = runMerge(s.store, null, s.threadStore, s.dir, dup, canon);
+    if (!r.ok) throw new Error(r.reason);
+    const id = readdirSync(s.sweeps).find((n) => n.startsWith('merge-'))!.slice(0, -'.json'.length);
+    return { dup, canon, id };
+  }
+
+  it('lists a merge by names, counts and state — never the detail rows the ledger holds for the rollback', () => {
+    const s = setup();
+    const { id } = mergePeople(s);
+    // The positive control: the ledger on disk does carry them, in clear.
+    const raw = readFileSync(join(s.sweeps, `${id}.json`), 'utf8');
+    expect(raw).toContain(EMAIL);
+    expect(raw).toContain(PHONE);
+
+    const views = listMergeRuns(s.store, s.sweeps);
+    expect(views).toEqual([{
+      id, createdAt: expect.any(String) as string, kind: 'person', dupName: 'Ada L.', canonicalName: 'Ada Lovelace',
+      applied: true, inEffect: true, superseded: false, dataStoreRows: 0, threadRows: 0,
+    }]);
+    expect(JSON.stringify(views)).not.toContain(EMAIL);
+    expect(JSON.stringify(views)).not.toContain(PHONE);
+  });
+
+  it('keeps an organisation\'s domain and vat_id out too — the domain is stored in clear by design', () => {
+    const s = setup();
+    const dup = s.store.createSubject({ kind: 'organization', name: 'Zxq GmbH' });
+    const canon = s.store.createSubject({ kind: 'organization', name: 'Zxq' });
+    s.store.setOrganizationDetail(dup, { domain: DOMAIN, vat_id: VAT });
+    const r = runMerge(s.store, null, s.threadStore, s.dir, dup, canon);
+    expect(r.ok).toBe(true);
+    expect(readFileSync(join(s.sweeps, readdirSync(s.sweeps)[0]!), 'utf8')).toContain(DOMAIN);
+    const text = JSON.stringify(listMergeRuns(s.store, s.sweeps));
+    expect(text).not.toContain(DOMAIN);
+    expect(text).not.toContain(VAT);
+  });
+
+  it('takes a merge back by id once, and then says it is no longer in effect', () => {
+    const s = setup();
+    const { dup, id } = mergePeople(s);
+    const back = rollbackMergeById(s.store, null, s.threadStore, s.sweeps, id);
+    expect(back.ok).toBe(true);
+    if (back.ok) expect(back.view.inEffect).toBe(false);
+    expect(s.store.getSubject(dup)!.merged_into).toBeNull();
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.inEffect).toBe(false);
+    expect(rollbackMergeById(s.store, null, s.threadStore, s.sweeps, id)).toEqual({ ok: false, reason: 'not_in_effect' });
+  });
+
+  it('refuses an id that is not a ledger name, a ledger that never applied, and an unreadable one', () => {
+    const s = setup();
+    const { id } = mergePeople(s);
+    for (const bad of ['../engine', 'merge-x', `${id}/../${id}`, '']) {
+      expect(rollbackMergeById(s.store, null, null, s.sweeps, bad)).toEqual({ ok: false, reason: 'not_found' });
+    }
+    // A real, valid ledger outside the sweeps directory is not reachable by a path-shaped id.
+    writeFileSync(join(s.dir, 'evil.json'), readFileSync(join(s.sweeps, `${id}.json`), 'utf8'));
+    expect(readMergeLedger(s.sweeps, '../evil')).toBeNull();
+    expect(readMergeLedger(s.sweeps, id)).not.toBeNull();
+    const led = JSON.parse(readFileSync(join(s.sweeps, `${id}.json`), 'utf8')) as MergeLedgerFile;
+    writeFileSync(join(s.sweeps, `${id}.json`), JSON.stringify({ ...led, applied: false }));
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id)).toEqual({ ok: false, reason: 'not_applied' });
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.applied).toBe(false);
+    writeFileSync(join(s.sweeps, `${id}.json`), '{not json');
+    expect(listMergeRuns(s.store, s.sweeps)).toEqual([]);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id)).toEqual({ ok: false, reason: 'not_found' });
+  });
+
+  it('lists nothing for an instance that never merged, and newest first otherwise', () => {
+    const s = setup();
+    expect(listMergeRuns(s.store, s.sweeps)).toEqual([]);
+    mkdirSync(s.sweeps, { recursive: true });
+    writeFileSync(join(s.sweeps, 'notes.json'), '{}');
+    expect(listMergeRuns(s.store, s.sweeps)).toEqual([]);
+    const a = s.store.createSubject({ kind: 'organization', name: 'Old A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Old B' });
+    runMerge(s.store, null, null, s.dir, a, b);
+    const c = s.store.createSubject({ kind: 'organization', name: 'New C' });
+    const d = s.store.createSubject({ kind: 'organization', name: 'New D' });
+    runMerge(s.store, null, null, s.dir, c, d);
+    const names = listMergeRuns(s.store, s.sweeps).map((v) => v.dupName);
+    expect(names).toEqual(['New C', 'Old A']);
+  });
+});
+
+function anchorThread(threadStore: ThreadStore, threadId: string, subjectId: string): void {
+  threadStore.createThread(threadId);
+  threadStore.updateThread(threadId, { primary_subject_id: subjectId });
+}
+
+describe('what refuses a merge rollback, and why', () => {
+  const dirs: string[] = [];
+  const closers: Array<() => void> = [];
+  function setup(): { dir: string; sweeps: string; store: SubjectStore; threadStore: ThreadStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mergerefuse-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const history = new RunHistory(join(dir, 'history.db'));
+    closers.push(() => { try { engine.close(); } catch { /* noop */ } try { history.close(); } catch { /* noop */ } });
+    return { dir, sweeps: join(dir, 'sweeps'), store: new SubjectStore(engine), threadStore: new ThreadStore(history.getDb()) };
+  }
+  afterEach(() => {
+    for (const c of closers) c();
+    closers.length = 0;
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+  const ledgerIds = (sweeps: string): string[] => readdirSync(sweeps).filter((n) => n.startsWith('merge-')).map((n) => n.slice(0, -5)).sort();
+
+  it('lets only the newest ledger of a pair take it back — an older one would write a stale before-image', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Pair A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Pair B' });
+    expect(runMerge(s.store, null, null, s.dir, a, b).ok).toBe(true);
+    const [first] = ledgerIds(s.sweeps);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, first!).ok).toBe(true);
+    expect(runMerge(s.store, null, null, s.dir, a, b).ok).toBe(true);
+    const second = ledgerIds(s.sweeps).find((x) => x !== first)!;
+    // Make the order certain even within one millisecond: the older ledger gets an older name.
+    const oldName = 'merge-2000-01-01T00-00-00-000Z-old1';
+    renameSync(join(s.sweeps, `${first!}.json`), join(s.sweeps, `${oldName}.json`));
+    const firstId = oldName;
+    // createdAt inside a file does not decide "newest": changing it does not promote the old one.
+    const older = JSON.parse(readFileSync(join(s.sweeps, `${firstId}.json`), 'utf8')) as MergeLedgerFile;
+    writeFileSync(join(s.sweeps, `${firstId}.json`), JSON.stringify({ ...older, createdAt: '2999-01-01T00:00:00.000Z' }));
+    const byId = new Map(listMergeRuns(s.store, s.sweeps).map((v) => [v.id, v]));
+    expect([byId.get(firstId)!.superseded, byId.get(firstId)!.inEffect]).toEqual([true, false]);
+    expect([byId.get(second)!.superseded, byId.get(second)!.inEffect]).toEqual([false, true]);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, firstId)).toEqual({ ok: false, reason: 'superseded' });
+    // A newer ledger that never applied still supersedes: the older before-image is stale either way.
+    const newer = JSON.parse(readFileSync(join(s.sweeps, `${second}.json`), 'utf8')) as MergeLedgerFile;
+    writeFileSync(join(s.sweeps, `${second}.json`), JSON.stringify({ ...newer, applied: false }));
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, firstId)).toEqual({ ok: false, reason: 'superseded' });
+    writeFileSync(join(s.sweeps, `${second}.json`), JSON.stringify(newer));
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, second).ok).toBe(true);
+  });
+
+  it('refuses a merge whose entries are gone, and one merged elsewhere since', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Gone A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Gone B' });
+    expect(runMerge(s.store, null, null, s.dir, a, b).ok).toBe(true);
+    const [id] = ledgerIds(s.sweeps);
+    const led = JSON.parse(readFileSync(join(s.sweeps, `${id!}.json`), 'utf8')) as MergeLedgerFile;
+    writeFileSync(join(s.sweeps, `${id!}.json`), JSON.stringify({ ...led, entry: { ...led.entry, canonicalId: 'no-such-subject' } }));
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.inEffect).toBe(false);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id!)).toEqual({ ok: false, reason: 'missing' });
+    writeFileSync(join(s.sweeps, `${id!}.json`), JSON.stringify({ ...led, entry: { ...led.entry, dupId: 'no-such-subject' } }));
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id!)).toEqual({ ok: false, reason: 'missing' });
+    writeFileSync(join(s.sweeps, `${id!}.json`), JSON.stringify(led));
+    const c = s.store.createSubject({ kind: 'organization', name: 'Gone C' });
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id!).ok).toBe(true);
+    expect(runMerge(s.store, null, null, s.dir, a, c).ok).toBe(true);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id!)).toEqual({ ok: false, reason: 'not_in_effect' });
+  });
+
+  it('refuses to reverse only the contact graph when the moved conversation links cannot be reached', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Link A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Link B' });
+    anchorThread(s.threadStore, 'tl', a);
+    expect(runMerge(s.store, null, s.threadStore, s.dir, a, b).ok).toBe(true);
+    const [id] = ledgerIds(s.sweeps);
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.threadRows).toBe(1);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id!)).toEqual({ ok: false, reason: 'unavailable' });
+    expect(s.store.getSubject(a)!.merged_into).toBe(b);
+    // With the store it goes through, and the link is back on the merged-away entry.
+    expect(rollbackMergeById(s.store, null, s.threadStore, s.sweeps, id!).ok).toBe(true);
+    expect(s.threadStore.getThread('tl')!.primary_subject_id).toBe(a);
+  });
+
+  it('refuses the same way when moved data rows cannot be reached', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Rows A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Rows B' });
+    expect(runMerge(s.store, null, null, s.dir, a, b).ok).toBe(true);
+    const [id] = ledgerIds(s.sweeps);
+    const led = JSON.parse(readFileSync(join(s.sweeps, `${id!}.json`), 'utf8')) as MergeLedgerFile;
+    const moved = [{ collection: 'deals', column: 'org', ids: ['r1'] }] as unknown as MergeLedgerFile['dataStore'];
+    writeFileSync(join(s.sweeps, `${id!}.json`), JSON.stringify({ ...led, dataStore: moved }));
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.dataStoreRows).toBe(1);
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, id!)).toEqual({ ok: false, reason: 'unavailable' });
+    expect(s.store.getSubject(a)!.merged_into).toBe(b);
+  });
+
+  it('calls a split result partial, and a store refusal failed', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Split A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Split B' });
+    anchorThread(s.threadStore, 'ts', a);
+    expect(runMerge(s.store, null, s.threadStore, s.dir, a, b).ok).toBe(true);
+    const [id] = ledgerIds(s.sweeps);
+    const broken = { restorePrimarySubject: () => { throw new Error('busy'); } } as unknown as ThreadStore;
+    expect(rollbackMergeById(s.store, null, broken, s.sweeps, id!)).toEqual({ ok: false, reason: 'partial' });
+
+    const c = s.store.createSubject({ kind: 'organization', name: 'Fail C' });
+    const d = s.store.createSubject({ kind: 'organization', name: 'Fail D' });
+    expect(runMerge(s.store, null, null, s.dir, c, d).ok).toBe(true);
+    const failId = ledgerIds(s.sweeps).find((x) => x !== id)!;
+    // A new entry has taken the merged-away name since: bringing the old one back would
+    // make two active entries of one name, which the store refuses.
+    s.store.createSubject({ kind: 'organization', name: 'Fail C' });
+    expect(rollbackMergeById(s.store, null, null, s.sweeps, failId)).toEqual({ ok: false, reason: 'failed' });
+    expect(s.store.getSubject(c)!.merged_into).toBe(d);
+  });
+
+  it('leaves out a ledger whose shape is broken instead of failing the whole list', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Shape A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Shape B' });
+    expect(runMerge(s.store, null, null, s.dir, a, b).ok).toBe(true);
+    const [id] = ledgerIds(s.sweeps);
+    const led = JSON.parse(readFileSync(join(s.sweeps, `${id!}.json`), 'utf8')) as MergeLedgerFile;
+    const clone = 'merge-2001-01-01T00-00-00-000Z-zzzz.json';
+    writeFileSync(join(s.sweeps, clone), JSON.stringify({ ...led, dataStore: [{ table: 'x' }] }));
+    writeFileSync(join(s.sweeps, 'merge-2002-01-01T00-00-00-000Z-yyyy.json'), JSON.stringify({ phase: 'merge' }));
+    const { dupId: _drop, ...noDup } = led.entry;
+    writeFileSync(join(s.sweeps, 'merge-2003-01-01T00-00-00-000Z-xxxx.json'), JSON.stringify({ ...led, entry: noDup }));
+    expect(listMergeRuns(s.store, s.sweeps).map((v) => v.id)).toEqual([id]);
+  });
+
+  it('reads a ledger from before the applied flag as applied, and needs the canonical row for inEffect', () => {
+    const s = setup();
+    const a = s.store.createSubject({ kind: 'organization', name: 'Legacy A' });
+    const b = s.store.createSubject({ kind: 'organization', name: 'Legacy B' });
+    expect(runMerge(s.store, null, null, s.dir, a, b).ok).toBe(true);
+    const [id] = ledgerIds(s.sweeps);
+    const { applied: _a, ...legacy } = JSON.parse(readFileSync(join(s.sweeps, `${id!}.json`), 'utf8')) as MergeLedgerFile;
+    writeFileSync(join(s.sweeps, `${id!}.json`), JSON.stringify(legacy));
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.applied).toBe(true);
+    // The canonical row gone while the duplicate still redirects onto it: not in effect.
+    const raw = (s.store as unknown as { db: { pragma: (q: string) => void; prepare: (q: string) => { run: (...a: unknown[]) => void } } }).db;
+    raw.pragma('foreign_keys = OFF');
+    raw.prepare('DELETE FROM subjects WHERE id = ?').run(b);
+    expect(s.store.getSubject(a)!.merged_into).toBe(b);
+    expect(listMergeRuns(s.store, s.sweeps)[0]!.inEffect).toBe(false);
+  });
+});
+

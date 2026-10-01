@@ -5891,6 +5891,59 @@ describe('LynoxHTTPApi', () => {
   });
 
   // PRD bulk-changes-reversible §3.4/§3.5 — the human side of a bulk run.
+  describe('subject merges as runs an owner can take back', () => {
+    const EMAIL = 'zxq-route@example.invalid';
+    it('lists a merge without its detail rows, takes it back once, and answers in fixed words', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-merge-route-'));
+      const { SubjectStore } = await import('../core/subject-store.js');
+      const { runMerge } = await import('../core/subject-merge-runner.js');
+      const db = new EngineDb(join(dir, 'engine.db'), '');
+      const store = new SubjectStore(db);
+      const dup = store.createSubject({ kind: 'person', name: 'Grace H.' });
+      const canon = store.createSubject({ kind: 'person', name: 'Grace Hopper' });
+      store.setPersonDetail(dup, { email: EMAIL });
+      expect(runMerge(store, null, null, dir, dup, canon).ok).toBe(true);
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = { s: engineRef['getSubjectStore'], d: engineRef['getDataStore'], t: engineRef['getThreadStore'] };
+      engineRef['getSubjectStore'] = () => store;
+      engineRef['getDataStore'] = () => null;
+      engineRef['getThreadStore'] = () => null;
+      const dataDirBefore = process.env['LYNOX_DATA_DIR'];
+      vi.stubEnv('LYNOX_DATA_DIR', dir);
+      try {
+        const list = await jsonFetch('/api/merges');
+        expect(list.status).toBe(200);
+        const text = await list.text();
+        expect(text).not.toContain(EMAIL);
+        const { merges } = JSON.parse(text) as { merges: { id: string; dupName: string; inEffect: boolean }[] };
+        expect(merges.map((m) => [m.dupName, m.inEffect])).toEqual([['Grace H.', true]]);
+        const id = merges[0]!.id;
+
+        const back = await jsonFetch(`/api/merges/${id}/rollback`, { method: 'POST', body: '{}' });
+        expect(back.status).toBe(200);
+        const backText = await back.text();
+        expect(backText).not.toContain(EMAIL);
+        expect((JSON.parse(backText) as { merge: { inEffect: boolean } }).merge.inEffect).toBe(false);
+
+        const again = await jsonFetch(`/api/merges/${id}/rollback`, { method: 'POST', body: '{}' });
+        expect(again.status).toBe(409);
+        expect(((await again.json()) as { error: string }).error).toMatch(/no longer in effect/);
+        const traversal = await jsonFetch(`/api/merges/${encodeURIComponent('../engine')}/rollback`, { method: 'POST', body: '{}' });
+        expect(traversal.status).toBe(404);
+
+        engineRef['getSubjectStore'] = () => null;
+        expect((await jsonFetch('/api/merges')).status).toBe(404);
+      } finally {
+        engineRef['getSubjectStore'] = orig.s;
+        engineRef['getDataStore'] = orig.d;
+        engineRef['getThreadStore'] = orig.t;
+        vi.stubEnv('LYNOX_DATA_DIR', dataDirBefore);
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('bulk runs', () => {
     let bulkDir: string;
     let bulkDb: EngineDb;
