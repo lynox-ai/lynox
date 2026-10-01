@@ -1982,8 +1982,8 @@ export class Engine {
         encrypt: this.userConfig.backup_encrypt ?? (!!process.env['LYNOX_VAULT_KEY']),
         // Asked at every upload, over `this.userConfig` — which `reloadUserConfig` REASSIGNS, so
         // a revoked opt-in takes effect in this process instead of at the next restart. A gate
-        // at the wiring below alone would enforce "true at the last boot"; this enforces
-        // "true now".
+        // at the `driveBackupAllowed()` call alone would enforce "true at the last boot"; this
+        // enforces "true now".
         uploadAllowed: () => this._driveUploadAllowed(),
       }, process.env['LYNOX_VAULT_KEY'] ?? null);
     } catch {
@@ -2052,7 +2052,8 @@ export class Engine {
         const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
         // Cache the consent decision so the upload itself can ask it synchronously. This is what
         // makes a revoked opt-in take effect without a restart. Tier is NOT cached: it is asked
-        // once, in the `if` below, because the environment cannot change in a running process.
+        // at the `driveBackupAllowed()` call that guards this block, because the environment
+        // cannot change in a running process.
         this._driveGate = { driveUploadOptedIn };
         // TIER only, and deliberately: this condition is derived from the environment, which
         // cannot change inside a running process, so boot is the right place to ask it — and
