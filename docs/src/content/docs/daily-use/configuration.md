@@ -130,7 +130,7 @@ Use `multilingual-e5-small` or `bge-m3` if you primarily work in non-English lan
 }
 ```
 
-When enabled, file writes are staged and shown as a diff for review before being applied. Useful for high-autonomy setups where you still want a final check.
+When enabled, a file write is **backed up and then applied at once** — it is not held back. In exchange the diff preview and the permission prompt are skipped for `write_file` and `edit_file`, and the review happens **after the run**: a diff you can accept, roll back, or roll back in part. So this setting chooses **when** you review a write, not **whether** the write waits for you. It has no effect on autonomous runs or without an active workspace, and it does not cover writes a shell command makes. Useful for high-autonomy setups where you still want a final check.
 
 ### Backups
 

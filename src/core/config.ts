@@ -187,7 +187,23 @@ export function loadConfig(): LynoxUserConfig {
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
     'default_tier', 'balanced_model', 'thinking_mode', 'effort_level',
-    'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider',
+    'max_session_cost_usd', 'max_concurrent_runs',
+  // `embedding_provider` is NOT here, since 2026-10-01, and this one is
+  // different from the others that came off: it is IRREVERSIBLE. The
+  // selectable `local` provider calls itself, in its own class comment,
+  // a deterministic hash-based provider "for testing … Not suitable for
+  // real semantic search". Memory rows are written with the model name,
+  // there is no re-embed path, and `findSimilarMemories` takes namespace
+  // and scope but NO model field — so vectors from two providers meet in
+  // the same cosine comparison at equal dimension, permanently. Every
+  // other key that left this list could be turned back; this one leaves
+  // a mark in the data. That asymmetry is the reason, not the size of
+  // the effect, which is read from the code and not measured.
+  //
+  // The operator's path stays: `LYNOX_EMBEDDING_PROVIDER` is applied after
+  // this merge and still wins, restricted to `onnx`/`local`. Same shape as
+  // the error endpoint — the env keeps precedence, only the per-directory
+  // source goes away.
   // `plugins` is NOT here, since 2026-10-01. It selects which of the
   // already-installed plugins are loaded and executed, so it decides which
   // CODE runs — a larger thing than setting a value, and a user-config
@@ -208,7 +224,23 @@ export function loadConfig(): LynoxUserConfig {
   // unknown key — still has its `plugins` take effect through that path.
   // Any reasoning about which selection wins has to account for both.
     'organization_id', 'client_id',
-    'changeset_review', 'greeting', 'context_name',
+    // `changeset_review` is NOT here, since 2026-10-01, and the reason is NOT
+  // the one above: this is REVERSIBLE. It destroys nothing.
+  //
+  // ⚠ And it is NOT "a bar in front of writes" — that description was wrong and
+  // a review round measured it. Changeset mode is backup-BEFORE-write: the write
+  // lands immediately, `agent.ts` explicitly skips the diff preview, the
+  // permission prompt and `isDangerousDetailed` for `write_file`/`edit_file`
+  // ("review happens post-run"), and the review is a post-run diff with a
+  // rollback. So a project `false` removes the post-run diff and the
+  // rollbackability, and in exchange RESTORES the write-time guard. It shifts
+  // the moment of review; it does not simply remove one.
+  //
+  // The decision stands on origin alone: a cloned repo must not decide whether
+  // rollbackability exists for the writes it causes. Note it is inert on
+  // autonomous runs (`isAutonomous ||`) and without an active workspace, and it
+  // never covered bash write paths (`sed -i`, `tee`) at all.
+  'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
     'max_http_requests_per_hour', 'max_http_requests_per_day',
     'max_mail_sends_per_hour', 'max_mail_sends_per_day', 'mail_dedup_window_sec',
