@@ -411,6 +411,21 @@ describe('error-reporting scrubbing', () => {
     expect(req['url'], 'the URL stays').toBe('https://x/y');
   });
 
+  it('masks the request URL like the query string', async () => {
+    // The URL repeats the query string. Both copies must be masked, and the
+    // rest of the URL must survive — it is the diagnostic part.
+    const { beforeSend } = await hooks();
+    const secret = 'a'.repeat(64);
+    const out = beforeSend({
+      request: { query_string: `t=${secret}`, url: `https://x/api/run?t=${secret}&q=hello` },
+    });
+    const req = (out as { request: Record<string, unknown> }).request;
+    expect(req['query_string']).not.toContain(secret);
+    expect(req['url'], 'the query copy inside the URL is masked too').not.toContain(secret);
+    expect(req['url'], 'the URL itself stays').toContain('https://x/api/run?t=');
+    expect(req['url']).toContain('q=hello');
+  });
+
   it('masks breadcrumb data, which the four named deletes never covered', async () => {
     // The http integration writes the raw query string under `http.query`, a key
     // the existing denylist does not name. Walking beats growing the list.
