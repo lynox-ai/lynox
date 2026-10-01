@@ -934,6 +934,38 @@ describe('Config', () => {
       expect(loadConfig().embedding_provider).toBe('onnx');
     });
 
+    it('changeset_review in a PROJECT config is IGNORED — whether writes are staged for review is a user-config decision', async () => {
+      // Off the allowlist since 2026-10-01, and the reason is NOT the one above.
+      // This is REVERSIBLE: it destroys nothing, it removes a bar in front of
+      // local writes (`session.ts`: a project `false` drops changeset review on
+      // non-autonomous runs). The decision rests only on where the setting may
+      // come from — a cloned repo must not decide whether a write is staged for
+      // review before it lands.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // Direction 1, and `false` is the value with teeth: the cwd tries to
+      // switch the review off while the user never asked for that.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ changeset_review: false, max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.changeset_review).toBeUndefined();
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // Direction 2: a user `false` must still work — otherwise this test is
+      // also satisfied by the setting having disappeared altogether, which
+      // would be a different change with different costs.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ changeset_review: false }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ changeset_review: true }));
+      reloadConfig();
+      expect(loadConfig().changeset_review).toBe(false);
+    });
     
     it('one invalid value in a PROJECT config silently drops ALL of its other keys', async () => {
       // This replaces a test that was a TAUTOLOGY. It asserted that a project

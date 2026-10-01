@@ -224,7 +224,13 @@ export function loadConfig(): LynoxUserConfig {
   // unknown key — still has its `plugins` take effect through that path.
   // Any reasoning about which selection wins has to account for both.
     'organization_id', 'client_id',
-    'changeset_review', 'greeting', 'context_name',
+    // `changeset_review` is NOT here, since 2026-10-01, and the reason is NOT
+  // the one above: this is REVERSIBLE. It destroys nothing — it removes a bar
+  // in front of local writes (a project `false` drops changeset review on
+  // non-autonomous runs). The decision rests only on where the setting may
+  // come from: a cloned repo must not decide whether a write is staged for
+  // review before it lands.
+  'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
     'max_http_requests_per_hour', 'max_http_requests_per_day',
     'max_mail_sends_per_hour', 'max_mail_sends_per_day', 'mail_dedup_window_sec',
