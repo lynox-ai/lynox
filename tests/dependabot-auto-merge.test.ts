@@ -29,7 +29,8 @@ afterAll(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 /** Run the decision block. `gh` is a stub that prints `behind` or exits with `ghExit`. */
 function decideWith(env: { UPDATE_TYPE?: string; GROUP?: string; NAMES?: string }, gh: { behind?: string; ghExit?: number }) {
   const bin = mkdtempSync(join(dir, 'bin-'));
-  writeFileSync(join(bin, 'gh'), gh.ghExit !== undefined ? `#!/bin/sh\nexit ${gh.ghExit}\n` : `#!/bin/sh\nprintf '%s\\n' '${gh.behind ?? ''}'\n`);
+  const argv = join(bin, 'argv');
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$@" > '${argv}'\n` + (gh.ghExit !== undefined ? `exit ${gh.ghExit}\n` : `printf '%s\\n' '${gh.behind ?? ''}'\n`));
   chmodSync(join(bin, 'gh'), 0o755);
   const out = join(bin, 'out');
   writeFileSync(out, '');
@@ -40,7 +41,9 @@ function decideWith(env: { UPDATE_TYPE?: string; GROUP?: string; NAMES?: string 
       UPDATE_TYPE: env.UPDATE_TYPE ?? 'version-update:semver-patch', GROUP: env.GROUP ?? '', NAMES: env.NAMES ?? 'left-pad',
     },
   });
-  return { code: r.status, eligible: /eligible=true/.test(readFileSync(out, 'utf8')), log: `${r.stdout}${r.stderr}` };
+  let ghArgs: string[] = [];
+  try { ghArgs = readFileSync(argv, 'utf8').split('\n').filter(Boolean); } catch { /* gh not called */ }
+  return { code: r.status, eligible: /eligible=true/.test(readFileSync(out, 'utf8')), log: `${r.stdout}${r.stderr}`, ghArgs };
 }
 
 describe('dependabot-auto-merge — the decision', () => {
@@ -48,10 +51,13 @@ describe('dependabot-auto-merge — the decision', () => {
     const r = decideWith({}, { behind: '0' });
     expect(r.code).toBe(0);
     expect(r.eligible).toBe(true);
+    // The direction matters: base...head gives the main commits the PR LACKS.
+    expect(r.ghArgs).toContain('repos/o/r/compare/main...abc');
   });
 
   it.each([
-    ['a major update', { UPDATE_TYPE: 'version-update:semver-major' }, { behind: '0' }, 'major'],
+    ['a major update', { UPDATE_TYPE: 'version-update:semver-major' }, { behind: '0' }, 'not patch or minor'],
+    ['an EMPTY update type (fetch-metadata could not parse)', { UPDATE_TYPE: '' }, { behind: '0' }, 'not patch or minor'],
     ['a group PR', { GROUP: 'minor-and-patch' }, { behind: '0' }, 'group PR'],
     ['a PR naming two dependencies without a group', { NAMES: 'a, b' }, { behind: '0' }, 'not exactly one'],
     ['a PR naming no dependency', { NAMES: '' }, { behind: '0' }, 'not exactly one'],
@@ -67,6 +73,15 @@ describe('dependabot-auto-merge — the decision', () => {
 });
 
 describe('dependabot-auto-merge — the wiring', () => {
+  it('feeds the decision from the right metadata outputs (a typo would silently empty a check)', () => {
+    const env = (decide as { env?: Record<string, string> } | undefined)?.env ?? {};
+    const norm = (v: string | undefined) => (v ?? '').replace(/\s/g, '');
+    expect(norm(env['UPDATE_TYPE'])).toBe('${{steps.meta.outputs.update-type}}');
+    expect(norm(env['GROUP'])).toBe('${{steps.meta.outputs.dependency-group}}');
+    expect(norm(env['NAMES'])).toBe('${{steps.meta.outputs.dependency-names}}');
+    expect(norm(env['HEAD_SHA'])).toBe('${{github.event.pull_request.head.sha}}');
+  });
+
   it('enables auto-merge ONLY on the decision, and switches it off otherwise', () => {
     const enable = steps.find((s) => (s.run ?? '').includes('gh pr merge --auto'));
     const disable = steps.find((s) => (s.run ?? '').includes('--disable-auto'));

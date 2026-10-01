@@ -19,8 +19,12 @@ name: dependabot-auto-merge
 # Every run re-decides: an update that stops qualifying (a dependabot rebase onto an older state, a
 # group) has auto-merge switched OFF again, so an earlier "on" does not linger.
 #
-# Known limit, stated: auto-merge, once on, is not re-checked when main moves without a push to the
-# PR. The next dependabot rebase (synchronize) re-decides.
+# Known limits, stated:
+#   · auto-merge, once on, is not re-checked when main moves without a push to the PR; the next
+#     dependabot rebase (synchronize) re-decides.
+#   · a push by a HUMAN to a dependabot branch skips this whole job (the actor is not dependabot),
+#     including the switch-off step — auto-merge that was on stays on over that push. Whoever
+#     pushes to a dependabot branch should switch auto-merge off by hand.
 #
 # Branch protection still requires green CI before the merge happens; this only flips the bit.
 
@@ -54,7 +58,13 @@ jobs:
         run: |
           # Fail-CLOSED: anything this step cannot establish means "no auto-merge".
           reason=""
-          if [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then reason="major update"; fi
+          # A POSITIVE list: only patch and minor qualify. Comparing against "major" alone let an
+          # empty or unknown update type (fetch-metadata could not parse the PR) through as "not
+          # major" — a fail-open a review found in the first version of this step.
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) reason="update type is '${UPDATE_TYPE:-empty}', not patch or minor" ;;
+          esac
           if [ -z "$reason" ] && [ -n "$GROUP" ]; then reason="group PR ($GROUP)"; fi
           if [ -z "$reason" ]; then
             # awk, not `wc -l`: wc counts newlines, and a single name has none — it reported 0 for
