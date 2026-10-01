@@ -225,6 +225,23 @@ describe('configureBudgetAndRateLimits — http-tool security wiring', () => {
     expect(ctx.allowedWildcards).toEqual(['cdn.example.com']);
   });
 
+  it('keeps a wildcard entry only when it names a domain, and warns about the rest', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const ctx = createToolContext(base);
+      configureBudgetAndRateLimits(
+        mockRunHistory,
+        { ...base, network_policy: 'allow-list', network_allowed_hosts: ['*.', '*..example.com', '*.cdn.example.com', '*.a*.example.com'] },
+        ctx,
+      );
+      expect(ctx.allowedWildcards).toEqual(['cdn.example.com']);
+      const warned = stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('network_allowed_hosts entry'));
+      expect(warned).toHaveLength(3);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('defaults to allow-all (no egress restriction) when unset — zero behaviour change', () => {
     const ctx = createToolContext(base);
     configureBudgetAndRateLimits(mockRunHistory, base, ctx);
