@@ -196,19 +196,18 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   //
   // ⚠ What holds that, and what does not. A lint rule in `eslint.config.js` makes a
   // `console` member access an error in this file, so the ordinary ways to add a second
-  // warning are caught — of fourteen `console` access shapes tried, seven are caught and
-  // seven are not, and all seven of the latter are named there. Spies in the test file catch `console.error`,
+  // warning are caught; destructuring and `globalThis` routes are not, and that rule's
+  // comment says which. Spies in the test file catch `console.error`,
   // `process.std{out,err}.write` and `process.emitWarning` on walked paths. A stray
-  // `doubtful = true` outside `report` is held by NEITHER of those two — but it is not
-  // unheld: `holds a complete catalogue for the long TTL, not the short one` fails on it,
-  // because the flag drops the cache from an hour to a minute and that test asserts no
-  // re-fetch five minutes on.
+  // `doubtful = true` outside `report` is caught by neither of those two, and IS caught
+  // by `holds a complete catalogue for the long TTL, not the short one`, which asserts
+  // no re-fetch five minutes on.
   //
-  // ⚠ This said "in silence" until a round planted it properly. My own probe had been
-  // `if (offset < 0) doubtful = true;` — `offset` is never negative, so the plant never
-  // RAN and its green meant nothing. A guarded plant on an unreachable branch measures
-  // the guard, not the subject. The error pointed DOWNWARD, which is the direction that
-  // wastes work: it tells a reader to build a control that already exists.
+  // ⚠ That last sentence said "in silence" until a round planted the flag properly. My
+  // probe had been `if (offset < 0) doubtful = true;` — `offset` is never negative, so
+  // it never RAN, and its green measured the guard rather than the subject. A guarded
+  // plant on an unreachable branch is a broken probe, and this one erred DOWNWARD: it
+  // told a reader to build a control that already existed.
   //
   // Earlier mechanisms for this property were built and retired, each defeated by
   // something its author had not enumerated. No count here: two files carried two

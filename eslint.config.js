@@ -44,27 +44,20 @@ export default [
     // BARE `console.warn` warns without the flag, so a warned, incomplete catalogue is
     // served for an hour. `report`'s own call carries the one exemption.
     //
-    // WHAT IT REACHES, measured: of FOURTEEN `console` access shapes tried, seven are
-    // caught and seven are not — and that fourteen is a SAMPLE, not an enumeration. Nine
-    // were tried first (4/5), then five more the first time anybody looked past them
-    // (3/2); the trying has not stopped producing hits, so the set is open.
+    // WHAT IT REACHES: the ordinary member-access shapes — `console.warn(x)`,
+    // `console['warn'](x)`, an optional chain, a `.call`, and an alias DECLARATION
+    // (`const w = console.warn`, where `console.warn` is itself a MemberExpression).
+    // What it does NOT reach: DESTRUCTURING (`const { warn } = console` is an
+    // ObjectPattern, not a MemberExpression) and anything routed through `globalThis`
+    // or `Reflect`. `process.std*.write` and `process.emitWarning` are a different
+    // channel, outside this rule by design, held by spies in the test file.
     //
-    //   caught      `console.warn(x)` · `console['warn'](x)` · `(console).warn(x)`
-    //               `const w = console.warn; w(x)` · `console?.warn(x)`
-    //               `console.warn.call(…)` · `(0, console.warn)(x)`
-    //   not caught  `const { warn } = console; warn(x)` and its renamed form
-    //               `const { warn: w } = console; w(x)` — an ObjectPattern, not a
-    //               MemberExpression · `globalThis.console.warn(x)` ·
-    //               `globalThis['console'].warn(x)` ·
-    //               `const c = globalThis.console; c.warn(x)` ·
-    //               `const { console: cc } = globalThis; cc.warn(x)` ·
-    //               `Reflect.get(console,'warn')(x)`
-    //
-    // ⚠ `process.std*.write` and `process.emitWarning` are a DIFFERENT channel, outside
-    // this rule by design and held by spies in the test file. They are deliberately not
-    // in the fourteen: an earlier version of this list put them in and dropped two of the
-    // seven uncaught console shapes to make room, and because 7/7 and 14 both still came
-    // out right, the substitution read clean. Right number, wrong set.
+    // ⚠ No counts here, on purpose. Three different fractions were written in this
+    // block and all three were wrong — an unsourced denominator, then one that mixed
+    // the two channels, then one whose halves summed to twelve. A count is a sample of
+    // what somebody tried, it ages the moment anybody tries another shape, and nothing
+    // in the build checks it. The measured list with its dates is the register row,
+    // which is where an open set can be kept honest.
     //
     // ⛔ THE HAZARD THIS BLOCK CREATES, both ways. Flat config REPLACES a rule's options
     // instead of merging them, so this block and a repo-wide `no-restricted-syntax`
