@@ -23,6 +23,12 @@ on:
   push:
     branches: [main]
 
+env:
+  # onnxruntime-node's postinstall downloads only CUDA/TensorRT providers on
+  # linux/x64 (~300 MB, never loaded: the CPU runtime ships in the npm package).
+  # Skipping it removes a CDN dependency from every install.
+  ONNXRUNTIME_NODE_INSTALL: skip
+
 jobs:
   security-scan:
     runs-on: ubuntu-latest
