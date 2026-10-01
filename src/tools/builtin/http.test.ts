@@ -1743,7 +1743,7 @@ describe('httpRequestTool', () => {
      * what the gate refused — one model turn later. The two populations are the
      * same set, because both conditions require `auth.oauth.token_url`.
      */
-    it('tells the model NOT to fetch_token on a 401 for a profile a user authorized', async () => {
+    it('tells the model NOT to fetch_token on a 401 for a profile a user authorized, with facts only', async () => {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({
@@ -1771,11 +1771,15 @@ describe('httpRequestTool', () => {
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.bexio.example/2.0/invoices', method: 'GET' }, agent);
 
-      expect(result).toMatch(/Do NOT call api_setup fetch_token/i);
-      // The remedy comes from the enumerated advice, so it is the one that fits
-      // THIS shape: an empty slot behind a consent means re-authorize.
-      expect(result).toContain('connect link');
-      expect(result).toContain('offline_access');
+      expect(result).toMatch(/Do NOT resolve this by calling api_setup fetch_token/i);
+      // FACTS, and no instruction to edit the profile. The text this reader gets
+      // is the same diagnosis the operator log carries, and that is only safe
+      // because it prescribes nothing: an earlier version shared a per-shape
+      // REMEDY here and told the model, two sentences after forbidding
+      // `fetch_token`, that it could run it by hand if it really wanted to.
+      expect(result).toContain('a user authorized it at the provider');
+      expect(result).toContain('that slot is empty');
+      expect(result).not.toContain('api_setup update');
       // The discriminator. The app-only text promises the opposite, and a model
       // that reads it here performs the swap.
       expect(result).not.toMatch(/no user interaction required/i);
@@ -1795,7 +1799,7 @@ describe('httpRequestTool', () => {
      * And the remedy must NOT be the connect link: there is no consent flow
      * behind this profile to send anyone to.
      */
-    it('also refuses to recommend fetch_token for an undeclared refresh token, and names the right remedy', async () => {
+    it('also refuses to recommend fetch_token for an undeclared refresh token, and says why', async () => {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({
@@ -1843,13 +1847,14 @@ describe('httpRequestTool', () => {
       } as never;
       const result = await handler({ url: 'https://legacy.example/v1/things', method: 'GET' }, agent);
 
-      expect(result).toMatch(/Do NOT call api_setup fetch_token/i);
+      expect(result).toMatch(/Do NOT resolve this by calling api_setup fetch_token/i);
       expect(result).not.toMatch(/no user interaction required/i);
-      // The remedy that fits a hand-configured profile — declare the token —
-      // and NOT the one that fits a connected one.
-      expect(result).toContain('api_setup update');
-      expect(result).toContain('"refresh_token"');
-      expect(result, 'a profile with no consent behind it was sent to a connect link').not.toContain('connect link');
+      // The facts that distinguish this shape from the connected one — and no
+      // remedy, which is what stops the text from being wrong about it. An
+      // earlier version sent this profile to a connect link it does not have.
+      expect(result).toContain('no consent flow is recorded');
+      expect(result).toContain('declares no auth.oauth.grant_type');
+      expect(result).not.toContain('connect link');
     });
 
     it('keeps the ordinary reminder when nothing is in the refresh slot to lose', async () => {
@@ -1898,7 +1903,7 @@ describe('httpRequestTool', () => {
       const result = await handler({ url: 'https://cc.example/v1/orders', method: 'GET' }, agent);
 
       expect(result).toContain('fetch_token');
-      expect(result).not.toMatch(/Do NOT call api_setup fetch_token/i);
+      expect(result).not.toMatch(/Do NOT resolve this by calling api_setup fetch_token/i);
     });
 
     it('still gives the fetch_token reminder to a connected profile that CAN refresh', async () => {
@@ -1934,7 +1939,7 @@ describe('httpRequestTool', () => {
       // not silence the reminder, or every connected profile loses the one
       // recovery that works for it.
       expect(result).toContain('fetch_token');
-      expect(result).not.toMatch(/Do NOT call api_setup fetch_token/i);
+      expect(result).not.toMatch(/Do NOT resolve this by calling api_setup fetch_token/i);
     });
 
     it('appends fetch_token hint on 401 for an oauth2 profile with token_url', async () => {

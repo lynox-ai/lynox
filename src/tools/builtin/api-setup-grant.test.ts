@@ -1639,136 +1639,115 @@ describe('whose token is in the refresh slot', () => {
   });
 });
 
-describe('what the operator is told when a renewal is declined', () => {
+describe('what the log says when a renewal is declined', () => {
   /**
-   * One assert per enumerated shape, because the first two versions of this
-   * function were each wrong in a way the other was right about, and both read
-   * as reasonable. The discriminating assertion in every case is a
-   * `not.toContain` of the remedy that belongs to a DIFFERENT shape — a sentence
-   * that merely mentions `grant_type` passes everything.
+   * The assertions are deliberately NOT "it names the right remedy per shape".
+   * Three versions of this function prescribed a remedy, and a review round
+   * found each of them wrong for a reachable state — the third one destructively
+   * so, because the reader is a model holding `api_setup update`. The property
+   * that replaced them is structural and holds for every shape at once: the line
+   * states facts and forbids the exchange, and prescribes NO profile edit. One
+   * invariant instead of five sentences that each have to stay true.
    */
-  const CRM = { id: 'crm-api' };
+  const base = {
+    id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+  };
+  // A substring list is a PROXY for "prescribes nothing", not the property — so
+  // it is only exact because the factual wording deliberately avoids every one of
+  // these phrases. It earned its keep immediately: the first run failed on the
+  // diagnosis's own "authorized it through the connect link", which was a fact
+  // and not a remedy. The fact was reworded rather than the guard excepted,
+  // because an exception per phrase is how this guard would stop working.
+  const IMPERATIVES = ['api_setup update', 'connect link', 'Remove auth.oauth', 'declare it'];
 
-  it('says an unperformable grant type is refused by the provider, not swapped', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    // V2 told this shape it "would run as a client-credentials grant". It does
-    // not: `fetch_token` posts the value verbatim and the provider refuses it.
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: { grant_type: 'password' } } }, 'foreign',
+  it('prescribes no profile edit, in any refused shape', async () => {
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    // Every state in which the gate refuses, driven through one assertion. This
+    // is the test that would have caught all three of the earlier defects, and
+    // none of the five per-shape tests it replaces could have: each of those
+    // asserted that ITS sentence was right.
+    const shapes = [
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: {} }, oauth_grant: { origin: 'callback' as const } },
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { grant_type: 'client_credentials' as const } }, oauth_grant: { origin: 'callback' as const } },
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { refresh_token_key: 'CRM_LEGACY_RT' } }, oauth_grant: { origin: 'callback' as const } },
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: {} } },
+    ];
+    for (const shape of shapes) {
+      for (const slotState of ['empty', 'engine-written', 'foreign'] as const) {
+        const line = oauthRenewalDeclinedDiagnosis(shape, slotState);
+        for (const imperative of IMPERATIVES) {
+          expect(line, `a remedy crept back in for ${JSON.stringify(shape.auth.oauth)} / ${slotState}`)
+            .not.toContain(imperative);
+        }
+        // The one imperative it MAY carry is negative, and it must.
+        expect(line).toContain('Do NOT resolve this by calling api_setup fetch_token');
+      }
+    }
+  });
+
+  it('names whose token is in the slot, which nothing else reports', async () => {
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    const p = { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: {} }, oauth_grant: { origin: 'callback' as const } };
+    expect(oauthRenewalDeclinedDiagnosis(p, 'empty')).toContain('that slot is empty');
+    expect(oauthRenewalDeclinedDiagnosis(p, 'engine-written')).toContain('stored for an earlier exchange');
+    expect(oauthRenewalDeclinedDiagnosis(p, 'foreign')).toContain('no record of storing');
+  });
+
+  it('names BOTH slots when they diverge, and neither as the one to keep', async () => {
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    // The fact a reader cannot get anywhere else. V3 turned it into "remove the
+    // field", which disconnects a profile whose named slot holds the only usable
+    // token — so the names are stated and the judgement is not made.
+    const line = oauthRenewalDeclinedDiagnosis(
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { refresh_token_key: 'CRM_LEGACY_RT' } }, oauth_grant: { origin: 'callback' as const } },
+      'foreign',
     );
-    expect(reason).toContain('"password"');
-    expect(reason).toContain('Correct the value');
-    expect(reason).not.toContain('connect link');
-    expect(reason).not.toContain('client-credentials grant and replace');
+    expect(line).toContain('CRM_LEGACY_RT');
+    expect(line).toContain('CRM_API_REFRESH_TOKEN');
+    expect(line).not.toContain('Remove auth.oauth');
   });
 
-  it('tells an explicit client_credentials on a connected profile that the swap is the point', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: { grant_type: 'client_credentials' } }, oauth_grant: { origin: 'callback' } },
-      'empty',
-    );
-    expect(reason).toContain('by hand');
-    expect(reason).toContain('connect link');
-    expect(reason).not.toContain('api_setup update');
-  });
-
-  it('names the slot removal when the profile reads a refresh token from elsewhere', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    // The shape the callback's own slot-agreement check produces. The token IS
-    // in the vault — under the derived name — so both "the provider returned
-    // none" and "declare it" are wrong, and the remedy `fetch_token` itself
-    // prescribes is the one no earlier version of this function named.
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: { refresh_token_key: 'CRM_LEGACY_RT' } }, oauth_grant: { origin: 'callback' } },
-      'empty',
-    );
-    expect(reason).toContain('Remove auth.oauth.refresh_token_key');
-    expect(reason).toContain('CRM_LEGACY_RT');
-    expect(reason).toContain('CRM_API_REFRESH_TOKEN');
-    expect(reason).not.toContain('offline_access');
-    expect(reason).not.toContain('grant_type "refresh_token"');
-  });
-
-  it('sends a connected profile with an empty slot to the consent screen', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: {} }, oauth_grant: { origin: 'callback' } }, 'empty',
-    );
-    expect(reason).toContain('connect link');
-    expect(reason).toContain('offline_access');
-    expect(reason).not.toContain('api_setup update');
-  });
-
-  it('does NOT tell a connected profile to declare the engine-written token a new consent superseded', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    // THE REGRESSION V2 SHIPPED, pinned so it cannot come back. This is the
-    // state the callback manufactures: a second authorization returned no
-    // refresh token, the grant type was cleared, and the dead first-grant token
-    // is still in the slot. V2 asked "is a token stored" before "whose is it"
-    // and answered "declare it: grant_type refresh_token" — which puts the dead
-    // token straight back into an unattended exchange, earns an `invalid_grant`,
-    // records a revocation, and sends the user round again.
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: {} }, oauth_grant: { origin: 'callback' } }, 'engine-written',
-    );
-    expect(reason).toContain('connect link');
-    expect(reason).toContain('replaced');
-    expect(reason, 'the advice that re-opens the loop came back').not.toContain('api_setup update');
-    expect(reason).not.toContain('grant_type "refresh_token"');
-  });
-
-  it('tells a hand-configured profile to declare the token somebody put there', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    // V1 got this one right and V2 kept it: a token the engine did not write is
-    // one a human meant, and declaring it is the action that works.
-    const reason = oauthRenewalDeclinedReason({ ...CRM, auth: { oauth: {} } }, 'foreign');
-    expect(reason).toContain('api_setup update');
-    expect(reason).toContain('"refresh_token"');
-    expect(reason).toContain('this engine did not write');
-    expect(reason).not.toContain('connect link');
-  });
-
-  it('gives the same advice for an engine-written token when no consent is behind the profile', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    // `fetch_token` on a hand-built profile can leave a refresh token under the
-    // derived name while `grant_type` stays absent. Nothing was superseded here,
-    // so declaring it IS the remedy — the split is on `origin`, not on who wrote
-    // the token.
-    const reason = oauthRenewalDeclinedReason({ ...CRM, auth: { oauth: {} } }, 'engine-written');
-    expect(reason).toContain('api_setup update');
-    expect(reason).not.toContain('connect link');
-  });
-
-  it('says plainly that it disagrees with the gate rather than inventing a reason', async () => {
-    const { oauthRenewalDeclinedReason, oauthProfileMayBeRenewedUnattended } = await import('./http.js');
-    const shape = { ...CRM, auth: { oauth: {} } };
-    // The gate PERMITS this shape, so the fallthrough is unreachable in the
-    // product. Asserting both halves is what makes it a drift detector instead
-    // of dead prose: if a future clause starts refusing it, this says so.
-    expect(oauthProfileMayBeRenewedUnattended(shape, false)).toBe(true);
-    expect(oauthRenewalDeclinedReason(shape, 'empty')).toContain('disagree');
+  it('says whether a consent is recorded, both ways round', async () => {
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    const oauth = { type: 'oauth2' as const, vault_keys: [], oauth: {} };
+    expect(oauthRenewalDeclinedDiagnosis({ ...base, auth: oauth, oauth_grant: { origin: 'callback' } }, 'foreign'))
+      .toContain('a user authorized it');
+    expect(oauthRenewalDeclinedDiagnosis({ ...base, auth: oauth }, 'foreign'))
+      .toContain('no consent flow is recorded');
   });
 
   it('strips control characters out of the grant type it echoes', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    // The line goes to stderr. A profile from a hand-edited JSON is never
-    // re-validated, so a newline here would forge a second `[lynox:…]` line in a
-    // stream operators and the control plane read.
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: { grant_type: 'x\n[lynox:oauth] forged\u0007' } } }, 'foreign',
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    // The line goes to stderr, and a profile from a hand-edited JSON is never
+    // re-validated — a newline here would forge a second `[lynox:…]` line.
+    const line = oauthRenewalDeclinedDiagnosis(
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { grant_type: 'x\n[lynox:oauth] forged\u0007' as never } } },
+      'foreign',
     );
-    expect(reason).not.toContain('\n');
-    expect(reason).not.toContain('\u0007');
-    expect(reason).toContain('forged');
+    expect(line).not.toContain('\n');
+    expect(line).not.toContain('\u0007');
+    expect(line).toContain('forged');
   });
 
   it('caps the echoed grant type, so one field cannot flood the log', async () => {
-    const { oauthRenewalDeclinedReason } = await import('./http.js');
-    const reason = oauthRenewalDeclinedReason(
-      { ...CRM, auth: { oauth: { grant_type: 'z'.repeat(5000) } } }, 'foreign',
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    const line = oauthRenewalDeclinedDiagnosis(
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { grant_type: 'z'.repeat(5000) as never } } },
+      'foreign',
     );
-    expect(reason.length).toBeLessThan(500);
+    expect(line.length).toBeLessThan(800);
+  });
+
+  it('tolerates a written list that is not a list, which the hot path used to throw on', async () => {
+    const { oauthRefreshSlotState } = await import('./http.js');
+    // `_admit` validates the id, the slot and the host and says nothing about
+    // `oauth_grant`, so a boot-loaded JSON can carry anything here. The first
+    // version read the field directly: `(('x') ?? []).find` is a TypeError, and
+    // the attach is not inside a try/catch — so EVERY request to such a profile
+    // failed, while the delete path tolerated the same record in the same run.
+    const bad = { ...base, oauth_grant: { written: 'not-an-array' } } as never;
+    expect(() => oauthRefreshSlotState(bad, 'S', 'rt-1')).not.toThrow();
+    expect(oauthRefreshSlotState(bad, 'S', 'rt-1')).toBe('foreign');
   });
 });
 
