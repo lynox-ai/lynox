@@ -153,8 +153,8 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
       return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run stopped by another loop.') };
     }
     if (current.maxTargets !== null && current.applied >= current.maxTargets) {
-      // Another loop may have written the rest of this loop's list: then the run is finished,
-      // not stopped at its maximum.
+      // Another loop may have written or failed the rest of this loop's list: with no target
+      // left to write, the run is finished, not stopped at its maximum.
       if (ledger.listPending(runId).length === 0) break;
       ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
