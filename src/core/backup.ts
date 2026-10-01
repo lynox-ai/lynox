@@ -221,7 +221,7 @@ export class BackupManager {
 
       // 10. Upload to Google Drive (best-effort — local backup is the primary)
       //
-      // TWO conditions here, and a third one elsewhere — each asked where it can change:
+      // The conditions, each asked where it can change:
       //
       //   `_uploadAllowed()`   — the user's opt-in, evaluated HERE rather than at boot.
       //   `manifest.encrypted` — whether this archive is ciphertext.
@@ -542,8 +542,8 @@ export class BackupManager {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
       const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
       // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
-      // `restoreBackup` both carried it. Three sites, one question, and the one that did not ask
-      // reported EVERY encrypted backup as invalid: `PRAGMA integrity_check` on ciphertext throws
+      // `restoreBackup` both carried it. One question asked in several places, and the one that
+      // did not ask reported EVERY encrypted backup as invalid: `PRAGMA integrity_check` throws
       // "file is not a database". Public API (`src/index.ts`) with no in-repo caller, and its only
       // tests run on an unencrypted manager, where the mapping is a no-op — so nothing saw it.
       const checkFiles = manifest.encrypted

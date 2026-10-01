@@ -11,7 +11,7 @@ import { isEncryptedBackupFile } from './backup-crypto.js';
 import type { GDriveBackupUploader, UploadResult } from './backup-upload-gdrive.js';
 
 /**
- * The two conditions that stand between a local backup and a copy of it at a third party.
+ * What stands between a local backup and a copy of it at a third party.
  *
  * They are separate questions with separate homes, and the split is the point:
  *
@@ -165,7 +165,7 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
       // step 5 to `if (false && this.vaultKey)` left all ten tests green — nothing encrypted,
       // `manifest.encrypted` still true, and the spy recording an upload of a plaintext archive
       // labelled encrypted, which is the exact scenario this file's header exists to prevent. The
-      // manifest field and the spy's copy of it are three fields and zero bytes; this reads bytes.
+      // manifest field and the spy's copy of it are metadata and no bytes at all; this reads bytes.
       expect(isEncryptedBackupFile(join(result.path, 'history.db'))).toBe(true);
       expect(localArchiveIsReadable(result.path)).toBe(true);
       expect(calls).toHaveLength(1);
@@ -313,8 +313,8 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
   });
 
   it('verifyBackup accepts an ENCRYPTED archive — the sqlite relabel it used to omit', async () => {
-    // Three sites answer "are these files ciphertext, so skip the SQLite integrity check":
-    // `createBackup` step 9, `restoreBackup`, and this public method — which did not ask. On an
+    // `createBackup` step 9, `restoreBackup` and this public method all answer "are these files
+    // ciphertext, so skip the SQLite integrity check" — and this one did not ask. On an
     // encrypted archive `PRAGMA integrity_check` runs against ciphertext and throws "file is not
     // a database", so every encrypted backup was reported invalid. Its own tests ran on an
     // unencrypted manager, where the relabel is a no-op, which is why nothing saw it.
