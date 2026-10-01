@@ -220,3 +220,141 @@ export function rollbackMergeRun(
   }
   return engine;
 }
+
+/**
+ * A merge as an owner's surface shows it: who was merged into whom, when, what else it
+ * repointed, and whether it can still be taken back. **Deliberately not the ledger entry.**
+ * The entry carries both subjects' full detail rows (for `people` email and phone, for
+ * `organizations` domain and `vat_id`) and the canonical's aliases verbatim, because the
+ * rollback needs them. Whether those are ciphertext depends on a vault key being set, and
+ * `domain` never is — so nothing here passes them on, whatever the storage looks like.
+ * The duplicate's name does come back, although the merge took it out of the contact
+ * views: a merge cannot be named for taking back without it.
+ */
+export interface MergeRunView {
+  /** The ledger's file name without `.json`, which is also what a rollback names. */
+  id: string;
+  createdAt: string;
+  kind: string;
+  dupName: string;
+  canonicalName: string;
+  /** False for a merge that crashed half way: it is not reversible. */
+  applied: boolean;
+  /** The merge holds and this ledger is the one that can take it back: the duplicate still
+   *  redirects onto the canonical, both rows exist, and no newer ledger names the same pair. */
+  inEffect: boolean;
+  /** A newer ledger names the same two entries (merged, taken back, merged again). This one's
+   *  before-image is stale, and replaying it would write old values over the newer merge. */
+  superseded: boolean;
+  dataStoreRows: number;
+  threadRows: number;
+}
+
+/** Read one ledger by its id, or null — an id that is not a ledger's name reads nothing,
+ *  so no path can be built from it. A file whose shape the views and the rollback rely on
+ *  is not there reads as null too, rather than throwing later. */
+export function readMergeLedger(sweepsDir: string, id: string): MergeLedgerFile | null {
+  const name = `${id}.json`;
+  if (!isMergeLedgerFileName(name)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(join(sweepsDir, name), 'utf8')) as Partial<MergeLedgerFile>;
+    const entry = parsed.entry as Partial<MergeLedgerEntry> | undefined;
+    if (parsed.phase !== 'merge' || typeof parsed.createdAt !== 'string' || !entry) return null;
+    if (typeof entry.dupId !== 'string' || typeof entry.canonicalId !== 'string' || typeof entry.kind !== 'string') return null;
+    if (!Array.isArray(parsed.dataStore) || !parsed.dataStore.every((r) => Array.isArray((r as { ids?: unknown }).ids))) return null;
+    if (parsed.threadAnchors !== undefined && !Array.isArray(parsed.threadAnchors)) return null;
+    return parsed as MergeLedgerFile;
+  } catch {
+    return null;
+  }
+}
+
+interface MergeRunRecord { view: MergeRunView; file: MergeLedgerFile }
+
+function readAll(store: SubjectStore, sweepsDir: string): MergeRunRecord[] {
+  let names: string[];
+  try {
+    names = readdirSync(sweepsDir);
+  } catch {
+    return [];
+  }
+  const records: MergeRunRecord[] = [];
+  for (const name of names) {
+    if (!isMergeLedgerFileName(name)) continue;
+    const id = name.slice(0, -'.json'.length);
+    const file = readMergeLedger(sweepsDir, id);
+    if (!file) continue;
+    const { dupId, canonicalId, kind } = file.entry;
+    const dup = store.getSubject(dupId);
+    const canonical = store.getSubject(canonicalId);
+    records.push({
+      file,
+      view: {
+        id, createdAt: file.createdAt, kind,
+        dupName: dup?.name ?? '', canonicalName: canonical?.name ?? '',
+        applied: file.applied !== false,
+        inEffect: dup?.merged_into === canonicalId && canonical !== null,
+        superseded: false,
+        dataStoreRows: file.dataStore.reduce((n, r) => n + r.ids.length, 0),
+        threadRows: file.threadAnchors?.length ?? 0,
+      },
+    });
+  }
+  // Newest first, by the id: the file name, which carries the writer's clock in the fixed
+  // format `isMergeLedgerFileName` enforces, so its text order is its time order. "Newest"
+  // decides which ledger may take a merge back. A file name can be edited too; this orders by
+  // the name the writer chose, nothing more.
+  records.sort((a, b) => (a.view.id < b.view.id ? 1 : a.view.id > b.view.id ? -1 : 0));
+  // Only the newest ledger of a pair can take the merge back.
+  const seen = new Set<string>();
+  for (const r of records) {
+    const pair = `${r.file.entry.dupId}\u0000${r.file.entry.canonicalId}`;
+    if (seen.has(pair)) {
+      r.view.superseded = true;
+      r.view.inEffect = false;
+    }
+    seen.add(pair);
+  }
+  return records;
+}
+
+/** The merges an owner can see, newest first. Unreadable ledgers are left out, not shown half. */
+export function listMergeRuns(store: SubjectStore, sweepsDir: string): MergeRunView[] {
+  return readAll(store, sweepsDir).map((r) => r.view);
+}
+
+/** Why a rollback did not happen, in a fixed vocabulary — the store's own reasons name ids. */
+export type MergeRollbackRefusal =
+  | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'unavailable' | 'partial' | 'failed';
+
+/**
+ * Take one merge back for its owner. Refuses up front what the store would refuse, or get
+ * wrong, so the answer is a category and not the store's wording:
+ *   · a merge that never fully applied, or whose entries are no longer in this graph;
+ *   · an older ledger of a pair merged again since — the store's own check would let it
+ *     through and write a stale before-image over the newer merge;
+ *   · a merge no longer in effect;
+ *   · a ledger that moved data rows or conversation links while those stores are not
+ *     available — reversing only the contact graph would report success with the rows
+ *     still pointing at the merged entry.
+ * A split result — engine reversed, a satellite store not — is `partial`.
+ */
+export function rollbackMergeById(
+  store: SubjectStore, dataStore: DataStore | null, threadStore: ThreadStore | null, sweepsDir: string, id: string,
+): { ok: true; view: MergeRunView } | { ok: false; reason: MergeRollbackRefusal } {
+  const record = readAll(store, sweepsDir).find((r) => r.view.id === id);
+  if (!record) return { ok: false, reason: 'not_found' };
+  const { view, file } = record;
+  if (!view.applied) return { ok: false, reason: 'not_applied' };
+  if (store.getSubject(file.entry.dupId) === null || store.getSubject(file.entry.canonicalId) === null) {
+    return { ok: false, reason: 'missing' };
+  }
+  if (view.superseded) return { ok: false, reason: 'superseded' };
+  if (!view.inEffect) return { ok: false, reason: 'not_in_effect' };
+  if ((file.dataStore.length > 0 && !dataStore) || ((file.threadAnchors?.length ?? 0) > 0 && !threadStore)) {
+    return { ok: false, reason: 'unavailable' };
+  }
+  const out = rollbackMergeRun(store, dataStore, threadStore, file);
+  if (!out.ok) return { ok: false, reason: out.reason?.startsWith('engine un-merged') ? 'partial' : 'failed' };
+  return { ok: true, view: { ...view, inEffect: false } };
+}
