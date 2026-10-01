@@ -37,11 +37,12 @@
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error();
-			// GET /api/config returns the user config plus response-only fields
-			// (managed, capabilities, locks, bugsink_dsn_configured, *_configured).
-			// We only need the three backup fields — projecting here keeps a future
-			// `JSON.stringify(config)` save from re-sending those response-only keys
-			// (the schema is `.strict()` since PRD-IA-V2 P1-PR-A2, would 400).
+			// GET returns the user config plus response-only fields (managed,
+			// capabilities, locks, *_configured). Both directions go through
+			// pickBackupConfig so a save re-sends neither those (the schema is
+			// strict and would 400) nor a key this view has no control for —
+			// see the docblock in backup-config.ts for why that second half
+			// matters under a merging PUT.
 			const body = (await res.json()) as Config;
 			config = pickBackupConfig(body);
 		} catch { /* ignore — settings just won't be editable */ }

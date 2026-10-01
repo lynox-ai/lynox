@@ -136,12 +136,14 @@ When enabled, file writes are staged and shown as a diff for review before being
 
 ```json
 {
-  "backup_schedule": "0 3 * * *",
   "backup_retention_days": 30,
   "backup_encrypt": true,
   "backup_gdrive": false
 }
 ```
+
+`backup_schedule` is **accepted and ignored** — it used to stand in this example beside the keys that
+work, with no hint that nothing reads it. Automatic backups are a trigger, not a config key.
 
 See [Backups](/features/backup/) for details.
 
