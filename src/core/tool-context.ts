@@ -135,14 +135,18 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
 
 /**
  * True iff `domain` (the part after `*.`) names a domain a wildcard entry can
- * cover: non-empty, no empty label, no further `*`, no whitespace. The floor
+ * cover: non-empty, no empty label, no further `*`, no whitespace, and a last
+ * label that is not all digits (a URL whose host ends in a numeric label is an
+ * IPv4 literal, never a name under a domain). The floor
  * matches a wildcard as `host === domain || host.endsWith('.' + domain)`, so
  * the domain itself must be a real name for that match to mean "this domain
  * and its subdomains".
  */
 export function isWildcardDomain(domain: string): boolean {
   if (/[*\s]/.test(domain)) return false;
-  return domain.split('.').every((label) => label.length > 0);
+  const labels = domain.split('.');
+  if (!labels.every((label) => label.length > 0)) return false;
+  return !/^\d+$/.test(labels[labels.length - 1]!);
 }
 
 /**
