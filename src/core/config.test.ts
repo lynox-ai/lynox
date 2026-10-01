@@ -896,6 +896,44 @@ describe('Config', () => {
       reloadConfig();
       expect(loadConfig().plugins).toEqual({ 'not-a-real-plugin': true });
     });
+
+    it('embedding_provider in a PROJECT config is IGNORED — which embedder writes the memory store is a user-config decision', async () => {
+      // Off the allowlist since 2026-10-01, and this one is IRREVERSIBLE where
+      // the others were not. The selectable `local` provider calls itself, in
+      // its own class comment, a hash-based provider "for testing … Not
+      // suitable for real semantic search"; memory rows carry the model name,
+      // there is no re-embed path, and the similarity search has no model
+      // field. So two providers' vectors meet in one cosine comparison, and
+      // turning the key back does not undo what was written.
+      //
+      // ⚠ The env path is deliberately not touched and is stubbed empty here,
+      // so this test measures the CONFIG sources rather than the machine it
+      // runs on: `LYNOX_EMBEDDING_PROVIDER` is applied after this merge and
+      // still wins.
+      vi.stubEnv('LYNOX_EMBEDDING_PROVIDER', '');
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // Direction 1: the user said nothing, the cwd names the test embedder.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ embedding_provider: 'local', max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.embedding_provider).toBeUndefined();
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // Direction 2: the user chose, and the choice must still arrive.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ embedding_provider: 'onnx' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ embedding_provider: 'local' }));
+      reloadConfig();
+      expect(loadConfig().embedding_provider).toBe('onnx');
+    });
+
     
     it('one invalid value in a PROJECT config silently drops ALL of its other keys', async () => {
       // This replaces a test that was a TAUTOLOGY. It asserted that a project
