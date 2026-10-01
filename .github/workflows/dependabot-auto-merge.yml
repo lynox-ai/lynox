@@ -16,6 +16,11 @@ name: dependabot-auto-merge
 #      catch that, here or anywhere: it is caught after the fact on main (2026-10-01: red to fixed
 #      in ~25 min). Do not add a condition against it — it cannot work.
 #
+# The class is wider than this workflow: a stale base decides check results on ANY PR, not only
+# dependabot's. Same day, a human PR (#1413) went red only because its base predated the fix for
+# those advisories — no test ran. Condition 2 is limited to dependabot PRs because only those
+# merge themselves here; read that as the scope of this file, not as the size of the problem.
+#
 # Every run re-decides: an update that stops qualifying (a dependabot rebase onto an older state, a
 # group) has auto-merge switched OFF again, so an earlier "on" does not linger.
 #
