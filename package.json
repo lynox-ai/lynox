@@ -75,7 +75,7 @@
     "@anthropic-ai/sdk": "^0.98.0",
     "@huggingface/transformers": "^4.2.0",
     "@sentry/node": "^11.1.0",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.0.3",
     "email-reply-parser": "^2.3.5",
     "ical.js": "^2.2.1",
     "iconv-lite": "^0.7.2",
@@ -89,7 +89,6 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "@evilmartians/lefthook",
-      "better-sqlite3",
       "onnxruntime-node"
     ],
     "overrides": {
