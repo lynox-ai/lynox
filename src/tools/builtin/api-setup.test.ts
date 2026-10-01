@@ -1452,7 +1452,7 @@ describe('api_setup tool', () => {
       }
     });
 
-    it('surfaces same-domain alt API host candidates referenced in the docs body', async () => {
+    it('surfaces alt API host candidates under the docs host\'s parent domain', async () => {
       const docsBody = '<html>See <a href="https://api.example.com/v1/widgets">api.example.com</a> for endpoints, and <a href="https://gateway.example.com">gateway.example.com</a>.</html>';
       const fetchSpy = mockFetchOk(docsBody);
       stubExtraction({
@@ -1466,7 +1466,7 @@ describe('api_setup tool', () => {
           { action: 'bootstrap', docs_url: 'https://docs.example.com/widgets' },
           agent,
         );
-        expect(result).toContain('same-domain alt host(s) observed in docs');
+        expect(result).toContain('alt host(s) under example.com observed in docs');
         expect(result).toContain('api.example.com');
         expect(result).toContain('gateway.example.com');
         expect(result).toMatch(/base_url note:.*docs\.example\.com/);
@@ -1493,14 +1493,72 @@ describe('api_setup tool', () => {
         );
         expect(result).not.toContain('api.evil.com');
         expect(result).not.toContain('attacker');
-        expect(result).not.toContain('same-domain alt host(s) observed');
+        expect(result).not.toContain('alt host(s) under');
         expect(result).not.toContain('base_url note:');
       } finally {
         fetchSpy.mockRestore();
       }
     });
 
-    it('omits the host note when no same-domain alt hosts are referenced', async () => {
+    it('surfaces a candidate only when it sits under the docs host\'s own parent', async () => {
+      // The parent of docs.example.co.uk is example.co.uk: a sibling there
+      // qualifies, a host elsewhere under the same two trailing labels does not.
+      const docsBody = '<html><a href="https://api.example.co.uk/v1">a</a> <a href="https://api.other-org.co.uk/v1">b</a> <a href="https://api.notexample.co.uk/v1">c</a></html>';
+      const fetchSpy = mockFetchOk(docsBody);
+      stubExtraction({ description: 'Regional API', auth: { type: 'bearer' } });
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.co.uk/v1' },
+          agent,
+        );
+        expect(result).toContain('api.example.co.uk');
+        expect(result).not.toContain('api.other-org.co.uk');
+        // Under the parent means a whole label boundary, not a string ending.
+        expect(result).not.toContain('api.notexample.co.uk');
+        expect(result).toContain('alt host(s) under example.co.uk observed in docs');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('treats a country-code second level as a suffix: only hosts under the docs host itself qualify', async () => {
+      const docsBody = '<html><a href="https://api.example.co.uk/v1">a</a> <a href="https://api.other-org.co.uk/v1">b</a></html>';
+      const fetchSpy = mockFetchOk(docsBody);
+      stubExtraction({ description: 'Regional API', auth: { type: 'bearer' } });
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://example.co.uk/docs' },
+          agent,
+        );
+        expect(result).toContain('alt host(s) under example.co.uk observed in docs: api.example.co.uk');
+        expect(result).not.toContain('api.other-org.co.uk');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('surfaces nothing for a docs host without a parent', async () => {
+      const fetchSpy = mockFetchOk('<html><a href="https://api.service.localhost/v1">a</a> <a href="https://api.service.null/v1">b</a></html>');
+      stubExtraction({ description: 'Local API', auth: { type: 'bearer' } });
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'http://localhost/docs' },
+          agent,
+        );
+        expect(result).not.toContain('alt host(s) under');
+        expect(result).not.toContain('base_url note:');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('omits the host note when no alt hosts under the parent domain are referenced', async () => {
       const fetchSpy = mockFetchOk('<html>Just docs body without api.* hosts referenced.</html>');
       stubExtraction({
         description: 'Self-hosted API',
@@ -1514,13 +1572,13 @@ describe('api_setup tool', () => {
           agent,
         );
         expect(result).not.toContain('base_url note:');
-        expect(result).not.toContain('same-domain alt host(s) observed');
+        expect(result).not.toContain('alt host(s) under');
       } finally {
         fetchSpy.mockRestore();
       }
     });
 
-    it('caps surfaced candidates at 3 even when more same-domain hosts are referenced', async () => {
+    it('caps surfaced candidates at 3 even when more hosts under the parent domain are referenced', async () => {
       const docsBody = '<html>Use ' +
         '<a href="https://api1.example.com">api1.example.com</a>, ' +
         '<a href="https://api2.example.com">api2.example.com</a>, ' +

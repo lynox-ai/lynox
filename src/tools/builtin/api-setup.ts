@@ -604,17 +604,32 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Last two labels — coarse stand-in for registrable domain; over-drops on
- *  multi-label TLDs (co.uk) but never under-drops (the security direction). */
-function lastTwoLabels(hostname: string): string {
-  const labels = hostname.toLowerCase().split('.');
-  if (labels.length < 2) return hostname.toLowerCase();
-  return labels.slice(-2).join('.');
+/** Second-level labels that, under a two-letter country code, are treated as
+ *  a public suffix (`co.uk`, `com.au`, `ac.jp`). One entry per label; add a line
+ *  to cover another. */
+const PUBLIC_SECOND_LEVEL_LABELS: readonly string[] = [
+  'co', 'com', 'net', 'org', 'ac', 'gov', 'edu', 'ne', 'or', 'go', 'ltd', 'plc',
+];
+
+/** The parent a candidate host must sit under: the docs host without its first
+ *  label when it has more than two labels, otherwise the docs host itself. A parent of the
+ *  form `<label from PUBLIC_SECOND_LEVEL_LABELS>.<two-letter country code>` is
+ *  treated as a public suffix, so only hosts under the docs host itself qualify.
+ *  A single-label docs host has no parent: no candidate qualifies. */
+function candidateParent(docsHost: string): string | null {
+  const labels = docsHost.split('.');
+  if (labels.length < 2) return null;
+  const parent = labels.length > 2 ? labels.slice(1) : labels;
+  const isPublicSuffix = parent.length === 2
+    && /^[a-z]{2}$/.test(parent[1]!)
+    && PUBLIC_SECOND_LEVEL_LABELS.includes(parent[0]!);
+  return isPublicSuffix ? docsHost : parent.join('.');
 }
 
-/** Same-domain alt-host candidates referenced in the docs body. Cross-domain
- *  hosts are dropped — surfacing them would let a hostile docs page steer
- *  weak agents at attacker.com. The same-domain check is load-bearing. */
+/** Alt-host candidates referenced in the docs body that sit under the docs
+ *  host's parent (the rule is on `candidateParent`). Every other host is
+ *  dropped. The parent check is load-bearing: the agent reads these hosts as
+ *  candidates for base_url. */
 function findApiHostCandidates(html: string, docsUrl: string): string[] {
   let docsHost: string;
   try {
@@ -622,14 +637,16 @@ function findApiHostCandidates(html: string, docsUrl: string): string[] {
   } catch {
     return [];
   }
-  const docsDomain = lastTwoLabels(docsHost);
+  const parent = candidateParent(docsHost);
+  if (parent === null) return [];
+  const parentSuffix = `.${parent}`;
   const re = /https?:\/\/((?:api[\w-]*|gateway[\w-]*|graphql[\w-]*|rest[\w-]*|edge[\w-]*)\.[a-z0-9.-]+\.[a-z]{2,})/gi;
   const seen = new Set<string>();
   const candidates: string[] = [];
   for (const match of html.matchAll(re)) {
     const host = (match[1] ?? '').toLowerCase();
     if (!host || host === docsHost) continue;
-    if (lastTwoLabels(host) !== docsDomain) continue;
+    if (!host.endsWith(parentSuffix)) continue;
     if (seen.has(host)) continue;
     seen.add(host);
     candidates.push(host);
@@ -1011,14 +1028,14 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ];
   }
 
-  // Surface same-domain alt-host candidates (api.foo.com vs docs.foo.com).
-  // Cross-domain candidates are dropped in findApiHostCandidates to avoid
-  // an attacker docs page steering vault auth at a foreign host.
+  // Surface alt-host candidates under the docs host's parent (api.foo.com vs
+  // docs.foo.com; the rule is on `candidateParent`). The notes below name the
+  // parent that was checked, and nothing more.
   const apiHostCandidates = findApiHostCandidates(docsText, docsUrl);
   if (apiHostCandidates.length > 0) {
     draft.notes = [
       ...(draft.notes ?? []),
-      `same-domain alt host(s) observed in docs: ${apiHostCandidates.join(', ')} — verify against authoritative source before swapping base_url`,
+      `alt host(s) under ${candidateParent(new URL(docsUrl).hostname.toLowerCase()) ?? ''} observed in docs: ${apiHostCandidates.join(', ')} — verify against authoritative source before swapping base_url`,
     ];
   }
 
@@ -1034,7 +1051,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
     : '';
   const hostHintNote = apiHostCandidates.length > 0
-    ? `\nbase_url note: docs host is ${new URL(docsUrl).hostname}; same-domain alt host(s) referenced in the body: ${apiHostCandidates.join(', ')}. Verify before swapping — these are observations from the docs page, not validated endpoints.`
+    ? `\nbase_url note: docs host is ${new URL(docsUrl).hostname}; alt host(s) under ${candidateParent(new URL(docsUrl).hostname.toLowerCase()) ?? ''} referenced in the body: ${apiHostCandidates.join(', ')}. Verify before swapping — these are observations from the docs page, not validated endpoints.`
     : '';
 
   return `Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).
