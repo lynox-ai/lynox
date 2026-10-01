@@ -2,14 +2,11 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { pickBackupConfig, type BackupConfigFields } from '../backup-config.js';
 
 	interface Backup { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
-	interface Config {
-		backup_schedule?: string | undefined;
-		backup_encrypt?: boolean;
-		backup_retention_days?: number | undefined;
-	}
+	type Config = BackupConfigFields;
 
 	let backups = $state<Backup[]>([]);
 	let loading = $state(true);
@@ -40,17 +37,14 @@
 		try {
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error();
-			// GET /api/config returns the user config plus response-only fields
-			// (managed, capabilities, locks, bugsink_dsn_configured, *_configured).
-			// We only need the three backup fields — projecting here keeps a future
-			// `JSON.stringify(config)` save from re-sending those response-only keys
-			// (the schema is `.strict()` since PRD-IA-V2 P1-PR-A2, would 400).
+			// GET returns the user config plus response-only fields (managed,
+			// capabilities, locks, *_configured). Both directions go through
+			// pickBackupConfig so a save re-sends neither those (the schema is
+			// strict and would 400) nor a key this view has no control for —
+			// see the docblock in backup-config.ts for why that second half
+			// matters under a merging PUT.
 			const body = (await res.json()) as Config;
-			config = {
-				backup_schedule: body.backup_schedule,
-				backup_encrypt: body.backup_encrypt,
-				backup_retention_days: body.backup_retention_days,
-			};
+			config = pickBackupConfig(body);
 		} catch { /* ignore — settings just won't be editable */ }
 		configLoading = false;
 	}
@@ -60,11 +54,7 @@
 		try {
 			// Send ONLY the three backup fields — schema is `.strict()`, so any
 			// stray response-only field from GET would 400 the whole save.
-			const payload: Config = {
-				backup_schedule: config.backup_schedule,
-				backup_encrypt: config.backup_encrypt,
-				backup_retention_days: config.backup_retention_days,
-			};
+			const payload: Config = pickBackupConfig(config);
 			const res = await fetch(`${getApiBase()}/config`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
@@ -194,19 +184,6 @@
 		<h2 class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-8 mb-3">{t('backups.settings')}</h2>
 
 		<div class="space-y-4">
-			<div class={cardClass}>
-				<label for="backup-schedule" class="block text-sm font-medium mb-1">{t('config.backup_schedule')}</label>
-				<p class="text-xs text-text-muted mb-2">{t('config.backup_schedule_desc')}</p>
-				<select id="backup-schedule"
-					value={config.backup_schedule ?? ''}
-					onchange={(e) => config.backup_schedule = (e.target as HTMLSelectElement).value || undefined}
-					class={inputClass}>
-					<option value="">{t('config.backup_off')}</option>
-					<option value="0 3 * * *">{t('config.backup_daily')}</option>
-					<option value="0 3 * * 1">{t('config.backup_weekly')}</option>
-					<option value="0 3 1 * *">{t('config.backup_monthly')}</option>
-				</select>
-			</div>
 
 			<div class={cardClass}>
 				<label for="backup-retention" class="block text-sm font-medium mb-1">{t('config.backup_retention')}</label>
