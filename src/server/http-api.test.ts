@@ -7253,7 +7253,7 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it('PUT /api/config accepts a curated api_base_url by its exact value, not a longer URL that starts with it', async () => {
+      it('PUT /api/config refuses an api_base_url that only starts with a curated value', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
         try {
@@ -9068,29 +9068,29 @@ describe('looksBinaryUpload', () => {
   });
 });
 
+describe('POST /api/push/subscribe', () => {
+  const sub = (endpoint: string) => ({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } } });
+
+  it('accepts a known push service and its subdomains', async () => {
+    const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/x')) });
+    expect(res.status).toBe(201);
+    const nested = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://eu.web.push.apple.com/x')) });
+    expect(nested.status).toBe(201);
+  });
+
+  it('matches a push service at a label boundary, not a longer name ending in it', async () => {
+    const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://notfcm.googleapis.com/fcm/send/x')) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe('Subscription endpoint must be a valid push service');
+  });
+});
+
 describe('metered audio routes: managed credit gate + debit', () => {
   /** Read an SSE response body to completion as a single string. */
   async function readSse(res: Response): Promise<string> {
     return res.text();
   }
-
-  describe('POST /api/push/subscribe', () => {
-    const sub = (endpoint: string) => ({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } } });
-
-    it('accepts a known push service and its subdomains', async () => {
-      const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/x')) });
-      expect(res.status).toBe(201);
-      const nested = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://eu.web.push.apple.com/x')) });
-      expect(nested.status).toBe(201);
-    });
-
-    it('matches a push service at a label boundary, not a longer name ending in it', async () => {
-      const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://notfcm.googleapis.com/fcm/send/x')) });
-      expect(res.status).toBe(400);
-      const body = await res.json() as { error: string };
-      expect(body.error).toBe('Subscription endpoint must be a valid push service');
-    });
-  });
 
   describe('POST /api/speak', () => {
     it('blocks with 402 when the onBeforeRun hook denies (budget exhausted) — never synthesizes', async () => {
