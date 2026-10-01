@@ -10242,6 +10242,69 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   });
 
   /**
+   * The read-modify-write must span no event-loop yield — and this test is the
+   * only thing that can tell, because the yield it removes is the only way to
+   * observe it.
+   *
+   * `apiStore.get` hands back the LIVE stored object and `save` replaces the map
+   * entry wholesale, so everything between them is an RMW. A dynamic `import()`
+   * is an await. With it sitting between the two, a concurrent `fetch_token`
+   * resuming inside that window writes its own record — including the `written`
+   * entry a delete needs — and the callback then saves the object it read BEFORE
+   * that write, losing it. `persistGrant` awaits nothing between its get and its
+   * save; this route now matches it.
+   *
+   * The interleaving is FORCED rather than hoped for: a hook on `get` schedules
+   * a microtask, armed only after the exchange so the earlier reads of this
+   * route cannot satisfy the test by accident. A microtask runs at the next
+   * await — which, with the import hoisted above the read, is after the save.
+   */
+  it('loses no concurrent write between reading the profile and saving it', async () => {
+    const { cookie, store } = await arrange({
+      tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+    });
+
+    let armed = false;
+    mockExchangeToken.mockImplementation(async () => {
+      armed = true;
+      return {
+        ok: true, status: 200, responseOk: true,
+        text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+      };
+    });
+
+    // Stands in for the `persistGrant` of a `fetch_token` that was parked on its
+    // own exchange and resumes inside the window.
+    let fired = false;
+    const realGet = store.get.bind(store);
+    store.get = ((id: string) => {
+      if (armed && !fired) {
+        fired = true;
+        queueMicrotask(() => {
+          const current = realGet(id);
+          if (current) store.save({ ...current, description: 'CONCURRENT' }, join(dataDir, 'apis'));
+        });
+      }
+      return realGet(id);
+    }) as typeof store.get;
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+    expect(fired, 'the interleaving never happened, so this test proved nothing').toBe(true);
+
+    const saved = store.get(PROFILE);
+    expect(
+      saved?.description,
+      'a write that landed between the read and the save was overwritten by the pre-read copy',
+    ).toBe('CONCURRENT');
+    // And the route's own write is there too — the point is that neither side
+    // loses, not that the concurrent one wins.
+    expect(saved?.auth?.oauth?.grant_type).toBe('refresh_token');
+  });
+
+  /**
    * The SECOND consent, and the reason `grant_type` is cleared and not only set.
    *
    * A provider that issues a refresh token on the first grant and none on the
