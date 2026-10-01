@@ -693,6 +693,51 @@ describe('Config', () => {
       expect(again.backup_gdrive).toBeUndefined();
     });
 
+    it('backup_encrypt in a PROJECT config is IGNORED in BOTH directions — a cwd file must not decide encryption', async () => {
+      // Taken out of PROJECT_SAFE_KEYS on 2026-10-01. Both directions did damage
+      // from a file in the working directory, and the heavier one is `false`:
+      //   false → the LOCAL archive goes out unencrypted for a user who had set
+      //           LYNOX_VAULT_KEY and never chose that. Nothing to do with uploads.
+      //   true  → the archive becomes encrypted and therefore eligible for the
+      //           Drive upload, reversing the decision of someone who switched
+      //           encryption off in order to suppress it.
+      // The sharpest form of the first is a project file DOWNGRADING a user's
+      // explicit `true`, so that is the one asserted first.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      
+      // Direction 1 (heavy): the user said `true`, a file in the cwd says `false`.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_encrypt: true }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_encrypt: false, backup_retention_days: 7 }),
+      );
+      const downgraded = loadConfig();
+      expect(downgraded.backup_encrypt).toBe(true);
+      // Positive control in the same fixture: a key that IS project-safe comes
+      // through, so the `true` above cannot be explained by the project file
+      // having been ignored wholesale.
+      expect(downgraded.backup_retention_days).toBe(7);
+      
+      // Direction 2: nothing in the user config, the cwd says `true`.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_encrypt: true }));
+      reloadConfig();
+      expect(loadConfig().backup_encrypt).toBeUndefined();
+      
+      // And the legitimate path must still work: taking a key off the allowlist
+      // must not make it unsettable. Without this third witness, deleting the
+      // field from the schema outright would satisfy the two above as well — and
+      // `false` is the value that matters, because a truthiness bug drops it.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_encrypt: false }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({}));
+      reloadConfig();
+      expect(loadConfig().backup_encrypt).toBe(false);
+    });
+
     it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {
       const projectDir = join(fakeProject, '.lynox');
       mkdirSync(projectDir, { recursive: true });

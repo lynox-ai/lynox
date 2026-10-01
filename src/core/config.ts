@@ -199,7 +199,15 @@ export function loadConfig(): LynoxUserConfig {
     'memory_extraction_limit', 'http_response_limit', 'http_html_extract',
     'enforce_https',
     'bugsink_dsn',
-    'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
+    // `backup_encrypt` is deliberately NOT here, and it was until 2026-10-01.
+  // It controls ENCRYPTION, which puts it on the security side of this
+  // allowlist's own dividing line rather than with the convenience keys —
+  // and it mattered in BOTH directions, so "the project can only loosen"
+  // or "can only tighten" are both wrong reasons to allow it. The scope
+  // that may decide it is the user config, not a directory one happens to
+  // be working in. `backup_gdrive` was already left out for the same
+  // reason, and `config.test.ts` holds both directions plus the user path.
+  'backup_dir', 'backup_schedule', 'backup_retention_days',
     'experience',
   ]);
 
