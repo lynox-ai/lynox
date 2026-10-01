@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * The voice catalogue fetch shipped paginating with a parameter the endpoint
@@ -187,6 +190,38 @@ afterEach(() => {
     warn.mockRestore();
     for (const spy of Object.values(otherChannels)) spy.mockRestore();
   }
+});
+
+describe('the lint exemption is counted, because the exemption IS the mechanism', () => {
+  it('finds exactly one `eslint-disable` in the module', () => {
+    // `eslint.config.js` forbids every `console` access in this file, and `report`'s one
+    // call carries an explicit `eslint-disable-next-line`. That comment was described as
+    // "the review signal" — and a review signal is not a barrier: a future author can add
+    // a SECOND directive with exactly the same ceremony and the property is silently gone.
+    // Counting them turns the signal into a schranke. Expected: exactly one.
+    //
+    // ⚠ This file previously carried a 146-line source scanner that was retired after
+    // five versions, each defeated by something it had not enumerated, so a source check
+    // here needs a reason. The reason is that this one is a different KIND of claim: it
+    // counts occurrences of a literal token that is ITSELF a comment. There is no scope
+    // to get wrong, no comment to strip, no channel list to keep complete, and the only
+    // way to make it red is to add a second exemption — which is precisely the event it
+    // exists to surface. The scanner failed because it made a structural claim about
+    // code through text; this makes a claim about text, about text.
+    const src = readFileSync(
+      resolve(fileURLToPath(import.meta.url), '../mistral-voxtral-tts.ts'),
+      'utf8',
+    );
+    const exemptions = [...src.matchAll(/eslint-disable/g)].map((m) => m.index ?? -1);
+    expect(
+      exemptions,
+      'a second lint exemption appeared in this module. Every diagnostic in the catalogue ' +
+        'walk goes through `report`, which pairs the warning with the flag that shortens ' +
+        'the cache lifetime; a bare console call warns without it and a warned, incomplete ' +
+        'catalogue is then served for an hour. If the new channel really is sanctioned, say ' +
+        'so here and raise this number deliberately.',
+    ).toHaveLength(1);
+  });
 });
 
 describe('the catalogue is paginated by offset, because `page` is ignored', () => {
