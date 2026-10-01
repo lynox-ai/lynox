@@ -1466,7 +1466,7 @@ describe('api_setup tool', () => {
           { action: 'bootstrap', docs_url: 'https://docs.example.com/widgets' },
           agent,
         );
-        expect(result).toContain("alt host(s) under the docs host's parent domain (example.com) observed in docs");
+        expect(result).toContain('alt host(s) under example.com observed in docs');
         expect(result).toContain('api.example.com');
         expect(result).toContain('gateway.example.com');
         expect(result).toMatch(/base_url note:.*docs\.example\.com/);
@@ -1517,7 +1517,42 @@ describe('api_setup tool', () => {
         expect(result).not.toContain('api.other-org.co.uk');
         // Under the parent means a whole label boundary, not a string ending.
         expect(result).not.toContain('api.notexample.co.uk');
-        expect(result).toContain("under the docs host's parent domain (example.co.uk)");
+        expect(result).toContain('alt host(s) under example.co.uk observed in docs');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('treats a country-code second level as a suffix: only hosts under the docs host itself qualify', async () => {
+      const docsBody = '<html><a href="https://api.example.co.uk/v1">a</a> <a href="https://api.other-org.co.uk/v1">b</a></html>';
+      const fetchSpy = mockFetchOk(docsBody);
+      stubExtraction({ description: 'Regional API', auth: { type: 'bearer' } });
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://example.co.uk/docs' },
+          agent,
+        );
+        expect(result).toContain('alt host(s) under example.co.uk observed in docs: api.example.co.uk');
+        expect(result).not.toContain('api.other-org.co.uk');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('surfaces nothing for a docs host without a parent', async () => {
+      const fetchSpy = mockFetchOk('<html><a href="https://api.service.localhost/v1">a</a></html>');
+      stubExtraction({ description: 'Local API', auth: { type: 'bearer' } });
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'http://localhost/docs' },
+          agent,
+        );
+        expect(result).not.toContain('alt host(s) under');
+        expect(result).not.toContain('base_url note:');
       } finally {
         fetchSpy.mockRestore();
       }
