@@ -34,13 +34,17 @@ curl -X POST http://localhost:3000/api/backups
 
 ## Scheduled Backups
 
-⚠ **`backup_schedule` does not schedule anything.** The key is declared and documented, and the
-Settings UI offers it — but nothing in the engine reads it, so no backup is ever created because of
-it. Automatic backups run as a **trigger** with the `backup` effect and a cron schedule. You create one
+⚠ **`backup_schedule` does not schedule anything, and there is no longer a control for it.** The key
+is still declared in the config schema, but nothing in the engine reads it, so no backup is ever
+created because of it. The "Backup schedule" select that used to sit in the Backups view was
+**removed** rather than wired up: a control that writes a key nobody reads is not a missing feature,
+it is a promise the product does not keep. Setting the key by hand in the config file is therefore
+the only way to set it at all — and it still has no effect.
+
+Automatic backups run as a **trigger** with the `backup` effect and a cron schedule. You create one
 by asking the agent in chat; Automation Hub → Triggers lists them, and "New trigger" opens a chat
 for it. (The Hub's **Tasks** tab is your to-do list, not agent triggers, and Settings has no Tasks
-page.) Until `backup_schedule` is either wired up or removed, treat both it and the "Backup
-schedule" control in Settings as having no effect.
+page.)
 
 The other keys below do work:
 
