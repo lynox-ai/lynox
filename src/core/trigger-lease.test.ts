@@ -109,9 +109,9 @@ function leaseRow(p: Proc, id = 'trg-1'): { lease_holder: string | null; lease_u
 }
 
 describe('the trigger run lease across a restart', () => {
-  // MUTATION (each tsc-checked): drop the lease clause from TriggerStore.getDue AND the
-  // claim in WorkerLoop.tick → B dispatches a second turn here. The claim alone (getDue
-  // clause kept) is covered by the claim-predicate test below.
+  // MUTATIONS (each tsc-checked): drop the lease clause from TriggerStore.getDue → B lists
+  // the trigger as due; let runTriggerNow ignore `held` → B starts it by hand. Dropping the
+  // claim in WorkerLoop.tick alone is killed by the next two tests.
   it('a run in progress is not started again by a restarted engine while its lease holds', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(T0);
