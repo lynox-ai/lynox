@@ -83,16 +83,16 @@ or hosted one (those never upload to your Drive — the control plane runs their
 If you opt in without a usable vault key, the local backup still runs and the upload is skipped,
 with a line on stderr saying so.
 
-**When a change takes effect** depends on how you make it, and the difference matters in the
-direction that protects you:
+**When a change takes effect** depends on how you make it:
 
-- Through the API or the Settings UI (`PUT /api/config`), **immediately** — in both directions. Turn
-  the upload off and the next backup is no longer uploaded, with no restart.
-- By **editing `~/.lynox/config.json` by hand**, at the **next restart**. lynox does not watch the
-  file, so a hand-edited `backup_gdrive: false` does not stop uploads until you restart it.
+- Through **`PUT /api/config`**, immediately and in both directions. There is no control for this
+  setting in Settings — the Backups page covers schedule, encryption and retention only.
+- By **editing `~/.lynox/config.json` by hand**, at the **next restart**, or earlier if something
+  else happens to call `PUT /api/config` (that route re-reads the whole file, so an unrelated save
+  from the Backups page picks up your edit too).
 
-If you need the upload to stop now and you edited the file, restart lynox — or make the same change
-through Settings, which applies it at once.
+So if you need an upload to stop **now** and you edited the file by hand, restart lynox. Do not
+assume the edit is already in effect.
 
 ### Turning it off again
 

@@ -229,11 +229,15 @@ export class BackupManager {
       //                          the environment and cannot change in a running process. It is
       //                          deliberately NOT in `_uploadAllowed()`: checking it in both
       //                          places was a compensating pair that no single mutant could
-      //                          expose. ⚠ So an uploader attached by an EMBEDDER through
-      //                          `setGDriveUploader()` is NOT tier-gated here — on a provisioned
-      //                          instance the engine attaches none, which is what makes that
-      //                          safe in this product, and is the thing to know before reusing
-      //                          this class.
+      //                          expose.
+      //
+      // ⚠ BEFORE REUSING THIS CLASS: an uploader attached by an EMBEDDER is gated by NEITHER of
+      // them. Not by tier, which lives at the engine's wiring; and not by consent, because
+      // `uploadAllowed` defaults to `() => true` for a caller that does not pass one — which is
+      // the right default for someone who attaches an uploader deliberately, and the more
+      // dangerous half to not know. What makes it safe inside this product is that the engine
+      // passes the predicate and attaches nothing on a provisioned instance. An embedder gets
+      // only the encryption condition for free.
       //
       // Why the opt-in is asked at upload time and not once at wiring: the engine's `init()` runs
       // once, so a gate there enforces "the setting was true at the last boot", not "the user
@@ -242,10 +246,13 @@ export class BackupManager {
       // privacy toggle. A predicate handed in at construction reads the engine's live config on
       // every call, so a RELOAD takes effect at once and in both directions.
       //
-      // ⚠ "A reload", precisely: nothing watches `config.json`. `reloadUserConfig` is called by
-      // `PUT /api/config` and the data-reset route, so a change made through the API or Settings
-      // is live, and a HAND-EDITED file is not until the next start. `features/backup.md` says
-      // so; the distinction is the whole value of this predicate and is easy to overstate.
+      // ⚠ "A reload", precisely: nothing watches `config.json`. `reloadUserConfig` has exactly two
+      // production callers — `PUT /api/config` and the data-reset route — so a change made through
+      // that route is live, and a HAND-EDITED file is not until the next start. There is no
+      // Settings control for this key; the Backups page sends three other fields, so do not point
+      // anyone at it. And note the route re-reads the WHOLE file, so an unrelated save picks up a
+      // hand-edit as a side effect. The distinction is the whole value of this predicate and it is
+      // easy to overstate in both directions.
       //
       // `manifest.encrypted` is the property and not a correlate because ONE predicate decides
       // encryption: the constructor's `config.encrypt && !!vaultKey` is exactly what step 5 acts

@@ -82,9 +82,9 @@ The memory system works across languages. You can discuss topics in German, Engl
 
 ## Local Storage
 
-Memory is stored locally. The flat-file `memory/` tree is the primary store the memory tools read
-and write; `~/.lynox/agent-memory.db` holds the older graph, and the current one is mirrored into
-`~/.lynox/engine.db`.
+Memory is stored locally, in two places: the flat-file `memory/` tree, which is what the memory
+tools read and write, and `~/.lynox/agent-memory.db`, which holds the knowledge graph and is the
+authoritative store for it.
 
 Both are part of the backup set, so a backup you send somewhere takes them along — that is the
 [Google Drive upload](/features/backup/#google-drive-upload), off by default, which encrypts file
