@@ -1223,6 +1223,114 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     expect(innerNames).toEqual(['bash']);
   });
 
+  it('a role on the pipeline step bounds the pool its sub-steps draw from', async () => {
+    // The sub-step declares `bash` and the parent set holds it, so the only thing that can
+    // withhold it is the step's own role. Written against a role that DENIES rather than one
+    // with an allowlist, because a denial is the shape that cannot be mistaken for the pool
+    // being narrow for another reason.
+    mockGetRole.mockReturnValue({
+      model: 'balanced', effort: 'high', autonomy: 'guided',
+      denyTools: ['bash'], description: 'Content creation, tone adaptation. No system commands.',
+    } as RoleConfig);
+    const step: ManifestStep = {
+      id: 'nested-role', agent: 'nested-role', runtime: 'pipeline', role: 'creator',
+      pipeline: [{ id: 'inner-role', task: 'run a script', tools: ['bash'] }],
+    };
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const innerNames = (innerConfig['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(innerNames).not.toContain('bash');
+    // The control: the parent set DOES carry it, so the line above is the role binding and
+    // not a fixture that never held the tool.
+    expect(mockParentTools.map(t => t.definition.name)).toContain('bash');
+    // ⚠ And what this run actually produces, named rather than left implicit: the sub-step
+    // declared ONE tool, the role withheld it, so the step runs with NOTHING and tells nobody.
+    // The inline runtime refuses that shape loudly when the role sits on the step itself; a
+    // role on the OUTER step reaches the pool before the sub-manifest exists, so that refusal
+    // cannot see it. Asserted exactly, so that adding the loud path later turns this red
+    // instead of passing quietly — a tripwire on a filed gap, not an approval of it.
+    expect(innerNames).toEqual([]);
+  });
+
+  it('the step bound SURVIVES a sub-step that carries its own role', async () => {
+    // The discriminator, and the reason the bound is applied to the POOL rather than written
+    // as `role: s.role ?? step.role` in the sub-manifest. With the label form, a sub-step with
+    // its own role REPLACES the step's role and the outer bound is gone — one level down, the
+    // same hole. With the pool form the two compose, so the outer denial still holds.
+    //
+    // Two different roles in one run, so the mock answers by NAME: the outer denies `bash`,
+    // the inner allows everything.
+    mockGetRole.mockImplementation((name: string) => (name === 'creator'
+      ? { model: 'balanced', effort: 'high', autonomy: 'guided', denyTools: ['bash'], description: 'No system commands.' }
+      : { model: 'fast', effort: 'low', autonomy: 'guided', description: 'A tier and an effort, nothing about tools.' }) as RoleConfig);
+    const step: ManifestStep = {
+      id: 'nested-compose', agent: 'nested-compose', runtime: 'pipeline', role: 'creator',
+      pipeline: [{ id: 'inner-compose', task: 'run a script', role: 'permissive', tools: ['bash'] }],
+    };
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect((innerConfig['tools'] as ToolEntry[]).map(t => t.definition.name)).not.toContain('bash');
+    // Controls: the parent set carries it, and the inner role on its own would not withhold it.
+    expect(mockParentTools.map(t => t.definition.name)).toContain('bash');
+    expect(mockGetRole('permissive').denyTools).toBeUndefined();
+  });
+
+  it('the pool honours an allowlist CEILING, not only a denylist', async () => {
+    // Added because a mutant that drops `allowedTools` from the pool SURVIVED the first
+    // round: both earlier tests use a role that denies, and a denial and a ceiling are
+    // different halves of `roleToolProfile`. One of them was unwitnessed.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'low', autonomy: 'guided',
+      allowTools: ['read_file'], description: 'Reads one thing.',
+    } as RoleConfig);
+
+    // Outside the ceiling: the sub-step declares it, the parent set holds it, the ceiling
+    // does not — so the step ends with nothing.
+    const outside: ManifestStep = {
+      id: 'ceil-out', agent: 'ceil-out', runtime: 'pipeline', role: 'narrow',
+      pipeline: [{ id: 'inner-out', task: 'run a script', tools: ['bash'] }],
+    };
+    await spawnPipeline(outside, {}, mockConfig, mockParentTools, 0);
+    const outNames = ((vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(outNames).toEqual([]);
+
+    // Inside it, in the SAME test: the ceiling admits what it names. Without this half the
+    // assertion above would also pass for a pool that admits nothing at all.
+    const inside: ManifestStep = {
+      id: 'ceil-in', agent: 'ceil-in', runtime: 'pipeline', role: 'narrow',
+      pipeline: [{ id: 'inner-in', task: 'read a file', tools: ['read_file'] }],
+    };
+    await spawnPipeline(inside, {}, mockConfig, mockParentTools, 0);
+    const inNames = ((vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(inNames).toEqual(['read_file']);
+    // And the control that makes the first half a ceiling finding: the parent set carries bash.
+    expect(mockParentTools.map(t => t.definition.name)).toContain('bash');
+  });
+
+  it('refuses a role name nothing knows on a pipeline step', async () => {
+    // Same silence as the agent runtime had: a typo made the role undefined, the pool stayed
+    // the whole parent set, and the author was told nothing.
+    mockGetRole.mockReturnValue(undefined as unknown as RoleConfig);
+    const step: ManifestStep = {
+      id: 'nested-typo', agent: 'nested-typo', runtime: 'pipeline', role: 'creatorr',
+      pipeline: [{ id: 'inner-typo', task: 'do it' }],
+    };
+    await expect(spawnPipeline(step, {}, mockConfig, mockParentTools, 0))
+      .rejects.toThrow(/Unknown role "creatorr" on step "nested-typo"/);
+  });
+
+  it('leaves a pipeline step with NO role drawing from the full parent set', async () => {
+    // The other direction, and the one that keeps the bound from becoming "a pipeline step
+    // gets less": without a declared role there is nothing to apply, and the pool is unchanged.
+    const step: ManifestStep = {
+      id: 'nested-noroll', agent: 'nested-noroll', runtime: 'pipeline',
+      pipeline: [{ id: 'inner-noroll', task: 'run a script', tools: ['bash'] }],
+    };
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect((innerConfig['tools'] as ToolEntry[]).map(t => t.definition.name)).toEqual(['bash']);
+  });
+
   it('passes undefined autonomy through unchanged (in-session inheritance)', async () => {
     const step: ManifestStep = {
       id: 'nested2', agent: 'nested2', runtime: 'pipeline',
