@@ -1713,88 +1713,104 @@ describe('what the log says when a renewal is declined', () => {
     ],
   };
 
-  it('returns exactly the four declared fact kinds, in order, for every input', async () => {
-    const { declinedFacts } = await import('./http.js');
-    // `id` is swept too: `refreshTokenKey` appends 14 characters, so the derived
-    // name crosses the 64-character vault bound at an id of 51 — which a review
-    // found by reading the code, because the fixture id was always `crm-api`.
-    // Digit-leading ids are admitted by `PROFILE_ID_PATTERN` and were the axis
-    // the previous fixture list missed entirely: every id in it began with a
-    // letter, so the LENGTH axis the fix was keyed on was swept and the
-    // FIRST-CHARACTER axis beside it was not. `360-crm` and `1password` are real.
-    const IDS = ['crm-api', 'a', '360-crm', '1password', '0', 'x'.repeat(50), 'y'.repeat(51), 'z'.repeat(64), '9' + 'z'.repeat(63)];
-    const GRANTS: readonly unknown[] = [
-      undefined, 'refresh_token', 'client_credentials', 'password', 'authorization_code', 5, 'q'.repeat(300),
-    ];
-    const SLOTS: readonly unknown[] = [
-      undefined, 'CRM_API_REFRESH_TOKEN', 'CRM_LEGACY_RT',
-      'UNSET_THIS_FIELD_WITH_API_SETUP_UPDATE_THEN_CALL_FETCH_TOKEN',
-      'CRM (unset this with api_setup update)', 'A"; x; "B', '', 7,
-    ];
-    const ORIGINS: readonly unknown[] = [undefined, 'callback'];
-    const STATES: readonly unknown[] = [undefined, 'connected', 'no-refresh', 'revoked'];
-    // Fields the function does NOT read, swept anyway: a clause keyed on one of
-    // them is the attack that beat the last two guards, and the kind sequence is
-    // what makes it fail now regardless.
-    const EXTRA = [{}, { token_url: 'https://t.example/token' }, { client_id_key: 'K' }];
-
-    const { oauthRenewalDeclinedDiagnosis, DECLINED_DIAGNOSIS_TAIL } = await import('./http.js');
+  it('returns exactly the four declared fact kinds, and a clean line, over every axis', { timeout: 30_000 }, async () => {
+    const { declinedFacts, oauthRenewalDeclinedDiagnosis, DECLINED_DIAGNOSIS_TAIL } = await import('./http.js');
     // The constant against a LITERAL, in this direction. `endsWith(TAIL)` with
     // TAIL imported is true of any tail whatsoever — the oracle would be the
     // subject.
     expect(DECLINED_DIAGNOSIS_TAIL, 'the closing sentence changed; if that is intended, change this literal too and say why').toBe(TAIL_LITERAL);
-    // And the two records that must agree with the kinds, checked at RUNTIME
-    // because `*.test.ts` under `src/` is outside both tsc projects — a
-    // `satisfies` weld here would be decoration. Without this a new kind can be
-    // added to the sequence and never pattern-checked at all.
+    // The two records that must agree with the kinds, checked at RUNTIME because
+    // `*.test.ts` under `src/` is outside both tsc projects — a `satisfies` weld
+    // here would be decoration. Without this a new kind can be added to the
+    // sequence and never pattern-checked at all.
     expect(Object.keys(CLAUSE_PATTERNS).sort(), 'a kind has no CLAUSE_PATTERNS entry, so its text is unchecked').toEqual([...KIND_SEQUENCE].sort());
     expect(Object.keys(INHABITANTS).sort(), 'a kind has no inhabitant generator, so it is never rendered').toEqual([...KIND_SEQUENCE].sort());
 
-    let seen = 0;
-    for (const id of IDS) {
-      for (const grant_type of GRANTS) {
-        for (const refresh_token_key of SLOTS) {
-          for (const origin of ORIGINS) {
-            for (const state of STATES) {
-              for (const extra of EXTRA) {
-                for (const slotState of ['empty', 'engine-written', 'foreign'] as const) {
-                  const profile = {
-                    id, name: 'n', base_url: 'https://api.crm.example/v1', description: 'd',
-                    auth: { type: 'oauth2', vault_keys: [], oauth: { grant_type, refresh_token_key, ...extra } },
-                    oauth_grant: { origin, state },
-                  } as never;
-                  const facts = declinedFacts(profile, slotState);
-                  expect(
-                    facts.map((f) => f.kind),
-                    'the fact kinds changed — a new clause is a new kind, and it needs a CLAUSE_PATTERNS entry and a line here',
-                  ).toEqual([...KIND_SEQUENCE]);
-                  // THE LINE, not only the facts. Restored from the commit before
-                  // the closure, which is what caught a rewritten tail and an
-                  // appended sentence.
-                  const line = oauthRenewalDeclinedDiagnosis(profile, slotState);
-                  expect(line.endsWith(TAIL_LITERAL), `something was appended after the tail: ${JSON.stringify(line.slice(-100))}`).toBe(true);
-                  const head = line.slice(0, line.length - TAIL_LITERAL.length);
-                  expect(head.endsWith('. '), `the head does not close before the tail: ${JSON.stringify(head.slice(-20))}`).toBe(true);
-                  const parts = head.slice(0, -2).split('; ');
-                  expect(parts.length, 'the clause count changed').toBe(KIND_SEQUENCE.length);
-                  for (const clause of parts) {
-                    const ok = Object.values(CLAUSE_PATTERNS).some((pats) => pats.some((pat) => pat.test(clause)));
-                    expect(ok, `an unallowlisted clause in the emitted line: ${JSON.stringify(clause)}`).toBe(true);
-                  }
-                  seen++;
-                }
-              }
-            }
-          }
+    // ⚠ NOT the full cross product, and the reason is a measurement rather than
+    // taste. The first version multiplied every axis: 36'288 cases, ~1.8 s idle
+    // and 13-18 s under load, which crosses vitest's default per-test timeout —
+    // so the guard went RED twice while nothing was wrong with the code. **A
+    // guard that flakes under load is worse than none: it teaches re-running.**
+    //
+    // What the property actually needs: `declinedFacts` is one literal return
+    // with no branches, so the kind sequence cannot vary with an input at all.
+    // The sweep exists to catch a FUTURE branch. A branch keyed on one field is
+    // caught by varying that field against any base; a branch keyed on a
+    // CONJUNCTION needs both values, so the small axes stay fully crossed (they
+    // are cheap) and a handful of deliberate conjunctions are named. Each axis
+    // below is varied against every base, which is what a one-at-a-time sweep
+    // owes and what a product buys too expensively.
+    const BIG = {
+      // `PROFILE_ID_PATTERN` admits a digit-leading id, and `refreshTokenKey`
+      // appends 14 characters — the two axes a previous fixture list missed, one
+      // of them because every id in it began with a letter.
+      id: ['crm-api', '360-crm', '1password', 'y'.repeat(51), 'z'.repeat(64)],
+      grant_type: [undefined, 'refresh_token', 'client_credentials', 'password', 'authorization_code', 5, 'q'.repeat(300)],
+      refresh_token_key: [
+        undefined, 'CRM_API_REFRESH_TOKEN', 'CRM_LEGACY_RT',
+        'UNSET_THIS_FIELD_WITH_API_SETUP_UPDATE_THEN_CALL_FETCH_TOKEN',
+        'CRM (unset this with api_setup update)', 'A"; x; "B', '', 7,
+      ],
+      // Fields the function does NOT read. A clause keyed on one of these is the
+      // attack that beat two earlier guards, and the kind sequence is what makes
+      // it fail now whatever it is keyed on.
+      extra: [{}, { token_url: 'https://t.example/token' }, { client_id_key: 'K' }],
+    } as const;
+    const SMALL = { origin: [undefined, 'callback'], state: [undefined, 'connected', 'no-refresh', 'revoked'] } as const;
+
+    const cases: Record<string, unknown>[] = [];
+    const base = { id: 'crm-api', grant_type: undefined as unknown, refresh_token_key: undefined as unknown, extra: {} as Record<string, unknown> };
+    for (const origin of SMALL.origin) {
+      for (const state of SMALL.state) {
+        for (const [axis, values] of Object.entries(BIG)) {
+          for (const value of values) cases.push({ ...base, [axis]: value, origin, state });
         }
       }
     }
-    // An ABSOLUTE floor beside the product. The previous control derived its
-    // expectation from the arrays under test, so emptying any one axis made the
-    // product zero and `expect(0).toBe(0)` passed with no coverage at all —
-    // strictly weaker than the floor it replaced.
-    expect(seen, 'the sweep built almost nothing, so this test proved little').toBeGreaterThan(3000);
-    expect(seen).toBe(IDS.length * GRANTS.length * SLOTS.length * ORIGINS.length * STATES.length * EXTRA.length * 3);
+    // Named conjunctions: two non-base values at once, which a one-at-a-time
+    // sweep cannot reach.
+    for (const origin of SMALL.origin) {
+      cases.push({ ...base, id: '360-crm', refresh_token_key: 'CRM_LEGACY_RT', extra: { token_url: 'https://t.example/token' }, origin, state: 'connected' });
+      cases.push({ ...base, id: 'y'.repeat(51), grant_type: 'authorization_code', extra: { token_url: 'https://t.example/token' }, origin, state: 'no-refresh' });
+      cases.push({ ...base, grant_type: 5, refresh_token_key: 7, origin, state: undefined });
+    }
+
+    let seen = 0;
+    for (const c of cases) {
+      for (const slotState of ['empty', 'engine-written', 'foreign'] as const) {
+        const profile = {
+          id: c['id'], name: 'n', base_url: 'https://api.crm.example/v1', description: 'd',
+          auth: { type: 'oauth2', vault_keys: [], oauth: { grant_type: c['grant_type'], refresh_token_key: c['refresh_token_key'], ...(c['extra'] as object) } },
+          oauth_grant: { origin: c['origin'], state: c['state'] },
+        } as never;
+        expect(
+          declinedFacts(profile, slotState).map((f) => f.kind),
+          'the fact kinds changed — a new clause is a new kind, and it needs a CLAUSE_PATTERNS entry, an INHABITANTS entry and a line in KIND_SEQUENCE',
+        ).toEqual([...KIND_SEQUENCE]);
+        // THE LINE, not only the facts. Restored from the commit before the
+        // closure, which is what caught a rewritten tail and an appended sentence.
+        const line = oauthRenewalDeclinedDiagnosis(profile, slotState);
+        expect(line.endsWith(TAIL_LITERAL), `something was appended after the tail: ${JSON.stringify(line.slice(-100))}`).toBe(true);
+        const head = line.slice(0, line.length - TAIL_LITERAL.length);
+        expect(head.endsWith('. '), `the head does not close before the tail: ${JSON.stringify(head.slice(-20))}`).toBe(true);
+        const parts = head.slice(0, -2).split('; ');
+        expect(parts.length, 'the clause count changed').toBe(KIND_SEQUENCE.length);
+        for (const clause of parts) {
+          const ok = Object.values(CLAUSE_PATTERNS).some((pats) => pats.some((pat) => pat.test(clause)));
+          expect(ok, `an unallowlisted clause in the emitted line: ${JSON.stringify(clause)}`).toBe(true);
+        }
+        seen++;
+      }
+    }
+    // An ABSOLUTE floor beside the derived count. The control this replaced took
+    // its expectation from the arrays under test, so emptying any one axis made
+    // the product zero and `expect(0).toBe(0)` passed with no coverage at all.
+    expect(seen, 'the sweep built almost nothing, so this test proved little').toBeGreaterThan(400);
+    expect(seen).toBe(cases.length * 3);
+    // Every axis reached, so a shrunken sweep cannot silently stop covering one.
+    for (const [axis, values] of Object.entries(BIG)) {
+      expect(values.length, `axis "${axis}" was emptied`).toBeGreaterThan(2);
+    }
   });
 
   /**
