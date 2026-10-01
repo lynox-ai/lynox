@@ -9116,6 +9116,74 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockSpeakStream).not.toHaveBeenCalled();
     });
 
+    // ── `lang` feeds TWO consumers with different vocabularies ────────────────────
+    // The request carries one value; the route derives the pre-processor's `lang`
+    // (binary `'de'|'en'` plus `'auto'`) and the catalogue's `voiceLanguage`
+    // separately. These cases exist because conflating them was the obvious design
+    // and the wrong one: it would have pushed catalogue tags into text preparation
+    // and into `src/core/transcribe/`.
+    const optsOf = (): Record<string, unknown> =>
+      (mockSpeakStream.mock.calls[0]?.[2] ?? {}) as Record<string, unknown>;
+
+    async function speakWithLang(lang: unknown): Promise<void> {
+      mockSpeakStream.mockResolvedValue({ characters: 5, model: 'm', voice: 'v', latencyMs: 1, ttfbMs: 1 });
+      const res = await jsonFetch('/api/speak', {
+        method: 'POST',
+        body: JSON.stringify({ text: 'hello', ...(lang === undefined ? {} : { lang }) }),
+      });
+      expect(res.status).toBe(200);
+      await readSse(res);
+    }
+
+    it("passes `fr` to the VOICE while leaving text-prep's `lang` unset", async () => {
+      // The register row's clause 2, literally: `lang: "fr"` must reach voice selection
+      // instead of falling to `undefined`. `Lang` cannot express `fr`, so text-prep
+      // correctly gets nothing and the catalogue gets the tag.
+      await speakWithLang('fr');
+      expect(optsOf()['voiceLanguage']).toBe('fr');
+      expect(optsOf()['lang']).toBeUndefined();
+    });
+
+    it('passes `de` to BOTH, because the pre-processor and the catalogue both know it', async () => {
+      await speakWithLang('de');
+      expect(optsOf()['lang']).toBe('de');
+      expect(optsOf()['voiceLanguage']).toBe('de');
+    });
+
+    it('does NOT select a voice for `auto`, and still runs text detection', async () => {
+      // `auto` means "detect from the text" for the pre-processor; for a voice there is
+      // nothing to detect against yet, and reaching into the detector from here would
+      // couple the two vocabularies this split keeps apart.
+      await speakWithLang('auto');
+      expect(optsOf()['lang']).toBe('auto');
+      expect(optsOf()['voiceLanguage']).toBeUndefined();
+    });
+
+    it('accepts a region subtag for the voice, which the catalogue carries', async () => {
+      await speakWithLang('en_GB');
+      expect(optsOf()['voiceLanguage']).toBe('en_GB');
+      // Not a `Lang` value, so text-prep is left to detect.
+      expect(optsOf()['lang']).toBeUndefined();
+    });
+
+    it('refuses a value that is not shaped like a language tag', async () => {
+      // A public endpoint whose value reaches a comparison against provider data.
+      // Each of these must reach NEITHER consumer rather than being passed along.
+      for (const bogus of ['../../etc/passwd', 'de; DROP TABLE', 'x'.repeat(50), '', 'deutsch-sehr-lang']) {
+        mockSpeakStream.mockClear();
+        await speakWithLang(bogus);
+        expect(optsOf()['voiceLanguage'], `rejected: ${JSON.stringify(bogus)}`).toBeUndefined();
+        expect(optsOf()['lang'], `rejected: ${JSON.stringify(bogus)}`).toBeUndefined();
+      }
+    });
+
+    it('ignores a non-string `lang` instead of coercing it', async () => {
+      mockSpeakStream.mockClear();
+      await speakWithLang(42);
+      expect(optsOf()['voiceLanguage']).toBeUndefined();
+      expect(optsOf()['lang']).toBeUndefined();
+    });
+
     it('synthesizes and debits the TTS cost via onAfterRun on the happy path', async () => {
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();

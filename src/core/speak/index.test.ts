@@ -299,3 +299,114 @@ describe('VOXTRAL_TTS_MODEL pin', () => {
     expect(facade.VOXTRAL_TTS_MODEL).not.toContain('latest');
   });
 });
+
+describe('the voice is resolved from the requested language, at ONE decision point', () => {
+  beforeEach(() => {
+    stubMistralKey(true);
+    stubConfig('mistral');
+    vi.stubEnv('LYNOX_TTS_PROVIDER', 'mistral');
+  });
+
+  // ⚠ This block needs its OWN restores. The file already has an identical `afterEach`,
+  // but it sits inside another `describe`, so it never applied here — and without it the
+  // spies leak: `vi.spyOn` on an already-spied method hands back the SAME mock with its
+  // call history, so `mock.calls[0]` was the previous test's call and
+  // `not.toHaveBeenCalled()` saw four. Four failures that all looked like the code and
+  // were all the harness.
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  /** Observes what the provider was finally asked to speak with. */
+  function captureVoice(): { spy: ReturnType<typeof vi.spyOn>; voiceOf: () => string | undefined } {
+    const spy = vi.spyOn(facade.mistralVoxtralTtsProvider, 'speak')
+      .mockResolvedValue(fakeResult(5));
+    return {
+      spy,
+      voiceOf: () => (spy.mock.calls[0]?.[1] as { voice?: string } | undefined)?.voice,
+    };
+  }
+
+  it('asks the catalogue and passes the deterministic pick', async () => {
+    const list = vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      // Arrival order reversed against id order on purpose — see the picker's tests.
+      .mockResolvedValue([{ id: 'fr_zz', language: 'fr' }, { id: 'fr_aa', language: 'fr' }]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('bonjour', { voiceLanguage: 'fr' });
+
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(voiceOf()).toBe('fr_aa');
+  });
+
+  it('leaves an EXPLICIT voice alone and does not even ask the catalogue', async () => {
+    // An explicit voice is a decision already made; consulting the catalogue would
+    // spend a request to maybe override the caller.
+    const list = vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices').mockResolvedValue([]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('hi', { voice: 'en_paul_neutral', voiceLanguage: 'fr' });
+
+    expect(voiceOf()).toBe('en_paul_neutral');
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('does not touch the catalogue when no language was asked for', async () => {
+    // The pre-existing path: no selection, no extra network call, provider default.
+    const list = vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices').mockResolvedValue([]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('hi', {});
+
+    expect(list).not.toHaveBeenCalled();
+    expect(voiceOf()).toBeUndefined();
+  });
+
+  it('still synthesises when the catalogue THROWS — selection is best-effort', async () => {
+    // The decisive one: an optional step in front of synthesis must not be able to
+    // take synthesis down. Before the try/catch this rejected the whole call.
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockRejectedValue(new Error('network'));
+    const { spy, voiceOf } = captureVoice();
+
+    const out = await facade.speak('hi', { voiceLanguage: 'fr' });
+
+    expect(out).not.toBeNull();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(voiceOf()).toBeUndefined();
+  });
+
+  it('falls back to the provider default and SAYS SO when no voice speaks the language', async () => {
+    // Today's German case, every time. The behaviour is deliberately today's plus a
+    // diagnostic; what it must not do is claim everything is fine.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'en_paul', language: 'en' }]);
+    const { voiceOf } = captureVoice();
+
+    const out = await facade.speak('Grüezi', { voiceLanguage: 'de' });
+
+    expect(out).not.toBeNull();
+    expect(voiceOf()).toBeUndefined();
+    const said = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(said).toContain("speaks 'de'");
+    expect(said).toContain('1 voices offered');
+    // It names the consequence rather than reassuring: a reader has to learn that the
+    // speaker identity will not match.
+    expect(said).toContain('will not match');
+    warn.mockRestore();
+  });
+
+  it('threads the same decision through speakStream, not only speak', async () => {
+    // Two entry points, one decision point — the half that is easy to forget.
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'fr_aa', language: 'fr' }]);
+    const spy = vi.spyOn(facade.mistralVoxtralTtsProvider, 'speakStream')
+      .mockResolvedValue({ characters: 5, provider: 'mistral-voxtral-tts', ttfbMs: 1, totalMs: 2 } as SpeakStreamMeta);
+
+    await facade.speakStream('bonjour', () => void 0, { voiceLanguage: 'fr' });
+
+    expect((spy.mock.calls[0]?.[2] as { voice?: string } | undefined)?.voice).toBe('fr_aa');
+  });
+});

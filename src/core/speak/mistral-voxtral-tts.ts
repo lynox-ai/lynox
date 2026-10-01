@@ -38,6 +38,7 @@ import type {
   SpeakProvider,
   SpeakResult,
   SpeakStreamMeta,
+  VoiceInfo,
 } from './types.js';
 
 /**
@@ -107,11 +108,9 @@ const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
   { id: 'en_sara_neutral',    language: 'en', description: 'Sara — neutral' },
 ];
 
-export interface VoiceInfo {
-  id: string;
-  language?: string;
-  description?: string;
-}
+// MOVED to `./types.js` so the `SpeakProvider` contract can name it; re-exported
+// here because four call sites import it from this module.
+export type { VoiceInfo } from './types.js';
 
 let _voicesCache: { voices: VoiceInfo[]; expiresAt: number } | null = null;
 const VOICES_TTL_MS = 60 * 60_000; // 1 hour
@@ -622,5 +621,8 @@ export const mistralVoxtralTtsProvider: SpeakProvider = {
   },
   speakStream(text: string, onChunk: AudioChunkCallback, opts: SpeakOpts): Promise<SpeakStreamMeta | null> {
     return speakMistralVoxtralStream(text, onChunk, opts);
+  },
+  listVoices(): Promise<VoiceInfo[]> {
+    return listMistralVoices();
   },
 };
