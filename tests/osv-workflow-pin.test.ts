@@ -548,12 +548,13 @@ function pinnedJobOf(where: string): unknown {
  * pin kills — simply moves one line up and is invisible again. Same class, one
  * level higher, so it is compared the same way: everything except `name`, `on`
  * and `jobs`, which have their own pins.
+ *
+ * `ONNXRUNTIME_NODE_INSTALL: skip` (ci.yml, release.yml): it must reach every
+ * job that runs `pnpm install`, and those include the pinned gate jobs, whose
+ * install step sits before the scan — a job- or step-level key would edit the
+ * job pin instead. It only tells onnxruntime-node's postinstall not to fetch the
+ * CUDA/TensorRT providers; it changes no PATH, tool or scanner input.
  */
-// `ONNXRUNTIME_NODE_INSTALL: skip` (ci.yml, release.yml): it must reach every
-// job that runs `pnpm install`, and those include the pinned gate jobs, whose
-// install step sits before the scan — a job- or step-level key would edit the
-// job pin instead. It only tells onnxruntime-node's postinstall not to fetch the
-// CUDA/TensorRT providers; it changes no PATH, tool or scanner input.
 const PINNED_WORKFLOW: Readonly<Record<string, unknown>> = {
   "ci.yml": {
     "env": {
@@ -590,8 +591,8 @@ function describeDifference(actual: unknown, expected: unknown, path = ''): stri
     const keys = [...new Set([...Object.keys(actual), ...Object.keys(expected)])].sort();
     return keys.flatMap((k) => {
       const p = path ? `${path}.${k}` : k;
-      if (!(k in expected)) return [`+${p}=${JSON.stringify(actual[k])}`];
-      if (!(k in actual)) return [`-${p}=${JSON.stringify(expected[k])}`];
+      if (!Object.hasOwn(expected, k)) return [`+${p}=${JSON.stringify(actual[k])}`];
+      if (!Object.hasOwn(actual, k)) return [`-${p}=${JSON.stringify(expected[k])}`];
       return describeDifference(actual[k], expected[k], p);
     });
   }
