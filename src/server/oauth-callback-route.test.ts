@@ -27,7 +27,7 @@ import { profileOAuthCookieAttributes, authorizationCodeParams } from './http-ap
  * tooling is how it stops being looked at.
  */
 
-const PORT = 39_517;
+// No fixed port: `start(0)` takes a free one from the OS, read back through `boundPort`.
 const SECRET = 'callback-route-test-secret-value';
 const CALLBACK = '/api/oauth/callback';
 const COOKIE = 'lynox_profile_oauth_state';
@@ -69,8 +69,10 @@ beforeAll(async () => {
   // api.start(PORT)` and close `server` in `afterAll` — always `undefined`, so
   // the teardown closed no socket and shut no engine down. `shutdown()` is the
   // handle; corrected 2026-09-25.
-  await api.start(PORT);
-  baseUrl = `http://127.0.0.1:${String(PORT)}`;
+  await api.start(0);
+  const port = api.boundPort;
+  if (port === undefined) throw new Error('server is not bound after start()');
+  baseUrl = `http://127.0.0.1:${String(port)}`;
   for (let i = 0; i < 20; i++) {
     try {
       if ((await fetch(`${baseUrl}/health`)).ok) break;

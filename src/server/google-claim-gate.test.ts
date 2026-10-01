@@ -69,7 +69,7 @@ interface Booted {
   readonly close: () => Promise<void>;
 }
 
-async function boot(port: number, managedInstanceId: string | undefined): Promise<Booted> {
+async function boot(managedInstanceId: string | undefined): Promise<Booted> {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-claimgate-'));
   for (const k of OWNED) vi.stubEnv(k, undefined);
   vi.stubEnv('LYNOX_DATA_DIR', dir);
@@ -85,7 +85,10 @@ async function boot(port: number, managedInstanceId: string | undefined): Promis
   // always `undefined`: that file's teardown has never closed a socket or shut
   // an engine down. Fixed there in this same change; named here because copying
   // the neighbouring pattern is how it would have spread.
-  await api.start(port);
+  // Port 0: the OS picks a free one. A fixed port let two concurrent runs answer each other.
+  await api.start(0);
+  const port = api.boundPort;
+  if (port === undefined) throw new Error('server is not bound after start()');
   const base = `http://127.0.0.1:${String(port)}`;
   for (let i = 0; i < 40; i++) {
     try { if ((await fetch(`${base}/health`)).ok) break; } catch { /* not up yet */ }
@@ -111,7 +114,7 @@ async function claim(base: string, body: unknown = { claim_nonce: 'n' }): Promis
 
 describe('a self-host instance with no client pair', () => {
   let b: Booted;
-  beforeAll(async () => { b = await boot(39_611, undefined); }, 60_000);
+  beforeAll(async () => { b = await boot(undefined); }, 60_000);
   afterAll(async () => { await b.close(); });
 
   it('refuses the claim with 503, not with the control-plane 400', async () => {
@@ -162,7 +165,7 @@ describe('a self-host instance with no client pair', () => {
 
 describe('a managed tenant with no client pair — the flow the gate must not refuse', () => {
   let b: Booted;
-  beforeAll(async () => { b = await boot(39_612, 'inst-claim-gate'); }, 60_000);
+  beforeAll(async () => { b = await boot('inst-claim-gate'); }, 60_000);
   afterAll(async () => { await b.close(); });
 
   it('gets past the credential gate and fails on the control-plane config instead', async () => {

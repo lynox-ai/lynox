@@ -385,7 +385,14 @@ const { LynoxHTTPApi } = await import('./http-api.js');
 // === Helpers ===
 
 const TEST_SECRET = 'test-bearer-token-12345';
-const TEST_PORT = 13100; // high port to avoid conflicts
+/** The port `start(0)` was given by the OS. Never a fixed number: two concurrent runs of this file
+ *  on one fixed port answered each other's requests — one saw ECONNREFUSED, the other 429s from
+ *  the first run's traffic — and both read as real failures. */
+function portOf(instance: { boundPort: number | undefined }): number {
+  const p = instance.boundPort;
+  if (p === undefined) throw new Error('server is not bound — start() resolved without a listening socket');
+  return p;
+}
 
 let api: InstanceType<typeof LynoxHTTPApi>;
 let baseUrl: string;
@@ -436,8 +443,8 @@ beforeAll(async () => {
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
   api = new LynoxHTTPApi();
   await api.init();
-  await api.start(TEST_PORT);
-  baseUrl = `http://127.0.0.1:${TEST_PORT}`;
+  await api.start(0);
+  baseUrl = `http://127.0.0.1:${portOf(api)}`;
   // Wait for server to be ready
   for (let i = 0; i < 20; i++) {
     try {
@@ -880,10 +887,9 @@ describe('LynoxHTTPApi', () => {
         // we don't disturb the suite-shared `api`/`baseUrl`.
         const altApi = new LynoxHTTPApi();
         await altApi.init();
-        const altPort = TEST_PORT + 1;
-        await altApi.start(altPort);
+        await altApi.start(0);
         try {
-          const altBase = `http://127.0.0.1:${altPort}`;
+          const altBase = `http://127.0.0.1:${portOf(altApi)}`;
           // Wait for the alt server to be ready.
           for (let i = 0; i < 20; i++) {
             try { const r = await fetch(`${altBase}/health`); if (r.ok) break; } catch { /* not ready */ }
