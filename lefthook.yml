@@ -12,12 +12,13 @@ commit-msg:
       run: bash scripts/no-ai-attribution.sh strip {1}
 
 pre-push:
-  # SCRIPTS, not commands, for every check whose subject is NOT the tree. lefthook (2.1.5 and 2.1.8,
-  # measured in clones with origin/HEAD) skips pre-push COMMANDS with "(skip) no matching push
-  # files" and exit 0 when the pushed tree equals the tree of origin/HEAD — a fresh branch carrying
-  # only an empty commit, or a range that adds a file and deletes it again. A check of the tree has
-  # nothing to see then. A check of commit MESSAGES, of every blob in the range, or of the pull
-  # request a branch belongs to does, and a script runs regardless.
+  # SCRIPTS, not commands, for every check that has no CI twin. lefthook (2.1.5 and 2.1.8, measured
+  # in real clones) computes its push files from the CHECKED-OUT HEAD against that branch's upstream
+  # (no upstream: origin/HEAD). With zero files it skips EVERY pre-push command — "(skip) no
+  # matching push files", exit 0 — whatever refs are being pushed: an empty commit on an
+  # already-pushed branch, a fresh branch carrying only an empty commit, a push of a branch you are
+  # not standing on. The commands below have CI twins, so for them that is latency. The scripts
+  # here do not, and a script ran in every measured case.
   scripts:
     "push-lands-guard.sh":
       # A push to a branch whose pull request is already merged or closed lands nowhere, and git

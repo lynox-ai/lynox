@@ -42,6 +42,7 @@
  * each says why: they are not in the class rather than untested.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync, rmSync, mkdirSync, readFileSync, readdirSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -326,6 +327,8 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     reason:
       'reads the remote from its arguments and the refs from stdin, not a tree; without a remote URL it refuses (exit 2) instead of guessing, and its fail-closed paths are covered in tests/push-lands-guard.test.ts',
     expectStrippedExit: 2,
+    // Pinned to the refusal THIS reason names; exit 2 alone would also be "could not check".
+    expectStrippedStderr: /no remote URL/,
   },
   'hex-guard': {
     kind: 'exempt',
@@ -436,12 +439,18 @@ describe('gate coverage', () => {
     // guards themselves made, one extension further out: it could not see the two
     // `.mjs` gates, the third-party binary, or the inline blocks, and they were
     // silently unaccounted for while the test reported full coverage.
-    const lefthook = readFileSync(join(repoRoot, 'lefthook.yml'), 'utf8');
-    // Commands are bare keys; SCRIPTS are quoted file names (`"public-repo-guard-meta.sh":`),
-    // keyed here by the name without the extension. Reading only the first shape made every check
-    // that moved to `scripts:` silently leave this inventory, and a stale entry then read as dead.
-    const steps = [...lefthook.matchAll(/^ {4}(?:([a-z0-9][a-z0-9-]*)|"([a-z0-9][a-z0-9-]*)\.(?:sh|mjs)"):$/gm)]
-      .map((m) => (m[1] ?? m[2]) as string);
+    // PARSED, not matched: every `commands:` key and every `scripts:` key (file name without its
+    // extension) of every hook. A regex over the text saw only one key shape at a time — the first
+    // version read commands only, so every check that moved to `scripts:` silently left this
+    // inventory; the second read quoted script keys only, and an unquoted one is just as valid YAML.
+    const doc = parseYaml(readFileSync(join(repoRoot, 'lefthook.yml'), 'utf8')) as Record<string, unknown>;
+    const steps: string[] = [];
+    for (const hook of Object.values(doc)) {
+      if (hook === null || typeof hook !== 'object') continue;
+      const h = hook as { commands?: Record<string, unknown>; scripts?: Record<string, unknown> };
+      steps.push(...Object.keys(h.commands ?? {}));
+      steps.push(...Object.keys(h.scripts ?? {}).map((k) => k.replace(/\.(?:sh|mjs|js)$/, '')));
+    }
     const unique = [...new Set(steps)].sort();
 
     expect(unique.length, 'no gate steps parsed out of lefthook.yml — the file shape changed').toBeGreaterThan(5);

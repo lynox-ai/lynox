@@ -17,8 +17,8 @@
  * `delete_branch_on_merge` is on, so the late push does not even hit an existing branch — it
  * RE-CREATES one (remote sha `000…0` on stdin). A check that reads "new branch → no PR yet" lets
  * exactly that case through, which is why the PR lookup is by branch NAME, never by remote state.
- * The second session had read the rule describing this and walked into it anyway: a rule without a
- * mechanism loses to the normal case.
+ * In the second case the rule describing this had been read beforehand, and did not prevent it: a
+ * rule without a mechanism loses to the normal case.
  *
  * ⛔ FAIL DIRECTION — closed, on purpose. `gh` missing, not logged in, the network gone, a timeout,
  * an answer that is not the expected JSON, a PR state this file does not know: every one of them
@@ -26,14 +26,16 @@
  * worked" a minute ago), so letting it through would be the guard failing precisely when needed.
  * There is no environment switch to turn it off; a switch would be the bypass.
  *
- * ⛔ WHY lefthook `scripts:` AND NOT `commands:` — measured with lefthook 2.1.5 and 2.1.8 in clones
- * with `origin/HEAD → origin/main`, as pro and core have it. A pre-push `command` is skipped with
- * "(skip) no matching push files", and the push exits 0, when the PUSHED TREE EQUALS THE TREE OF
- * `origin/HEAD` — e.g. a branch re-created from commits whose content is already on main.
- * `skip_empty: false` does not change it. A `script` runs regardless and receives the remote
- * name/URL as `$1 $2` and the ref lines on stdin. (A first version of this paragraph said "whenever
- * the push changes no file"; that came from fixtures WITHOUT `origin/HEAD`, where lefthook skips
- * even pushes that change files.)
+ * ⛔ WHY lefthook `scripts:` AND NOT `commands:` — measured with lefthook 2.1.5 and 2.1.8 in real
+ * clones, with a probe that LETS THE PUSH THROUGH. lefthook computes its "push files" from the
+ * CHECKED-OUT HEAD against that branch's upstream (no upstream: against `origin/HEAD`); with zero
+ * files every pre-push `command` is skipped with "(skip) no matching push files" and the push exits
+ * 0 — whatever refs are actually being pushed. So an empty commit on an already-pushed branch, and
+ * a push of a branch you are not standing on, skip every command. `skip_empty: false` does not
+ * change it. A `script` ran in every measured case, and receives the remote name/URL as `$1 $2`
+ * and the ref lines on stdin. (Two earlier statements of this condition were wrong — one from a
+ * fixture without `origin/HEAD`, one from probes that always blocked and so never advanced the
+ * upstream.)
  *
  * What the hook cannot see, and why `sweep` exists: a clone where lefthook is not installed, a
  * `--no-verify` push, and the second between this check and the transport (a merge landing in
@@ -161,6 +163,20 @@ export function orphanHeads(heads, prs) {
   return out.sort((a, b) => (a.branch < b.branch ? -1 : a.branch > b.branch ? 1 : 0));
 }
 
+/**
+ * Only pull requests whose head lives in THIS repository. `gh pr list --head <name>` matches the
+ * branch NAME across forks, and in a public repository a fork PR can carry any name: a closed fork
+ * PR would falsely block a push, an open one would mask a real late push. A missing field (an older
+ * `gh`) counts as same-repository, which keeps the check strict rather than blind.
+ *
+ * @template {{ isCrossRepository?: boolean }} T
+ * @param {T[]} prs
+ * @returns {T[]}
+ */
+export function ownRepoOnly(prs) {
+  return prs.filter((p) => p.isCrossRepository !== true);
+}
+
 /** Run `gh` with a hard timeout; any failure is a thrown Error carrying gh's own first line. */
 function gh(args) {
   const r = spawnSync('gh', args, { encoding: 'utf8', timeout: GH_TIMEOUT_MS, killSignal: 'SIGKILL' });
@@ -201,8 +217,8 @@ function hook(remoteName, remoteUrl, stdin) {
   let fail = 0;
   for (const { branch } of updates) {
     if (branch === 'main') continue;
-    const prs = jsonArray(gh(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all',
-      '--json', 'number,state,mergedAt,closedAt', '--limit', '100']), `pull requests for ${branch}`);
+    const prs = ownRepoOnly(jsonArray(gh(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all',
+      '--json', 'number,state,mergedAt,closedAt,isCrossRepository', '--limit', '100']), `pull requests for ${branch}`));
     const v = verdict(prs);
     if (v.kind === 'land') continue;
     fail = 1;
@@ -231,10 +247,11 @@ function sweep(repo) {
     console.error(`push-lands-guard sweep: expected <owner/repo>, got ${JSON.stringify(repo)}`);
     return 2;
   }
-  const prs = jsonArray(gh(['pr', 'list', '--repo', repo, '--state', 'all', '--json',
-    'number,state,headRefName,headRefOid', '--limit', String(PR_LIMIT)]), 'pull requests');
-  if (prs.length >= PR_LIMIT) {
-    console.error(`push-lands-guard sweep: ${prs.length} pull requests reached the limit of ${PR_LIMIT} — the list may be cut short, refusing to report.`);
+  const all = jsonArray(gh(['pr', 'list', '--repo', repo, '--state', 'all', '--json',
+    'number,state,headRefName,headRefOid,isCrossRepository', '--limit', String(PR_LIMIT)]), 'pull requests');
+  const prs = ownRepoOnly(all);
+  if (all.length >= PR_LIMIT) {
+    console.error(`push-lands-guard sweep: ${all.length} pull requests reached the limit of ${PR_LIMIT} — the list may be cut short, refusing to report.`);
     return 2;
   }
   // One JSON object per line via --jq: `--paginate` concatenates pages, and a page boundary inside

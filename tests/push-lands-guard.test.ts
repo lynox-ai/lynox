@@ -6,13 +6,13 @@
  *   1. the predicates (which PR states block, what an orphaned head is);
  *   2. the CLI against a stub `gh` on PATH — above all the FAIL DIRECTION: no `gh`, a failing
  *      `gh`, garbage from `gh` must each block the push (exit 2), never let it through;
- *   3. a real `git push` through lefthook in a throwaway CLONE (with `origin/HEAD`, like the real
- *      repos), for the case that decided the wiring: lefthook skips pre-push COMMANDS when the
- *      pushed tree equals the tree of `origin/HEAD`, and exits 0. The guard is a lefthook SCRIPT
- *      for that reason, and only an actual push can show that it runs and gets its stdin.
- *      (A first version of this suite built its fixture WITHOUT `origin/HEAD` — under that
- *      condition lefthook skips even pushes that change files, which made the finding look far
- *      broader than it is. The fixture below is a real `git clone`.)
+ *   3. a real `git push` through lefthook in a throwaway CLONE, for the case that decided the
+ *      wiring: lefthook skips every pre-push COMMAND, exit 0, when the checked-out HEAD has no file
+ *      diff against its upstream (no upstream: against `origin/HEAD`) — the fresh branch with only
+ *      an empty commit below is one such case. The guard is a lefthook SCRIPT for that reason, and
+ *      only an actual push can show that it runs and gets its stdin. If a lefthook upgrade stopped
+ *      forwarding stdin, the stdin assertion here fails before the guard silently reads "nothing
+ *      to check".
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, copyFileSync, chmodSync, existsSync } from 'node:fs';
@@ -24,7 +24,7 @@ import { parse } from 'yaml';
 /** These tests start processes (node, git, lefthook); the default 5 s is too tight under load. */
 const PROCESS_TEST_TIMEOUT_MS = 30_000;
 // @ts-expect-error — plain .mjs script, no type declarations
-import { classifyRemote, branchUpdates, verdict, orphanHeads } from '../scripts/push-lands-guard.mjs';
+import { classifyRemote, branchUpdates, verdict, orphanHeads, ownRepoOnly } from '../scripts/push-lands-guard.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(REPO, 'scripts/push-lands-guard.mjs');
@@ -107,6 +107,13 @@ describe('verdict — can a push to this branch still land?', () => {
   });
 });
 
+describe('ownRepoOnly', () => {
+  it('drops fork PRs and keeps own ones, including those without the field (older gh)', () => {
+    expect(ownRepoOnly([{ n: 1, isCrossRepository: true }, { n: 2, isCrossRepository: false }, { n: 3 }]))
+      .toEqual([{ n: 2, isCrossRepository: false }, { n: 3 }]);
+  });
+});
+
 describe('orphanHeads — the sweep predicate', () => {
   const prs = [
     { number: 10, state: 'MERGED', headRefName: 'kept', headRefOid: A },      // merged, branch not deleted
@@ -167,6 +174,18 @@ describe('hook mode — the push is blocked unless the PR state is READ and allo
     const { code, out } = hookRun(p, PUSH);
     expect(out).toContain('#77 was CLOSED');
     expect(out).toContain('gh pr reopen 77');
+    expect(code).toBe(1);
+  }, PROCESS_TEST_TIMEOUT_MS);
+
+  it('a CLOSED pull request from a FORK with the same branch name does not block (public repo)', () => {
+    const p = stubPath('fork-closed', `echo '[{"number":9,"state":"CLOSED","mergedAt":null,"closedAt":"x","isCrossRepository":true}]'`);
+    expect(hookRun(p, PUSH).code).toBe(0);
+  }, PROCESS_TEST_TIMEOUT_MS);
+
+  it('an OPEN fork PR with the same name does not mask our own merged one', () => {
+    const p = stubPath('fork-open', `echo '[{"number":9,"state":"OPEN","isCrossRepository":true},{"number":5,"state":"MERGED","mergedAt":"x","closedAt":"x","isCrossRepository":false}]'`);
+    const { code, out } = hookRun(p, PUSH);
+    expect(out).toContain('#5 was MERGED');
     expect(code).toBe(1);
   }, PROCESS_TEST_TIMEOUT_MS);
 
@@ -273,10 +292,9 @@ describe('wiring — a real push through lefthook, in a clone shaped like the re
 
   /**
    * A seed repo carrying the REAL hook script and the REAL registration, with the node script
-   * replaced by a recorder whose behaviour a `mode` file picks. Then a real `git clone` — which
-   * sets `origin/HEAD`, the property the first fixture lacked — a fresh branch carrying ONLY an
-   * empty commit (pushed tree == tree of origin/HEAD: the case where lefthook skips commands),
-   * and a real push.
+   * replaced by a recorder whose behaviour a `mode` file picks. Then a real `git clone` (which
+   * sets `origin/HEAD`, as in the real repos), a fresh branch carrying ONLY an empty commit (no
+   * file diff against origin/HEAD: a case where lefthook skips commands), and a real push.
    */
   function pushThroughLefthook(mode: 'block' | 'silent0' | 'pass') {
     expect(existsSync(LEFTHOOK)).toBe(true);
@@ -317,7 +335,7 @@ describe('wiring — a real push through lefthook, in a clone shaped like the re
     expect(git(work, 'symbolic-ref', 'refs/remotes/origin/HEAD').stdout.trim()).toBe('refs/remotes/origin/main');
     expect(spawnSync(LEFTHOOK, ['install'], { cwd: work, encoding: 'utf8', env }).status).toBe(0);
     git(work, 'switch', '-q', '-c', 'feat/claim');
-    git(work, 'commit', '-q', '--allow-empty', '-m', 'Claim track: x');
+    git(work, 'commit', '-q', '--allow-empty', '-m', 'empty commit');
     const push = spawnSync('git', ['push', 'origin', 'feat/claim'], { cwd: work, encoding: 'utf8', env });
     const landed = spawnSync('git', ['ls-remote', join(dir, 'remote.git'), 'refs/heads/feat/claim'], { encoding: 'utf8', env }).stdout.trim() !== '';
     return { push, landed, args: readFileSync(out.args, 'utf8'), stdin: readFileSync(out.stdin, 'utf8'), remote: join(dir, 'remote.git') };

@@ -1,6 +1,7 @@
 #!/bin/sh
-# A lefthook SCRIPT, not a command: lefthook skips pre-push commands when the pushed tree equals the
-# tree of origin/HEAD (measured, 2.1.5 + 2.1.8) and exits 0. See push-lands-guard.mjs.
+# A lefthook SCRIPT, not a command: lefthook skips every pre-push command, exit 0, when the
+# checked-out HEAD has no file diff against its upstream — whatever is being pushed (measured,
+# 2.1.5 + 2.1.8). See push-lands-guard.mjs and the comment above `scripts:` in lefthook.yml.
 # $1 = remote name, $2 = remote URL; the ref lines arrive on stdin (`use_stdin: true`) and pass
 # through to node.
 #
