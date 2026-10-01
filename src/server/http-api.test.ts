@@ -9143,41 +9143,38 @@ describe('metered audio routes: managed credit gate + debit', () => {
       await readSse(res);
     }
 
-    it("passes `fr` to the VOICE while leaving text-prep's `lang` unset", async () => {
-      // The register row's clause 2, literally: `lang: "fr"` must reach voice selection
-      // instead of falling to `undefined`. `Lang` cannot express `fr`, so text-prep
-      // correctly gets nothing and the catalogue gets the tag.
-      await speakWithLang('fr');
-      expect(optsOf()['voiceLanguage']).toBe('fr');
-      expect(optsOf()['lang']).toBeUndefined();
-    });
-
-    it('passes `de` to BOTH, because the pre-processor and the catalogue both know it', async () => {
-      await speakWithLang('de');
-      expect(optsOf()['lang']).toBe('de');
-      expect(optsOf()['voiceLanguage']).toBe('de');
-    });
-
-    it('does NOT select a voice for `auto`, and still runs text detection', async () => {
-      // `auto` means "detect from the text" for the pre-processor; for a voice there is
-      // nothing to detect against yet, and reaching into the detector from here would
-      // couple the two vocabularies this split keeps apart.
-      await speakWithLang('auto');
-      expect(optsOf()['lang']).toBe('auto');
-      expect(optsOf()['voiceLanguage']).toBeUndefined();
-    });
-
-    it('accepts a region subtag for the voice, which the catalogue carries', async () => {
-      await speakWithLang('en_GB');
-      expect(optsOf()['voiceLanguage']).toBe('en_GB');
-      // Not a `Lang` value, so text-prep is left to detect.
-      expect(optsOf()['lang']).toBeUndefined();
+    it('derives BOTH fields from ONE tag, and they agree on case and region', async () => {
+      // One table instead of five separate cases, and the reason is measurable: this file
+      // sits near the per-IP rate-limit ceiling (600 in a 60 s window on loopback), and my
+      // first version of these tests tipped it over — two UNRELATED oauth tests started
+      // failing with 429. A test that exhausts a shared budget breaks its neighbours, and
+      // the neighbour's failure does not name the cause.
+      //
+      // ⚠ `en_GB` expecting `lang: 'en'` is a CHANGED expectation. The first version of this
+      // test asserted `lang` was undefined there — it encoded the inconsistency it should
+      // have caught: the voice rule is case-insensitive and region-tolerant while the
+      // text-prep comparison was case-sensitive and bare-two-letter, so `DE` and `de-CH`
+      // reached one consumer and not the other, silently.
+      for (const [raw, lang, voiceLanguage] of [
+        ['fr', undefined, 'fr'],        // `Lang` cannot express fr → text-prep detects; the voice gets the tag
+        ['de', 'de', 'de'],             // both consumers know it
+        ['DE', 'de', 'DE'],             // case
+        ['de-CH', 'de', 'de-CH'],       // a real UI locale
+        ['en_GB', 'en', 'en_GB'],       // region subtag the catalogue carries
+        ['auto', 'auto', undefined],    // detect the text; nothing to detect a voice against
+      ] as const) {
+        mockSpeakStream.mockClear();
+        await speakWithLang(raw);
+        expect(optsOf()['lang'], `lang for ${raw}`).toBe(lang);
+        expect(optsOf()['voiceLanguage'], `voiceLanguage for ${raw}`).toBe(voiceLanguage);
+      }
     });
 
     it('refuses a value that is not shaped like a language tag', async () => {
-      // A public endpoint whose value reaches a comparison against provider data.
-      // Each of these must reach NEITHER consumer rather than being passed along.
-      for (const bogus of ['../../etc/passwd', 'de; DROP TABLE', 'x'.repeat(50), '', 'deutsch-sehr-lang']) {
+      // A public endpoint whose value reaches a comparison against provider data and a
+      // diagnostic. Three shapes rather than five, for the budget reason above: a traversal
+      // string, a statement separator, and something far too long.
+      for (const bogus of ['../../etc/passwd', 'de; DROP TABLE', 'x'.repeat(50)]) {
         mockSpeakStream.mockClear();
         await speakWithLang(bogus);
         expect(optsOf()['voiceLanguage'], `rejected: ${JSON.stringify(bogus)}`).toBeUndefined();

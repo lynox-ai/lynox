@@ -65,6 +65,7 @@ export function isVoiceLanguageTag(value: unknown): value is string {
 export function pickVoiceForLanguage(
   voices: readonly VoiceInfo[],
   language: string,
+  preferred?: string | undefined,
 ): VoiceChoice {
   const wanted = language.trim().toLowerCase();
   if (!wanted) return { voice: undefined, matched: false, candidates: 0 };
@@ -78,5 +79,14 @@ export function pickVoiceForLanguage(
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const first = matches[0];
   if (first === undefined) return { voice: undefined, matched: false, candidates: 0 };
+  // ⚠ The caller's PREFERRED voice wins when it speaks this language, and "first by
+  // id" is only the tie-break. Sorting alone was deterministic and wrong: with the
+  // live catalogue (8 `en_us_*`, 16 `en_gb_*`) the first id is a British voice, so
+  // selecting by language silently changed which voice every English user hears.
+  // Determinism was the property this function needed; changing nobody's voice
+  // unless their language demands it is the property the FEATURE needed.
+  if (preferred !== undefined && matches.includes(preferred)) {
+    return { voice: preferred, matched: true, candidates: matches.length };
+  }
   return { voice: first, matched: true, candidates: matches.length };
 }

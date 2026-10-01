@@ -303,6 +303,25 @@ describe('a payload problem is not reported as a pagination problem', () => {
   });
 });
 
+describe('the provider object really is wired to the catalogue', () => {
+  it('reaches the real fetch through `mistralVoxtralTtsProvider.listVoices`', async () => {
+    // ⚠ Every other test spies `listVoices` away, so the one line that connects the
+    // provider contract to the catalogue — `listVoices() { return listMistralVoices(); }` —
+    // had NO witness: a reviewer replaced its body with `Promise.resolve([])` and all 123
+    // tests stayed green. Production voice selection was therefore untested at the seam
+    // that matters. This calls the real object method.
+    vi.stubGlobal('fetch', stubMistral());
+    vi.resetModules();
+    const mod = await import('./mistral-voxtral-tts.js');
+
+    const voices = await mod.mistralVoxtralTtsProvider.listVoices?.();
+
+    expect(voices).toHaveLength(TOTAL);
+    expect(voices?.map((v) => v.id)).toContain('fr_marie_neutral');
+    expect(requested.length).toBeGreaterThan(0);
+  });
+});
+
 describe('concurrent callers share one walk, instead of each starting their own', () => {
   it('makes ONE set of provider requests for two simultaneous cold-cache calls', async () => {
     // ⚠ Measured by a security pass rather than reasoned: the cache is only written when
@@ -311,10 +330,14 @@ describe('concurrent callers share one walk, instead of each starting their own'
     // routing voice selection through it made it hot — once per `POST /api/speak` instead
     // of once per page load — so the change widened a pre-existing amplifier.
     //
-    // The fixture holds the first response open until both callers are inside, which is
-    // the only shape that can tell "one shared walk" from "two walks that happened to
-    // look alike". A stub that answers immediately would let the first walk finish and
-    // warm the cache before the second call starts, and would pass either way.
+    // The fixture holds the first response open until both callers are inside.
+    //
+    // ⚠ And the claim that used to stand here — "a stub that answers immediately … would
+    // pass either way" — is FALSE, measured by a reviewer: with an immediate stub and the
+    // single-flight REMOVED the test still fails, because the awaits inside the walk keep
+    // the cache cold until both calls have started. The gate makes the concurrency
+    // deliberate rather than incidental, which is worth having; it is not what makes the
+    // assertion able to fail. A sequential pair is the only shape that passes either way.
     let release: () => void = () => undefined;
     const gate = new Promise<void>((r) => { release = r; });
     let released = false;
@@ -343,9 +366,14 @@ describe('concurrent callers share one walk, instead of each starting their own'
     expect(offsets()).toEqual(['0', '7', '14', '21', '28', '30']);
   });
 
-  it('starts a NEW walk after the shared one settles, so a failure is not remembered', async () => {
-    // The `finally` that clears the in-flight promise. Without it a rejected or stale
-    // promise would be handed to every later caller for the rest of the process.
+  it('starts a NEW walk once the shared one has settled and the cache expired', async () => {
+    // The `finally` that clears the in-flight promise: without it a settled promise would
+    // be handed to every later caller for the rest of the process.
+    //
+    // ⚠ Renamed. It used to say "so a failure is not remembered", and it never exercised a
+    // failure — `walkMistralVoices` catches its own errors and does not reject, so no
+    // rejection path exists to remember. What this actually covers is TTL expiry, and the
+    // name now says that. A test name is a claim like any other.
     vi.stubGlobal('fetch', stubMistral());
     const listVoices = await freshListVoices();
     await listVoices();

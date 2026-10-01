@@ -108,8 +108,10 @@ const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
   { id: 'en_sara_neutral',    language: 'en', description: 'Sara — neutral' },
 ];
 
-// MOVED to `./types.js` so the `SpeakProvider` contract can name it; re-exported
-// here because four call sites import it from this module.
+// MOVED to `./types.js` so the `SpeakProvider` contract can name it; re-exported here
+// because ONE call site still imports it from this module (`./index.ts`). The first
+// version of this line said "four call sites" — a number that justified keeping the
+// re-export alive, and it was wrong; counted, it is one.
 export type { VoiceInfo } from './types.js';
 
 let _voicesCache: { voices: VoiceInfo[]; expiresAt: number } | null = null;
@@ -657,4 +659,5 @@ export const mistralVoxtralTtsProvider: SpeakProvider = {
   listVoices(): Promise<VoiceInfo[]> {
     return listMistralVoices();
   },
+  defaultVoice: DEFAULT_VOICE,
 };

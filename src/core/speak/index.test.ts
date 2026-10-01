@@ -324,7 +324,15 @@ describe('the voice is resolved from the requested language, at ONE decision poi
       .mockResolvedValue(fakeResult(5));
     return {
       spy,
-      voiceOf: () => (spy.mock.calls[0]?.[1] as { voice?: string } | undefined)?.voice,
+      // ⚠ Asserts the provider was REACHED before reading what it was called with.
+      // Without it every assertion in this block that checks for ABSENCE passes whenever
+      // `speak` returns early — measured: a mutant making `speak` return null left two of
+      // these tests green while seven others fell. The route's `optsOf()` got this guard
+      // and this block did not, which is how the same hole survives a fix.
+      voiceOf: () => {
+        expect(spy, 'the provider was never called — an absence assertion would be vacuous').toHaveBeenCalled();
+        return (spy.mock.calls[0]?.[1] as { voice?: string } | undefined)?.voice;
+      },
     };
   }
 
@@ -350,6 +358,34 @@ describe('the voice is resolved from the requested language, at ONE decision poi
 
     expect(voiceOf()).toBe('en_paul_neutral');
     expect(list).not.toHaveBeenCalled();
+  });
+
+  it('an EMPTY voice is not a decision — it must not suppress selection', async () => {
+    // `voice: ''` used to pass `opts.voice !== undefined` and both skip the catalogue and
+    // reach the provider, because `?? DEFAULT_VOICE` keeps an empty string. Unreachable
+    // from the route, which is precisely the direct-caller class the sink defends.
+    const list = vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'fr_aa', language: 'fr' }]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('bonjour', { voice: '  ', voiceLanguage: 'fr' });
+
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(voiceOf()).toBe('fr_aa');
+  });
+
+  it("uses the provider's own default for English rather than the first id", async () => {
+    // The end-to-end half of the regression: through the real dispatch, with the provider's
+    // `defaultVoice` in play, an English request keeps the voice it had before this feature.
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices').mockResolvedValue([
+      { id: 'en_gb_voice0', language: 'en' },
+      { id: 'en_paul_neutral', language: 'en' },
+    ]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('hello', { voiceLanguage: 'en' });
+
+    expect(voiceOf()).toBe('en_paul_neutral');
   });
 
   it('does not touch the catalogue when no language was asked for', async () => {
@@ -417,6 +453,34 @@ describe('the voice is resolved from the requested language, at ONE decision poi
     expect(warn).not.toHaveBeenCalled();
     expect(voiceOf()).toBeUndefined();
     warn.mockRestore();
+  });
+
+  it('trims the language before using it, so a padded value still works', async () => {
+    // The `.trim()` had no witness: a padded value is rejected by the shape rule if it is
+    // NOT trimmed, so dropping the trim silently turns a working request into no selection.
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'fr_aa', language: 'fr' }]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('bonjour', { voiceLanguage: '  fr  ' });
+
+    expect(voiceOf()).toBe('fr_aa');
+  });
+
+  it('survives a catalogue entry that makes the PICK throw, not only a failing fetch', async () => {
+    // ⚠ The pick sits inside the try/catch, and the comment there says that is the reason
+    // for the placement — but nothing exercised it: every test's catalogue was well-formed.
+    // This supplies an entry whose `language` is not a string, which is what a second
+    // provider's catalogue could contain, and asserts synthesis still happens.
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'x', language: 42 as unknown as string }]);
+    const { spy, voiceOf } = captureVoice();
+
+    const out = await facade.speak('hi', { voiceLanguage: 'fr' });
+
+    expect(out).not.toBeNull();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(voiceOf()).toBeUndefined();
   });
 
   it('threads the same decision through speakStream, not only speak', async () => {

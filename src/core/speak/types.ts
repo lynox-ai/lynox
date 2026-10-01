@@ -102,4 +102,17 @@ export interface SpeakProvider {
    * must therefore treat its absence as "no selection", never as an error.
    */
   listVoices?(): Promise<VoiceInfo[]>;
+  /**
+   * The voice this provider uses when nobody chose one — its curated default.
+   *
+   * ⚠ Language selection PREFERS this voice whenever it speaks the requested
+   * language, and that is a correctness requirement rather than a nicety. Without it,
+   * selecting by language changed the voice for every existing English user: the
+   * catalogue holds 8 `en_us_*` and 16 `en_gb_*` entries, and "first by id" among
+   * those is a BRITISH voice, so an English request that previously got the curated
+   * default silently started getting `en_gb_…` instead. Measured on the live
+   * catalogue shape. "Deterministic" and "unchanged" are different properties, and
+   * the feature only needed the first.
+   */
+  readonly defaultVoice?: string | undefined;
 }

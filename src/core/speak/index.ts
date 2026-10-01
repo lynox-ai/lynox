@@ -147,7 +147,13 @@ async function resolveVoice(
   provider: SpeakProvider,
   opts: RichSpeakOpts,
 ): Promise<string | undefined> {
-  if (opts.voice !== undefined) return opts.voice;
+  // ⚠ An EMPTY voice is not a decision. `opts.voice !== undefined` alone let `voice: ''`
+  // both suppress language selection and reach the provider (`opts.voice ?? DEFAULT_VOICE`
+  // keeps `''`, since it is nullish-coalescing and `''` is not nullish). The HTTP route
+  // cannot produce it, which is exactly why the sink has to: this is the direct-caller
+  // class the whole "the sink validates, not only the route" reasoning exists for.
+  const chosen = opts.voice?.trim();
+  if (chosen !== undefined && chosen !== '') return chosen;
   const wanted = opts.voiceLanguage?.trim();
   if (!wanted) return undefined;
   // ⚠ The SINK validates, not only the route. Everything that keeps this value harmless
@@ -167,7 +173,7 @@ async function resolveVoice(
   try {
     const catalogue = await provider.listVoices();
     offered = catalogue.length;
-    choice = pickVoiceForLanguage(catalogue, wanted);
+    choice = pickVoiceForLanguage(catalogue, wanted, provider.defaultVoice);
   } catch {
     // The catalogue reports its own failures; selection must not take synthesis with it.
     return undefined;

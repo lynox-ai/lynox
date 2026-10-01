@@ -6934,8 +6934,15 @@ export class LynoxHTTPApi {
       // the same literals. The gap is at voice selection, so that is where the new value
       // goes.
       const langRaw = b && typeof b['lang'] === 'string' ? b['lang'] : undefined;
+      // ⚠ Derived from the tag's HEAD, lowercased — because the two consumers disagreed
+      // otherwise, and the disagreement was silent. The voice rule is case-insensitive and
+      // accepts a region subtag; this comparison was case-SENSITIVE and bare-two-letter, so
+      // `DE` set the voice language and left text-prep to guess, and `de-CH` did the same.
+      // Measured. Latent today because the Web UI's locale type is `'de' | 'en'`, but
+      // `RichSpeakOpts.lang` invites a UI locale and a UI locale is commonly `de-CH`.
+      const langHead = langRaw?.toLowerCase().split(/[-_]/)[0];
       const lang: Lang | 'auto' | undefined =
-        langRaw === 'de' || langRaw === 'en' || langRaw === 'auto' ? langRaw : undefined;
+        langHead === 'de' || langHead === 'en' ? langHead : langRaw?.toLowerCase() === 'auto' ? 'auto' : undefined;
       // The shape rule lives in `src/core/speak/voice-for-language.ts` and is SHARED here
       // rather than re-declared. It used to be a regex in this route, and that placement
       // was the finding: the consumer validated nothing, so every safety property of this

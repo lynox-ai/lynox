@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickVoiceForLanguage } from './voice-for-language.js';
+import { isVoiceLanguageTag, pickVoiceForLanguage } from './voice-for-language.js';
 import type { VoiceInfo } from './types.js';
 
 /**
@@ -15,7 +15,7 @@ const catalogue: VoiceInfo[] = [
   { id: 'en_gb_alice', language: 'en' },
   { id: 'fr_marie_neutral', language: 'fr' },
   { id: 'fr_marie_calm', language: 'fr' },
-  { id: 'no_language_at_all' },
+  { id: 'aaa_no_language' },
 ];
 
 describe('a voice is picked deterministically, from the catalogue content', () => {
@@ -26,6 +26,26 @@ describe('a voice is picked deterministically, from the catalogue content', () =
     expect(choice.voice).toBe('en_gb_alice');
     expect(choice.matched).toBe(true);
     expect(choice.candidates).toBe(3);
+  });
+
+  it('PREFERS the provider default when it speaks the language, so nobody\'s voice changes', () => {
+    // ⚠⚠ The regression this parameter exists for, measured on the LIVE catalogue shape:
+    // 8 `en_us_*` + 16 `en_gb_*`, where "first by id" is a BRITISH voice. Sorting alone was
+    // deterministic AND wrong — an English user who had the curated default silently started
+    // getting `en_gb_…`. Determinism was what this function needed; not changing anybody's
+    // voice unless their language demands it is what the FEATURE needed.
+    const live = [
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `en_us_voice${String(i)}`, language: 'en' })),
+      ...Array.from({ length: 16 }, (_, i) => ({ id: `en_gb_voice${String(i)}`, language: 'en' })),
+      { id: 'en_paul_neutral', language: 'en' },
+    ];
+    expect(pickVoiceForLanguage(live, 'en', 'en_paul_neutral').voice).toBe('en_paul_neutral');
+    // Without the preference it is the alphabetically first — the behaviour that was wrong.
+    expect(pickVoiceForLanguage(live, 'en').voice).toBe('en_gb_voice0');
+    // A preference that does NOT speak the language must not win.
+    expect(pickVoiceForLanguage(live, 'en', 'fr_marie_neutral').voice).toBe('en_gb_voice0');
+    // And it must not invent a match where the language has none.
+    expect(pickVoiceForLanguage(live, 'de', 'en_paul_neutral').matched).toBe(false);
   });
 
   it('matches on the language HEAD, so a region subtag finds the catalogue entry', () => {
@@ -75,11 +95,25 @@ describe('a voice is picked deterministically, from the catalogue content', () =
   });
 
   it('skips entries with no language instead of counting them as candidates', () => {
-    // `no_language_at_all` sorts before every `en_*` id. If the filter ever lets an
-    // entry without a language through, it would win — so this is the assertion that
-    // separates "filtered" from "sorted".
-    expect(pickVoiceForLanguage(catalogue, 'en').voice).not.toBe('no_language_at_all');
+    // ⚠ The fixture id is `aaa_no_language` and the `aaa_` prefix is load-bearing: it has
+    // to sort BEFORE every `en_*` id, so that an entry slipping past the language filter
+    // would WIN the pick and this assertion could fail. The first version used
+    // `no_language_at_all`, which sorts AFTER `en_gb_alice` — measured — so the
+    // `.not.toBe(...)` below could never fail and the comment claiming otherwise was
+    // wrong. A fixture that cannot produce the failure it guards against is decoration.
+    expect(pickVoiceForLanguage(catalogue, 'en').voice).not.toBe('aaa_no_language');
     expect(pickVoiceForLanguage([{ id: 'x' }], 'en').matched).toBe(false);
+  });
+
+  it('accepts the shape bounds exactly, and nothing wider', () => {
+    // The bounds are the claimed defence against a long or forged value, and widening
+    // `{2,3}` to `{2,30}` or the region to `{2,40}` survived every other test.
+    for (const ok of ['de', 'gsw', 'de_ch', 'en-gb', 'zh_hant']) {
+      expect(isVoiceLanguageTag(ok), `must accept ${ok}`).toBe(true);
+    }
+    for (const no of ['d', 'abcd', 'de_', 'de_abcde', 'deu_latn_ch', 'auto', 'AUTO']) {
+      expect(isVoiceLanguageTag(no), `must reject ${no}`).toBe(false);
+    }
   });
 
   it('is stable: the same catalogue in a different order gives the same voice', () => {
