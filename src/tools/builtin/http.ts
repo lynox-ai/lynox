@@ -572,6 +572,18 @@ const API_SETUP_TOOL_NAME = 'api_setup';
  * It stays because it is the barrier for the next caller that does not come
  * through the handler — and one exists today.
  *
+ * ⚠ The paragraph above is a claim about code that can move, and it is anchored
+ * on SYMBOLS rather than line numbers for that reason — but it is NOT pinned by
+ * a test, and a reader should know which of the two it is. It cannot be. If the
+ * handler's two reads were moved BELOW the attach, the renewal would become
+ * reachable for such an agent and this condition would then decline it
+ * silently: no exchange, no log, which is observably identical to the handler
+ * having thrown first. The only difference would be where the throw comes from,
+ * and asserting that pins an unguarded dereference a future cleanup should be
+ * free to fix. So the same masking that makes the witness impossible makes the
+ * detector impossible, and this is prose on purpose rather than prose for want
+ * of effort.
+ *
  * ⚠ And condition 2 is NECESSARY, not SUFFICIENT — said plainly because the
  * cheap reading of it is that a caller which passes carries real guards. It
  * refuses a dereference that would throw, and it refuses the fabricated agent
