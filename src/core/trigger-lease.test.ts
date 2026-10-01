@@ -233,8 +233,23 @@ describe('recording a lost run', () => {
       if (id === 'trg-1') throw new Error('SQLITE_BUSY: database is locked');
       return real(id, ...rest);
     });
+    const before = leaseRow(p);
     await p.loop.tick();
     await vi.waitFor(() => expect(p.dispatches()).toBe(1));
+    // The dispatched turn was trg-2's: trg-1 was neither run nor settled — its occurrence is
+    // unchanged, and the lease this tick took over stays held instead of being dropped.
+    const after = leaseRow(p);
+    expect(after.next_run_at).toBe(before.next_run_at);
+    expect(after.lease_holder).not.toBeNull();
+    expect(after.lease_holder).not.toBe('dead-loop');
+    expect(leaseRow(p, 'trg-2').lease_holder).not.toBeNull();
+    // MUTATION: release trg-1's lease in the catch → the next tick reads it `claimed` and
+    // runs the lost run from the start. Without the release it lapses again, reads
+    // `interrupted` again, and is still not run.
+    vi.setSystemTime(T0 + 2 * MIN + 16 * MIN);
+    await p.loop.tick();
+    await new Promise((r) => setImmediate(r));
+    expect(p.dispatches()).toBe(1);
   });
 });
 

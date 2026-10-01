@@ -50,8 +50,10 @@ const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
  * which is why the lease is long. A lease that lapses under a live run is reported as
  * interrupted by whichever process finds it, and the run is not started a second time —
  * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
- * process then runs beside the live one; a bulk run's per-target claim keeps the two from
- * writing the same target.
+ * process then runs beside the live one. A bulk run's per-target claim keeps the two apart
+ * only while that claim is younger than `BULK_CLAIM_STALE_MS` (30 s): a run stalled long
+ * enough to lose its lease has stale target claims too, so a target it is still writing can
+ * be written a second time.
  */
 const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
@@ -495,7 +497,7 @@ export class WorkerLoop {
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
           } catch (err: unknown) {
             process.stderr.write(
-              `[lynox:worker] recording the interrupted run of ${task.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              `[lynox:worker] recording or releasing the interrupted run of ${task.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
             );
           }
           continue;

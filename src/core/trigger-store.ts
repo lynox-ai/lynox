@@ -741,7 +741,9 @@ export class TriggerStore {
    * recorded it, or an answer re-armed its trigger (which runs the same question again,
    * by design of the durable wait), or the lost run was a manual one started before its
    * trigger's scheduled time — that scheduled occurrence then runs, and the lost manual
-   * run is not reported. `interrupted`: a lapsed
+   * run is not reported; for a one-shot, that scheduled run repeats what the lost manual
+   * run had already done (a manual run that finished would have completed the trigger).
+   * `interrupted`: a lapsed
    * lease whose run never recorded a result — the occurrence it ran is still the due one,
    * so its holder died (or stopped renewing for longer than the lease) mid-run. The lease
    * is taken in every case but `held`; what an interrupted run means is the caller's call.
