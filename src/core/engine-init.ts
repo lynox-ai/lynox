@@ -53,19 +53,36 @@ import { compose, engineText, renderFence, type Part } from './data-boundary.js'
 /**
  * Apply the boot-time cost, rate and egress settings to the ToolContext.
  *
- * The persistent budget and the HTTP/mail rate limits count against RunHistory,
- * so they need it. The egress settings (`enforce_https`, `network_policy`, the
- * operator host floor) do not, and are applied whether or not RunHistory opened:
- * an engine that boots without its history must still enforce the egress policy
- * it was configured with.
+ * The HTTP/mail rate limits and the daily/monthly caps count against
+ * RunHistory, so they need it. The session cap and the egress settings
+ * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
+ * applied whether or not RunHistory opened: an engine that boots without its
+ * history must still enforce the limits it was configured with.
  */
 export function configureBudgetAndRateLimits(
   runHistory: RunHistory | null,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
+  configurePersistentBudget({
+    costProvider: runHistory,
+    sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
+    dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
+    monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
+  });
   if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
   configureEgressPolicy(userConfig, toolContext);
+}
+
+// Env vars override config (managed hosting sets tier-specific limits via env)
+function envFloat(key: string): number | undefined {
+  const v = parseFloat(process.env[key] ?? '');
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+function envInt(key: string): number | undefined {
+  const v = parseInt(process.env[key] ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : undefined;
 }
 
 function configureHistoryBackedLimits(
@@ -73,22 +90,6 @@ function configureHistoryBackedLimits(
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
-  // Env vars override config (managed hosting sets tier-specific limits via env)
-  const envFloat = (key: string): number | undefined => {
-    const v = parseFloat(process.env[key] ?? '');
-    return Number.isFinite(v) && v > 0 ? v : undefined;
-  };
-  const envInt = (key: string): number | undefined => {
-    const v = parseInt(process.env[key] ?? '', 10);
-    return Number.isFinite(v) && v > 0 ? v : undefined;
-  };
-
-  configurePersistentBudget({
-    costProvider: runHistory,
-    sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
-    dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
-    monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
-  });
   applyHttpRateLimits(
     toolContext,
     runHistory,

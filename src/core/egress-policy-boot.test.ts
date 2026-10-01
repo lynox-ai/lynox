@@ -1,16 +1,17 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 
 /**
- * The egress policy is applied at boot whether or not RunHistory opened.
+ * The egress policy and the session cost cap are applied at boot whether or not
+ * RunHistory opened.
  *
  * RunHistory is optional at boot: when it fails to open, the engine logs it and
- * keeps running without history, threads and tasks. The egress settings do not
- * depend on it, so they must reach the ToolContext either way. This is an
+ * keeps running without history, threads and tasks. The egress settings and the
+ * session cap do not depend on it, so they must take effect either way. This is an
  * init-ORDER property — a unit test that calls the wiring function directly
  * cannot see where `Engine.init` calls it from — so it boots a real Engine.
  */
@@ -29,13 +30,14 @@ vi.mock('./run-history.js', async (importOriginal) => {
 
 const { Engine } = await import('./engine.js');
 const { reloadConfig } = await import('./config.js');
+const { getSessionCostCeiling, resetPersistentBudget } = await import('./session-budget.js');
 
 interface EngineInternals { _toolContext: ToolContext; runHistory: unknown }
 
-describe('Engine boot — the egress policy does not depend on run history', () => {
+describe('Engine boot — egress policy and session cap do not depend on run history', () => {
   const dirs: string[] = [];
   const engines: InstanceType<typeof Engine>[] = [];
-  const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_NETWORK_POLICY', 'LYNOX_NETWORK_ALLOWED_HOSTS'] as const;
+  const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_NETWORK_POLICY', 'LYNOX_NETWORK_ALLOWED_HOSTS', 'LYNOX_MAX_SESSION_COST_USD'] as const;
   const saved = new Map<string, string | undefined>();
 
   function setEnv(key: string, value: string | undefined): void {
@@ -45,6 +47,7 @@ describe('Engine boot — the egress policy does not depend on run history', () 
 
   afterEach(async () => {
     runHistoryOpen.fail = false;
+    resetPersistentBudget();
     for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
     engines.length = 0;
     for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -59,7 +62,10 @@ describe('Engine boot — the egress policy does not depend on run history', () 
     dirs.push(dir);
     for (const k of ENV_KEYS) setEnv(k, undefined);
     setEnv('LYNOX_DATA_DIR', dir);
-    setEnv('LYNOX_NETWORK_POLICY', 'deny-all');
+    setEnv('LYNOX_NETWORK_POLICY', 'allow-list');
+    setEnv('LYNOX_NETWORK_ALLOWED_HOSTS', 'ops.example.com');
+    setEnv('LYNOX_MAX_SESSION_COST_USD', '7');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ enforce_https: true }));
     reloadConfig();
     runHistoryOpen.fail = !historyOpens;
     const engine = new Engine({} as LynoxConfig);
@@ -73,16 +79,23 @@ describe('Engine boot — the egress policy does not depend on run history', () 
     return engine as unknown as EngineInternals;
   }
 
-  it('applies the configured policy when run history opened', async () => {
+  function expectConfiguredLimits(engine: EngineInternals): void {
+    expect(engine._toolContext.networkPolicy).toBe('allow-list');
+    expect(engine._toolContext.allowedHosts).toEqual(new Set(['ops.example.com']));
+    expect(engine._toolContext.enforceHttps).toBe(true);
+    expect(getSessionCostCeiling()).toBe(7);
+  }
+
+  it('applies the configured egress policy and session cap when run history opened', async () => {
     const engine = await boot(true);
     expect(engine.runHistory).not.toBeNull();
-    expect(engine._toolContext.networkPolicy).toBe('deny-all');
+    expectConfiguredLimits(engine);
   });
 
-  it('applies the configured policy when run history is unavailable', async () => {
+  it('applies the configured egress policy and session cap when run history is unavailable', async () => {
     const engine = await boot(false);
     // The case under test is real: the engine booted without its history.
     expect(engine.runHistory).toBeNull();
-    expect(engine._toolContext.networkPolicy).toBe('deny-all');
+    expectConfiguredLimits(engine);
   });
 });
