@@ -51,10 +51,35 @@ export default [
     // each produced fail-opens or false reds; this rule is the mechanism that already
     // exists doing the same job statically.
     //
-    // `no-restricted-syntax` rather than `no-console` with an empty `allow`: the
-    // latter's schema requires a non-empty list, and this selector additionally
-    // catches `console['warn']` and an ALIAS declaration (`const w = console.warn`),
-    // which an enumeration of method names does not.
+    // `no-restricted-syntax` rather than `no-console` with an empty `allow`, whose
+    // schema requires a non-empty list.
+    //
+    // ⚠⚠ WHAT IT CATCHES AND WHAT IT DOES NOT, measured one lint run per shape. The
+    // first version of this comment said the selector "additionally catches
+    // `console['warn']` and an ALIAS declaration", which reads as if the enumeration
+    // problem were solved. It is narrowed, not solved — from eleven shapes to five:
+    //
+    //   RED    console.warn(x) · console['warn'](x) · (console).warn(x)
+    //          const w = console.warn; w(x)          ← an alias DECLARATION, because
+    //                                                  `console.warn` is itself a
+    //                                                  MemberExpression there
+    //   GREEN  const { warn } = console; warn(x)     ← an ObjectPattern, not a
+    //                                                  MemberExpression
+    //          globalThis.console.warn(x) · globalThis['console'].warn(x)
+    //          const c = globalThis.console; c.warn(x)
+    //          Reflect.get(console, 'warn')(x)
+    //
+    // The destructured form is the one that stings: the retired scanner was defeated
+    // by exactly it, and the module's own comment says so. The spies do not hold it
+    // either — the destructured reference IS the `console.warn` spy, and that spy is
+    // only asserted silent on the clean path. So for a `console.warn`-shaped bypass
+    // this rule is the SOLE mechanism, and five shapes walk through it.
+    //
+    // Not widened further on purpose: this is the seventh attempt at the property
+    // "every diagnostic goes through `report`", and the previous six were each
+    // defeated by a shape their author had not thought of. Chasing the fifth, sixth
+    // and seventh selector is the same move again. The remaining shapes are filed as
+    // a register row, where they can be read as what they are — open.
     files: ['src/core/speak/mistral-voxtral-tts.ts'],
     rules: {
       'no-restricted-syntax': ['error', {

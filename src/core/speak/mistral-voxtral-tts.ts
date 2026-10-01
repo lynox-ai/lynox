@@ -237,9 +237,16 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;
-    // The ONE sanctioned diagnostic channel of this module. `eslint.config.js` forbids
-    // every `console` access in this file precisely so that a SECOND one cannot be added
-    // without a second disable comment — and a disable comment is a review signal.
+    // The ONE sanctioned diagnostic channel of this module. `eslint.config.js` has a
+    // block for this file that makes a `console` MEMBER ACCESS an error, so a second
+    // diagnostic in the ordinary shapes needs a second disable comment — which a
+    // reviewer sees.
+    //
+    // ⚠ NOT "forbids every console access", which is what this said first. Measured:
+    // `const { warn } = console; warn(…)` is an ObjectPattern and walks through, as do
+    // the four `globalThis`/`Reflect` routes. Five shapes of eleven. The exact list is
+    // in `eslint.config.js` beside the rule, and the open ones are a register row.
+    //
     // ⚠ The directive must sit on the line IMMEDIATELY above the call: it disables the
     // NEXT line, so with the explanation written after it, it covered a comment line and
     // eslint reported it as unused while the call itself stayed flagged.
