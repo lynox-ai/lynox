@@ -592,6 +592,31 @@ describe('assertHostPolicy (network_policy SSOT)', () => {
       expect(() => assertHostPolicy('https://example.com', { surface: 'full-control' }, wild)).not.toThrow();
     });
 
+    it('matches an operator wildcard at a label boundary: the domain and its subdomains, not a longer name ending in it', () => {
+      const wild = policyCtx({ networkPolicy: 'guarded', allowedWildcards: ['example.com'] });
+      expect(() => assertHostPolicy('https://notexample.com/x', { surface: 'full-control' }, wild))
+        .toThrow(/not permitted under guarded egress policy/);
+      const listed = policyCtx({ networkPolicy: 'allow-list', allowedWildcards: ['example.com'] });
+      expect(() => assertHostPolicy('https://api.example.com/x', { surface: 'full-control' }, listed)).not.toThrow();
+      expect(() => assertHostPolicy('https://notexample.com/x', { surface: 'full-control' }, listed))
+        .toThrow(/not in network allow-list/);
+    });
+
+    it('admits an accepted profile host by its exact name, not by a longer name ending in it', () => {
+      const ctx = policyCtx({ networkPolicy: 'guarded' });
+      const ackHosts = new Set(['token.provider.net']);
+      expect(() => assertHostPolicy('https://xtoken.provider.net/oauth/token', { surface: 'full-control', ackHosts }, ctx))
+        .toThrow(/not permitted under guarded egress policy/);
+    });
+
+    it('lets a connector call reach its own hosts by their exact names only', () => {
+      const ctx = policyCtx({ networkPolicy: 'guarded' });
+      const hosts = new Set(['api.vendor.test']);
+      expect(() => assertHostPolicy('https://api.vendor.test/v1', { surface: 'connector', hosts }, ctx)).not.toThrow();
+      expect(() => assertHostPolicy('https://xapi.vendor.test/v1', { surface: 'connector', hosts }, ctx))
+        .toThrow(/not permitted under guarded egress policy/);
+    });
+
     it('allows a human-accepted profile egress host — incl. a token_url ≠ base_url (P7)', () => {
       const ctx = policyCtx({ networkPolicy: 'guarded' });
       // guardedAckHosts is the union across profiles; a token endpoint on a
