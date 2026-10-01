@@ -89,7 +89,12 @@ function localArchiveIsReadable(path: string): boolean {
   // And the database is a database — unless the archive is ciphertext, where it must NOT be.
   const dbPath = join(path, 'history.db');
   if (!existsSync(dbPath)) return false;
-  if (manifest.encrypted) return isEncryptedBackupFile(dbPath);
+  if (manifest.encrypted) {
+    // EVERY listed file, not just the database. Checking only `history.db` would miss a step-5
+    // pass that stopped after its first entry — `memory/_global/facts.txt` would stay plaintext
+    // in an archive labelled encrypted, and every assertion in this file would still pass.
+    return files.every(f => isEncryptedBackupFile(join(path, f.path)));
+  }
   const db = new Database(dbPath, { readonly: true });
   try {
     return (db.prepare('SELECT count(*) AS n FROM test').get() as { n: number }).n > 0;
@@ -364,12 +369,14 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
     expect(verdict.errors.join(' ').toLowerCase()).toContain('integrity');
   });
 
-  it('a Drive module that never loaded means NO upload — the gate fails closed', async () => {
-    // `_driveUploadAllowed` returns false when the engine never cached the gate, which happens
-    // when the dynamic import of the Drive module fails. Flipping that to `true` survived the
-    // suite: nothing exercised the uncached state, so the fail-OPEN direction was uncovered. This
-    // is the manager-level equivalent — no predicate handed in means the embedder's default, and
-    // an explicitly refusing predicate means no upload however the uploader got attached.
+  it('a refusing uploadAllowed stops the upload however the uploader was attached', async () => {
+    // The manager side of the consent condition, with the uploader attached through the SETTER
+    // rather than through the config — so the refusal cannot depend on how it got there.
+    //
+    // ⚠ An earlier title claimed this covered "a Drive module that never loaded", which it does
+    // not: that path needs a module-level mock and lives in
+    // `backup-drive-gate-unloaded.test.ts`. A test title is a claim about what is covered, and
+    // this one was borrowing another file's.
     const { calls, uploader } = spyUploader();
     const manager = new BackupManager(
       lynoxDir,

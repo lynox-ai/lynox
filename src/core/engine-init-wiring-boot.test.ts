@@ -200,6 +200,39 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     expect(engine.getBackupManager()!.getGDriveUploader()).toBeNull();
   });
 
+  it('the SHIPPED default — setting absent — uploads nothing, end to end', async () => {
+    // The most common state a real instance is in, and until now no test drove it to an actual
+    // backup: the tier test above only asserts that an uploader is attached, and the revocation
+    // test starts from consent GRANTED. So the engine-level consent read hung on exactly one
+    // test, which a mutation round measured (removing it failed one test, not two).
+    //
+    // That is a concentration rather than a gap in itself — but the state it leaves untested is
+    // the default one, so this is the witness worth having: self-host, nothing opted in, an
+    // uploader attached, and a real backup that goes nowhere.
+    const dir = freshDataDir('drive-default');
+    seedBackupSource(dir);
+    setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
+    // No `config.json` at all — the shipped state, not `backup_gdrive: false`.
+    const engine = await boot();
+
+    const manager = engine.getBackupManager();
+    expect(manager).not.toBeNull();
+    // FIXTURE GUARD: tier says yes, so a refusal below can only be the missing consent.
+    expect(manager!.getGDriveUploader(), 'self-host must have an uploader attached').not.toBeNull();
+    expect(engine.getUserConfig().backup_gdrive, 'the default must be absent, not false').toBeUndefined();
+
+    const { calls, uploader } = spyUploader();
+    manager!.setGDriveUploader(uploader);
+    const result = await manager!.createBackup();
+
+    expect(result.success).toBe(true);
+    // FIXTURE GUARD: the archive IS encrypted, so the encryption condition cannot be the reason.
+    expect(result.manifest.encrypted, 'the boot must have produced a vault key').toBe(true);
+    expect(existsSync(join(result.path, 'manifest.json'))).toBe(true);   // witness 1
+    expect(calls).toHaveLength(0);                                       // witness 2
+  });
+
   it('REVOKING the opt-in stops uploads in the running process, without a restart', async () => {
     // The test the whole gate exists for, and the one a boot-time-only check cannot pass. Two
     // backups through the SAME engine, with the setting flipped in between — so the assertion is

@@ -221,17 +221,31 @@ export class BackupManager {
 
       // 10. Upload to Google Drive (best-effort — local backup is the primary)
       //
-      // THREE conditions, and each is asked where it can change:
+      // TWO conditions here, and a third one elsewhere — each asked where it can change:
       //
-      //   `_uploadAllowed()`  — tier and the user's opt-in, evaluated HERE rather than at boot.
+      //   `_uploadAllowed()`   — the user's opt-in, evaluated HERE rather than at boot.
       //   `manifest.encrypted` — whether this archive is ciphertext.
+      //   (tier)               — asked ONCE, at the engine's wiring, because it is derived from
+      //                          the environment and cannot change in a running process. It is
+      //                          deliberately NOT in `_uploadAllowed()`: checking it in both
+      //                          places was a compensating pair that no single mutant could
+      //                          expose. ⚠ So an uploader attached by an EMBEDDER through
+      //                          `setGDriveUploader()` is NOT tier-gated here — on a provisioned
+      //                          instance the engine attaches none, which is what makes that
+      //                          safe in this product, and is the thing to know before reusing
+      //                          this class.
       //
       // Why the opt-in is asked at upload time and not once at wiring: the engine's `init()` runs
       // once, so a gate there enforces "the setting was true at the last boot", not "the user
       // wants this now". Revoking `backup_gdrive` would have kept uploading until the process
       // restarted — fail-open, and the same class `_reconcileBugsink` exists to close for the
       // privacy toggle. A predicate handed in at construction reads the engine's live config on
-      // every call, so a reload takes effect immediately and in both directions.
+      // every call, so a RELOAD takes effect at once and in both directions.
+      //
+      // ⚠ "A reload", precisely: nothing watches `config.json`. `reloadUserConfig` is called by
+      // `PUT /api/config` and the data-reset route, so a change made through the API or Settings
+      // is live, and a HAND-EDITED file is not until the next start. `features/backup.md` says
+      // so; the distinction is the whole value of this predicate and is easy to overstate.
       //
       // `manifest.encrypted` is the property and not a correlate because ONE predicate decides
       // encryption: the constructor's `config.encrypt && !!vaultKey` is exactly what step 5 acts

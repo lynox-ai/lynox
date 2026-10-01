@@ -336,7 +336,7 @@ export class Engine {
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
   /**
-   * The two pure gate functions, cached when `init()` loads the Drive module.
+   * The pure consent decision, cached when `init()` loads the Drive module.
    *
    * `null` until then, and `null` forever if that module fails to load — which is why
    * `_driveUploadAllowed` fails CLOSED on it. It exists because the decision has to be
@@ -2050,8 +2050,9 @@ export class Engine {
         // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
         // been fatal to boot on every tier. A gate is not worth a crash.
         const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
-        // Cache the two pure decisions so the upload itself can ask them synchronously.
-        // This is what makes a revoked opt-in take effect without a restart.
+        // Cache the consent decision so the upload itself can ask it synchronously. This is what
+        // makes a revoked opt-in take effect without a restart. Tier is NOT cached: it is asked
+        // once, in the `if` below, because the environment cannot change in a running process.
         this._driveGate = { driveUploadOptedIn };
         // TIER only, and deliberately: this condition is derived from the environment, which
         // cannot change inside a running process, so boot is the right place to ask it — and
@@ -2463,7 +2464,8 @@ export class Engine {
   /**
    * Does the user want this backup uploaded to Drive, right now?
    *
-   * CONSENT only. The tier condition is asked once, at the wiring below, because it is derived
+   * CONSENT only. The tier condition is asked once, at the wiring in `init()` (above this method
+   * in the file), because it is derived
    * from the environment and cannot change in a running process — and asking it here as well
    * produced a survivor: with the tier gate already refusing to attach an uploader on a
    * provisioned instance, dropping the tier term from this expression changed no test's outcome.

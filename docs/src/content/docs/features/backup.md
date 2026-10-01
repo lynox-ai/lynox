@@ -34,10 +34,11 @@ curl -X POST http://localhost:3000/api/backups
 
 ## Scheduled Backups
 
-⚠ `backup_schedule` is **not read by anything** — it is declared and documented, and no code
-consults it. Automatic backups run as a **task**, not from this key: a trigger with the `backup`
-effect and a cron condition, which you create under Settings → Tasks. Setting `backup_schedule` in
-your config has no effect at all.
+⚠ **`backup_schedule` does not schedule anything.** The key is declared and documented, and the
+Settings UI offers it — but nothing in the engine reads it, so no backup is ever created because of
+it. Automatic backups run as a **task**: a trigger with the `backup` effect and a cron condition,
+which you create under Settings → Tasks. Until the key is either wired up or removed, treat both it
+and the "Backup schedule" control in Settings as having no effect.
 
 The other keys below do work:
 
@@ -82,7 +83,16 @@ or hosted one (those never upload to your Drive — the control plane runs their
 If you opt in without a usable vault key, the local backup still runs and the upload is skipped,
 with a line on stderr saying so.
 
-**Changing `backup_gdrive` takes effect immediately** — no restart needed, in either direction.
+**When a change takes effect** depends on how you make it, and the difference matters in the
+direction that protects you:
+
+- Through the API or the Settings UI (`PUT /api/config`), **immediately** — in both directions. Turn
+  the upload off and the next backup is no longer uploaded, with no restart.
+- By **editing `~/.lynox/config.json` by hand**, at the **next restart**. lynox does not watch the
+  file, so a hand-edited `backup_gdrive: false` does not stop uploads until you restart it.
+
+If you need the upload to stop now and you edited the file, restart lynox — or make the same change
+through Settings, which applies it at once.
 
 ### Turning it off again
 
