@@ -375,7 +375,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
     "runs-on": "ubuntu-latest",
     "steps": [
       {
-        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+        "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
         "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -409,7 +409,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
     "runs-on": "ubuntu-latest",
     "steps": [
       {
-        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+        "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
         "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -439,7 +439,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
     "runs-on": "ubuntu-latest",
     "steps": [
       {
-        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+        "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
         "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
