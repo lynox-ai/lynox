@@ -48,13 +48,16 @@ const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
  * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while a synchronous
  * tool (`bash` runs `execSync`, with no upper bound on its timeout) blocks the event loop,
  * which is why the lease is long. A lease that lapses under a live run is reported as
- * interrupted by whichever process finds it; it does not start the run a second time.
+ * interrupted by whichever process finds it, and the run is not started a second time —
+ * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
+ * process then runs beside the live one; a bulk run's per-target claim keeps the two from
+ * writing the same target.
  */
 const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
 /** What a run the engine lost mid-way reads as — a RESULT, the status is `failed`. */
 const INTERRUPTED_RESULT =
-  'The engine stopped while this run was in progress. It was not started again, because what it had already done would happen a second time.';
+  'The engine stopped while this run was in progress. It is recorded as failed instead of being run again from the start, because what it had already done would happen a second time.';
 /**
  * Per effect: does a run continue where a lost run stopped without repeating anything that
  * run already did? Only then may a lost run be started again. Every effect has to answer —
@@ -482,10 +485,19 @@ export class WorkerLoop {
           // mail sent, a record written, tokens spent — would happen twice. It is recorded
           // as the failed run it was, which schedules it like any other failure (the next
           // occurrence for a cron, nothing more for a one-shot, a retry where the owner
-          // asked for retries), and the owner can run it again by hand.
+          // asked for retries — a retry does run it from the start, which is what retries
+          // were set up for), and the owner can run it again by hand. Fenced per task: a
+          // store error here must not stop the other due triggers of this tick; the lease
+          // then stays and lapses again, and the run is reported once more, never re-run.
           releasePersistentBudget(reservation.reservedUSD);
-          this.recordAndNotify(task, INTERRUPTED_RESULT, false);
-          this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
+          try {
+            this.recordAndNotify(task, INTERRUPTED_RESULT, false);
+            this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
+          } catch (err: unknown) {
+            process.stderr.write(
+              `[lynox:worker] recording the interrupted run of ${task.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
           continue;
         }
         // Fire and forget — don't await, execute in parallel. Release the

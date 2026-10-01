@@ -737,8 +737,11 @@ export class TriggerStore {
    * same file cannot both win.
    *
    * `held`: a live lease belongs to someone else; do not run. `claimed`: nobody holds it,
-   * or a lapsed lease belongs to a run that was settled meanwhile (a sweep or an answer
-   * moved `next_run_at` past the moment that run took the lease). `interrupted`: a lapsed
+   * or a lapsed lease belongs to a run whose occurrence is no longer the due one: a sweep
+   * recorded it, or an answer re-armed its trigger (which runs the same question again,
+   * by design of the durable wait), or the lost run was a manual one started before its
+   * trigger's scheduled time — that scheduled occurrence then runs, and the lost manual
+   * run is not reported. `interrupted`: a lapsed
    * lease whose run never recorded a result — the occurrence it ran is still the due one,
    * so its holder died (or stopped renewing for longer than the lease) mid-run. The lease
    * is taken in every case but `held`; what an interrupted run means is the caller's call.

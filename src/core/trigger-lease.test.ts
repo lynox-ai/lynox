@@ -111,7 +111,7 @@ function leaseRow(p: Proc, id = 'trg-1'): { lease_holder: string | null; lease_u
 describe('the trigger run lease across a restart', () => {
   // MUTATIONS (each tsc-checked): drop the lease clause from TriggerStore.getDue → B lists
   // the trigger as due; let runTriggerNow ignore `held` → B starts it by hand. Dropping the
-  // claim in WorkerLoop.tick alone is killed by the next two tests.
+  // claim in WorkerLoop.tick alone fails this test and the next two.
   it('a run in progress is not started again by a restarted engine while its lease holds', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(T0);
@@ -209,6 +209,32 @@ describe('a lease that cannot be taken', () => {
     expect(p.dispatches()).toBe(0);
     // Still due: it waits for the next tick instead of being dropped.
     expect(p.manager.getDueTriggers().map((t) => t.id)).toEqual(['trg-1']);
+  });
+});
+
+describe('recording a lost run', () => {
+  // MUTATION: drop the try around recordAndNotify/releaseLease in the interrupted branch
+  // → the throw leaves the tick, and the second due trigger is not dispatched.
+  it('a store error while recording one lost run does not stop the other due triggers', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    const p = boot(newDir());
+    seedCron(p);
+    p.history.insertTrigger({
+      id: 'trg-2', title: 'Weekly digest', source: 'cron', effect: 'run_agent',
+      scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:10.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z',
+    });
+    // trg-1's run was lost: a lapsed lease taken after its occurrence was due.
+    p.manager.claimLease('trg-1', 'dead-loop', new Date(T0 + MIN).toISOString(), new Date(T0).toISOString());
+    vi.setSystemTime(T0 + 2 * MIN);
+    const real = p.manager.recordTaskRun.bind(p.manager);
+    vi.spyOn(p.manager, 'recordTaskRun').mockImplementation((id, ...rest) => {
+      if (id === 'trg-1') throw new Error('SQLITE_BUSY: database is locked');
+      return real(id, ...rest);
+    });
+    await p.loop.tick();
+    await vi.waitFor(() => expect(p.dispatches()).toBe(1));
   });
 });
 
