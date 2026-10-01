@@ -844,6 +844,58 @@ describe('Config', () => {
       reloadConfig();
       expect(loadConfig().bugsink_dsn).toBe('https://k@errors.mine.example/1');
     });
+
+    it('plugins in a PROJECT config is IGNORED — which plugins load is a user-config decision', async () => {
+      // Taken off the allowlist on 2026-10-01. The key selects which of the
+      // ALREADY-INSTALLED plugins `loadPlugins` imports and executes, so it
+      // decides which code runs. Nothing is installed from here either way;
+      // the selection is the point, and it is a larger thing than setting a
+      // value.
+      //
+      // THREE witnesses, and the third is the one the other two miss.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // 1: the user said nothing, the cwd names a selection.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ plugins: { 'not-a-real-plugin': true }, max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.plugins).toBeUndefined();
+      // Positive control from the verified-accepted set, in-process only.
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // 2: the user chose, and the choice must still ARRIVE — without this the
+      // test would also pass if the field were deleted from the schema.
+      writeFileSync(
+        join(userDir, 'config.json'),
+        JSON.stringify({ plugins: { 'not-a-real-plugin': true } }),
+      );
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({}));
+      reloadConfig();
+      expect(loadConfig().plugins).toEqual({ 'not-a-real-plugin': true });
+
+      // 3: the sharp one. `loadPlugins` reads
+      // `this.config.plugins ?? readPluginsConfig()`, so a project entry
+      // REPLACES the user's selection instead of adding to it — an empty
+      // object would switch every plugin off. Asserted even though the
+      // removal makes it unreachable: it is the half that would do damage if
+      // the key were ever reinstated without deciding the merge semantics
+      // first, and an unreachable hazard with no witness is one nobody finds
+      // again.
+      writeFileSync(
+        join(userDir, 'config.json'),
+        JSON.stringify({ plugins: { 'not-a-real-plugin': true } }),
+      );
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ plugins: {} }));
+      reloadConfig();
+      expect(loadConfig().plugins).toEqual({ 'not-a-real-plugin': true });
+    });
     
     it('one invalid value in a PROJECT config silently drops ALL of its other keys', async () => {
       // This replaces a test that was a TAUTOLOGY. It asserted that a project
