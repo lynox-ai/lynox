@@ -3998,3 +3998,19 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     expect(result).toContain('HTTP 200');
   });
 });
+
+describe('outbound-write consent is granted per exact host', () => {
+  it('a consent for one host does not cover a longer name ending in it', async () => {
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+    testCounters.approvedOutboundDomains.add('api.example.com');
+
+    // The consented host itself goes through without a prompt…
+    const ok = await visible({ url: 'https://api.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
+    expect(ok).toContain('HTTP 200');
+
+    // …and a host that only ends in it still needs its own consent.
+    const other = await visible({ url: 'https://xapi.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
+    expect(other).toContain('requires user consent but no interactive prompt is available');
+  });
+});
