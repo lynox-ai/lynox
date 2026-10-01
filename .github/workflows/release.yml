@@ -292,10 +292,30 @@ jobs:
   #   - release-control-plane.yml — rsync + migrate + rebuild the control plane
   # Keeps the prod admin token + control plane SSH key out of this public repo.
   #
-  # Gate: the GitHub Release publication is itself the intentional gate.
-  # cut-release.sh only tags + publishes after a release PR merges, so a
-  # release event always represents a deliberate human decision. No second
-  # reviewer gate here — matches the staging dispatch pattern.
+  # Gate: `environment: production` on this job. The environment carries one
+  # protection rule, `required_reviewers`, so the job — and with it the dispatch,
+  # i.e. the PRODUCTION deploy of the control plane AND the website — waits
+  # until a reviewer approves it. The core release itself does NOT wait: images
+  # and the npm package are already published by the jobs this one `needs`, and
+  # `deploy-docs-prod` (the public docs) is a separate job this gate does not
+  # cover.
+  #
+  # What it is, stated precisely so nobody reads more into it: a PAUSE until a
+  # human has looked, not a barrier. It has ONE required reviewer, who is also a
+  # repository admin; the environment allows admins to bypass it
+  # (`can_admins_bypass: true`) and does not prevent self-review
+  # (`prevent_self_review: false`). So it holds the deploy until that person acts
+  # — it does not stop anyone with admin rights. GitHub lets a run wait up to 30 days for
+  # an environment approval; the cost is the delay until someone approves, and
+  # one approval per release. Measured the last time this gate existed (core#142's
+  # commit message): v1.3.1–v1.3.3 sat unapproved for 40 h, 38 h and ~1 h, and the
+  # website and control plane were rsynced by hand instead — a gate nobody
+  # answers turns into a manual path around it.
+  #
+  # History: core#142 (2026-04-23) removed this key because the reviewer gate
+  # held releases for hours. It is back by decision on 2026-10-01: until then
+  # every core release moved the control plane to production with no human
+  # pause.
   #
   # Security: release tag + sha go through env vars (never interpolated
   # directly into the shell command), and the JSON payload is built with
@@ -304,9 +324,14 @@ jobs:
   # write credential there and rotate it like one.
   dispatch-pro-release:
     needs: [docker-manifest, npm]
+    environment: production
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Kept although the explicit record step is gone: before core#142 this job
+      # had no permissions block at all, so it is not measured whether the
+      # environment's own Deployment object needs this scope. Removing it is a
+      # separate, measured change.
       deployments: write
     steps:
       - name: Dispatch release to lynox-pro
@@ -329,39 +354,9 @@ jobs:
             https://api.github.com/repos/lynox-ai/lynox-pro/dispatches \
             -d "$PAYLOAD"
 
-      # Record a GitHub Deployment for visual tracking on the Deployments page.
-      # PR #142 (2026-04-23) removed `environment: production` from this job to
-      # drop a manual reviewer gate that was blocking releases for hours; the
-      # side effect was that GH stopped creating Deployment objects, so the
-      # Deployments page froze at v1.3.3. This restores the visual record
-      # without re-introducing a blocking gate — the deployment is created and
-      # immediately marked `success` after the cross-repo dispatch succeeds.
-      # RELEASE_TAG is read via env: (not interpolated into the script) — same
-      # safe pattern as the dispatch step above.
-      - name: Record GitHub Deployment (production)
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        with:
-          script: |
-            const tag = process.env.RELEASE_TAG;
-            const dep = await github.rest.repos.createDeployment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: tag,
-              environment: 'production',
-              required_contexts: [],
-              auto_merge: false,
-              production_environment: true,
-              description: `Engine ${tag} dispatched to lynox-pro`,
-            });
-            if (typeof dep.data.id !== 'number') {
-              throw new Error(`Unexpected createDeployment response: ${JSON.stringify(dep.data)}`);
-            }
-            await github.rest.repos.createDeploymentStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              deployment_id: dep.data.id,
-              state: 'success',
-              description: 'Cross-repo dispatch to lynox-pro succeeded',
-            });
+      # No explicit Deployment record any more: with `environment: production` on
+      # the job, GitHub creates the Deployment object itself. Measured on this
+      # repo's production deployments: v1.0.5–v1.3.3 (job had the environment, no
+      # record step) carry GitHub-created deployments; v1.3.4–v1.3.6 (neither)
+      # carry none; from v1.3.7 the record step created them. Keeping that step
+      # next to the environment would book every release twice.
