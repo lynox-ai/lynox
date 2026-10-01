@@ -237,6 +237,13 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;
+    // The ONE sanctioned diagnostic channel of this module. `eslint.config.js` forbids
+    // every `console` access in this file precisely so that a SECOND one cannot be added
+    // without a second disable comment — and a disable comment is a review signal.
+    // ⚠ The directive must sit on the line IMMEDIATELY above the call: it disables the
+    // NEXT line, so with the explanation written after it, it covered a comment line and
+    // eslint reported it as unused while the call itself stayed flagged.
+    // eslint-disable-next-line no-restricted-syntax
     console.warn(message);
   };
   try {
