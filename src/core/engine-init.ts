@@ -50,7 +50,25 @@ import { compose, engineText, renderFence, type Part } from './data-boundary.js'
 
 // ── History + Budget + Subscriptions ────────────────────────────
 
+/**
+ * Apply the boot-time cost, rate and egress settings to the ToolContext.
+ *
+ * The persistent budget and the HTTP/mail rate limits count against RunHistory,
+ * so they need it. The egress settings (`enforce_https`, `network_policy`, the
+ * operator host floor) do not, and are applied whether or not RunHistory opened:
+ * an engine that boots without its history must still enforce the egress policy
+ * it was configured with.
+ */
 export function configureBudgetAndRateLimits(
+  runHistory: RunHistory | null,
+  userConfig: LynoxUserConfig,
+  toolContext: ToolContext,
+): void {
+  if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
+  configureEgressPolicy(userConfig, toolContext);
+}
+
+function configureHistoryBackedLimits(
   runHistory: RunHistory,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
@@ -89,6 +107,9 @@ export function configureBudgetAndRateLimits(
     dailyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_DAY') ?? userConfig.max_mail_sends_per_day,
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
+}
+
+function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolContext): void {
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
   // Outbound egress policy. Default 'allow-all' = unchanged behaviour.
   // 'allow-list'/'deny-all'/'guarded' are opt-in operator/CP controls enforced
