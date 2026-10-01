@@ -1198,6 +1198,25 @@ export async function spawnPipeline(
   }
   const steps: InlinePipelineStep[] = step.pipeline;
 
+  // A role on THIS step bounds the pool every sub-step draws from, applied before the
+  // sub-manifest exists.
+  //
+  // Deliberately the pool and NOT `role: s.role ?? step.role` below: a sub-step carrying its
+  // own role would then REPLACE this step's bound instead of narrowing inside it, which is the
+  // same hole one level down. A pool composes; a label does not. `spawnInline` still applies
+  // each sub-step's own role to what this leaves, so the result is the intersection.
+  //
+  // Unknown name refused here as on the two other runtimes: without it a typo made
+  // `declaredRole` undefined and the step ran with the whole parent set, telling the author
+  // nothing.
+  const declaredRole = step.role ? getRole(step.role) : undefined;
+  if (step.role !== undefined && declaredRole === undefined) {
+    throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
+  }
+  const pool = declaredRole === undefined
+    ? parentTools
+    : resolveTools(undefined, roleToolProfile(declaredRole), parentTools, INLINE_EXCLUDED_TOOLS);
+
   const subManifest: Manifest = {
     manifest_version: '1.1',
     name: `${step.id}-sub`,
@@ -1225,7 +1244,7 @@ export async function spawnPipeline(
 
   const startTime = Date.now();
   const state = await runManifest(subManifest, config, {
-    parentTools,
+    parentTools: pool,
     depth: depth + 1,
     parentPrompt,
     userTimezone,

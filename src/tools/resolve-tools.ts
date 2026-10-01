@@ -73,6 +73,23 @@ export function resolveTools(
 }
 
 /**
+ * Every tool in `derived` is one that `parent` holds.
+ *
+ * The invariant every route that builds a tool list for a child agent owes, stated as a
+ * predicate rather than as a comment above each route. Pure and exported for two reasons:
+ * a test asserts the PROPERTY on a route's real output instead of re-implementing the
+ * comparison, and a mutant that routes around the bound then fails on this assertion rather
+ * than on a count that could move for other reasons.
+ *
+ * It is deliberately about NAMES, not identity: a route may hand on the same tool object or
+ * a filtered copy, and both are the same grant.
+ */
+export function withinSurface(derived: ToolEntry[], parent: ToolEntry[]): boolean {
+  const held = new Set(parent.map(t => t.definition.name));
+  return derived.every(t => held.has(t.definition.name));
+}
+
+/**
  * The role's upper bound as a set, or `null` when the role declared none.
  *
  * Read the two absent-ish values apart before touching this: `allowedTools: []` is a

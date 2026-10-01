@@ -105,6 +105,12 @@ export async function runGuardedSavedWorkflow(
   // 3. Run the workflow. Pass the engine's tool set + tool-context + memory so
   //    inline steps can actually execute headless — the runner needs
   //    `parentTools` or it throws before running a step.
+  //
+  //    This stays the engine's set, and that is a decision rather than an oversight: there is
+  //    no agent here and therefore no grant to narrow to. A scheduled run has no parent
+  //    session — bounding it to something would take tools away from a cron run that nothing
+  //    promised to withhold. The set a role protects is "a child of a session", not
+  //    "everything that is not a root".
   const toolContext = engine.getToolContext();
   const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params, {
     tools: toolContext.tools,

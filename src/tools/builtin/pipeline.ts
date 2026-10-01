@@ -1014,7 +1014,13 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
   },
   handler: async (input: RunPipelineInput, agent): Promise<string> => {
     const rawPipelineConfig = agent.toolContext.userConfig;
-    const pipelineTools = agent.toolContext.tools;
+    // `getAvailableTools()`, not `toolContext.tools`: that context carries the ENGINE's
+    // registry, which for a child agent is wider than the child's own grant — a workflow step
+    // naming a tool the child does not hold would otherwise be served from it. The accessor's
+    // own docblock names pipeline child-agents as its consumers, so this restores a contract
+    // rather than adding one; the side effect on a root session is that workflow steps now
+    // honour user-disabled tools (`excludeTools`), which is what that docblock asks for.
+    const pipelineTools = agent.getAvailableTools();
     const pipelineStreamHandler = agent.toolContext.streamHandler;
     const pipelineRunHistory = agent.toolContext.runHistory;
     if (!rawPipelineConfig) {

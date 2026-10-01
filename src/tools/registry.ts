@@ -1,4 +1,5 @@
 import type { ToolEntry, ToolScopeConfig } from '../types/index.js';
+import { resolveTools } from './resolve-tools.js';
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolEntry>();
@@ -22,15 +23,11 @@ export class ToolRegistry {
   }
 
   scopedView(config: ToolScopeConfig): ToolEntry[] {
-    let entries = this.getEntries();
-    if (config.allowedTools) {
-      const allowed = new Set(config.allowedTools);
-      entries = entries.filter(e => allowed.has(e.definition.name));
-    }
-    if (config.deniedTools) {
-      const denied = new Set(config.deniedTools);
-      entries = entries.filter(e => !denied.has(e.definition.name));
-    }
-    return entries;
+    // Routed through `resolveTools` rather than resolving here a second time. An allow/deny
+    // pair becoming a tool list is one operation, and it has one home that bounds at a single
+    // exit; a copy of the vocabulary beside it is a template for the next route that forgets
+    // the bound. Faithful to what this did — `base ∩ allowed − denied`, and `[]` still admits
+    // nothing — so no caller sees a different answer.
+    return resolveTools(config.allowedTools, { deniedTools: config.deniedTools }, this.getEntries());
   }
 }
