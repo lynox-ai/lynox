@@ -431,7 +431,9 @@ describe('stop at ~80 % and resume (§7 c)', () => {
       runBulkEffect(runId, 'bulk_apply', effectDeps(writer)),
     ]);
     // Whichever loop finds the last target taken may end `pending`; at least one closes the run.
-    expect([a.status, b.status].every((st) => st === 'done' || st === 'pending')).toBe(true);
+    // The message carries both outcomes, so a failure names the status it saw.
+    const outcomes = JSON.stringify([a, b]);
+    expect([a.status, b.status].every((st) => st === 'done' || st === 'pending'), outcomes).toBe(true);
     expect([a.status, b.status]).toContain('done');
     expect(writes.size).toBe(210);
     expect([...writes.entries()].filter(([, c]) => c !== 1)).toEqual([]);
