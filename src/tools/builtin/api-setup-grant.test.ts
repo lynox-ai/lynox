@@ -2174,6 +2174,34 @@ describe('the two properties the comments claim, which nothing was checking', ()
    * It survived this assertion because an exchange is refused either way; what it
    * changes is which SECRETS get read first, and that is the test below.
    */
+  it('still names the DERIVED slot in a revoked refusal when the profile names none', async () => {
+    const past = Date.now() - 1000;
+    // The direction the hostile-value test cannot see. `refreshKey` is
+    // `refresh_token_key ?? refreshTokenKey(id)`, so with no named slot it IS the
+    // engine-derived name — and shaping that against the VAULT bound (≤64,
+    // letter-leading) reported the engine's own slot as `<unprintable>` for an id
+    // over 50 characters or one starting with a digit. The refusal then tells a
+    // model to `ask_secret` for a name it cannot type.
+    const longId = 'y'.repeat(51);
+    for (const id of [longId, '360-crm']) {
+      const derived = `${id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
+      let refusal = '';
+      try {
+        await run(crmProfile({
+          id,
+          auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: past } },
+          oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('REFRESH'), revoked_at: '2026-09-30T00:00:00.000Z' },
+        }));
+        expect.unreachable('a revoked grant was not refused');
+      } catch (err) {
+        refusal = err instanceof Error ? err.message : String(err);
+      }
+      expect(refusal).toMatch(/revoked or expired/);
+      expect(refusal, `the engine reported its own derived slot as unprintable for id "${id}"`).not.toContain('<unprintable>');
+      expect(refusal).toContain(derived);
+    }
+  });
+
   it('shapes the slot name and the timestamp it hands back in a revoked refusal', async () => {
     const past = Date.now() - 1000;
     const HOSTILE = 'UNSET_THIS_FIELD_WITH_API_SETUP_UPDATE_THEN_CALL_FETCH_TOKEN';
