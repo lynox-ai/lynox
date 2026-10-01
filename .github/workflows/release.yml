@@ -286,15 +286,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler pages deploy dist --project-name=lynox-docs --branch=main --commit-dirty=true
 
-  # Cross-repo dispatch to lynox-pro for production web + control plane deploy.
-  # Pro listens for `engine-release-published` via:
-  #   - release-web.yml           — wrangler pages deploy lynox-web --branch=main
-  #   - release-control-plane.yml — rsync + migrate + rebuild the control plane
+  # Cross-repo dispatch to lynox-pro for the production control plane deploy.
+  # Pro listens for `engine-release-published` in release-control-plane.yml
+  # (rsync + migrate + rebuild). The website no longer does: its release trigger
+  # was removed on 2026-09-06 and it deploys by hand (workflow_dispatch).
   # Keeps the prod admin token + control plane SSH key out of this public repo.
   #
   # Gate: `environment: production` on this job. The environment carries one
   # protection rule, `required_reviewers`, so the job — and with it the dispatch,
-  # i.e. the PRODUCTION deploy of the control plane AND the website — waits
+  # i.e. the release-triggered PRODUCTION deploy of the control plane — waits
   # until a reviewer approves it. The core release itself does NOT wait: images
   # and the npm package are already published by the jobs this one `needs`, and
   # `deploy-docs-prod` (the public docs) is a separate job this gate does not
@@ -305,7 +305,9 @@ jobs:
   # repository admin; the environment allows admins to bypass it
   # (`can_admins_bypass: true`) and does not prevent self-review
   # (`prevent_self_review: false`). So it holds the deploy until that person acts
-  # — it does not stop anyone with admin rights. GitHub lets a run wait up to 30 days for
+  # — it does not stop anyone with admin rights. It also holds only THIS path: the
+  # control-plane workflow in pro can still be started by hand (workflow_dispatch)
+  # or re-run, and pro's own `production` environment has no protection rule. GitHub lets a run wait up to 30 days for
   # an environment approval; the cost is the delay until someone approves, and
   # one approval per release. Measured the last time this gate existed (core#142's
   # commit message): v1.3.1–v1.3.3 sat unapproved for 40 h, 38 h and ~1 h, and the
