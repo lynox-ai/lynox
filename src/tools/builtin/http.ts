@@ -557,6 +557,21 @@ const API_SETUP_TOOL_NAME = 'api_setup';
  * the type system then stops questioning. This is the one place that has to
  * distrust it.
  *
+ * ⚠ Condition 2 is UNREACHABLE through `http_request`, and that is the honest
+ * description of what it is for. The handler dereferences `agent.toolContext`
+ * and `agent.sessionCounters.httpRequests` itself, both before it ever calls the
+ * attach — so an agent missing either cannot arrive here by that route. The only
+ * other caller is `attachStoredCredential`, the bulk worker effect's entry
+ * point, and its fabricated agent is missing BOTH at once. So no behavioural
+ * test can separate the two halves, and the predicate tests are the only
+ * witnesses that can exist for them. That was measured, after a count of killed
+ * mutants said "2" and a count of distinct WITNESSES said "2, both of one kind":
+ * the attempt to add an effect-level witness failed on unmutated code, at the
+ * handler's own counter check, which is how the unreachability was found.
+ *
+ * It stays because it is the barrier for the next caller that does not come
+ * through the handler — and one exists today.
+ *
  * ⚠ And condition 2 is NECESSARY, not SUFFICIENT — said plainly because the
  * cheap reading of it is that a caller which passes carries real guards. It
  * refuses a dereference that would throw, and it refuses the fabricated agent
