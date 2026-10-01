@@ -85,10 +85,15 @@ export default [
     // was enumerated nowhere. Four red plus five green is nine. A later round then
     // found five more by trying: `console?.warn(x)`, `console.warn.call(null, x)` and
     // `(0, console.warn)(x)` are RED; `const { warn: w } = console; w(x)` and
-    // `const { console: cc } = globalThis; cc.warn(x)` are GREEN. So the known universe
-    // is at least fourteen and the set is OPEN. Writing a closed-looking fraction over
-    // an unenumerated denominator is the same slip as a mutation count that was correct
-    // for one design — third time in this file, so it is written down as open.
+    // `const { console: cc } = globalThis; cc.warn(x)` are GREEN — each re-run here
+    // rather than inherited, because an inherited number is how the `enum` citation
+    // below went wrong.
+    //
+    // So of FOURTEEN shapes tried, seven are caught and seven are not, and the set is
+    // OPEN — five more appeared the first time somebody looked past the original nine.
+    // Writing a closed-looking fraction over an unenumerated denominator is the same
+    // slip as a mutation count that was correct for one design; third time in this
+    // file, so it is written as open rather than as a number.
     //
     //   RED    console.warn(x) · console['warn'](x) · (console).warn(x)
     //          const w = console.warn; w(x)          ← an alias DECLARATION, because
