@@ -172,6 +172,9 @@ describe('isEndpointAcked — persisted acceptance for runtime egress', () => {
   it('is host-bound — a DIFFERENT non-vetted host is not covered (swap-after-accept re-gates)', () => {
     expect(isEndpointAcked(ack, 'https://other-host.example/oauth/token')).toBe(false);
   });
+  it('covers a host by its exact name, not a longer name ending in an accepted one', () => {
+    expect(isEndpointAcked(ack, 'https://xshop.myshopify.com/admin/oauth/access_token')).toBe(false);
+  });
   it('fail-closed on a missing ack (pre-fix / disk-loaded profile)', () => {
     expect(isEndpointAcked(undefined, 'https://token-thief.example.com/oauth/token')).toBe(false);
   });
