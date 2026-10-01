@@ -113,7 +113,7 @@ export interface SuggestedApiCatalog {
    * API host — for WordPress, WooCommerce and Shopware there is no fixed host
    * at all, because the API is the user's own site. Three of them (bexio,
    * Notion, Airtable) additionally get an advisory note from bootstrap's
-   * same-domain host scan, but the drafted `base_url` is wrong in every case:
+   * parent-domain host scan, but the drafted `base_url` is wrong in every case:
    * the scan only appends "verify before swapping", it never swaps.
    */
   readonly connect_when_user_asks: readonly SuggestedApi[];

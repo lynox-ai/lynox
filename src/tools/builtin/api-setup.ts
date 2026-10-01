@@ -604,17 +604,22 @@ function deriveBaseUrlFromDocs(docsUrl: string): string {
   return `${u.protocol}//${u.host}`;
 }
 
-/** Last two labels — coarse stand-in for registrable domain; over-drops on
- *  multi-label TLDs (co.uk) but never under-drops (the security direction). */
-function lastTwoLabels(hostname: string): string {
-  const labels = hostname.toLowerCase().split('.');
-  if (labels.length < 2) return hostname.toLowerCase();
-  return labels.slice(-2).join('.');
+/** The parent a candidate host must sit under: the docs host without its first
+ *  label when it has more than two labels (`docs.example.com` → `example.com`),
+ *  otherwise the docs host itself. There is no public-suffix list here, so the
+ *  rule never reaches above the docs host's own parent: a sibling of the docs
+ *  host qualifies, while a docs host deep in a tree (`a.docs.example.com`) drops
+ *  hosts outside `docs.example.com` even when they belong to the same
+ *  organisation. In doubt a candidate is dropped. */
+function candidateParent(docsHost: string): string {
+  const labels = docsHost.split('.');
+  return labels.length > 2 ? labels.slice(1).join('.') : docsHost;
 }
 
-/** Same-domain alt-host candidates referenced in the docs body. Cross-domain
- *  hosts are dropped — surfacing them would let a hostile docs page steer
- *  weak agents at attacker.com. The same-domain check is load-bearing. */
+/** Alt-host candidates referenced in the docs body that sit under the docs
+ *  host's parent (see `candidateParent`). Every other host is dropped —
+ *  surfacing it would let a hostile docs page steer weak agents at a host of
+ *  its choosing. The parent check is load-bearing. */
 function findApiHostCandidates(html: string, docsUrl: string): string[] {
   let docsHost: string;
   try {
@@ -622,14 +627,14 @@ function findApiHostCandidates(html: string, docsUrl: string): string[] {
   } catch {
     return [];
   }
-  const docsDomain = lastTwoLabels(docsHost);
+  const parentSuffix = `.${candidateParent(docsHost)}`;
   const re = /https?:\/\/((?:api[\w-]*|gateway[\w-]*|graphql[\w-]*|rest[\w-]*|edge[\w-]*)\.[a-z0-9.-]+\.[a-z]{2,})/gi;
   const seen = new Set<string>();
   const candidates: string[] = [];
   for (const match of html.matchAll(re)) {
     const host = (match[1] ?? '').toLowerCase();
     if (!host || host === docsHost) continue;
-    if (lastTwoLabels(host) !== docsDomain) continue;
+    if (!host.endsWith(parentSuffix)) continue;
     if (seen.has(host)) continue;
     seen.add(host);
     candidates.push(host);
@@ -1011,14 +1016,15 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ];
   }
 
-  // Surface same-domain alt-host candidates (api.foo.com vs docs.foo.com).
-  // Cross-domain candidates are dropped in findApiHostCandidates to avoid
-  // an attacker docs page steering vault auth at a foreign host.
+  // Surface alt-host candidates under the docs host's parent (api.foo.com vs
+  // docs.foo.com). Every other host is dropped in findApiHostCandidates, so a
+  // hostile docs page cannot steer vault auth at a host of its choosing. The
+  // notes below say what was checked (the parent), not more.
   const apiHostCandidates = findApiHostCandidates(docsText, docsUrl);
   if (apiHostCandidates.length > 0) {
     draft.notes = [
       ...(draft.notes ?? []),
-      `same-domain alt host(s) observed in docs: ${apiHostCandidates.join(', ')} — verify against authoritative source before swapping base_url`,
+      `alt host(s) under the docs host's parent domain (${candidateParent(new URL(docsUrl).hostname.toLowerCase())}) observed in docs: ${apiHostCandidates.join(', ')} — verify against authoritative source before swapping base_url`,
     ];
   }
 
@@ -1034,7 +1040,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     ? `\nIncluded ${String(fetchedSections.length)} linked section(s): ${fetchedSections.map(s => s.url).join(', ')}`
     : '';
   const hostHintNote = apiHostCandidates.length > 0
-    ? `\nbase_url note: docs host is ${new URL(docsUrl).hostname}; same-domain alt host(s) referenced in the body: ${apiHostCandidates.join(', ')}. Verify before swapping — these are observations from the docs page, not validated endpoints.`
+    ? `\nbase_url note: docs host is ${new URL(docsUrl).hostname}; alt host(s) under its parent domain referenced in the body: ${apiHostCandidates.join(', ')}. Verify before swapping — these are observations from the docs page, not validated endpoints.`
     : '';
 
   return `Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).
