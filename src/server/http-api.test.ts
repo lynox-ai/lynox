@@ -338,7 +338,7 @@ vi.mock('../core/config.js', () => ({
 // Keep _initPushChannel a deterministic no-op — with getLynoxDir now mocked
 // it would otherwise generate VAPID keys on disk during init().
 vi.mock('../integrations/push/web-push-channel.js', () => ({
-  WebPushNotificationChannel: class { /* test no-op */ },
+  WebPushNotificationChannel: class { /* test no-op */ subscribe(): void { /* accepted */ } },
 }));
 
 // POST /api/workflows/:id/run dynamically imports the pipeline tool module.
@@ -7253,6 +7253,42 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('PUT /api/config accepts a curated api_base_url by its exact value, not a longer URL that starts with it', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'anthropic', api_base_url: 'https://api.anthropic.com.example.org' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('only the curated Anthropic/Mistral endpoints');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config pairs provider openai only with the exact curated Mistral URL, not a longer URL that starts with it', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ provider: 'openai', api_base_url: 'https://api.mistral.ai.example.org/v1' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          // This provider check speaks first; a later, general endpoint check
+          // would refuse the same URL with a different message.
+          expect(body.error).toContain("provider 'openai' is only allowed with the curated Mistral preset");
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it('PUT /api/config does NOT reject the curated Anthropic host as an endpoint (no over-rejection of the legit switch)', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
@@ -9037,6 +9073,24 @@ describe('metered audio routes: managed credit gate + debit', () => {
   async function readSse(res: Response): Promise<string> {
     return res.text();
   }
+
+  describe('POST /api/push/subscribe', () => {
+    const sub = (endpoint: string) => ({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } } });
+
+    it('accepts a known push service and its subdomains', async () => {
+      const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/x')) });
+      expect(res.status).toBe(201);
+      const nested = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://eu.web.push.apple.com/x')) });
+      expect(nested.status).toBe(201);
+    });
+
+    it('matches a push service at a label boundary, not a longer name ending in it', async () => {
+      const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://notfcm.googleapis.com/fcm/send/x')) });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('Subscription endpoint must be a valid push service');
+    });
+  });
 
   describe('POST /api/speak', () => {
     it('blocks with 402 when the onBeforeRun hook denies (budget exhausted) — never synthesizes', async () => {
