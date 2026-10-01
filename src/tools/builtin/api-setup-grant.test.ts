@@ -1746,6 +1746,29 @@ describe('what the log says when a renewal is declined', () => {
     expect(oauthRenewalDeclinedDiagnosis(divergent, 'empty')).not.toContain('offline_access');
   });
 
+  it('explains WHY an unrunnable grant type is refused, not just which one it is', async () => {
+    const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
+    // Restored. The removal of the per-shape remedies took this sentence with
+    // them, and it is a FACT rather than a remedy — the only thing in the line
+    // that explains why this shape is refused at all. Without it the operator
+    // reads a quoted value and no reason, and the allowlist happily accepts the
+    // bare "it declares auth.oauth.grant_type "password"" clause: a guard that
+    // forbids remedies cannot notice a missing fact.
+    const line = oauthRenewalDeclinedDiagnosis(
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { grant_type: 'password' } } } as never,
+      'foreign',
+    );
+    expect(line).toContain('neither "refresh_token" nor "client_credentials"');
+    expect(line).toContain('no exchange here can run it');
+    // And the two runnable values keep the short form, so the explanation is not
+    // noise on every line.
+    const cc = oauthRenewalDeclinedDiagnosis(
+      { ...base, auth: { type: 'oauth2' as const, vault_keys: [], oauth: { grant_type: 'client_credentials' } }, oauth_grant: { origin: 'callback' as const } } as never,
+      'empty',
+    );
+    expect(cc).not.toContain('no exchange here can run it');
+  });
+
   it('names BOTH slots when they diverge, and neither as the one to keep', async () => {
     const { oauthRenewalDeclinedDiagnosis } = await import('./http.js');
     // The fact a reader cannot get anywhere else. V3 turned it into "remove the
