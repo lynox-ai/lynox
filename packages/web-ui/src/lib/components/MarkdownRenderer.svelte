@@ -86,6 +86,12 @@
 		if (mermaidInitTheme !== theme) {
 			mermaid.initialize({
 				startOnLoad: false,
+				// mermaid 12 changed the default layout and look, which re-lays out and
+				// recolours existing diagrams. Pinned to the mermaid 11 defaults so a
+				// version bump does not also change how diagrams look; moving to the new
+				// look is a separate, deliberate change.
+				layout: 'dagre',
+				look: 'classic',
 				theme: theme === 'light' ? 'default' : 'dark',
 				themeVariables: mermaidVars(theme)
 			});

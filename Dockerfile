@@ -21,6 +21,9 @@ WORKDIR /app
 # package's own postinstall). LEFTHOOK=0 makes lefthook skip — git hooks are a
 # dev-machine concern, never needed in an image build.
 ENV LEFTHOOK=0
+# onnxruntime-node's postinstall fetches only CUDA/TensorRT providers on
+# linux/x64 (~300 MB, never loaded; the CPU runtime ships in the package).
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -48,6 +51,9 @@ ARG BUILD_SHA=
 ENV BUILD_SHA=${BUILD_SHA}
 # See build-engine stage: skip lefthook's git-dependent postinstall in the build.
 ENV LEFTHOOK=0
+# The web-ui install also installs the workspace root's dependencies, so the
+# onnxruntime-node postinstall runs here too (see build-engine stage).
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
@@ -78,9 +84,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && corepack enable && corepack prepare pnpm@10 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# onnxruntime-node: skip the postinstall download (CUDA/TensorRT providers only on
+# linux/x64, ~300 MB, never loaded — the CPU runtime ships in the npm package),
+# and remove the provider files in case a warm store's side-effects cache put them
+# back. Then prove the CPU runtime still loads in this image.
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile --prod \
-    && node -e "const db = require('better-sqlite3')(':memory:'); db.prepare('SELECT 1').get(); db.close(); console.log('better-sqlite3 OK')"
+    && node -e "const db = require('better-sqlite3')(':memory:'); db.prepare('SELECT 1').get(); db.close(); console.log('better-sqlite3 OK')" \
+    && ORT_DIR="$(ls -d node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node)" \
+    && rm -f "$ORT_DIR"/bin/napi-v6/linux/*/libonnxruntime_providers_*.so \
+    && test -z "$(find "$ORT_DIR/bin" -name 'libonnxruntime_providers_*')" \
+    && node -e "require(require('path').resolve(process.argv[1])); console.log('onnxruntime-node OK')" "$ORT_DIR"
 
 # --- Stage 4: Whisper.cpp (audio transcription) ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS whisper-build

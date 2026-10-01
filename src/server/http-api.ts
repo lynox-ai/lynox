@@ -6907,7 +6907,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -6922,11 +6922,40 @@ export class LynoxHTTPApi {
       const voiceFromConfig = readUserConfig().tts_voice;
       const voice = voiceFromRequest ?? (typeof voiceFromConfig === 'string' && voiceFromConfig.length > 0 ? voiceFromConfig : undefined);
       const model = b && typeof b['model'] === 'string' ? b['model'] : undefined;
-      // Caller-provided source language for text-prep (Web UI passes user's
-      // UI locale). Falls back to 'auto' — leaf runs a stopword vote.
+      // ONE caller-supplied value, TWO consumers with different vocabularies — which is
+      // why it becomes two fields rather than one widened type. `lang` is the
+      // pre-processor's source-text language and is binary by design (`Lang = 'de'|'en'`,
+      // which its own docblock calls the Markdown → spoken-text language);
+      // `voiceLanguage` is the provider catalogue's tag, and that catalogue already
+      // contains values `Lang` cannot express (`fr`, normalised from `fr_fr`).
+      //
+      // Widening `Lang` instead would have pushed the catalogue's vocabulary into text
+      // preparation AND into `src/core/transcribe/`, a different feature that enumerates
+      // the same literals. The gap is at voice selection, so that is where the new value
+      // goes.
       const langRaw = b && typeof b['lang'] === 'string' ? b['lang'] : undefined;
+      // ⚠⚠ ONE rule gates BOTH derivations, and getting there took two attempts.
+      //
+      // First the comparison was `langRaw === 'de' || … === 'en'`: case-sensitive and
+      // bare-two-letter, while the voice rule is case-insensitive and region-tolerant. So
+      // `DE` and `de-CH` reached the voice and left text-prep guessing.
+      //
+      // Then it derived `lang` from the tag's HEAD — which fixed that class and opened a
+      // new one in the same direction: `de_`, `de-x`, `de_abcde` and any three-subtag locale
+      // (`de-CH-1996`, `en-Latn-US`) have a head the comparison accepts, so they forced
+      // text preparation in that language while the shape rule rejected them for the voice.
+      // (⚠ The first version of this sentence said all five "have the head `de`" — and
+      // `en-Latn-US` has the head `en` and forced ENGLISH. One of its own examples
+      // contradicted it.) Measured: before that change both fields were undefined —
+      // agreement — and after it they disagreed. A fix that moves a disagreement is not
+      // a fix.
+      //
+      // Now the shape rule decides FIRST, and both consumers read what it accepted.
+      const tag = isVoiceLanguageTag(langRaw) ? langRaw : undefined;
+      const langHead = tag?.toLowerCase().split(/[-_]/)[0];
       const lang: Lang | 'auto' | undefined =
-        langRaw === 'de' || langRaw === 'en' || langRaw === 'auto' ? langRaw : undefined;
+        langHead === 'de' || langHead === 'en' ? langHead : langRaw?.toLowerCase() === 'auto' ? 'auto' : undefined;
+      const voiceLanguage = tag;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without
@@ -6970,6 +6999,7 @@ export class LynoxHTTPApi {
         ...(voice ? { voice } : {}),
         ...(model ? { model } : {}),
         ...(lang ? { lang } : {}),
+        ...(voiceLanguage ? { voiceLanguage } : {}),
       });
 
       if (meta) {

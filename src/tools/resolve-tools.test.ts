@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveTools, type ToolResolutionProfile } from './resolve-tools.js';
+import { resolveTools, withinSurface, type ToolResolutionProfile } from './resolve-tools.js';
 import type { ToolEntry } from '../types/index.js';
 
 /**
@@ -17,6 +17,27 @@ const tool = (name: string): ToolEntry => ({
 
 const BASE = [tool('read_file'), tool('task_list'), tool('bash'), tool('write_file')];
 const names = (entries: ToolEntry[]): string[] => entries.map(t => t.definition.name);
+
+describe('withinSurface', () => {
+  it('answers on NAMES, so a filtered copy counts as the same grant', () => {
+    // Identity would be the wrong test: a route may hand on the parent's own objects or a
+    // filtered copy of them, and both are the same grant. Asserted in both directions so the
+    // predicate cannot degrade into `derived.length <= parent.length`.
+    expect(withinSurface([tool('read_file')], BASE)).toBe(true);
+    expect(withinSurface(BASE.filter(t => t.definition.name !== 'bash'), BASE)).toBe(true);
+    expect(withinSurface([tool('never_registered')], BASE)).toBe(false);
+    expect(withinSurface([tool('read_file'), tool('never_registered')], BASE)).toBe(false);
+  });
+
+  it('an empty derived list is within any surface, and that is not a pass for a route', () => {
+    // True by definition and stated because it is the trap: a route that grants NOTHING
+    // satisfies this predicate. Every route test therefore asserts a non-empty result beside
+    // it — the predicate bounds the grant, it does not prove one was made.
+    expect(withinSurface([], BASE)).toBe(true);
+    expect(withinSurface([], [])).toBe(true);
+    expect(withinSurface([tool('read_file')], [])).toBe(false);
+  });
+});
 
 describe('resolveTools — the request, then the bound', () => {
   it('an explicit list narrows within a profile and cannot reach past its denylist', () => {

@@ -4,8 +4,9 @@
  * After a deploy, an already-open tab keeps running yesterday's JS whose
  * content-hashed dynamic-import chunks 404 against the new server. Vite fires
  * a `vite:preloadError` event for every such failed dynamic import (Mermaid's
- * lazy chunk, route chunks, …). The root layout listens for it and calls
- * `triggerStaleReload()` to hard-reload onto the fresh build, and the Mermaid
+ * lazy chunk, route chunks, …), and also for a chunk that loaded but failed to
+ * parse or run. The root layout listens via `onPreloadError`, which calls
+ * `triggerStaleReload()` only for the load failures, and the Mermaid
  * renderer reuses `isChunkLoadError` so a stale-chunk failure is not masked as
  * a diagram-syntax error.
  *
@@ -19,11 +20,12 @@
 
 /**
  * Browser messages emitted when a dynamic `import()` / module preload fails to
- * fetch — the stale-content-hashed-chunk-after-deploy signature. Deliberately
+ * fetch — the stale-content-hashed-chunk-after-deploy signature — plus Vite's own
+ * message for a CSS chunk that fails to preload (same cause, same event). Deliberately
  * NOT matched: real errors thrown inside a successfully-loaded module.
  */
 const CHUNK_LOAD_ERROR_RE =
-	/Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i;
+	/Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS for/i;
 
 /** sessionStorage key holding the epoch-ms of the last auto-reload attempt. */
 export const STALE_RELOAD_ATTEMPT_KEY = 'lyx-stale-reload-attempt';
@@ -95,4 +97,20 @@ export function triggerStaleReload(): void {
 	} catch {
 		window.location.reload();
 	}
+}
+
+/**
+ * Listener for Vite's `vite:preloadError`. Vite dispatches that event for EVERY rejected
+ * dynamic import — not only a stale chunk that 404s after a deploy, but also a chunk that
+ * was fetched fine and then failed to parse or run (a browser older than the chunk's
+ * syntax floor, a throw at module top level). Reloading helps only in the first case: in
+ * the others the reload fetches the same chunk and fails the same way, so the user gets a
+ * page reload for nothing before the loop guard stops it.
+ *
+ * So reload only for a chunk-load failure. Anything else is left alone: the event is not
+ * cancelled, Vite rethrows the error, and it reaches the importer's own `catch` (the
+ * Mermaid renderer shows its error box there).
+ */
+export function onPreloadError(event: Event): void {
+	if (isChunkLoadError((event as Event & { payload?: unknown }).payload)) triggerStaleReload();
 }

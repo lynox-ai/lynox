@@ -9116,6 +9116,102 @@ describe('metered audio routes: managed credit gate + debit', () => {
       expect(mockSpeakStream).not.toHaveBeenCalled();
     });
 
+    // ── `lang` feeds TWO consumers with different vocabularies ────────────────────
+    // The request carries one value; the route derives the pre-processor's `lang`
+    // (binary `'de'|'en'` plus `'auto'`) and the catalogue's `voiceLanguage`
+    // separately. These cases exist because conflating them was the obvious design
+    // and the wrong one: it would have pushed catalogue tags into text preparation
+    // and into `src/core/transcribe/`.
+    // ⚠ Asserts the facade was REACHED before reading its options. Without this the three
+    // `toBeUndefined()` cases below pass vacuously whenever the route returns early — and
+    // under a filtered run (`-t "POST /api/speak"`) that is exactly what happens: the
+    // positive cases fail loudly while the negative ones, which are the entire mechanical
+    // guarantee of the shape rule, go green for the wrong reason. A guard that is green
+    // when it did not run is not a guard.
+    const optsOf = (): Record<string, unknown> => {
+      expect(mockSpeakStream, 'the route never reached the speak facade — this assertion would pass vacuously').toHaveBeenCalled();
+      return (mockSpeakStream.mock.calls[0]?.[2] ?? {}) as Record<string, unknown>;
+    };
+
+    async function speakWithLang(lang: unknown): Promise<void> {
+      mockSpeakStream.mockResolvedValue({ characters: 5, model: 'm', voice: 'v', latencyMs: 1, ttfbMs: 1 });
+      const res = await jsonFetch('/api/speak', {
+        method: 'POST',
+        body: JSON.stringify({ text: 'hello', ...(lang === undefined ? {} : { lang }) }),
+      });
+      expect(res.status).toBe(200);
+      await readSse(res);
+    }
+
+    it('derives BOTH fields from ONE tag, and they agree on case and region', async () => {
+      // ONE tag decides BOTH fields, asserted on every row: `lang` for text preparation and
+      // `voiceLanguage` for the catalogue, agreeing on case and region. The single-case tests
+      // this table replaced are in the git history.
+      //
+      // ⚠ There is deliberately no request count in this comment, and the reason is the
+      // history of this very block. Its first version justified the collapse with the per-IP
+      // rate budget — a false reason: the budget is spent per REQUEST, not per `it()`, so
+      // folding cases into a loop saves nothing. Every later revision then re-counted and got
+      // a different number wrong, including one that a later commit of mine falsified a few
+      // lines below while the comment still asserted it. Nothing in the build checks a number
+      // in a comment, so the counts live in the PR body against a head SHA instead.
+      //
+      // The budget hazard itself is real and was measured (two unrelated oauth tests failing
+      // with 429 when an earlier version added requests), and `RATE_WINDOW_MS` /
+      // `RATE_MAX_LOOPBACK` are as quoted — it is simply not what this shape is for. A true
+      // general lesson does not make a false causal claim true.
+      //
+      // ⚠ `en_GB` expecting `lang: 'en'` is a CHANGED expectation. The first version of this
+      // test asserted `lang` was undefined there — it encoded the inconsistency it should
+      // have caught: the voice rule is case-insensitive and region-tolerant while the
+      // text-prep comparison was case-sensitive and bare-two-letter, so `DE` and `de-CH`
+      // reached one consumer and not the other, silently.
+      for (const [raw, lang, voiceLanguage] of [
+        ['fr', undefined, 'fr'],        // `Lang` cannot express fr → text-prep detects; the voice gets the tag
+        ['de', 'de', 'de'],             // both consumers know it
+        ['DE', 'de', 'DE'],             // case
+        ['de-CH', 'de', 'de-CH'],       // a real UI locale
+        ['en_GB', 'en', 'en_GB'],       // region subtag the catalogue carries
+        ['auto', 'auto', undefined],    // detect the text; nothing to detect a voice against
+        // ⚠ The class a previous fix INTRODUCED while closing another: these have the head
+        // `de`/`en`, so deriving `lang` from the head alone forced German text-prep while the
+        // shape rule rejected them for the voice. Before that fix both fields were undefined —
+        // agreement — and after it they disagreed. Now one rule gates both, so both are unset.
+        ['de_', undefined, undefined],
+        ['de-CH-1996', undefined, undefined],
+      ] as const) {
+        mockSpeakStream.mockClear();
+        await speakWithLang(raw);
+        expect(optsOf()['lang'], `lang for ${raw}`).toBe(lang);
+        expect(optsOf()['voiceLanguage'], `voiceLanguage for ${raw}`).toBe(voiceLanguage);
+      }
+    });
+
+    it('refuses a value that is not shaped like a language tag', async () => {
+      // A public endpoint whose value reaches a comparison against provider data and a
+      // diagnostic: a traversal string, a statement separator, and something far too long.
+      //
+      // Two further shapes an earlier version carried here — the empty string and a long
+      // hyphenated word — are gone, and NOT for the budget reason the comment above retracts.
+      // They are dominated by the shape rule's own reject table in voice-for-language.test.ts:
+      // `'d'` rejects anything below the minimum length, which subsumes the empty string, and
+      // `'abcd'` plus `'deu_latn_ch'` cover an over-long first segment and a three-subtag
+      // value. A case whose mutant another case already kills is not coverage.
+      for (const bogus of ['../../etc/passwd', 'de; DROP TABLE', 'x'.repeat(50)]) {
+        mockSpeakStream.mockClear();
+        await speakWithLang(bogus);
+        expect(optsOf()['voiceLanguage'], `rejected: ${JSON.stringify(bogus)}`).toBeUndefined();
+        expect(optsOf()['lang'], `rejected: ${JSON.stringify(bogus)}`).toBeUndefined();
+      }
+    });
+
+    it('ignores a non-string `lang` instead of coercing it', async () => {
+      mockSpeakStream.mockClear();
+      await speakWithLang(42);
+      expect(optsOf()['voiceLanguage']).toBeUndefined();
+      expect(optsOf()['lang']).toBeUndefined();
+    });
+
     it('synthesizes and debits the TTS cost via onAfterRun on the happy path', async () => {
       const onBeforeRun = vi.fn();
       const onAfterRun = vi.fn();

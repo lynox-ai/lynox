@@ -303,6 +303,89 @@ describe('a payload problem is not reported as a pagination problem', () => {
   });
 });
 
+describe('the provider object really is wired to the catalogue', () => {
+  it('reaches the real fetch through `mistralVoxtralTtsProvider.listVoices`', async () => {
+    // ⚠ Every other test spies `listVoices` away, so the one line that connects the
+    // provider contract to the catalogue — `listVoices() { return listMistralVoices(); }` —
+    // had NO witness: a reviewer replaced its body with `Promise.resolve([])` and all 123
+    // tests stayed green. Production voice selection was therefore untested at the seam
+    // that matters. This calls the real object method.
+    vi.stubGlobal('fetch', stubMistral());
+    vi.resetModules();
+    const mod = await import('./mistral-voxtral-tts.js');
+
+    const voices = await mod.mistralVoxtralTtsProvider.listVoices?.();
+
+    expect(voices).toHaveLength(TOTAL);
+    expect(voices?.map((v) => v.id)).toContain('fr_marie_neutral');
+    expect(requested.length).toBeGreaterThan(0);
+  });
+});
+
+describe('concurrent callers share one walk, instead of each starting their own', () => {
+  it('makes ONE set of provider requests for two simultaneous cold-cache calls', async () => {
+    // ⚠ Measured by a security pass rather than reasoned: the cache is only written when
+    // a walk FINISHES, so before this every request arriving DURING a walk saw a miss and
+    // started another. The path existed (the settings picker reads the catalogue), but
+    // routing voice selection through it made it hot — once per `POST /api/speak` instead
+    // of once per page load — so the change widened a pre-existing amplifier.
+    //
+    // The fixture holds the first response open until both callers are inside.
+    //
+    // ⚠ And the claim that used to stand here — "a stub that answers immediately … would
+    // pass either way" — is FALSE, measured by a reviewer: with an immediate stub and the
+    // single-flight REMOVED the test still fails, because the awaits inside the walk keep
+    // the cache cold until both calls have started. The gate makes the concurrency
+    // deliberate rather than incidental, which is worth having; it is not what makes the
+    // assertion able to fail. A sequential pair is the only shape that passes either way.
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    let released = false;
+    const all = catalogue();
+    const fetchSpy = vi.fn(async (input: string) => {
+      requested.push(String(input));
+      if (!released) { released = true; await gate; }
+      const off = Number(new URL(String(input)).searchParams.get('offset') ?? '0');
+      return {
+        ok: true,
+        json: async () => ({ items: all.slice(off, off + SERVER_PAGE), total: all.length }),
+      } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const listVoices = await freshListVoices();
+    const first = listVoices();
+    const second = listVoices();
+    release();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(a).toHaveLength(TOTAL);
+    expect(b).toHaveLength(TOTAL);
+    // Six requests is ONE walk at this page size (5 data pages + the empty tail). Twelve
+    // would mean both callers walked.
+    expect(offsets()).toEqual(['0', '7', '14', '21', '28', '30']);
+  });
+
+  it('starts a NEW walk once the shared one has settled and the cache expired', async () => {
+    // The `finally` that clears the in-flight promise: without it a settled promise would
+    // be handed to every later caller for the rest of the process.
+    //
+    // ⚠ Renamed. It used to say "so a failure is not remembered", and it never exercised a
+    // failure — `walkMistralVoices` catches its own errors and does not reject, so no
+    // rejection path exists to remember. What this actually covers is TTL expiry, and the
+    // name now says that. A test name is a claim like any other.
+    vi.stubGlobal('fetch', stubMistral());
+    const listVoices = await freshListVoices();
+    await listVoices();
+    const afterFirst = requested.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    // Past the long TTL: the cache is cold again, and a second walk must actually run.
+    vi.setSystemTime(Date.now() + 2 * 60 * 60_000);
+    await listVoices();
+    expect(requested.length).toBeGreaterThan(afterFirst);
+  });
+});
+
 describe('the cache keeps a clean result longer than a doubtful one', () => {
   // The cache layer had no test at all, and this change ADDED logic to it: a
   // complete walk is held for an hour, a doubtful one for a minute. Before, an

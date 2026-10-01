@@ -378,7 +378,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
-        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
         "with": {
           "node-version": "22"
         }
@@ -412,7 +412,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
-        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
         "with": {
           "node-version": "22"
         }
@@ -442,7 +442,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
         "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
       },
       {
-        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
         "with": {
           "node-version": "22"
         }
@@ -548,16 +548,24 @@ function pinnedJobOf(where: string): unknown {
  * pin kills — simply moves one line up and is invisible again. Same class, one
  * level higher, so it is compared the same way: everything except `name`, `on`
  * and `jobs`, which have their own pins.
+ *
+ * `ONNXRUNTIME_NODE_INSTALL: skip` (ci.yml, release.yml): it must reach every
+ * job that runs `pnpm install`, and those include the pinned gate jobs, whose
+ * install step sits before the scan — a job- or step-level key would edit the
+ * job pin instead. It only tells onnxruntime-node's postinstall not to fetch the
+ * CUDA/TensorRT providers; it changes no PATH, tool or scanner input.
  */
 const PINNED_WORKFLOW: Readonly<Record<string, unknown>> = {
   "ci.yml": {
     "env": {
-      "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": true
+      "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": true,
+      "ONNXRUNTIME_NODE_INSTALL": "skip"
     }
   },
   "release.yml": {
     "env": {
-      "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": true
+      "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": true,
+      "ONNXRUNTIME_NODE_INSTALL": "skip"
     }
   },
   "dep-scan-daily.yml": {
@@ -571,6 +579,27 @@ const PINNED_WORKFLOW: Readonly<Record<string, unknown>> = {
     }
   }
 };
+
+/**
+ * Every leaf path that differs between two normalised objects, as
+ * `+path=value` (only in actual), `-path=value` (only in expected) or
+ * `~path: expected → actual`. A count like `{ env: {…(2)} }` names nothing.
+ */
+function describeDifference(actual: unknown, expected: unknown, path = ''): string[] {
+  const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (isObj(actual) && isObj(expected)) {
+    const keys = [...new Set([...Object.keys(actual), ...Object.keys(expected)])].sort();
+    return keys.flatMap((k) => {
+      const p = path ? `${path}.${k}` : k;
+      if (!Object.hasOwn(expected, k)) return [`+${p}=${JSON.stringify(actual[k])}`];
+      if (!Object.hasOwn(actual, k)) return [`-${p}=${JSON.stringify(expected[k])}`];
+      return describeDifference(actual[k], expected[k], p);
+    });
+  }
+  return JSON.stringify(actual) === JSON.stringify(expected)
+    ? []
+    : [`~${path || '(root)'}: ${JSON.stringify(expected)} → ${JSON.stringify(actual)}`];
+}
 
 function workflowLevelOf(file: string): unknown {
   const doc = parseYaml(readFileSync(WORKFLOW_DIR + file, 'utf8')) as Record<string, unknown>;
@@ -637,6 +666,16 @@ describe('the install action, whole', () => {
   });
 });
 
+describe('the pin diagnostics name what moved', () => {
+  it('lists added, removed and changed leaves by path', () => {
+    expect(describeDifference(
+      { env: { A: 1, B: 'skip' }, keep: { x: true } },
+      { env: { A: 2, C: 'old' }, keep: { x: true } },
+    )).toEqual(['~env.A: 2 → 1', '+env.B="skip"', '-env.C="old"']);
+    expect(describeDifference({ a: [1] }, { a: [1] })).toEqual([]);
+  });
+});
+
 describe('the surroundings of the pinned shell', () => {
   for (const where of Object.keys(PINNED_JOB)) {
     it(`${where} is exactly the reviewed job, up to and including the gate`, () => {
@@ -653,13 +692,26 @@ describe('the surroundings of the pinned shell', () => {
 
   for (const file of Object.keys(PINNED_TRIGGERS)) {
     it(`${file} still fires on exactly what was reviewed`, () => {
-      expect(triggersOf(file)).toEqual(PINNED_TRIGGERS[file]);
+      // Same rule as the job pin: say which reading applies, here.
+      const actual = triggersOf(file);
+      expect(
+        actual,
+        `${file}: the trigger block differs from the reviewed one (${describeDifference(actual, PINNED_TRIGGERS[file]).join('; ')}). ` +
+        `If you changed when this workflow runs on purpose, update PINNED_TRIGGERS in this file in the SAME commit and say what moved in the pull request. ` +
+        `If you did not, something changed when the dependency gate runs — a narrowed filter can stop it from running at all.`,
+      ).toEqual(PINNED_TRIGGERS[file]);
     });
   }
 
   for (const file of Object.keys(PINNED_WORKFLOW)) {
     it(`${file} carries exactly the reviewed workflow-level keys`, () => {
-      expect(workflowLevelOf(file)).toEqual(PINNED_WORKFLOW[file]);
+      const actual = workflowLevelOf(file);
+      expect(
+        actual,
+        `${file}: the workflow-level keys differ from the reviewed ones (${describeDifference(actual, PINNED_WORKFLOW[file]).join('; ')}). ` +
+        `They reach into every job, the gate job included. If you added or changed one on purpose, update PINNED_WORKFLOW in this file in the SAME commit, ` +
+        `say what moved and why it must sit at workflow level in the pull request. If you did not, something can now reach the pinned gate from one level up — a PATH or env that shadows the scanner is exactly what this pin exists for.`,
+      ).toEqual(PINNED_WORKFLOW[file]);
     });
   }
 
