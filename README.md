@@ -61,7 +61,7 @@ Full docs at **[docs.lynox.ai](https://docs.lynox.ai)** — getting started, int
 └────────────────┘  └───────────────────┘
 ```
 
-**BYOK** — You provide your LLM credential (Anthropic and Mistral are the natively-supported and tested paths; Ollama and Fireworks are verified end-to-end; other OpenAI-compatible endpoints / LiteLLM / Vertex are wired but experimental). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via `LYNOX_BUGSINK_DSN` for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
+**BYOK** — You provide your LLM credential (Anthropic and Mistral are the natively-supported and tested paths; Ollama and Fireworks are verified end-to-end; other OpenAI-compatible endpoints / LiteLLM are wired but experimental; Vertex is wired but not usable in the Docker image). When self-hosted, lynox calls the LLM API directly: no proxy, no middleman, and no telemetry unless you opt in via `LYNOX_BUGSINK_DSN` for error reporting. Your data stays on the host you control. (Managed tier opt-in routes via the lynox control plane — see the Managed page for that flow.)
 
 ## Key capabilities
 
