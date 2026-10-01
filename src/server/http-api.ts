@@ -1867,6 +1867,22 @@ export class LynoxHTTPApi {
     return { exhaust_eta_iso: new Date(etaMs).toISOString(), projection_basis_days: window.length };
   }
 
+  /**
+   * The port the server is actually bound to — the real one also after `start(0)`, which lets the
+   * operating system pick a free port. `undefined` before `start()` resolves and after `shutdown()`.
+   */
+  get boundPort(): number | undefined {
+    const addr = this.server?.address();
+    return addr !== null && addr !== undefined && typeof addr === 'object' ? addr.port : undefined;
+  }
+
+  /**
+   * Bind and listen. Resolves once the socket is LISTENING, so `boundPort` is set when it returns.
+   *
+   * Port `0` asks the OS for a free port. Tests use that: a fixed test port made two concurrent runs
+   * of one file answer each other's requests — one run reached the OTHER run's server, the other
+   * saw connection refusals — and both read as genuine failures (or, worse, as passes).
+   */
   async start(port: number): Promise<void> {
     // Web UI mode binds to 0.0.0.0 — without a secret, the engine API would
     // be reachable unauthenticated from any container network neighbour.
@@ -1962,9 +1978,10 @@ export class LynoxHTTPApi {
       throw err;
     });
 
+    const listening = new Promise<void>((resolve) => { this.server?.once('listening', () => { resolve(); }); });
     this.server.listen(port, host, () => {
       const authStatus = secret ? '(auth enabled)' : '(localhost only)';
-      process.stderr.write(`lynox HTTP API listening on ${protocol}://${host}:${port} ${authStatus}\n`);
+      process.stderr.write(`lynox HTTP API listening on ${protocol}://${host}:${String(this.boundPort ?? port)} ${authStatus}\n`);
       if (ALLOWED_IPS.length > 0) {
         process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
       }
@@ -1989,6 +2006,8 @@ export class LynoxHTTPApi {
     // Session idle eviction — prevents unbounded memory growth
     this.sessionStore.setRunningCheck((id) => this.runningSessions.has(id));
     this.sessionStore.startEviction();
+
+    await listening;
   }
 
   async shutdown(): Promise<void> {
