@@ -198,7 +198,15 @@ export function loadConfig(): LynoxUserConfig {
     'pipeline_context_limit', 'pipeline_step_result_limit',
     'memory_extraction_limit', 'http_response_limit', 'http_html_extract',
     'enforce_https',
-    'bugsink_dsn',
+    // `bugsink_dsn` is NOT here, since 2026-10-01. It names the endpoint
+  // error reports are sent to — an outbound destination, like
+  // `network_policy`, which this allowlist already keeps off for the same
+  // reason. The scope that may choose where diagnostics go is the user or
+  // global config, not a directory one happens to be working in. It is
+  // also a member of `SECRET_CONFIG_KEYS`, so it sat on the convenience
+  // side of a line it belongs on the other side of. Nothing becomes
+  // impossible: the key is still settable in the user config and still
+  // overridden by LYNOX_BUGSINK_DSN.
     // `backup_encrypt` is deliberately NOT here, and it was until 2026-10-01.
   // It controls ENCRYPTION, which puts it on the security side of this
   // allowlist's own dividing line rather than with the convenience keys —

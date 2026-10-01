@@ -796,6 +796,54 @@ describe('Config', () => {
       // project-safe key" is what the previous version of these tests did.
       expect(merged.max_session_cost_usd).toBe(5);
     });
+
+    it('bugsink_dsn in a PROJECT config is IGNORED — the error-reporting endpoint is a user-config decision', async () => {
+      // Taken off the allowlist on 2026-10-01. The key names an OUTBOUND
+      // destination: error events are sent there, and `beforeSend` masks
+      // credential shapes in text while leaving structure — stack frames with
+      // absolute paths, and tool and model names in the breadcrumbs — intact.
+      // `network_policy` is already kept off this allowlist for the same
+      // reason, and `bugsink_dsn` is a member of `SECRET_CONFIG_KEYS` besides.
+      //
+      // Both directions, and the second has a job no other assertion here
+      // does: it is the only one that says the field still ARRIVES from the
+      // user config. What it is NOT, measured rather than assumed: the only
+      // thing standing between this test and a wholesale deletion of the
+      // field from the schema. That mutant fails at the positive control
+      // first, because a file the strict schema rejects is discarded whole
+      // and takes the control key with it. Direction 2 fails under it too —
+      // it is simply not the first to speak.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // Direction 1: the user said nothing, the cwd names an endpoint.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ bugsink_dsn: 'https://k@elsewhere.example/9', max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.bugsink_dsn).toBeUndefined();
+      // Positive control from the verified-accepted set, in-process only.
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // Direction 2: the user chose an endpoint and it must still be theirs —
+      // and it must still ARRIVE, which is what keeps this honest about the
+      // field continuing to exist.
+      writeFileSync(
+        join(userDir, 'config.json'),
+        JSON.stringify({ bugsink_dsn: 'https://k@errors.mine.example/1' }),
+      );
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ bugsink_dsn: 'https://k@elsewhere.example/9' }),
+      );
+      reloadConfig();
+      expect(loadConfig().bugsink_dsn).toBe('https://k@errors.mine.example/1');
+    });
     
     it('one invalid value in a PROJECT config silently drops ALL of its other keys', async () => {
       // This replaces a test that was a TAUTOLOGY. It asserted that a project
