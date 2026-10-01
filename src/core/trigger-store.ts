@@ -672,6 +672,11 @@ export class TriggerStore {
    * the statuses we happen to remember would drop it (task-manager.test.ts covers
    * exactly that row). Bound as a parameter off {@link WAITING}, not written as a
    * SQL literal, so the query and the type cannot drift apart.
+   *
+   * LEASE GATE (engine.db v16): a trigger whose run holds a live lease is not due, in
+   * this process or any other on the same file. A lapsed lease is due again, so the
+   * caller's {@link claimLease} can find it and decide what the dead run means. Also
+   * a denylist term, for the same reason as the wait gate.
    */
   getDue(now: string = new Date().toISOString()): TriggerRecord[] {
     const rows = this.db.prepare(
@@ -684,8 +689,9 @@ export class TriggerStore {
          AND status != ?
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
          AND NOT (effect = 'run_agent' AND confirmed_at IS NULL)
+         AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(now, WAITING) as TriggerFullDbRow[];
+    ).all(now, WAITING, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
@@ -722,6 +728,49 @@ export class TriggerStore {
     return this.db.prepare(
       "UPDATE triggers SET status = ?, waiting_until = NULL, updated_at = datetime('now') WHERE id = ? AND status = ?",
     ).run(to, id, WAITING).changes > 0;
+  }
+
+  /**
+   * Take the run lease of a trigger before running it — the persistent half of the
+   * double-start guard (the WorkerLoop's `activeTasks` map is the in-process half and
+   * dies with the process). One immediate transaction, so two engine processes on the
+   * same file cannot both win.
+   *
+   * `held`: a live lease belongs to someone else; do not run. `claimed`: nobody holds it,
+   * or a lapsed lease belongs to a run whose occurrence is no longer the due one: a sweep
+   * recorded it, or an answer re-armed its trigger (which runs the same question again,
+   * by design of the durable wait), or the lost run was a manual one started before its
+   * trigger's scheduled time — that scheduled occurrence then runs, and the lost manual
+   * run is not reported; for a one-shot, that scheduled run repeats what the lost manual
+   * run had already done (a manual run that finished would have completed the trigger).
+   * `interrupted`: a lapsed
+   * lease whose run never recorded a result — the occurrence it ran is still the due one,
+   * so its holder died (or stopped renewing for longer than the lease) mid-run. The lease
+   * is taken in every case but `held`; what an interrupted run means is the caller's call.
+   */
+  claimLease(id: string, holder: string, until: string, now: string): 'claimed' | 'interrupted' | 'held' | 'not_found' {
+    return this.db.transaction((): 'claimed' | 'interrupted' | 'held' | 'not_found' => {
+      const row = this.db.prepare('SELECT lease_holder, lease_until, lease_since, next_run_at FROM triggers WHERE id = ?')
+        .get(id) as { lease_holder: string | null; lease_until: string | null; lease_since: string | null; next_run_at: string | null } | undefined;
+      if (!row) return 'not_found';
+      if (row.lease_until !== null && row.lease_until > now) return 'held';
+      this.db.prepare('UPDATE triggers SET lease_holder = ?, lease_until = ?, lease_since = ? WHERE id = ?').run(holder, until, now, id);
+      const unsettled = row.lease_holder !== null && row.lease_since !== null
+        && row.next_run_at !== null && row.next_run_at <= row.lease_since;
+      return unsettled ? 'interrupted' : 'claimed';
+    }).immediate();
+  }
+
+  /** Extend a lease this holder still has. False when it was taken over meanwhile. */
+  renewLease(id: string, holder: string, until: string): boolean {
+    return this.db.prepare('UPDATE triggers SET lease_until = ? WHERE id = ? AND lease_holder = ?')
+      .run(until, id, holder).changes > 0;
+  }
+
+  /** Drop the lease once the run has recorded its result. A lease another holder took is left alone. */
+  releaseLease(id: string, holder: string): void {
+    this.db.prepare('UPDATE triggers SET lease_holder = NULL, lease_until = NULL, lease_since = NULL WHERE id = ? AND lease_holder = ?')
+      .run(id, holder);
   }
 
   /**

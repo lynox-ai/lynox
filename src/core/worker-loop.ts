@@ -8,13 +8,13 @@
  * Watch tasks use crypto.createHash('sha256') for content change detection.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TriggerRecord, PromptText, BulkWriteEffect } from '../types/index.js';
+import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -40,6 +40,43 @@ const DISMISSED_ANSWER = '__dismissed__';
 const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
+
+/**
+ * The run lease (engine.db v16): a running trigger renews it every heartbeat, and a lease
+ * not renewed for {@link LEASE_TTL_MS} lapses. The heartbeat is a timer, not a hook per
+ * tool call — one LLM turn may take ~40 minutes with its retries, and `ask_user`,
+ * `spawn_agent` and `run_workflow` are unbounded. A timer cannot fire while a synchronous
+ * tool (`bash` runs `execSync`, with no upper bound on its timeout) blocks the event loop,
+ * which is why the lease is long. A lease that lapses under a live run is reported as
+ * interrupted by whichever process finds it, and the run is not started a second time —
+ * except for an effect that resumes after loss ({@link RESUMES_AFTER_LOSS}), which another
+ * process then runs beside the live one. A bulk run's per-target claim keeps the two apart
+ * only while that claim is younger than `BULK_CLAIM_STALE_MS` (30 s): a run stalled long
+ * enough to lose its lease has stale target claims too, so a target it is still writing can
+ * be written a second time.
+ */
+const LEASE_HEARTBEAT_MS = 30_000;
+const LEASE_TTL_MS = 15 * 60_000;
+/** What a run the engine lost mid-way reads as — a RESULT, the status is `failed`. */
+const INTERRUPTED_RESULT =
+  'The engine stopped while this run was in progress. It is recorded as failed instead of being run again from the start, because what it had already done would happen a second time.';
+/**
+ * Per effect: does a run continue where a lost run stopped without repeating anything that
+ * run already did? Only then may a lost run be started again. Every effect has to answer —
+ * `satisfies` makes a new effect type a compile error until it does, so the question
+ * cannot be skipped by whoever adds the next one — and the answer is `false` unless the
+ * effect is shown to repeat nothing. A bulk run claims each target once
+ * (`BulkLedger.claimTarget`), and its preview skips the targets it has already read.
+ */
+const RESUMES_AFTER_LOSS = {
+  run_workflow: false,
+  run_agent: false,
+  backup: false,
+  notify: false,
+  bulk_apply: true,
+  bulk_undo: true,
+  bulk_preview: true,
+} as const satisfies Record<TriggerEffect, boolean>;
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
 // Per-run ceiling on a watch's change-analysis session — it is a single
@@ -165,12 +202,16 @@ export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
   private readonly activeTasks = new Map<string, ActiveTask>();
+  /** Names this loop's runs in the lease column; another process's loop has its own. */
+  private readonly leaseHolder = randomUUID();
 
   constructor(
     private readonly engine: Engine,
     private readonly notificationRouter: NotificationRouter,
     private readonly intervalMs: number = DEFAULT_INTERVAL_MS,
     private readonly taskTimeoutMs: number = DEFAULT_TASK_TIMEOUT_MS,
+    /** The run lease's timing; only tests shorten it. */
+    private readonly lease: { heartbeatMs: number; ttlMs: number } = { heartbeatMs: LEASE_HEARTBEAT_MS, ttlMs: LEASE_TTL_MS },
   ) {}
 
   start(): void {
@@ -256,10 +297,33 @@ export class WorkerLoop {
     const trigger = taskManager.getTrigger(triggerId);
     if (!trigger) return { ok: false, reason: 'not_found' };
     if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
+    // A run another engine process holds counts as running too. A lost run does not stop
+    // a manual one: running it again is what the person asked for.
+    const lease = this.takeLease(trigger.id);
+    if (lease === 'not_found') return { ok: false, reason: 'not_found' };
+    if (lease === 'held') return { ok: false, reason: 'already_running' };
     // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
     // activeTasks guard + run history key on exactly the row we found.
     void this.executeTask(trigger);
     return { ok: true };
+  }
+
+  /**
+   * Take a trigger's run lease. A store error reads as `held`: the trigger waits one
+   * tick rather than run without the guard (two processes contending for the write
+   * lock is exactly when the guard matters).
+   */
+  private takeLease(triggerId: string): 'claimed' | 'interrupted' | 'held' | 'not_found' {
+    const taskManager = this.engine.getTaskManager();
+    if (!taskManager) return 'not_found';
+    const now = Date.now();
+    try {
+      return taskManager.claimLease(
+        triggerId, this.leaseHolder, new Date(now + this.lease.ttlMs).toISOString(), new Date(now).toISOString(),
+      );
+    } catch {
+      return 'held';
+    }
   }
 
   /** @internal Exposed for testing. */
@@ -412,6 +476,32 @@ export class WorkerLoop {
           // frees or the daily window resets. No status write → no churn.
           continue;
         }
+        // Taken after the reservation, so a deferred task never holds a lease it does not use.
+        const lease = this.takeLease(task.id);
+        if (lease === 'held' || lease === 'not_found') {
+          releasePersistentBudget(reservation.reservedUSD);
+          continue;
+        }
+        if (lease === 'interrupted' && !RESUMES_AFTER_LOSS[task.effect]) {
+          // A run the engine lost mid-way is not started again: what it already did — a
+          // mail sent, a record written, tokens spent — would happen twice. It is recorded
+          // as the failed run it was, which schedules it like any other failure (the next
+          // occurrence for a cron, nothing more for a one-shot, a retry where the owner
+          // asked for retries — a retry does run it from the start, which is what retries
+          // were set up for), and the owner can run it again by hand. Fenced per task: a
+          // store error here must not stop the other due triggers of this tick; the lease
+          // then stays and lapses again, and the run is reported once more, never re-run.
+          releasePersistentBudget(reservation.reservedUSD);
+          try {
+            this.recordAndNotify(task, INTERRUPTED_RESULT, false);
+            this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
+          } catch (err: unknown) {
+            process.stderr.write(
+              `[lynox:worker] recording or releasing the interrupted run of ${task.id} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+          continue;
+        }
         // Fire and forget — don't await, execute in parallel. Release the
         // reservation once the task settles, via .finally so it runs even if
         // executeTask's synchronous prologue throws — a leaked reservation would
@@ -467,6 +557,15 @@ export class WorkerLoop {
     };
     armDeadline();
     this.activeTasks.set(task.id, { controller, pauseDeadline, resumeDeadline });
+    const heartbeat = setInterval(() => {
+      try {
+        const until = new Date(Date.now() + this.lease.ttlMs).toISOString();
+        if (this.engine.getTaskManager()?.renewLease(task.id, this.leaseHolder, until) === false) {
+          process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) lost its run lease to another engine process\n`);
+        }
+      } catch { /* best-effort: a missed renewal only shortens the lease */ }
+    }, this.lease.heartbeatMs);
+    heartbeat.unref();
 
     // AsyncLocalStorage — per-task context for logging/tracing
     const taskCtx: WorkerTaskContext = {
@@ -622,6 +721,11 @@ export class WorkerLoop {
       // idempotent and is the only handle on it once the map entry is gone.
       this.activeTasks.get(task.id)?.pauseDeadline();
       this.activeTasks.delete(task.id);
+      // After the result is recorded, so `next_run_at` has moved before the row is free.
+      clearInterval(heartbeat);
+      try {
+        this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
+      } catch { /* a lease left behind lapses on its own */ }
     }
   }
 

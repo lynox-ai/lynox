@@ -433,6 +433,7 @@ describe('applying an external run', () => {
       const engine = {
         getTaskManager: () => ({
           getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+          claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
           getTrigger: (id: string) => triggers.getById(id), recordTaskRun,
         }),
         getBulkLedger: () => ledger,
