@@ -411,6 +411,24 @@ describe('error-reporting scrubbing', () => {
     expect(req['url'], 'the URL stays').toBe('https://x/y');
   });
 
+  it('turns the SDK data collection off explicitly instead of trusting its defaults', async () => {
+    // The SDK's defaults collect user info (client IP), cookies, headers, request
+    // bodies, AI inputs/outputs and stack-frame variables. Each switch is pinned
+    // here so that dropping one is a test failure, not a silent default.
+    await hooks();
+    const opts = initMock.mock.calls[0]?.[0] as { dataCollection?: Record<string, unknown> };
+    expect(opts.dataCollection).toEqual({
+      userInfo: false,
+      cookies: false,
+      httpHeaders: false,
+      httpBodies: [],
+      genAI: { inputs: false, outputs: false },
+      graphQL: { document: false, variables: false },
+      databaseQueryData: false,
+      stackFrameVariables: false,
+    });
+  });
+
   it('masks the request URL like the query string', async () => {
     // The URL repeats the query string. Both copies must be masked, and the
     // rest of the URL must survive — it is the diagnostic part.

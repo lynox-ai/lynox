@@ -105,6 +105,21 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       tracesSampleRate: 0,     // No performance tracing (cost + PII)
       attachStacktrace: true,
       maxBreadcrumbs: 50,
+      // Explicit, because the SDK's defaults collect everything (v11 turned all of
+      // these on). Measured on 11.1.0 with the defaults: the client IP arrived as
+      // `user.ip_address`, and incoming request bodies were captured. `beforeSend`
+      // below still strips request data, cookies and headers as a second layer,
+      // so a future default that adds a field is caught there too.
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: false,
+        httpBodies: [],
+        genAI: { inputs: false, outputs: false },
+        graphQL: { document: false, variables: false },
+        databaseQueryData: false,
+        stackFrameVariables: false,
+      },
 
       beforeBreadcrumb(breadcrumb) {
         if (breadcrumb.data) {

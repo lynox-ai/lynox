@@ -80,7 +80,7 @@ it('masks a credential in the query string in both request fields, and the reque
   await Sentry.flush(3000);
 
   // Envelopes are [headers, [[itemHeader, payload], ...]]; find the error event.
-  type Payload = { exception?: unknown; request?: { url?: string; query_string?: string } };
+  type Payload = { exception?: unknown; user?: unknown; request?: { url?: string; query_string?: string } };
   const events = sent
     .map((s) => JSON.parse(s) as [unknown, [unknown, Payload][]])
     .flatMap(([, items]) => items.map(([, payload]) => payload))
@@ -93,6 +93,9 @@ it('masks a credential in the query string in both request fields, and the reque
   // would pass without it.)
   expect(request?.url, 'the event carries its request URL').toContain('/api/run?t=');
   expect(request?.url, 'the non-secret part of the query survives').toContain('q=hello');
+  // No user identity: @sentry/node 11 defaults to sending the client IP as
+  // `user.ip_address`; the explicit `dataCollection` turns that off.
+  expect(events[0]?.user, 'no user identity (client IP) on the event').toBeUndefined();
   // The property under test, in both copies of the query string.
   expect(request?.url).not.toContain(secret);
   expect(request?.query_string).not.toContain(secret);
