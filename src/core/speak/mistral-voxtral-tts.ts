@@ -188,52 +188,23 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   // Hoisted so the catch can still see what the loop had collected, and so the
   // cache TTL can depend on whether the walk was clean.
   const partial: VoiceInfo[] = [];
-  // ONE flag with ONE meaning: "this walk reported something". It replaces a flag
-  // that was set only in the pagination branch, which made the comment below false
-  // for two of the three diagnostics — a warned, incomplete catalogue was still
-  // cached for an hour. Measured: 29 of 30 voices with two warnings fired, and the
-  // second call five minutes later did not re-fetch.
+  // ONE flag with ONE meaning: "this walk reported something", and ONE writer for it.
+  // Every diagnostic goes through `report`, which sets the flag and warns in a single
+  // statement, so a warned catalogue cannot keep the hour-long cache lifetime. Measured
+  // on the version before it: 29 of 30 voices with two warnings fired, and the second
+  // call five minutes later did not re-fetch.
   //
-  // ⚠⚠ And the first version of THIS comment over-claimed in the same way the file
-  // has had to correct four times already. It said tying the TTL to "did we warn"
-  // makes the invariant "structural instead of restated" and that a fourth
-  // diagnostic "cannot forget" to shorten the lifetime. Neither was true: it was
-  // three hand-written `doubtful = true` assignments guarded by three hand-written
-  // tests. A review proved it by deleting ONE of those tests — the assignment in
-  // the `unusable` branch was then uncovered, and the suite stayed green with the
-  // flag removed. An over-claiming comment is worse than none, because it removes
-  // the pressure to build the thing it describes.
+  // ⚠ What holds that, and what does not. A lint rule in `eslint.config.js` makes a
+  // `console` member access an error in this file, so the ordinary ways to add a second
+  // warning are caught — seven of fourteen access shapes tried, and the five that walk
+  // through are named there. Spies in the test file catch `console.error`,
+  // `process.std{out,err}.write` and `process.emitWarning` on walked paths. Neither holds
+  // a `doubtful = true` written outside `report`, which would cut the cache to a minute
+  // in silence.
   //
-  // So all FOUR diagnostics in this function go through `report`, which sets the
-  // flag and warns in one statement. That removes the ordinary way to get it wrong.
-  // (Four, not three: the three in the walk plus the one in the catch. "Three" was
-  // the count of the `doubtful = true` assignments an earlier draft had, and it
-  // survived into a sentence about `report` call sites — a number that stayed
-  // correct about the set it no longer named.)
-  //
-  // ⚠⚠ It is NOT a guarantee, and three versions of this comment claimed it was. The
-  // first read "a fourth branch cannot write one without the other, because there is
-  // only one way to say it" — refuted from inside this very file, where six
-  // `process.stderr.write` call sites are the idiom a fourth diagnostic would be
-  // written in (six CALL SITES; `logRequest` is a latency line, so five are
-  // diagnostics — a right number is easy to quote about a set one member wider).
-  //
-  // What holds it instead is the test beside this file, and what holds it is a SPY,
-  // not a reading of this text. Five versions of a source scanner were built and
-  // retired: each asked "what does this function SAY" when the question is "what does
-  // it CALL", and each was defeated by something it had not enumerated — the last one
-  // by `process.emitWarning` and by `const { warn } = console`, both measured green
-  // with the whole suite passing. The spies watch `console.error`,
-  // `process.std{out,err}.write` and `process.emitWarning` beside the `console.warn`
-  // one, and they do not care about access shape, aliasing or `bind`.
-  //
-  // ⚠ Two things the spies do not hold, so nobody has to rediscover them:
-  //   - they are PATH-DEPENDENT. A branch no test walks emits nothing. The static half
-  //     is a lint rule on `process.std*.write` (`no-console` covers `console` only,
-  //     and allows `warn`/`error` anyway); filed as a register row.
-  //   - the OTHER direction. A stray `doubtful = true` outside `report` cuts the cache
-  //     to a minute in silence. Filed too; it costs provider requests, not
-  //     correctness.
+  // Seven mechanisms were built for this property and six retired, each defeated by
+  // something its author had not enumerated. The history and the open shapes are a
+  // register row; what belongs here is which mechanism holds which half.
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;
