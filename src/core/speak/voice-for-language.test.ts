@@ -130,15 +130,18 @@ describe('a voice is picked deterministically, from the catalogue content', () =
   });
 
   it('refuses a non-string even when it would STRINGIFY to an accepted tag', () => {
-    // ⚠ Also a survivor's witness. Replacing the `typeof` test with `String(value)` passed
-    // the whole suite, because the only non-string it had was `42` — and `'42'` fails the
-    // pattern anyway, so that case never exercised the type check at all. These two do: both
-    // stringify to something the pattern ACCEPTS.
+    // ⚠ A survivor's witness, and the reason is simpler than the first version of this
+    // comment claimed: before this test, NO test passed a non-string to this predicate at
+    // all. The accept and reject lists above are strings throughout.
     //
-    // It is the EXPORTED predicate that needs this, not the HTTP route. The route narrows
-    // `lang` to a string before it ever calls here (`typeof b['lang'] === 'string'`), so no
-    // request can reach the coerced path — the guarantee belongs to the function because
-    // the function is what other callers hold, and its signature claims `value is string`.
+    // The HTTP route cannot supply one either, and that is why the gap sat here unseen: it
+    // narrows `lang` with `typeof b['lang'] === 'string'` before calling, so the route's own
+    // `42` case arrives here as `undefined`, never as a number. The guarantee belongs to the
+    // function because the function is what other callers hold, and its signature claims
+    // `value is string` for an `unknown` argument.
+    //
+    // Both inputs below stringify to something the pattern ACCEPTS — that is what makes
+    // them discriminating. `42` would not be: `'42'` fails the pattern either way.
     expect(isVoiceLanguageTag(['de'])).toBe(false);
     expect(isVoiceLanguageTag({ toString: () => 'de' })).toBe(false);
   });

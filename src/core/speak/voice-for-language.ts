@@ -17,21 +17,6 @@ export interface VoiceChoice {
 }
 
 /**
- * Pick a voice for `language` from `voices`, deterministically.
- *
- * ⚠ THE RULE IS "FIRST BY ID", NOT "FIRST IN THE CATALOGUE", and the difference is
- * the whole reason this function sorts. The catalogue arrives in whatever order the
- * provider sent it: `listMistralVoices` pushes entries as they arrive, nothing in
- * the fetch sorts, and no provider document promises an ordering. Whether that order
- * is stable between two calls is **not observable from here** — checking it would
- * mean live calls against someone else's service — so the rule does not depend on it.
- * Sorting by id makes "which of the sixteen `en_gb` voices" answerable from the
- * catalogue's CONTENT instead of from its arrival sequence.
- *
- * An unstable choice would be a surface that changes between two requests with the
- * same input, which is worse than a choice somebody disagrees with.
- */
-/**
  * The accepted shape of a voice-language tag: 2-3 letters, optionally a separator and a
  * 2-4 character region subtag. At most 8 characters, exactly `[A-Za-z0-9_-]`.
  *
@@ -50,6 +35,14 @@ export interface VoiceChoice {
  * case-insensitive pattern and claimed to defend a future widening to four letters —
  * measured, after that widening `AUTO` and `aUtO` would both have passed while `auto`
  * was blocked. A half-present protection described as whole is worse than none.
+ *
+ * ⚠ And the clause is DEAD against THIS pattern, which belongs written down rather than
+ * left to look load-bearing. It can only change the answer for an input that lowercases
+ * to `auto`, and `auto` is four letters with no separator, so `^[a-z]{2,3}` rejects it
+ * either way. A mutant that deletes the clause passes every test in this module, and that
+ * is not a missing test: no input distinguishes the two versions. It stays as defence
+ * against exactly one plausible edit — widening the head bound to four — which would
+ * otherwise re-admit `auto` as a language silently.
  */
 const VOICE_LANGUAGE_TAG = /^[a-z]{2,3}([_-][a-z0-9]{2,4})?$/i;
 
@@ -62,6 +55,21 @@ export function isVoiceLanguageTag(value: unknown): value is string {
   return typeof value === 'string' && value.toLowerCase() !== 'auto' && VOICE_LANGUAGE_TAG.test(value);
 }
 
+/**
+ * Pick a voice for `language` from `voices`, deterministically.
+ *
+ * ⚠ THE RULE IS "FIRST BY ID", NOT "FIRST IN THE CATALOGUE", and the difference is
+ * the whole reason this function sorts. The catalogue arrives in whatever order the
+ * provider sent it: `listMistralVoices` pushes entries as they arrive, nothing in
+ * the fetch sorts, and no provider document promises an ordering. Whether that order
+ * is stable between two calls is **not observable from here** — checking it would
+ * mean live calls against someone else's service — so the rule does not depend on it.
+ * Sorting by id makes "which of the sixteen `en_gb` voices" answerable from the
+ * catalogue's CONTENT instead of from its arrival sequence.
+ *
+ * An unstable choice would be a surface that changes between two requests with the
+ * same input, which is worse than a choice somebody disagrees with.
+ */
 export function pickVoiceForLanguage(
   voices: readonly VoiceInfo[],
   language: string,
