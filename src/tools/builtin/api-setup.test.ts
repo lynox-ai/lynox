@@ -1503,7 +1503,7 @@ describe('api_setup tool', () => {
     it('surfaces a candidate only when it sits under the docs host\'s own parent', async () => {
       // The parent of docs.example.co.uk is example.co.uk: a sibling there
       // qualifies, a host elsewhere under the same two trailing labels does not.
-      const docsBody = '<html><a href="https://api.example.co.uk/v1">a</a> <a href="https://api.other-org.co.uk/v1">b</a></html>';
+      const docsBody = '<html><a href="https://api.example.co.uk/v1">a</a> <a href="https://api.other-org.co.uk/v1">b</a> <a href="https://api.notexample.co.uk/v1">c</a></html>';
       const fetchSpy = mockFetchOk(docsBody);
       stubExtraction({ description: 'Regional API', auth: { type: 'bearer' } });
 
@@ -1515,6 +1515,8 @@ describe('api_setup tool', () => {
         );
         expect(result).toContain('api.example.co.uk');
         expect(result).not.toContain('api.other-org.co.uk');
+        // Under the parent means a whole label boundary, not a string ending.
+        expect(result).not.toContain('api.notexample.co.uk');
         expect(result).toContain("under the docs host's parent domain (example.co.uk)");
       } finally {
         fetchSpy.mockRestore();
