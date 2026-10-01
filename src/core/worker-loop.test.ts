@@ -102,6 +102,11 @@ function makeTaskManager(tasks: TriggerRecord[] = []): TaskManager {
     // make every one of them fail for a reason none of them was about.
     getExpiredWaitingTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue([]),
     endWait: vi.fn<(id: string, to: string) => boolean>().mockReturnValue(false),
+    // The run lease (engine.db v16): free by default. The lease itself is tested
+    // against a real engine.db in trigger-lease.test.ts.
+    claimLease: vi.fn<() => 'claimed' | 'interrupted' | 'held' | 'not_found'>().mockReturnValue('claimed'),
+    renewLease: vi.fn<() => boolean>().mockReturnValue(true),
+    releaseLease: vi.fn(),
     // runTriggerNow resolves the trigger by id (or id-prefix) before dispatch.
     getTrigger: vi.fn<(id: string) => TriggerRecord | undefined>(
       (id) => tasks.find((t) => t.id === id || t.id.startsWith(id)),

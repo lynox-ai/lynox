@@ -856,6 +856,19 @@ const MIGRATIONS: string[] = [
      confirmed_at TEXT NOT NULL,
      PRIMARY KEY (host, method, kind)
    );`,
+
+  // v16 (trigger run lease): a run in progress is recorded in the row itself, not only in
+  // the WorkerLoop's in-memory map, so a second engine process on the same file — or the
+  // same process after a restart — does not start it again while its lease holds.
+  // `lease_holder` names the loop that holds it; `lease_until` is renewed by that run's
+  // heartbeat and lapses when the holder dies; `lease_since` is when the run took it, which
+  // tells a lapsed lease of a run that never recorded its result (the occurrence it ran is
+  // still the due one) from one whose run was settled by someone else meanwhile. All NULL:
+  // nobody is running it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (16);
+   ALTER TABLE triggers ADD COLUMN lease_until TEXT;
+   ALTER TABLE triggers ADD COLUMN lease_holder TEXT;
+   ALTER TABLE triggers ADD COLUMN lease_since TEXT;`,
 ];
 
 /**

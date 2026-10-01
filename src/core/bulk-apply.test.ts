@@ -165,6 +165,7 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
         getDueTriggers: () => triggers.getDue(),
         getExpiredWaitingTriggers: () => [],
         endWait: () => false,
+        claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
         getTrigger: (id: string) => triggers.getById(id),
         recordTaskRun,
       }),
@@ -215,7 +216,8 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
       triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
     });
     const engine = {
-      getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false, recordTaskRun }),
+      getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+        claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
       getBulkLedger: () => ledger,
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
@@ -243,7 +245,8 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
     const recordTaskRun = vi.fn();
     const task = { id: 'bulk-x', title: 'Bulk run x', effect: 'bulk_apply', bulk_run_id: 'x', source: 'manual' } as unknown as TriggerRecord;
     const engine = {
-      getTaskManager: () => ({ getDueTriggers: () => [task], getExpiredWaitingTriggers: () => [], endWait: () => false, recordTaskRun }),
+      getTaskManager: () => ({ getDueTriggers: () => [task], getExpiredWaitingTriggers: () => [], endWait: () => false,
+        claimLease: () => 'claimed', renewLease: () => true, releaseLease: () => {}, recordTaskRun }),
       getBulkLedger: () => null,
       getUserConfig: () => ({}),
     } as unknown as Engine;
@@ -989,7 +992,8 @@ describe('§7(i) before-images reach no model context', () => {
       triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
     });
     const engine = {
-      getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false, recordTaskRun }),
+      getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+        claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
       getBulkLedger: () => ledger,
       getDataStore: () => store,
       getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),

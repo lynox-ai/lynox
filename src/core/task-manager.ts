@@ -688,6 +688,21 @@ export class TaskManager {
     return this.history.endTriggerWait(id, to);
   }
 
+  /** Take a trigger's run lease before running it (engine.db v16). */
+  claimLease(id: string, holder: string, until: string, now: string): 'claimed' | 'interrupted' | 'held' | 'not_found' {
+    return this.history.claimTriggerLease(id, holder, until, now);
+  }
+
+  /** Extend this holder's lease; false when another holder took it over. */
+  renewLease(id: string, holder: string, until: string): boolean {
+    return this.history.renewTriggerLease(id, holder, until);
+  }
+
+  /** Drop this holder's lease after the run recorded its result. */
+  releaseLease(id: string, holder: string): void {
+    this.history.releaseTriggerLease(id, holder);
+  }
+
   /** Update the watch_config JSON for a watch trigger (e.g. to store last_hash). */
   updateWatchConfig(id: string, config: Record<string, unknown>): void {
     this.history.updateTriggerWatchConfig(id, JSON.stringify(config));

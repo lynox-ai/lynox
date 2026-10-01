@@ -2933,6 +2933,19 @@ export class RunHistory {
     return this._triggerStore?.endWait(id, to) ?? false;
   }
 
+  /** Trigger run lease (engine.db v16) — see {@link TriggerStore.claimLease}. */
+  claimTriggerLease(id: string, holder: string, until: string, now: string): 'claimed' | 'interrupted' | 'held' | 'not_found' {
+    return this._requireTriggerStore().claimLease(id, holder, until, now);
+  }
+
+  renewTriggerLease(id: string, holder: string, until: string): boolean {
+    return this._requireTriggerStore().renewLease(id, holder, until);
+  }
+
+  releaseTriggerLease(id: string, holder: string): void {
+    this._requireTriggerStore().releaseLease(id, holder);
+  }
+
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
    *  WorkerLoop tick's second query, beside {@link getDueTriggers} — which no longer
    *  returns a parked trigger at all. Empty when no trigger store is wired. */
