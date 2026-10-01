@@ -238,14 +238,23 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   const report = (message: string): void => {
     doubtful = true;
     // The ONE sanctioned diagnostic channel of this module. `eslint.config.js` has a
-    // block for this file that makes a `console` MEMBER ACCESS an error, so a second
-    // diagnostic in the ordinary shapes needs a second disable comment — which a
-    // reviewer sees.
+    // block for this file that makes a `console` MEMBER ACCESS an error, so adding a
+    // second diagnostic in one of the caught shapes has to WIDEN this exemption, and
+    // the widening shows up in a diff.
+    //
+    // ⚠ What this said first — "needs a second disable comment" — is false, and the
+    // commit that wrote it disproved it three paragraphs further down: changing this
+    // line to a file-wide `/* eslint-disable no-restricted-syntax */` is still ONE
+    // directive and lets every shape through. The barrier is not the COUNT of
+    // directives, it is that a change to their SCOPE is visible. That is exactly why
+    // the test which counted them was taken out again.
     //
     // ⚠ NOT "forbids every console access", which is what this said first. Measured:
     // `const { warn } = console; warn(…)` is an ObjectPattern and walks through, as do
-    // the four `globalThis`/`Reflect` routes. Five shapes of eleven. The exact list is
-    // in `eslint.config.js` beside the rule, and the open ones are a register row.
+    // the four `globalThis`/`Reflect` routes — five of the NINE shapes that were run.
+    // Nine is the size of the list, not of the set: a later round found five more by
+    // trying, three caught and two not. The enumeration is in `eslint.config.js` beside
+    // the rule, and it is written there as OPEN.
     //
     // ⚠ The directive must sit on the line IMMEDIATELY above the call: it disables the
     // NEXT line, so with the explanation written after it, it covered a comment line and
