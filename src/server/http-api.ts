@@ -6934,25 +6934,25 @@ export class LynoxHTTPApi {
       // the same literals. The gap is at voice selection, so that is where the new value
       // goes.
       const langRaw = b && typeof b['lang'] === 'string' ? b['lang'] : undefined;
-      // ⚠ Derived from the tag's HEAD, lowercased — because the two consumers disagreed
-      // otherwise, and the disagreement was silent. The voice rule is case-insensitive and
-      // accepts a region subtag; this comparison was case-SENSITIVE and bare-two-letter, so
-      // `DE` set the voice language and left text-prep to guess, and `de-CH` did the same.
-      // Measured. Latent today because the Web UI's locale type is `'de' | 'en'`, but
-      // `RichSpeakOpts.lang` invites a UI locale and a UI locale is commonly `de-CH`.
-      const langHead = langRaw?.toLowerCase().split(/[-_]/)[0];
+      // ⚠⚠ ONE rule gates BOTH derivations, and getting there took two attempts.
+      //
+      // First the comparison was `langRaw === 'de' || … === 'en'`: case-sensitive and
+      // bare-two-letter, while the voice rule is case-insensitive and region-tolerant. So
+      // `DE` and `de-CH` reached the voice and left text-prep guessing.
+      //
+      // Then it derived `lang` from the tag's HEAD — which fixed that class and opened a
+      // new one in the same direction: `de_`, `de-x`, `de_abcde` and any three-subtag
+      // locale (`de-CH-1996`, `en-Latn-US`) have the head `de`, so they forced German
+      // text-prep while the shape rule rejected them for the voice. Measured: before that
+      // change both fields were undefined — agreement — and after it they disagreed. A fix
+      // that moves a disagreement is not a fix.
+      //
+      // Now the shape rule decides FIRST, and both consumers read what it accepted.
+      const tag = isVoiceLanguageTag(langRaw) ? langRaw : undefined;
+      const langHead = tag?.toLowerCase().split(/[-_]/)[0];
       const lang: Lang | 'auto' | undefined =
         langHead === 'de' || langHead === 'en' ? langHead : langRaw?.toLowerCase() === 'auto' ? 'auto' : undefined;
-      // The shape rule lives in `src/core/speak/voice-for-language.ts` and is SHARED here
-      // rather than re-declared. It used to be a regex in this route, and that placement
-      // was the finding: the consumer validated nothing, so every safety property of this
-      // value rested on one call site. Rejecting early is still worth it — a malformed
-      // value never enters the facade — but the guarantee belongs to the module.
-      //
-      // `'auto'` is excluded by that rule: for text preparation it means "detect from the
-      // text", and for a voice there is nothing to detect against until the text has been
-      // analysed. Selecting by the DETECTED language is a separate step, filed.
-      const voiceLanguage = isVoiceLanguageTag(langRaw) ? langRaw : undefined;
+      const voiceLanguage = tag;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without

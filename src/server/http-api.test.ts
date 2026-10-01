@@ -9144,11 +9144,16 @@ describe('metered audio routes: managed credit gate + debit', () => {
     }
 
     it('derives BOTH fields from ONE tag, and they agree on case and region', async () => {
-      // One table instead of five separate cases, and the reason is measurable: this file
-      // sits near the per-IP rate-limit ceiling (600 in a 60 s window on loopback), and my
-      // first version of these tests tipped it over — two UNRELATED oauth tests started
-      // failing with 429. A test that exhausts a shared budget breaks its neighbours, and
-      // the neighbour's failure does not name the cause.
+      // One table instead of five separate cases.
+      //
+      // ⚠ The reason this comment first gave was FALSE and worth keeping as the correction:
+      // it credited the per-IP rate budget. The budget is spent per REQUEST, not per `it()` —
+      // counted, the old block made 10 and the new one makes 10 too, so collapsing the cases
+      // saved nothing. What paid for the two new values was dropping two bogus ones: a
+      // coverage trade, not a saving. The budget hazard itself is real and was measured (two
+      // unrelated oauth tests failing with 429 when my first version added requests), and
+      // `RATE_WINDOW_MS`/`RATE_MAX_LOOPBACK` are as quoted — but it is not what this shape
+      // is for. A true general lesson does not make a false causal claim true.
       //
       // ⚠ `en_GB` expecting `lang: 'en'` is a CHANGED expectation. The first version of this
       // test asserted `lang` was undefined there — it encoded the inconsistency it should
@@ -9162,6 +9167,12 @@ describe('metered audio routes: managed credit gate + debit', () => {
         ['de-CH', 'de', 'de-CH'],       // a real UI locale
         ['en_GB', 'en', 'en_GB'],       // region subtag the catalogue carries
         ['auto', 'auto', undefined],    // detect the text; nothing to detect a voice against
+        // ⚠ The class a previous fix INTRODUCED while closing another: these have the head
+        // `de`/`en`, so deriving `lang` from the head alone forced German text-prep while the
+        // shape rule rejected them for the voice. Before that fix both fields were undefined —
+        // agreement — and after it they disagreed. Now one rule gates both, so both are unset.
+        ['de_', undefined, undefined],
+        ['de-CH-1996', undefined, undefined],
       ] as const) {
         mockSpeakStream.mockClear();
         await speakWithLang(raw);

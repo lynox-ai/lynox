@@ -455,6 +455,31 @@ describe('the voice is resolved from the requested language, at ONE decision poi
     warn.mockRestore();
   });
 
+  it('a blank voice never reaches the provider, on ANY path', async () => {
+    // ⚠ The half the first fix missed. `resolveVoice` stopped a blank from suppressing
+    // selection, and `toInternalOpts` then re-admitted the RAW value with `?? opts.voice`
+    // whenever selection yielded nothing — so the provider still received `'  '`. These are
+    // the paths where selection yields nothing, each measured to leak before the fix.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'en_paul_neutral', language: 'en' }]);
+    const spy = vi.spyOn(facade.mistralVoxtralTtsProvider, 'speak').mockResolvedValue(fakeResult(5));
+
+    for (const opts of [
+      { voice: '  ' },                               // no language at all
+      { voice: '' },                                 // the route drops this one, a direct caller does not
+      { voice: '  ', voiceLanguage: 'de' },          // today's German case: no match, warn fires
+      { voice: '\t ', voiceLanguage: 'deutsch' },    // fails the shape rule
+    ]) {
+      spy.mockClear();
+      await facade.speak('hi', opts);
+      const sent = (spy.mock.calls[0]?.[1] as { voice?: string } | undefined)?.voice;
+      expect(spy, `provider not reached for ${JSON.stringify(opts)}`).toHaveBeenCalled();
+      expect(sent, `a blank voice leaked for ${JSON.stringify(opts)}`).toBeUndefined();
+    }
+    warn.mockRestore();
+  });
+
   it('trims the language before using it, so a padded value still works', async () => {
     // The `.trim()` had no witness: a padded value is rejected by the shape rule if it is
     // NOT trimmed, so dropping the trim silently turns a working request into no selection.

@@ -101,8 +101,18 @@ export function hasSpeakProvider(): boolean {
  */
 function toInternalOpts(opts: RichSpeakOpts, resolvedVoice?: string | undefined): SpeakOpts {
   const out: Record<string, unknown> = {};
-  const voice = resolvedVoice ?? opts.voice;
-  if (voice !== undefined) out['voice'] = voice;
+  // ⚠ ONLY the resolved voice. This used to fall back to `?? opts.voice`, which re-admitted
+  // the RAW, untrimmed value every time selection yielded nothing — so the blank-voice guard
+  // in `resolveVoice` closed the suppression half and the provider still received `'  '`.
+  // Measured through the facade: `{ voice: '  ' }` reached the Mistral payload as
+  // `"voice":"  "` where a voice-less call sends the curated default.
+  //
+  // The fallback is dead for every legitimate caller — `resolveVoice`'s first branch already
+  // returns the explicit voice, trimmed — so it existed solely to undo the guard. And the
+  // claim that went with it, "the HTTP route cannot produce it", is false for whitespace:
+  // the route drops a falsy `voice` but `'  '` is truthy, and the config path gates on
+  // `length > 0` rather than a trim.
+  if (resolvedVoice !== undefined) out['voice'] = resolvedVoice;
   if (opts.model !== undefined) out['model'] = opts.model;
   if (opts.tenantId !== undefined) out['tenantId'] = opts.tenantId;
   if (opts.timeoutMs !== undefined) out['timeoutMs'] = opts.timeoutMs;
