@@ -544,8 +544,9 @@ export class BackupManager {
       // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
       // `restoreBackup` both carried it. One question asked in several places, and the one that
       // did not ask reported EVERY encrypted backup as invalid: `PRAGMA integrity_check` throws
-      // "file is not a database". Public API (`src/index.ts`) with no in-repo caller, and its only
-      // tests run on an unencrypted manager, where the mapping is a no-op — so nothing saw it.
+      // "file is not a database". Public API (`src/index.ts`) with no in-repo caller, and BEFORE
+      // this change its only tests RAN on an unencrypted manager, where the relabel is a no-op —
+      // so nothing saw it. `backup-upload-opt-in.test.ts` now runs it on an encrypted archive.
       const checkFiles = manifest.encrypted
         ? verifiableFiles.map(f => (f.type === 'sqlite' ? { ...f, type: 'file' as const } : f))
         : verifiableFiles;

@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-lynox can back up your data automatically — encrypted when you set a vault key, and optionally uploaded to Google Drive.
+lynox can back up your data automatically — encrypted with a vault key it generates on first run, and optionally uploaded to Google Drive.
 
 ## What's Backed Up
 
@@ -36,9 +36,11 @@ curl -X POST http://localhost:3000/api/backups
 
 ⚠ **`backup_schedule` does not schedule anything.** The key is declared and documented, and the
 Settings UI offers it — but nothing in the engine reads it, so no backup is ever created because of
-it. Automatic backups run as a **task**: a trigger with the `backup` effect and a cron condition,
-which you create under Settings → Tasks. Until the key is either wired up or removed, treat both it
-and the "Backup schedule" control in Settings as having no effect.
+it. Automatic backups run as a **trigger** with the `backup` effect and a cron schedule. You create one
+by asking the agent in chat; Automation Hub → Triggers lists them, and "New trigger" opens a chat
+for it. (The Hub's **Tasks** tab is your to-do list, not agent triggers, and Settings has no Tasks
+page.) Until `backup_schedule` is either wired up or removed, treat both it and the "Backup
+schedule" control in Settings as having no effect.
 
 The other keys below do work:
 
@@ -76,12 +78,15 @@ or hosted one (those never upload to your Drive — the control plane runs their
    default is off. A project-local `.lynox/config.json` cannot set it: the project-config allowlist
    deliberately excludes it, and no environment variable overrides it. It can also be set through
    `PUT /api/config`, so treat API access to the instance as equivalent to config access.
-3. **The archive is encrypted** — `LYNOX_VAULT_KEY` is set to a **non-empty** value and you have
-   not set `backup_encrypt` to `false`. An empty `LYNOX_VAULT_KEY=` does not count as a key, and
-   turning `backup_encrypt` off disables the upload too, even with a key present.
+3. **The archive is encrypted.** ⚠ Do not read this as a brake you have to release: lynox
+   **generates a vault key on first run** and sets `LYNOX_VAULT_KEY` from it, so this condition is
+   normally already true before you touch anything. "I never set a vault key" is not a reason
+   uploads will not happen. It fails only if you set `LYNOX_VAULT_KEY=` empty, set `backup_encrypt`
+   to `false` (which disables the upload even with a key present), or your `vault.key` file is gone
+   while `vault.db` remains.
 
-If you opt in without a usable vault key, the local backup still runs and the upload is skipped,
-with a line on stderr saying so.
+In the rare case that there is no usable vault key, the local backup still runs and the upload is
+skipped, with a line on stderr saying so.
 
 **When a change takes effect** depends on how you make it:
 
@@ -98,8 +103,9 @@ assume the edit is already in effect.
 
 Set `backup_gdrive` to `false` (or remove the line). New backups are no longer uploaded.
 
-This does **not** remove copies already in Drive, and lynox has no remote-delete surface, so
-delete the `lynox-backups` folder in your Drive yourself if you want them gone.
+This does **not** remove copies already in Drive. Neither the UI nor the HTTP API has a
+remote-delete control, so delete the `lynox-backups` folder in your Drive yourself if you want them
+gone.
 
 ### What Drive can see
 

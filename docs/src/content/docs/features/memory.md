@@ -83,12 +83,15 @@ The memory system works across languages. You can discuss topics in German, Engl
 ## Local Storage
 
 Memory is stored locally, in two places: the flat-file `memory/` tree, which is what the memory
-tools read and write, and `~/.lynox/agent-memory.db`, which holds the knowledge graph and is the
-authoritative store for it.
+tools read and write, and `~/.lynox/agent-memory.db`, which holds a copy of every stored memory's
+text plus the knowledge graph built from it, and is the authoritative store for that graph.
 
 Both are part of the backup set, so a backup you send somewhere takes them along — that is the
 [Google Drive upload](/features/backup/#google-drive-upload), off by default, which encrypts file
-contents before sending. Leave it off and no backup of your memory is sent anywhere.
+contents before sending. Leave it off and lynox itself sends no backup of your memory anywhere.
+
+On a managed or hosted instance this setting is not the whole picture: those never upload to your
+Drive, and the control plane runs its own backups of the instance instead.
 
 Two other paths can still move it, and both need an explicit action from you: a migration to
 another instance (`POST /api/migration/export`) and a data export (`GET /api/export`).

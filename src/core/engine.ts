@@ -2475,14 +2475,9 @@ export class Engine {
    *
    * Fails closed when the Drive module never loaded — no gate, no upload.
    *
-   * ⚠ That `return false` is a SURVIVING mutant, and it stays deliberately. Flipping it to `true`
-   * changes no test's outcome, because the only path that leaves `_driveGate` null — a failed
-   * dynamic import — sits in the same `try` as the wiring, so it also leaves no uploader attached
-   * and step 10 never asks. The one way to reach the difference is an embedder that calls
-   * `getBackupManager()!.setGDriveUploader(...)` on an instance where that import failed. A test
-   * for that needs a module-level mock in a file of its own, and the reachability argument is
-   * worth more than the coverage it would buy — so it is written here instead. Do not "simplify"
-   * this line: it is the fail-closed direction of a gate, and its mutant is fail-open.
+   * ⚠ Do not "simplify" the `return false`: it is the fail-closed direction of a gate, and its
+   * mutant is fail-open. `backup-drive-gate-unloaded.test.ts` covers it — in a file of its own,
+   * because reaching this branch needs a module-level `vi.mock`.
    */
   private _driveUploadAllowed(): boolean {
     const gate = this._driveGate;
