@@ -335,6 +335,17 @@ export class Engine {
   private _notificationRouter = new NotificationRouter();
   private _workerLoop: WorkerLoop | null = null;
   private _backupManager: import('./backup.js').BackupManager | null = null;
+  /**
+   * The pure consent decision, cached when `init()` loads the Drive module.
+   *
+   * `null` until then, and `null` forever if that module fails to load — which is why
+   * `_driveUploadAllowed` fails CLOSED on it. It exists because the decision has to be
+   * available SYNCHRONOUSLY at upload time, while the module must stay a dynamic import so
+   * a load failure in an optional feature cannot make `init()` throw.
+   */
+  private _driveGate: {
+    driveUploadOptedIn: (c: { backup_gdrive?: boolean | undefined }) => boolean;
+  } | null = null;
   private _apiStore: import('./api-store.js').ApiStore | null = null;
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
@@ -1969,6 +1980,11 @@ export class Engine {
         backupDir,
         retentionDays: this.userConfig.backup_retention_days ?? 30,
         encrypt: this.userConfig.backup_encrypt ?? (!!process.env['LYNOX_VAULT_KEY']),
+        // Asked at every upload, over `this.userConfig` — which `reloadUserConfig` REASSIGNS, so
+        // a revoked opt-in takes effect in this process instead of at the next restart. A gate
+        // at the `driveBackupAllowed()` call alone would enforce "true at the last boot"; this
+        // enforces "true now".
+        uploadAllowed: () => this._driveUploadAllowed(),
       }, process.env['LYNOX_VAULT_KEY'] ?? null);
     } catch {
       this._backupManager = null;
@@ -2033,7 +2049,20 @@ export class Engine {
         // second `await import` above this block to reach the gate — outside the catch, in an
         // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
         // been fatal to boot on every tier. A gate is not worth a crash.
-        const { GDriveBackupUploader, driveBackupAllowed } = await import('./backup-upload-gdrive.js');
+        const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
+        // Cache the consent decision so the upload itself can ask it synchronously. This is what
+        // makes a revoked opt-in take effect without a restart. Tier is NOT cached: it is asked
+        // at the `driveBackupAllowed()` call that guards this block, because the environment
+        // cannot change in a running process.
+        this._driveGate = { driveUploadOptedIn };
+        // TIER only, and deliberately: this condition is derived from the environment, which
+        // cannot change inside a running process, so boot is the right place to ask it — and
+        // provisioned instances then never build a credential shim they will not use.
+        //
+        // The user's opt-in is NOT asked here. It can change at runtime, so it is asked where the
+        // upload happens (`uploadAllowed` above → `backup.ts` step 10), which is the only place
+        // an answer can be current. One condition, one place, each where it can change: asking
+        // consent in both would give two mechanisms that no single test can tell apart.
         if (driveBackupAllowed()) {
           // A resolving shim, not the instance: `BackupAuthProvider` is the two
           // methods the uploader calls, so a late-built credential is picked up
@@ -2433,6 +2462,29 @@ export class Engine {
   getSearchProvider(): import('../integrations/search/index.js').SearchProvider | null { return this._searchProvider; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
+  /**
+   * Does the user want this backup uploaded to Drive, right now?
+   *
+   * CONSENT only. The tier condition is asked once, at the wiring in `init()` (above this method
+   * in the file), because it is derived
+   * from the environment and cannot change in a running process — and asking it here as well
+   * produced a survivor: with the tier gate already refusing to attach an uploader on a
+   * provisioned instance, dropping the tier term from this expression changed no test's outcome.
+   * Two mechanisms for one condition are a compensating pair, and a redundancy no test can
+   * distinguish makes the coverage look larger than it is. One condition, one place.
+   *
+   * Fails closed when the Drive module never loaded — no gate, no upload.
+   *
+   * ⚠ Do not "simplify" the `return false`: it is the fail-closed direction of a gate, and its
+   * mutant is fail-open. `backup-drive-gate-unloaded.test.ts` covers it — in a file of its own,
+   * because reaching this branch needs a module-level `vi.mock`.
+   */
+  private _driveUploadAllowed(): boolean {
+    const gate = this._driveGate;
+    if (!gate) return false;
+    return gate.driveUploadOptedIn(this.userConfig);
+  }
+
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }
   getApiStore(): import('./api-store.js').ApiStore | null { return this._apiStore; }
   getArtifactStore(): import('./artifact-store.js').ArtifactStore | null { return this._artifactStore; }

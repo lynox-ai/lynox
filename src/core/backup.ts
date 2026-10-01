@@ -47,6 +47,14 @@ export interface BackupConfig {
   encrypt: boolean;
   /** Google Drive uploader instance (optional — set when Google auth is available). */
   gdriveUploader?: import('./backup-upload-gdrive.js').GDriveBackupUploader | undefined;
+  /**
+   * Asked at EVERY upload, not once at wiring: may this backup be uploaded at all?
+   *
+   * The engine hands in a closure over its live config, so revoking the opt-in takes effect in
+   * the running process instead of at the next restart. Omitted means yes, which is the right
+   * default for an embedder that attaches an uploader deliberately and has no such setting.
+   */
+  uploadAllowed?: (() => boolean) | undefined;
 }
 
 // DERIVED, not restated. These three lists and the migration set used to be maintained
@@ -65,14 +73,21 @@ export class BackupManager {
   private readonly encrypt: boolean;
   private readonly vaultKey: string | null;
   private _gdriveUploader: import('./backup-upload-gdrive.js').GDriveBackupUploader | null;
+  private readonly _uploadAllowed: () => boolean;
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
     this.backupDir = config.backupDir;
     this.retentionDays = config.retentionDays;
-    this.encrypt = config.encrypt && vaultKey !== null;
+    // `!!vaultKey`, not `vaultKey !== null`. The two differ on exactly one value — the empty
+    // string — and they used to sit in different places: this line said `!== null`, while the
+    // encryption pass in `createBackup` asks for a truthy key. `LYNOX_VAULT_KEY=` (set, empty)
+    // survives the `?? null` in the engine as `''`, so with an explicit `backup_encrypt: true`
+    // this field went true while nothing was encrypted. An empty string is not key material.
+    this.encrypt = config.encrypt && !!vaultKey;
     this.vaultKey = vaultKey;
     this._gdriveUploader = config.gdriveUploader ?? null;
+    this._uploadAllowed = config.uploadAllowed ?? (() => true);
   }
 
   /** Set Google Drive uploader (can be set after construction when auth becomes available). */
@@ -138,6 +153,14 @@ export class BackupManager {
       }
 
       // 5. Encryption (optional)
+      //
+      // `this.encrypt` is safe to read as "this archive IS ciphertext" only because the
+      // constructor derives it with the same predicate this branch asks for. An earlier draft
+      // also carried a separate `didEncrypt`, set inside this branch, so the manifest would
+      // record the pass rather than the intent. It was removed: with one predicate the two are
+      // identical, no mutation could tell them apart, and a redundancy no test can see is worse
+      // than none — it makes the coverage look larger than it is. The `&& this.vaultKey` below is
+      // type narrowing for `deriveBackupKey`, not a second condition.
       if (this.encrypt && this.vaultKey) {
         const key = deriveBackupKey(this.vaultKey);
         for (const entry of files) {
@@ -197,12 +220,79 @@ export class BackupManager {
       }
 
       // 10. Upload to Google Drive (best-effort — local backup is the primary)
+      //
+      // The conditions, each asked where it can change:
+      //
+      //   `_uploadAllowed()`   — the user's opt-in, evaluated HERE rather than at boot.
+      //   `manifest.encrypted` — whether this archive is ciphertext.
+      //   (tier)               — asked where `driveBackupAllowed()` is called, in `Engine.init`,
+      //                          because it is derived from the environment and cannot change in
+      //                          a running process. Deliberately NOT in `_uploadAllowed()` too:
+      //                          checking it in both places was a compensating pair that no
+      //                          single mutant could expose.
+      //
+      // ⚠ BEFORE REUSING THIS CLASS: an uploader attached by an EMBEDDER is gated by NEITHER of
+      // them. Not by tier, which lives at the engine's wiring; and not by consent, because
+      // `uploadAllowed` defaults to `() => true` for a caller that does not pass one — which is
+      // the right default for someone who attaches an uploader deliberately, and the more
+      // dangerous half to not know. What makes it safe inside this product is that the engine
+      // passes the predicate and attaches nothing on a provisioned instance. An embedder gets
+      // only the encryption condition for free.
+      //
+      // Why the opt-in is asked at upload time and not once at wiring: the engine's `init()` runs
+      // once, so a gate there enforces "the setting was true at the last boot", not "the user
+      // wants this now". Revoking `backup_gdrive` would have kept uploading until the process
+      // restarted — fail-open, and the same class `_reconcileBugsink` exists to close for the
+      // privacy toggle. A predicate handed in at construction reads the engine's live config on
+      // every call, so a RELOAD takes effect at once and in both directions.
+      //
+      // ⚠ "A reload", precisely: nothing watches `config.json`. `Engine.reloadUserConfig` is what
+      // makes a change live, and `PUT /api/config` is the route that calls it — so a change made
+      // that way takes effect at once, and a HAND-EDITED file does not until something calls that
+      // route or the process restarts. `features/backup.md` states both halves for users.
+      //
+      // Deliberately named rather than counted: every stale claim this file has carried was a
+      // COUNT or a POSITION ("three ways", "exactly two callers", "the wiring below"). A sentence
+      // that names a symbol can go incomplete; one that counts goes false.
+      //
+      // `manifest.encrypted` is the property and not a correlate because ONE predicate decides
+      // encryption: the constructor's `config.encrypt && !!vaultKey` is exactly what step 5 acts
+      // on. Reading the environment variable here would be the proxy — that answers whether a key
+      // exists somewhere, not whether THIS archive was encrypted.
+      //
+      // ⚠ What "encrypted" does NOT cover: `manifest.json` is written in step 7, AFTER the
+      // encryption pass, and the uploader walks the directory rather than `files[]`, so the
+      // manifest goes up in the clear — file paths, sizes, checksums and the data directory's
+      // absolute path. `features/backup.md` says so under "What Drive can see"; it is a property
+      // of the design (the remote listing parses that manifest), not an oversight.
       if (this._gdriveUploader) {
-        try {
-          await this._gdriveUploader.upload(finalDir, manifest);
-        } catch {
-          // GDrive upload failure does not fail the backup
-          process.stderr.write('[lynox:backup] Google Drive upload failed — local backup is intact\n');
+        if (!this._uploadAllowed()) {
+          // Nothing to say: not opting in is the normal state, and a line here would fire on
+          // every backup of every instance that never asked for an upload.
+        } else if (!manifest.encrypted) {
+          process.stderr.write(
+            '[lynox:backup] Google Drive upload skipped — this backup is not encrypted. '
+            + 'Set LYNOX_VAULT_KEY to a non-empty value (and do not set backup_encrypt to false) '
+            + 'to upload. The local backup is intact.\n',
+          );
+        } else {
+          // The result is NOT discarded, and that is the point: the real uploader does not throw
+          // on a refusal — a missing `drive.file` scope, an API error and a network failure all
+          // come back as `{ success: false, error }`. Discarding it made every genuine upload
+          // failure silent while the code claimed its refusals were written, which is the same
+          // defect one level up.
+          try {
+            const result = await this._gdriveUploader.upload(finalDir, manifest);
+            if (!result.success) {
+              process.stderr.write(
+                `[lynox:backup] Google Drive upload failed — local backup is intact: ${result.error ?? 'unknown error'}\n`,
+              );
+            }
+          } catch (err: unknown) {
+            // A throw is the unexpected path; the uploader reports refusals by return value.
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${msg}\n`);
+          }
         }
       }
 
@@ -451,7 +541,16 @@ export class BackupManager {
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
       const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
-      return verifyBackup(backupPath, verifiableFiles);
+      // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
+      // `restoreBackup` both carried it. One question asked in several places, and the one that
+      // did not ask reported EVERY encrypted backup as invalid: `PRAGMA integrity_check` throws
+      // "file is not a database". Public API (`src/index.ts`) with no in-repo caller, and BEFORE
+      // this change its only tests RAN on an unencrypted manager, where the relabel is a no-op —
+      // so nothing saw it. `backup-upload-opt-in.test.ts` now runs it on an encrypted archive.
+      const checkFiles = manifest.encrypted
+        ? verifiableFiles.map(f => (f.type === 'sqlite' ? { ...f, type: 'file' as const } : f))
+        : verifiableFiles;
+      return verifyBackup(backupPath, checkFiles);
     } catch (err: unknown) {
       return { valid: false, errors: [err instanceof Error ? err.message : String(err)], files_checked: 0 };
     }

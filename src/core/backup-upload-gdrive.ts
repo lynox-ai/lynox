@@ -99,6 +99,43 @@ export function driveBackupAllowed(env: NodeJS.ProcessEnv = process.env): boolea
   return !isProvisionedInstance(env);
 }
 
+/**
+ * Does the USER want backups uploaded to Drive?
+ *
+ * `driveBackupAllowed` above answers a different question — whether this DEPLOYMENT may upload at
+ * all. Both are required, because they are different questions: tier says a deployment may upload,
+ * the setting says its owner wants it to. Sending a copy of the whole data directory to a third
+ * party is a decision of its own and needs a switch of its own.
+ *
+ * `backup_gdrive` is not invented here. It is declared in `LynoxUserConfig` and in
+ * `LynoxUserConfigSchema`, and documented on two published pages — `features/backup.md`, which
+ * states the default as `false`, and `daily-use/configuration.md`, which shows it in an example —
+ * while nothing in the codebase read it. A documented setting that no code consults is a promise,
+ * not a control. This function is the reader.
+ *
+ * `=== true` rather than truthiness: the property is an EXPLICIT opt-in. `undefined` — the
+ * default, the field being `optional()` — and `false` both mean no, and so does a non-boolean
+ * that somehow reached this far.
+ *
+ * Deliberately NOT added to `PROJECT_SAFE_KEYS` in `config.ts`. That allowlist is what a
+ * PROJECT-local config may override, and its own comment says project config cannot override
+ * security-sensitive fields. A file sitting in a working directory must not be able to change this
+ * setting. It is a user-config setting, which is the path both documented pages show — and, on a
+ * self-hosted instance, `PUT /api/config` reaches it too, so API access to an instance is
+ * equivalent to config access.
+ *
+ * Extracted as a pure function for the same reason as the gate above: so the DECISION can be
+ * asserted without booting an engine, and — the part that matters here — without a test having
+ * to cause the very upload the gate exists to prevent. The lines that CALL it are covered
+ * separately, in `engine-init-wiring-boot.test.ts`, because a unit test that hands the setting in
+ * cannot see a dropped call.
+ */
+export function driveUploadOptedIn(
+  config: { backup_gdrive?: boolean | undefined } = {},
+): boolean {
+  return config.backup_gdrive === true;
+}
+
 
 /** Authenticated fetch helper for Drive API. */
 async function driveFetch(auth: BackupAuthProvider, url: string, options?: RequestInit): Promise<Response> {
