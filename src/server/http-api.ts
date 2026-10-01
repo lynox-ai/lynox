@@ -6941,11 +6941,14 @@ export class LynoxHTTPApi {
       // `DE` and `de-CH` reached the voice and left text-prep guessing.
       //
       // Then it derived `lang` from the tag's HEAD — which fixed that class and opened a
-      // new one in the same direction: `de_`, `de-x`, `de_abcde` and any three-subtag
-      // locale (`de-CH-1996`, `en-Latn-US`) have the head `de`, so they forced German
-      // text-prep while the shape rule rejected them for the voice. Measured: before that
-      // change both fields were undefined — agreement — and after it they disagreed. A fix
-      // that moves a disagreement is not a fix.
+      // new one in the same direction: `de_`, `de-x`, `de_abcde` and any three-subtag locale
+      // (`de-CH-1996`, `en-Latn-US`) have a head the comparison accepts, so they forced
+      // text preparation in that language while the shape rule rejected them for the voice.
+      // (⚠ The first version of this sentence said all five "have the head `de`" — and
+      // `en-Latn-US` has the head `en` and forced ENGLISH. One of its own examples
+      // contradicted it.) Measured: before that change both fields were undefined —
+      // agreement — and after it they disagreed. A fix that moves a disagreement is not
+      // a fix.
       //
       // Now the shape rule decides FIRST, and both consumers read what it accepted.
       const tag = isVoiceLanguageTag(langRaw) ? langRaw : undefined;

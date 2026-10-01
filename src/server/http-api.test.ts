@@ -9144,16 +9144,25 @@ describe('metered audio routes: managed credit gate + debit', () => {
     }
 
     it('derives BOTH fields from ONE tag, and they agree on case and region', async () => {
-      // One table instead of five separate cases.
+      // Two tests in place of five.
       //
-      // ⚠ The reason this comment first gave was FALSE and worth keeping as the correction:
-      // it credited the per-IP rate budget. The budget is spent per REQUEST, not per `it()` —
-      // counted, the old block made 10 and the new one makes 10 too, so collapsing the cases
-      // saved nothing. What paid for the two new values was dropping two bogus ones: a
-      // coverage trade, not a saving. The budget hazard itself is real and was measured (two
-      // unrelated oauth tests failing with 429 when my first version added requests), and
-      // `RATE_WINDOW_MS`/`RATE_MAX_LOOPBACK` are as quoted — but it is not what this shape
-      // is for. A true general lesson does not make a false causal claim true.
+      // ⚠ The reason this comment first gave was FALSE, and it is kept as the correction:
+      // it credited the per-IP rate budget. The budget is spent per REQUEST, not per `it()`.
+      // Counted, each time by hand: five separate tests made 10 requests, the first table
+      // form made 10, and THIS form makes 12 — eight table rows, three rejected shapes, one
+      // non-string. So collapsing the cases saved nothing and the two rows added later cost
+      // two requests.
+      //
+      // ⚠⚠ And the "10" stood here after a later commit of mine had already added those two
+      // rows twelve lines below. The number was true when written and my own next edit
+      // falsified it — inside the comment whose entire point is that you have to COUNT.
+      // Re-counted above, with the parts named so the next reader can check rather than
+      // trust.
+      //
+      // The budget hazard itself is real and was measured (two unrelated oauth tests failing
+      // with 429 when an earlier version added requests), and `RATE_WINDOW_MS` /
+      // `RATE_MAX_LOOPBACK` are as quoted. A true general lesson does not make a false
+      // causal claim true.
       //
       // ⚠ `en_GB` expecting `lang: 'en'` is a CHANGED expectation. The first version of this
       // test asserted `lang` was undefined there — it encoded the inconsistency it should
