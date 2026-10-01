@@ -12,25 +12,21 @@ commit-msg:
       run: bash scripts/no-ai-attribution.sh strip {1}
 
 pre-push:
-  commands:
-    security-scan:
-      run: sh scripts/security-scan.sh
-    default-on-inventory:
-      # What runs when an operator configures nothing? v2.11.0 shipped a config
-      # flag reading `?? true`, so a new HTML parser went live fleet-wide without
-      # anyone deciding it. Pairs with the `default-on-inventory` CI job, which is
-      # the gate for the bypassed case.
-      run: bash scripts/default-on-inventory.sh
-    public-repo-guard:
-      # Block internal infra / control-plane / ops leaks (staging hostnames,
-      # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —
-      # the class gitleaks doesn't catch. Scans the whole tracked tree; the
-      # CI job re-runs it so `git push --no-verify` can't slip a leak past.
-      run: bash scripts/public-repo-guard.sh
-      skip:
-        - merge
-        - rebase
-    public-repo-guard-meta:
+  # SCRIPTS, not commands, for every check that has no CI twin. lefthook (2.1.5 and 2.1.8, measured
+  # in real clones) computes its push files from the CHECKED-OUT HEAD against that branch's upstream
+  # (no upstream: origin/HEAD). With zero files it skips EVERY pre-push command — "(skip) no
+  # matching push files", exit 0 — whatever refs are being pushed: an empty commit on an
+  # already-pushed branch, a fresh branch carrying only an empty commit, a push of a branch you are
+  # not standing on. The commands below have CI twins, so for them that is latency. The scripts
+  # here do not, and a script ran in every measured case.
+  scripts:
+    "push-lands-guard.sh":
+      # A push to a branch whose pull request is already merged or closed lands nowhere, and git
+      # reports success anyway. Fail-closed: an unreadable PR state blocks the push. Its backstop
+      # for --no-verify is the scheduled sweep (.github/workflows/push-lands-sweep.yml).
+      runner: sh
+      use_stdin: true
+    "public-repo-guard-meta.sh":
       # The customer-name class does NOT scan the tree — it scans commit
       # messages, which is where that leak actually happens and the one surface
       # that cannot be edited after a merge. So it needs its own invocation:
@@ -56,11 +52,12 @@ pre-push:
       # CLAUDE.md). It is chosen because a hook nobody can push through is how
       # people learn --no-verify, and because the state it lets through announces
       # itself in the output instead of passing as a clean scan.
-      run: bash scripts/public-repo-guard.sh check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
+      # The invocation lives in .lefthook/pre-push/public-repo-guard-meta.sh.
+      runner: bash
       skip:
         - merge
         - rebase
-    public-repo-guard-files:
+    "public-repo-guard-files.sh":
       # The same class over the other surface: the PATHS and CONTENT of the files
       # this push adds. The message half above cannot see them, so a file named
       # after a customer — or holding the name in its body — reached this PUBLIC
@@ -75,7 +72,26 @@ pre-push:
       # Same range expression, same fallback, same reasons as the block above:
       # `|| echo HEAD` yields an empty range that the guard reports as "NO files"
       # rather than blocking a clone that has no local origin/main.
-      run: bash scripts/public-repo-guard.sh check-files "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
+      # The invocation lives in .lefthook/pre-push/public-repo-guard-files.sh.
+      runner: bash
+      skip:
+        - merge
+        - rebase
+  commands:
+    security-scan:
+      run: sh scripts/security-scan.sh
+    default-on-inventory:
+      # What runs when an operator configures nothing? v2.11.0 shipped a config
+      # flag reading `?? true`, so a new HTML parser went live fleet-wide without
+      # anyone deciding it. Pairs with the `default-on-inventory` CI job, which is
+      # the gate for the bypassed case.
+      run: bash scripts/default-on-inventory.sh
+    public-repo-guard:
+      # Block internal infra / control-plane / ops leaks (staging hostnames,
+      # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —
+      # the class gitleaks doesn't catch. Scans the whole tracked tree; the
+      # CI job re-runs it so `git push --no-verify` can't slip a leak past.
+      run: bash scripts/public-repo-guard.sh
       skip:
         - merge
         - rebase
