@@ -107,10 +107,18 @@ export async function runGuardedSavedWorkflow(
   //    `parentTools` or it throws before running a step.
   //
   //    This stays the engine's set, and that is a decision rather than an oversight: there is
-  //    no agent here and therefore no grant to narrow to. A scheduled run has no parent
-  //    session — bounding it to something would take tools away from a cron run that nothing
-  //    promised to withhold. The set a role protects is "a child of a session", not
-  //    "everything that is not a root".
+  //    no parent AGENT here, so there is no grant this run could exceed. A scheduled run has
+  //    no session — bounding it would take tools from a cron run that nothing promised to
+  //    withhold. The set a role protects is "a child of a session", not "everything that is
+  //    not a root".
+  //
+  //    ⚠ Precisely "no parent grant", NOT "nothing applies here": `onBeforeCreateAgent` takes
+  //    `(tools) => tools` and needs no agent, so a plugin narrowing DOES exist that this path
+  //    does not get — and neither does the plugin tool gate, since `getToolContext().tools`
+  //    are the raw registry entries. No plugin registers either today, so this is latent
+  //    rather than live; it is named here because the first draft of this comment said "no
+  //    agent and therefore nothing to narrow to", which is a wider claim than the decision
+  //    needs and would have read as a check that had been considered and ruled out.
   const toolContext = engine.getToolContext();
   const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params, {
     tools: toolContext.tools,

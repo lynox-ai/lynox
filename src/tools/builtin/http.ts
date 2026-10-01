@@ -535,7 +535,8 @@ const API_SETUP_TOOL_NAME = 'api_setup';
  * and fail the other:
  *
  * **1. The right.** Tool scoping in this engine is keyed on `definition.name`
- * (`tools/registry.ts › scopedView`, `tools/resolve-tools.ts › selectByTier`), so
+ * (`tools/resolve-tools.ts › resolveTools`, and `tools/resolve-tools.ts › withinSurface` for
+ * what a derived list may hold), so
  * calling another tool's handler directly walks past it. Without this check an
  * `http_request` would carry out the write side of `api_setup` for a caller that
  * does not hold `api_setup` — and two populations are exactly in that state:

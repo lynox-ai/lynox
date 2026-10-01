@@ -1018,8 +1018,20 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     // registry, which for a child agent is wider than the child's own grant — a workflow step
     // naming a tool the child does not hold would otherwise be served from it. The accessor's
     // own docblock names pipeline child-agents as its consumers, so this restores a contract
-    // rather than adding one; the side effect on a root session is that workflow steps now
-    // honour user-disabled tools (`excludeTools`), which is what that docblock asks for.
+    // rather than adding one.
+    //
+    // For a ROOT session the two lists differ by FOUR things, and the first draft of this
+    // comment named one of them. Measured against `session.ts`, where both are built:
+    //   1. the PLUGIN GATE — `applyPluginToolGate` wraps the handlers the agent gets, while
+    //      `toolContext.tools` are the raw registry entries. Workflow steps therefore ran
+    //      PAST the gate and now run through it. A tightening, and the one worth naming.
+    //   2. `onBeforeCreateAgent` hooks, which shape the agent's list and not the context's.
+    //   3. `userConfig.disabled_tools` — already subtracted downstream by the inline path, so
+    //      new here only when the context's config is staler than the session's.
+    //   4. `agentOverrides.excludeTools`, a session's own excludes.
+    // None of the four is a loss: each is a narrowing the user, a plugin or the session asked
+    // for, and (3) was mostly in force already. Stated in full because "it now honours
+    // disabled tools" reads as one effect where there are four.
     const pipelineTools = agent.getAvailableTools();
     const pipelineStreamHandler = agent.toolContext.streamHandler;
     const pipelineRunHistory = agent.toolContext.runHistory;

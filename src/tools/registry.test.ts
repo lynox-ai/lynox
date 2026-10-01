@@ -62,6 +62,18 @@ describe('ToolRegistry', () => {
   });
 
   describe('scopedView', () => {
+    it('an allowedTools of [] admits nothing — the one shape routing could have changed', () => {
+      // The only shape where the old in-place filtering and `resolveTools` could plausibly
+      // diverge: an empty array is truthy, so each takes its filter branch rather than its
+      // "no allowlist" branch. Asserted because the routing comment names this case, and a
+      // claim about a shape nobody tests is a claim about nothing.
+      const reg = new ToolRegistry();
+      reg.register(makeTool('bash')).register(makeTool('read_file'));
+      expect(reg.scopedView({ allowedTools: [] })).toEqual([]);
+      // The control beside it: `undefined` is NOT the same value, and still admits everything.
+      expect(reg.scopedView({ allowedTools: undefined })).toHaveLength(2);
+    });
+
     it('filters by allowedTools whitelist', () => {
       const reg = new ToolRegistry();
       reg.register(makeTool('bash')).register(makeTool('read_file')).register(makeTool('write_file'));
