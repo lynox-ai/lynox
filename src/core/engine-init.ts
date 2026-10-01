@@ -50,27 +50,46 @@ import { compose, engineText, renderFence, type Part } from './data-boundary.js'
 
 // ── History + Budget + Subscriptions ────────────────────────────
 
+/**
+ * Apply the boot-time cost, rate and egress settings to the ToolContext.
+ *
+ * The HTTP/mail rate limits and the daily/monthly caps count against
+ * RunHistory, so they need it. The session cap and the egress settings
+ * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
+ * applied whether or not RunHistory opened: an engine that boots without its
+ * history must still enforce the limits it was configured with.
+ */
 export function configureBudgetAndRateLimits(
-  runHistory: RunHistory,
+  runHistory: RunHistory | null,
   userConfig: LynoxUserConfig,
   toolContext: ToolContext,
 ): void {
-  // Env vars override config (managed hosting sets tier-specific limits via env)
-  const envFloat = (key: string): number | undefined => {
-    const v = parseFloat(process.env[key] ?? '');
-    return Number.isFinite(v) && v > 0 ? v : undefined;
-  };
-  const envInt = (key: string): number | undefined => {
-    const v = parseInt(process.env[key] ?? '', 10);
-    return Number.isFinite(v) && v > 0 ? v : undefined;
-  };
-
   configurePersistentBudget({
     costProvider: runHistory,
     sessionCapUSD: envFloat('LYNOX_MAX_SESSION_COST_USD') ?? userConfig.max_session_cost_usd,
     dailyCapUSD: envFloat('LYNOX_MAX_DAILY_COST_USD') ?? userConfig.max_daily_cost_usd,
     monthlyCapUSD: envFloat('LYNOX_MAX_MONTHLY_COST_USD') ?? userConfig.max_monthly_cost_usd,
   });
+  if (runHistory) configureHistoryBackedLimits(runHistory, userConfig, toolContext);
+  configureEgressPolicy(userConfig, toolContext);
+}
+
+// Env vars override config (managed hosting sets tier-specific limits via env)
+function envFloat(key: string): number | undefined {
+  const v = parseFloat(process.env[key] ?? '');
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+function envInt(key: string): number | undefined {
+  const v = parseInt(process.env[key] ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+function configureHistoryBackedLimits(
+  runHistory: RunHistory,
+  userConfig: LynoxUserConfig,
+  toolContext: ToolContext,
+): void {
   applyHttpRateLimits(
     toolContext,
     runHistory,
@@ -89,6 +108,9 @@ export function configureBudgetAndRateLimits(
     dailyLimit: envInt('LYNOX_MAX_MAIL_SENDS_PER_DAY') ?? userConfig.max_mail_sends_per_day,
     dedupWindowMs: dedupSec !== undefined ? dedupSec * 1000 : undefined,
   });
+}
+
+function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolContext): void {
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
   // Outbound egress policy. Default 'allow-all' = unchanged behaviour.
   // 'allow-list'/'deny-all'/'guarded' are opt-in operator/CP controls enforced

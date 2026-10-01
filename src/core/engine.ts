@@ -1219,11 +1219,11 @@ export class Engine {
       }
     }
 
-    // Configure persistent budget caps and HTTP rate limits
+    // Configure persistent budget caps, HTTP rate limits and the egress policy.
+    // Called with or without RunHistory: the limits that count against it are
+    // skipped when it failed to open, the egress policy is applied regardless.
     // History subscriptions (toolEnd → recordToolCall) are set up per-Session in the constructor.
-    if (this.runHistory) {
-      configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
-    }
+    configureBudgetAndRateLimits(this.runHistory, this.userConfig, this._toolContext);
   }
 
   /** Context resolution, workspace, briefing, secrets, API client recreate, user ID + scopes. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
