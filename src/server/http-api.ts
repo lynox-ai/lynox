@@ -25,7 +25,9 @@ import {
   exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
-import { accessTokenKey, refreshTokenKey } from '../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
+import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry } from '../types/memory.js';
@@ -7800,9 +7802,17 @@ export class LynoxHTTPApi {
       // already says the connection is incomplete and that a new link heals it —
       // the save is an upsert, so the retry overwrites whatever was left behind.
       try {
+        // Decided ONCE, above the writes, because three things downstream have to
+        // agree about it: which vault slot is filled, which grant type the profile
+        // is given, and which state the grant record records. Re-asking
+        // `typeof parsed.refresh_token === 'string'` at each of them is three
+        // chances to answer differently.
+        const refreshToken = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== ''
+          ? parsed.refresh_token
+          : null;
         secretStore.set(accessTokenKey(signed.profileId), accessToken);
-        if (typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '') {
-          secretStore.set(refreshTokenKey(signed.profileId), parsed.refresh_token);
+        if (refreshToken !== null) {
+          secretStore.set(refreshTokenKey(signed.profileId), refreshToken);
         }
         // RE-READ, never the snapshot. `profile` was fetched before
         // `exchangeToken`, which can take fifteen seconds while the user is on
@@ -7824,12 +7834,65 @@ export class LynoxHTTPApi {
           const oauthNext = { ...fresh.auth?.oauth };
           if (expiry === 'unknown') delete oauthNext.token_expires_at;
           else oauthNext.token_expires_at = expiry;
+          // THE GRANT TYPE, and it is the point of this block rather than a detail
+          // of it. `fetch_token` reads `auth.oauth.grant_type` and defaults it to
+          // `client_credentials` when it is absent — so a profile that has just
+          // been authorized BY A USER, and whose stored token therefore carries
+          // that user's delegation, would be renewed by posting an app-level grant
+          // and silently exchanged for a token that can see different data. The
+          // route sent `grant_type: 'authorization_code'` in the token REQUEST and
+          // wrote nothing about it; this is where that is corrected.
+          //
+          // Only when a refresh token actually came back, because that is what a
+          // `refresh_token` grant needs to present. A provider that answers without
+          // one leaves the field ALONE rather than being given a grant type the
+          // profile cannot perform — and `oauth_grant.state` below says which of
+          // the two happened, so the unattended renewal can refuse that shape
+          // instead of guessing from an absent field.
+          if (refreshToken !== null) oauthNext.grant_type = 'refresh_token';
+          // WHAT THIS EXCHANGE WROTE, by vault name and by a fingerprint of the
+          // value. `purgeRecordedTokens` removes a name only while the vault still
+          // holds that very value — a name alone proves nothing, since the user can
+          // store their own token under it later. Until now this route recorded
+          // nothing, so deleting a connected profile (or unlinking it in the UI,
+          // which calls the same function) left both tokens behind in the vault.
+          const written: WrittenSecret[] = [
+            { name: accessTokenKey(signed.profileId), fp: tokenFingerprint(accessToken) },
+          ];
+          if (refreshToken !== null) {
+            written.push({ name: refreshTokenKey(signed.profileId), fp: tokenFingerprint(refreshToken) });
+          }
+          // Merged, not replaced: a previous `fetch_token` may have written a name
+          // this exchange does not touch — an explicit `output_secret_name` — and
+          // dropping it would stop a later delete from purging it. Same rule as
+          // `api-setup.ts › mergeWrites`: one entry per name, and the entry this
+          // exchange wrote wins for the names it wrote.
+          const rewritten = new Set(written.map((w) => w.name));
+          const grantNext: OAuthGrantRecord = {
+            ...fresh.oauth_grant,
+            origin: 'callback',
+            // `connected` and `no-refresh` are the two honest outcomes, and
+            // `connect` already branches on them to tell a returning user that
+            // authorizing again replaces what is stored. Nothing wrote them, so
+            // that branch has never once been reached: a user who had already
+            // connected was handed the link as if they never had.
+            state: refreshToken !== null ? 'connected' : 'no-refresh',
+            written: [...recordedWrites(fresh).filter((w) => !rewritten.has(w.name)), ...written],
+          };
+          // A revocation verdict is about a grant this authorization just
+          // replaced. Leaving it would let `hasRevokedGrant` keep reporting a
+          // connection the user has just re-established as revoked — and the
+          // attach steps aside for a changed refresh token, so the record would be
+          // the only thing still saying it. `fetch_token` clears the same three
+          // fields after a successful exchange, for the same reason.
+          delete grantNext.revoked_fp;
+          delete grantNext.revoked_at;
           // `apisDir` for the same reason `api_setup` passes it: an engine
           // without an `engine.db` has no ConnectionStore, and `save` then
           // persists only when it is told where to.
           const { getLynoxDir } = await import('../core/config.js');
           const saved = apiStore.save(
-            { ...fresh, auth: { ...fresh.auth, oauth: oauthNext } } as typeof fresh,
+            { ...fresh, auth: { ...fresh.auth, oauth: oauthNext }, oauth_grant: grantNext } as typeof fresh,
             join(getLynoxDir(), 'apis'),
           );
           // The result is READ. `save` does not throw when `_admit` refuses — it
@@ -7839,7 +7902,7 @@ export class LynoxHTTPApi {
           // change exists to remove, so it is said out loud instead.
           if (!saved.ok) {
             process.stderr.write(
-              `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but its token lifetime could not be recorded: ${saved.reason}\n`,
+              `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but what this engine learned about them could not be recorded — its lifetime, its grant type, and what a delete would have to purge: ${saved.reason}\n`,
             );
           }
         } else {

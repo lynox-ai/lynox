@@ -614,42 +614,87 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * whether the CALLER may trigger one, which is why it is a second predicate and
  * not another condition in the first.
  *
- * Refuses exactly one shape: a stored refresh token with no explicit
- * `grant_type`. That combination is ambiguous, and automating it makes the
- * ambiguity destructive.
+ * One thing is being protected, in two shapes: a token a USER consented to must
+ * never be swapped, unattended, for an app-level one. `fetch_token` posts a
+ * client-credentials grant for every `grant_type` but `refresh_token`, absent
+ * ones included — so wherever the stored token came from a human at a consent
+ * screen, that default is the swap.
  *
- * `auth.oauth.grant_type` is OPTIONAL on a profile — the validator checks it
- * only when present — and `fetch_token` defaults it to `client_credentials`.
- * The authorization-code flow sends `grant_type: 'authorization_code'` in the
- * token REQUEST and never writes one onto the profile, so a profile created by
- * `connect` carries a user-delegated refresh token and no grant type at all.
- * Renew that and `fetch_token` posts a CLIENT-CREDENTIALS grant: it either fails,
- * or it succeeds and replaces the token the user consented to with an app-level
- * one that can see different data.
+ * Allowed, because neither can be that swap:
+ *   · `grant_type: 'refresh_token'` — presents the user's own grant back;
+ *   · `grant_type: 'client_credentials'`, explicitly chosen;
+ *   · neither of those, no refresh token, and no callback behind it — the
+ *     hand-built app-only profile this piece exists for, Shopify's shape.
  *
- * A model calling `fetch_token` by hand has always been able to do that. What
- * this change would add is doing it BY ITSELF, on expiry, with nobody choosing
- * it — so the automated path declines and leaves the decision where it was.
+ * Refused:
+ *   · anything whose `oauth_grant.origin` is `callback` and that is not a
+ *     refresh-token grant;
+ *   · a stored refresh token with no explicit `grant_type` — the older,
+ *     hand-configured version of the same ambiguity.
  *
- * What it does NOT refuse, because these are unambiguous:
- *   · `grant_type: 'refresh_token'` — the intended case;
- *   · no refresh token at all — `client_credentials` is then the only thing the
- *     profile can mean, which is the Shopify shape this piece exists for;
- *   · `grant_type: 'client_credentials'`, explicitly chosen.
+ * ⚠ The second refusal used to be the only one, and the first version of this
+ * comment argued that it sufficed: a profile with no refresh token "can only
+ * mean client_credentials". That is true of a profile somebody BUILT, and false
+ * of one `connect` produced — a provider that answers the authorization-code
+ * exchange without a refresh token (no `offline_access`, say) leaves exactly
+ * that shape, and since the callback writes `token_expires_at` there is now a
+ * reader to act on it. The missing discriminator was never the grant type; it
+ * was whether a human had been sent to a consent screen, which only
+ * `oauth_grant.origin` records.
  *
- * ⚠ The refusal is not a workaround for the missing piece, it is a pointer at
- * it: nothing switches a profile to `refresh_token` after an authorization-code
- * exchange, which is the other half of the row this branch closes. Until that
- * lands, such a profile has to be given its grant type before it can renew, and
- * the log line says which profile.
+ * A model calling `fetch_token` by hand can still do all of this. What is
+ * refused here is doing it BY ITSELF, on expiry, with nobody choosing it.
  */
 export function oauthProfileMayBeRenewedUnattended(
-  profile: { auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined },
+  profile: {
+    auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined;
+    oauth_grant?: { origin?: 'callback' | undefined } | undefined;
+  },
   hasStoredRefreshToken: boolean,
 ): boolean {
   const grantType = profile.auth?.oauth?.grant_type;
-  if (grantType !== undefined) return true;
+  // The only grant that presents the user's own authorization back to the
+  // provider. It replaces nothing it did not come from, so where it is named
+  // there is nothing to decide.
+  if (grantType === 'refresh_token') return true;
+  // Everything past this line would post a CLIENT-CREDENTIALS grant, because
+  // that is what `fetch_token` does for every other value and for none at all.
+  // So the question is no longer "which grant type" but "whose token would that
+  // replace", and `oauth_grant.origin` is the one field that answers it: the
+  // engine writes it, a value arriving in a create or update is discarded, and
+  // `callback` means a human sat at the provider's consent screen for this.
+  //
+  // Asked on the ENGINE-owned half on purpose. `auth.oauth` is model-authorable,
+  // so a gate reading only `grant_type` is one an injected `api_setup update`
+  // can open from the inside.
+  if (profile.oauth_grant?.origin === 'callback') return false;
+  if (grantType === 'client_credentials') return true;
   return !hasStoredRefreshToken;
+}
+
+/**
+ * Why a renewal was declined, as the sentence the operator reads in the log.
+ *
+ * Separate from the predicate and pure, so the advice can be asserted without
+ * driving an attach — and separate from each other, because the two refusals
+ * have OPPOSITE remedies and one sentence covering both sends half its readers
+ * the wrong way. A connected profile told to "set grant_type to refresh_token"
+ * would be given a grant with no token to present; told to set
+ * `client_credentials`, it would perform the very swap the refusal exists to
+ * prevent. Its way back is the consent screen, and only the connect link leads
+ * there.
+ */
+export function oauthRenewalDeclinedReason(profile: {
+  auth?: { oauth?: { grant_type?: string | undefined } | undefined } | undefined;
+  oauth_grant?: { origin?: 'callback' | undefined } | undefined;
+}): string {
+  if (profile.oauth_grant?.origin === 'callback') {
+    const named = profile.auth?.oauth?.grant_type;
+    return named === undefined
+      ? 'a user authorized it and the provider returned no refresh token, so there is nothing to renew with; renewing anyway would post a client-credentials grant and replace their access with an app-level one. Have the user open the api_setup connect link again — if the provider needs a scope to issue a refresh token (offline_access, for example), it has to be asked for before they authorize.'
+      : `a user authorized it, and it names auth.oauth.grant_type "${named}", which this path would run as a client-credentials grant and replace their access with an app-level one. If that is really wanted, run api_setup fetch_token by hand; otherwise have the user open the connect link again.`;
+  }
+  return 'it holds a refresh token but names no auth.oauth.grant_type, and the default would post a client-credentials grant that replaces the user\'s delegated token. Set grant_type to "refresh_token" with api_setup update.';
 }
 
 /**
@@ -960,7 +1005,7 @@ async function attachEngineManagedAuth(
         await renewExpiringOAuthToken(profile.id, agent);
       } else {
         process.stderr.write(
-          `[lynox:http] oauth token renewal declined for profile "${profile.id}": it holds a refresh token but names no auth.oauth.grant_type, and the default would post a client-credentials grant that replaces the user's delegated token. Set grant_type to "refresh_token" with api_setup update.\n`,
+          `[lynox:http] oauth token renewal declined for profile "${profile.id}": ${oauthRenewalDeclinedReason(profile)}\n`,
         );
       }
     }

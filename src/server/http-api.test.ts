@@ -9899,10 +9899,13 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
   const VERIFIER = 'v'.repeat(43);
 
-  async function arrange(opts: { expiresAt?: number; tokenBody?: string } = {}): Promise<{
+  async function arrange(opts: {
+    expiresAt?: number; tokenBody?: string;
+    grant?: import('../core/api-store.js').OAuthGrantRecord;
+  } = {}): Promise<{
     cookie: string; store: Awaited<ReturnType<typeof makeStore>>;
   }> {
-    const store = await makeStore(opts.expiresAt);
+    const store = await makeStore(opts.expiresAt, opts.grant);
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
     mockGetApiStore.mockReturnValue(store);
     mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_CLIENT_ID' ? 'id-1' : 'sec-1'));
@@ -9923,13 +9926,17 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(signed)}`, store };
   }
 
-  async function makeStore(expiresAt?: number): Promise<InstanceType<
+  async function makeStore(
+    expiresAt?: number,
+    grant?: import('../core/api-store.js').OAuthGrantRecord,
+  ): Promise<InstanceType<
     Awaited<typeof import('../core/api-store.js')>['ApiStore']
   >> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     store.register({
       id: PROFILE, name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+      ...(grant === undefined ? {} : { oauth_grant: grant }),
       auth: {
         type: 'oauth2',
         vault_keys: ['CRM_CLIENT_ID'],
@@ -10102,5 +10109,148 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       auth?: { oauth?: { token_expires_at?: number } };
     };
     expect(onDisk.auth?.oauth?.token_expires_at, 'the expiry was never persisted, only held in memory').toBe(at);
+  });
+
+  /**
+   * Callback → unattended renewal, with nobody in between. This is the clause
+   * the register row states, and it is one test rather than two because the
+   * interesting part is the HANDOVER: the route writes a field, and a predicate
+   * in another module reads it and reaches a different answer than before.
+   *
+   * `fetch_token` runs `auth.oauth.grant_type` and defaults it to
+   * `client_credentials`. The authorization-code flow sends its grant type in
+   * the token REQUEST only, so without this write the profile said nothing about
+   * how it should be renewed — and the renewal, for a profile that HAS a refresh
+   * token, was refused for being ambiguous. bexio is exactly this shape, so
+   * until the field is written it renews never.
+   */
+  it('records the refresh_token grant, which is what lets the profile renew unattended', async () => {
+    const { cookie, store } = await arrange({
+      tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const saved = store.get(PROFILE);
+    expect(saved?.auth?.oauth?.grant_type, 'the callback stored a refresh token and said nothing about how to use it').toBe('refresh_token');
+    expect(saved?.oauth_grant?.origin).toBe('callback');
+    expect(saved?.oauth_grant?.state).toBe('connected');
+
+    // The handover itself, asserted across the module boundary: the same
+    // profile object the route just saved, handed to the predicate that gates
+    // the unattended renewal. Without the write above this is `false`.
+    const { oauthProfileMayBeRenewedUnattended } = await import('../tools/builtin/http.js');
+    expect(oauthProfileMayBeRenewedUnattended(saved!, true)).toBe(true);
+
+    // ON DISK too, for the same reason the expiry is checked there: a field that
+    // lives until the next restart is a fix that works in a test and not in
+    // production.
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'apis', `${PROFILE}.json`), 'utf-8')) as {
+      auth?: { oauth?: { grant_type?: string } };
+      oauth_grant?: { origin?: string; state?: string };
+    };
+    expect(onDisk.auth?.oauth?.grant_type).toBe('refresh_token');
+    expect(onDisk.oauth_grant?.origin).toBe('callback');
+  });
+
+  /**
+   * The other outcome, and the one that was silently WRONG before this change.
+   *
+   * A provider may answer the authorization-code exchange without a refresh
+   * token — no `offline_access` asked for, say. The profile then holds a token a
+   * user consented to, no refresh token, and no grant type. The old predicate
+   * read that as "client_credentials is the only thing this can mean" and
+   * renewed it, which posts an app-level grant and replaces the user's access
+   * with one that can see different data.
+   *
+   * So the assertion is in two halves: the route must NOT invent a grant type it
+   * cannot perform, and the predicate must refuse the shape that leaves.
+   */
+  it('says no-refresh, invents no grant type, and the renewal then refuses the profile', async () => {
+    const { cookie, store } = await arrange({
+      tokenBody: JSON.stringify({ access_token: 'at-1', expires_in: 3600 }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+    // Only the access token was written — there was no refresh token to store.
+    expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0])).toEqual(['CRM_API_ACCESS_TOKEN']);
+
+    const saved = store.get(PROFILE);
+    expect(saved?.auth?.oauth?.grant_type, 'a grant type was invented for a profile with nothing to present').toBeUndefined();
+    expect(saved?.oauth_grant?.state).toBe('no-refresh');
+
+    const { oauthProfileMayBeRenewedUnattended } = await import('../tools/builtin/http.js');
+    // `false` for the vault argument: there IS no refresh token. That is the
+    // combination the old rule let through.
+    expect(
+      oauthProfileMayBeRenewedUnattended(saved!, false),
+      'a user-authorized profile with no refresh token was cleared for an unattended client-credentials swap',
+    ).toBe(false);
+  });
+
+  /**
+   * What a delete has to purge. `purgeRecordedTokens` — which both `api_setup
+   * delete` and the UI unlink route call — removes a vault name only while the
+   * vault still holds the value recorded against it, and it reads that list from
+   * `oauth_grant.written`. This route recorded nothing, so deleting a profile
+   * authorized through the connect link left both of its tokens behind.
+   *
+   * The merge is asserted, not just the two new entries: a `fetch_token` run
+   * earlier may have written a name this exchange does not touch, and dropping
+   * it would stop the delete from purging that one instead.
+   */
+  it('records what it wrote, and keeps what an earlier exchange wrote under another name', async () => {
+    const { cookie, store } = await arrange({
+      grant: { written: [{ name: 'CRM_LEGACY_TOKEN', fp: 'old-fp' }] },
+      tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const names = (store.get(PROFILE)?.oauth_grant?.written ?? []).map((w) => w.name);
+    expect(names).toContain('CRM_API_ACCESS_TOKEN');
+    expect(names).toContain('CRM_API_REFRESH_TOKEN');
+    expect(names, 'a name an earlier exchange wrote was dropped, so a delete stops purging it').toContain('CRM_LEGACY_TOKEN');
+
+    // The FINGERPRINT, not only the name, because that is what the purge
+    // matches on: a name whose recorded value does not match what the vault
+    // holds is skipped, so a wrong fingerprint is indistinguishable from no
+    // record at all — and the delete reports success while the token stays.
+    const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+    const access = (store.get(PROFILE)?.oauth_grant?.written ?? []).find((w) => w.name === 'CRM_API_ACCESS_TOKEN');
+    expect(access?.fp, 'the recorded fingerprint does not name the token that was stored').toBe(tokenFingerprint('at-1'));
+  });
+
+  /**
+   * A revocation verdict describes the grant this authorization just replaced.
+   * Left standing, `hasRevokedGrant` keeps reporting a connection the user has
+   * just re-established as revoked — and since the attach steps aside once the
+   * vault holds a different refresh token, the record would be the only thing
+   * still saying it. `fetch_token` clears the same fields after a successful
+   * exchange.
+   */
+  it('clears the revocation the new authorization replaced', async () => {
+    const { cookie, store } = await arrange({
+      grant: { state: 'revoked', revoked_fp: 'dead-fp', revoked_at: '2026-01-01T00:00:00.000Z' },
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const grant = store.get(PROFILE)?.oauth_grant;
+    expect(grant?.state).toBe('connected');
+    expect(grant?.revoked_fp, 'the verdict on a replaced grant was left on the profile').toBeUndefined();
+    expect(grant?.revoked_at).toBeUndefined();
   });
 });

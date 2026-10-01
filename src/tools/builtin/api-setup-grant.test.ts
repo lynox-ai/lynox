@@ -1549,14 +1549,93 @@ describe('which profiles may be renewed unattended', () => {
 
   it('refuses a stored refresh token with no declared grant type', async () => {
     const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
-    // The shape `connect` produces: a user-delegated refresh token and no
-    // `grant_type`, because the authorization-code flow sends that value in the
-    // token REQUEST and never writes it onto the profile. `fetch_token` would
+    // The HAND-CONFIGURED shape — a user pasted a refresh token and never named
+    // a grant type. (It used to be described here as "the shape `connect`
+    // produces"; it is not, any more: the callback now writes `refresh_token`
+    // onto a profile it stored one for, and the profiles it leaves without a
+    // grant type are caught by `oauth_grant.origin` below.) `fetch_token` would
     // default to client_credentials and replace the delegated token with an
     // app-level one.
     expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: {} } }, true)).toBe(false);
     expect(oauthProfileMayBeRenewedUnattended({ auth: {} }, true)).toBe(false);
     expect(oauthProfileMayBeRenewedUnattended({}, true)).toBe(false);
+  });
+
+  it('refuses a callback-authorized profile that has NO refresh token', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // The hole the `hasStoredRefreshToken` test above cannot see, and the reason
+    // the predicate stopped asking only about the grant type. A provider that
+    // answers the authorization-code exchange WITHOUT a refresh token — no
+    // `offline_access` in the request, say — leaves a profile with a
+    // user-delegated access token, no refresh token and no grant type. By the
+    // old rule that read as "client_credentials is the only thing this can
+    // mean", so the renewal fired and swapped the user's token for an app one.
+    // The second argument is `false` here: there is nothing in the vault.
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: {} }, oauth_grant: { origin: 'callback' } },
+      false,
+    )).toBe(false);
+  });
+
+  it('refuses a callback-authorized profile that names client_credentials', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // `auth.oauth` is model-authorable; `oauth_grant` is not. A gate that read
+    // only the grant type could be opened from the inside by one `api_setup
+    // update`, which is why the engine-owned field is asked FIRST and an
+    // explicit `client_credentials` does not get past it on a connected
+    // profile. The remedy is a by-hand `fetch_token`, not an automatic one.
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: { grant_type: 'client_credentials' } }, oauth_grant: { origin: 'callback' } },
+      false,
+    )).toBe(false);
+  });
+
+  it('permits a callback-authorized profile once it carries the refresh_token grant', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // What the callback writes when the provider DID return a refresh token, and
+    // the whole point of the piece: this is the shape that renews unattended
+    // without replacing anything the user did not authorize. bexio is this
+    // shape; without it the profile renews never.
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: { grant_type: 'refresh_token' } }, oauth_grant: { origin: 'callback' } },
+      true,
+    )).toBe(true);
+  });
+});
+
+describe('what the operator is told when a renewal is declined', () => {
+  /**
+   * The two refusals have OPPOSITE remedies, so the sentence is asserted per
+   * shape rather than "it mentions grant_type". A single text covering both
+   * sends half its readers to the action that causes the harm.
+   */
+  it('sends a connected profile with no refresh token back to the consent screen, not to api_setup update', async () => {
+    const { oauthRenewalDeclinedReason } = await import('./http.js');
+    const reason = oauthRenewalDeclinedReason({ auth: { oauth: {} }, oauth_grant: { origin: 'callback' } });
+    expect(reason).toContain('connect link');
+    expect(reason).toContain('offline_access');
+    // The discriminating half: following the OTHER branch's advice here gives
+    // the profile a grant with no token to present, or performs the swap.
+    expect(reason).not.toContain('api_setup update');
+  });
+
+  it('names the grant type a connected profile declared, and does not tell it to set one', async () => {
+    const { oauthRenewalDeclinedReason } = await import('./http.js');
+    const reason = oauthRenewalDeclinedReason({
+      auth: { oauth: { grant_type: 'client_credentials' } },
+      oauth_grant: { origin: 'callback' } ,
+    });
+    expect(reason).toContain('"client_credentials"');
+    expect(reason).toContain('by hand');
+    expect(reason).not.toContain('api_setup update');
+  });
+
+  it('tells a hand-configured profile to declare refresh_token, which is right only for it', async () => {
+    const { oauthRenewalDeclinedReason } = await import('./http.js');
+    const reason = oauthRenewalDeclinedReason({ auth: { oauth: {} } });
+    expect(reason).toContain('api_setup update');
+    expect(reason).toContain('"refresh_token"');
+    expect(reason).not.toContain('connect link');
   });
 });
 
