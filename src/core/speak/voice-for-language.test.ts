@@ -56,6 +56,19 @@ describe('a voice is picked deterministically, from the catalogue content', () =
     expect(pickVoiceForLanguage(catalogue, 'EN').voice).toBe('en_gb_alice');
   });
 
+  it('matches on the CATALOGUE side head too, which the test above cannot show', () => {
+    // ⚠ This half had no witness, and a mutant proved it: comparing the catalogue's tag
+    // WHOLE instead of by its head passed every test in this file, because every language in
+    // the fixture is already a bare head — which is what the Mistral parser produces
+    // (`fr_fr` → `fr`). `VoiceInfo.language` is a contract, not a Mistral field, so a
+    // provider reporting `de-AT` is exactly what this side of the comparison is for. The test
+    // above cannot see it: it varies the REQUEST and holds the catalogue fixed.
+    const regional: VoiceInfo[] = [{ id: 'de_at_hans', language: 'de-AT' }];
+    const choice = pickVoiceForLanguage(regional, 'de');
+    expect(choice.voice).toBe('de_at_hans');
+    expect(choice.candidates).toBe(1);
+  });
+
   it('finds the French voices this fix made reachable', () => {
     // The point of the catalogue repair: before it, no `fr_*` voice was in the list at
     // all, so this request could not have been answered.
@@ -114,6 +127,20 @@ describe('a voice is picked deterministically, from the catalogue content', () =
     for (const no of ['d', 'abcd', 'de_', 'de_abcde', 'deu_latn_ch', 'auto', 'AUTO']) {
       expect(isVoiceLanguageTag(no), `must reject ${no}`).toBe(false);
     }
+  });
+
+  it('refuses a non-string even when it would STRINGIFY to an accepted tag', () => {
+    // ⚠ Also a survivor's witness. Replacing the `typeof` test with `String(value)` passed
+    // the whole suite, because the only non-string it had was `42` — and `'42'` fails the
+    // pattern anyway, so that case never exercised the type check at all. These two do: both
+    // stringify to something the pattern ACCEPTS.
+    //
+    // It is the EXPORTED predicate that needs this, not the HTTP route. The route narrows
+    // `lang` to a string before it ever calls here (`typeof b['lang'] === 'string'`), so no
+    // request can reach the coerced path — the guarantee belongs to the function because
+    // the function is what other callers hold, and its signature claims `value is string`.
+    expect(isVoiceLanguageTag(['de'])).toBe(false);
+    expect(isVoiceLanguageTag({ toString: () => 'de' })).toBe(false);
   });
 
   it('is stable: the same catalogue in a different order gives the same voice', () => {
