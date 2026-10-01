@@ -772,14 +772,19 @@ const VAULT_NAME_SHAPE = /^[A-Z][A-Z0-9_]{0,63}$/;
  *
  * `refreshTokenKey` is `id.toUpperCase().replace(/-/g,'_') + '_REFRESH_TOKEN'`,
  * and `_admit` admits an id of 64 — so the name it builds runs to 78 characters
- * and does NOT fit `VAULT_NAME_SHAPE`. Shaping it against the vault bound made
+ * and does NOT fit `VAULT_NAME_SHAPE`. It also admits a DIGIT-LEADING id
+ * (`PROFILE_ID_PATTERN` is `/^[a-z0-9][a-z0-9_-]{0,63}$/`), so `360-crm` derives
+ * `360_CRM_REFRESH_TOKEN` — a real shape, `1password` and `3cx` likewise. The
+ * first version of this constant closed the LENGTH axis and left the
+ * FIRST-CHARACTER axis open, because every id in its fixtures began with a
+ * letter: the axis the fix was keyed on was swept and its sibling was not. Shaping it against the vault bound made
  * the engine report its own slot as `<unprintable>` for any id over 50, which is
  * the one fact that clause exists to deliver. A value gets the bound of what it
  * actually is; the alternative — printing it unchecked because "it is
  * engine-built" — is an assumption the renderer cannot enforce, and the test
  * that enumerates every inhabitant of a fact caught exactly that.
  */
-const DERIVED_NAME_SHAPE = /^[A-Z][A-Z0-9_]{0,77}$/;
+const DERIVED_NAME_SHAPE = /^[A-Z0-9][A-Z0-9_]{0,77}$/;
 /** `new Date().toISOString()`, which is what the engine writes into `revoked_at`. */
 const ISO_TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const GRANT_TYPE_SHAPE = /^[A-Za-z0-9_:.\-]{1,40}$/;
@@ -1283,9 +1288,23 @@ async function attachEngineManagedAuth(
         // branch writes it for every connected profile, which makes the shape the
         // engine's own default. A pre-existing hole whose population a change
         // widens is that change's to close.
+        // The BOUND follows the value, the way `renderDeclinedFact` picks it.
+        // `refreshKey` is `auth.oauth.refresh_token_key ?? refreshTokenKey(id)`,
+        // so when the profile names no slot this IS the engine-derived name —
+        // and shaping that against the vault bound is the very bug
+        // `DERIVED_NAME_SHAPE` exists to fix, reproduced at the one site the fix
+        // did not reach. Measured through the real attach: an id of 51
+        // characters, and `360-crm`, both printed `<unprintable>` where the name
+        // used to print. A model told to `ask_secret` for `"<unprintable>"`
+        // cannot follow the instruction, and the nearest move left to it is to
+        // edit the profile — which is the move this whole series exists to
+        // prevent.
+        const namesOwnSlot = typeof profile.auth?.oauth?.refresh_token_key === 'string';
         return { refusal: revokedGrantMessage(
           profile.id,
-          shapedForLog(refreshKey, VAULT_NAME_SHAPE, 80),
+          namesOwnSlot
+            ? shapedForLog(refreshKey, VAULT_NAME_SHAPE, 80)
+            : shapedForLog(refreshKey, DERIVED_NAME_SHAPE, 80),
           shapedForLog(profile.oauth_grant?.revoked_at, ISO_TIMESTAMP_SHAPE, 30),
         ) };
       }
@@ -1390,7 +1409,7 @@ async function attachEngineManagedAuth(
     }
     const protectedKeys = [userKey, passKey].filter(k => isProtectedSecretWrite(k));
     if (protectedKeys.length > 0) {
-      return { refusal: protectedKeyRefusal(profile.id, protectedKeys.join(' + ')) };
+      return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
     const user = secretStore.resolve(userKey);
     const pass = secretStore.resolve(passKey);
@@ -1398,7 +1417,10 @@ async function attachEngineManagedAuth(
     // `Basic base64("ck:")` — a half-credential that reads as an auth failure
     // rather than as a missing secret.
     if (!user || !pass) {
-      const missing = [user ? null : userKey, pass ? null : passKey].filter(Boolean).join(' + ');
+      const missing = [user ? null : userKey, pass ? null : passKey]
+        .filter((k): k is string => typeof k === 'string')
+        .map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80))
+        .join(' + ');
       return { refusal: `Error: api_profile "${profile.id}" is basic/user_pass_split but the vault has no usable value for ${missing}. Ask the user for the credential with ask_secret, then retry.` };
     }
     return put('Authorization', `Basic ${Buffer.from(`${user}:${pass}`, 'utf-8').toString('base64')}`);
@@ -1426,7 +1448,7 @@ async function attachEngineManagedAuth(
     // `isInfraSecret` — the provider slots live in a separate set that
     // `isInfraSecret` does not cover, and they are exactly what such a profile wants.
     if (isProtectedSecretWrite(tokenKey)) {
-      return { refusal: protectedKeyRefusal(profile.id, tokenKey) };
+      return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
     if (!hostVetted) {
       return { hint: () => `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
@@ -1456,7 +1478,7 @@ async function attachEngineManagedAuth(
     // passed nothing; `X-Key\r\nX-Evil: …` would smuggle a second header on a path
     // that exists precisely to bypass the agent.
     if (/[\r\n\0]/.test(slot) || /[\r\n\0]/.test(value)) {
-      return { refusal: `Error: api_profile "${profile.id}" produced an auth header containing CRLF/null — refusing to send it. Check auth.header_name and the stored value of ${tokenKey}.` };
+      return { refusal: `Error: api_profile "${profile.id}" produced an auth header containing CRLF/null — refusing to send it. Check auth.header_name and the stored value of ${shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)}.` };
     }
     return put(slot, value);
   }
@@ -1490,7 +1512,28 @@ async function attachEngineManagedAuth(
  * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`
  * since they were written, and the root fix belongs in `validateProfile`, not here).
  * What IS new is widening it to two fields never interpolated before across three
- * more shapes, so the filter goes on everything this file prints, old hints included.
+ * more shapes.
+ *
+ * ⚠ The sentence here used to end "so the filter goes on everything this file
+ * prints, old hints included". **That was false when it was written and a review
+ * proved it by enumeration**: `modelOwnedAuthHint` is consistently filtered, and
+ * four refusals outside it printed a vault-key name raw — one of them fourteen
+ * lines from a later fix that was looking for exactly this. A comment that
+ * claims total coverage is worse than none, because it is the thing somebody
+ * greps for instead of enumerating.
+ *
+ * So, as a map rather than a claim. This file has TWO filters, and the split is
+ * by what is known about the value:
+ *   · `safeToken` / `SAFE_PROFILE_TOKEN` — a general NAME filter, loose charset
+ *     (`[A-Za-z0-9._-]`), length 64. For values whose shape is not pinned.
+ *   · `shapedForLog(value, shape, max)` — for a value whose shape IS pinned, and
+ *     the bound follows the value: `VAULT_NAME_SHAPE` mirrors
+ *     `VAULT_KEY_PATTERN` for a model-authored key, `DERIVED_NAME_SHAPE` is
+ *     wider because `refreshTokenKey` builds a 78-character name and admits a
+ *     digit-leading id, `ISO_TIMESTAMP_SHAPE` for `revoked_at`.
+ * Neither is applied by default. Any NEW interpolation of a profile value into a
+ * model-facing string needs one of them chosen deliberately, and `validateProfile`
+ * remains the root fix nobody has made.
  */
 const SAFE_PROFILE_TOKEN = /^[A-Za-z0-9._-]{1,64}$/;
 function safeToken(value: string | undefined): string | undefined {

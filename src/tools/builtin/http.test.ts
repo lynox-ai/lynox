@@ -1916,6 +1916,63 @@ describe('httpRequestTool', () => {
     });
 
     /**
+     * THE WHOLE REMINDER AGAINST A LITERAL, and that is the only guard on this
+     * surface that is not the shape already defeated once.
+     *
+     * Until now the single prescription check here was
+     * `not.toContain('api_setup update')` — a banned English spelling, which is
+     * exactly the guard a review beat by writing the instruction in this repo's
+     * `api_setup({ action: "update", … })` form. The reminder is FIXED text whose
+     * only interpolation is the `_admit`-pinned profile id, so every byte of it
+     * can simply be stated. A sentence added inside it fails here.
+     *
+     * The phrase bans below stay. The lesson of the round that produced this test
+     * is that a restructure replaced two working line-level assertions and opened
+     * what they covered: augment, do not replace.
+     */
+    it('emits the reminder byte for byte, so no sentence can be added inside it', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'literal_api',
+        name: 'Lit',
+        base_url: 'https://lit.example/v1',
+        description: 'Lit',
+        custom_endpoint_ack: { accepted: true, hosts: ['lit.example'], accepted_at: '2026-10-01T00:00:00.000Z' },
+        oauth_grant: { origin: 'callback', state: 'no-refresh' },
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['LIT_CLIENT_ID', 'LIT_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://lit.example/oauth/token',
+            client_id_key: 'LIT_CLIENT_ID',
+            client_secret_key: 'LIT_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 401, headers: { 'content-type': 'application/json' }, json: {},
+      })));
+
+      const agent = {
+        toolContext: { apiStore: store },
+        sessionCounters: testCounters,
+        secretStore: { resolve: (n: string) => (n === 'LITERAL_API_ACCESS_TOKEN' ? 'at-stale' : null) },
+      } as never;
+      const result = await handler({ url: 'https://lit.example/v1/x', method: 'GET' }, agent);
+
+      const REMINDER = '**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\n'
+        + 'This URL maps to api_profile "literal_api". An exchange for it would replace a token '
+        + 'somebody is relying on with an app-level one that can see different data, and the old '
+        + 'access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the '
+        + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
+        + 'it to the person who owns it. The engine has written the details to its log.';
+      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(REMINDER);
+    });
+
+    /**
      * THE CARRIER PATH, and it needs no code change to exist — which is why no
      * mutant could have found it.
      *
