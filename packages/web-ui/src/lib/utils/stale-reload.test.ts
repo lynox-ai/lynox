@@ -160,6 +160,12 @@ describe('onPreloadError (the vite:preloadError listener)', () => {
 		expect(replaced).toHaveLength(1);
 	});
 
+	it('reloads for a CSS chunk that failed to preload (Vite fires the same event)', () => {
+		const { replaced } = installWindow();
+		onPreloadError(preloadError(new Error('Unable to preload CSS for /_app/immutable/assets/0.abc.css')));
+		expect(replaced).toHaveLength(1);
+	});
+
 	it('does NOT reload for a chunk that loaded but cannot parse or run here', () => {
 		// e.g. a browser below a library's syntax floor: a reload fetches the same chunk
 		// and fails again. The error must reach the importer's catch instead.

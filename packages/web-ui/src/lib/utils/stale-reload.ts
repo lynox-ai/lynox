@@ -19,11 +19,12 @@
 
 /**
  * Browser messages emitted when a dynamic `import()` / module preload fails to
- * fetch — the stale-content-hashed-chunk-after-deploy signature. Deliberately
+ * fetch — the stale-content-hashed-chunk-after-deploy signature — plus Vite's own
+ * message for a CSS chunk that fails to preload (same cause, same event). Deliberately
  * NOT matched: real errors thrown inside a successfully-loaded module.
  */
 const CHUNK_LOAD_ERROR_RE =
-	/Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i;
+	/Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS for/i;
 
 /** sessionStorage key holding the epoch-ms of the last auto-reload attempt. */
 export const STALE_RELOAD_ATTEMPT_KEY = 'lyx-stale-reload-attempt';
