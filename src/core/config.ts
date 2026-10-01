@@ -187,7 +187,26 @@ export function loadConfig(): LynoxUserConfig {
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
     'default_tier', 'balanced_model', 'thinking_mode', 'effort_level',
-    'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider', 'plugins',
+    'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider',
+  // `plugins` is NOT here, since 2026-10-01. It selects which of the
+  // already-installed plugins are loaded and executed, so it decides which
+  // CODE runs — a larger thing than setting a value, and a user-config
+  // decision rather than one a working directory makes. Nothing is
+  // installed from here either way; the selection is the point.
+  //
+  // ⚠ If this is ever reinstated, decide the MERGE SEMANTICS before the
+  // key: `loadPlugins` reads `this.config.plugins ?? readPluginsConfig()`,
+  // so a project entry REPLACES the user's selection rather than adding to
+  // it — an empty object would switch all of them off. Whether that is
+  // right depends on the question above, which is why it is written here
+  // and not fixed at a key that no longer carries it.
+  //
+  // ⚠ And there is a SECOND read path, which is why the `??` above is not
+  // the whole story: `readPluginsConfig` (`plugins.ts`) reads the user's
+  // `config.json` as RAW TEXT, without the schema. So a user file this
+  // loader rejects — and `readConfigFile` rejects a file WHOLE, over one
+  // unknown key — still has its `plugins` take effect through that path.
+  // Any reasoning about which selection wins has to account for both.
     'organization_id', 'client_id',
     'changeset_review', 'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
