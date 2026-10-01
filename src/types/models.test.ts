@@ -30,6 +30,7 @@ import {
   isCaptureWeakModel,
   isDurableCaptureDegraded,
   CAPTURE_WEAK_MODEL_IDS,
+  isMistralHost,
 } from './models.js';
 
 describe('pricing-vs-TTL contract (cache-write must match the TTL the agent sends)', () => {
@@ -719,5 +720,25 @@ describe('isBlockedModelId + parseBlockedModelIds (operator model blocklist)', (
     expect(parseBlockedModelIds(undefined)).toEqual([]);
     expect(parseBlockedModelIds('')).toEqual([]);
     expect(parseBlockedModelIds(' , ')).toEqual([]);
+  });
+});
+
+describe('isMistralHost', () => {
+  it('is true for the Mistral API host and its subdomains', () => {
+    expect(isMistralHost('https://api.mistral.ai/v1')).toBe(true);
+    expect(isMistralHost('https://eu.mistral.ai/v1')).toBe(true);
+    expect(isMistralHost('https://API.Mistral.AI/v1')).toBe(true);
+  });
+
+  it('matches at a label boundary: not a longer name ending in it, not a host that only contains it', () => {
+    expect(isMistralHost('https://notmistral.ai/v1')).toBe(false);
+    expect(isMistralHost('https://api.mistral.ai.example.com/v1')).toBe(false);
+    expect(isMistralHost('https://example.com/?proxy=mistral.ai')).toBe(false);
+  });
+
+  it('is false for a missing or unparseable URL', () => {
+    expect(isMistralHost(undefined)).toBe(false);
+    expect(isMistralHost('')).toBe(false);
+    expect(isMistralHost('not a url')).toBe(false);
   });
 });
