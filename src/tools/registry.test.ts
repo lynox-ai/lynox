@@ -62,11 +62,11 @@ describe('ToolRegistry', () => {
   });
 
   describe('scopedView', () => {
-    it('an allowedTools of [] admits nothing — the one shape routing could have changed', () => {
-      // The only shape where the old in-place filtering and `resolveTools` could plausibly
-      // diverge: an empty array is truthy, so each takes its filter branch rather than its
-      // "no allowlist" branch. Asserted because the routing comment names this case, and a
-      // claim about a shape nobody tests is a claim about nothing.
+    it('pins [] against undefined — an empty allowlist admits nothing, an absent one everything', () => {
+      // The two absent-ish values are different here, and nothing pinned it: an empty array is
+      // truthy, so it takes the filter branch, while `undefined` takes none. Written while a
+      // routing change was being weighed (it was pulled back out), and kept because the
+      // distinction is this method's own and was untested either way.
       const reg = new ToolRegistry();
       reg.register(makeTool('bash')).register(makeTool('read_file'));
       expect(reg.scopedView({ allowedTools: [] })).toEqual([]);

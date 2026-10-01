@@ -112,13 +112,10 @@ export async function runGuardedSavedWorkflow(
   //    withhold. The set a role protects is "a child of a session", not "everything that is
   //    not a root".
   //
-  //    ⚠ Precisely "no parent grant", NOT "nothing applies here": `onBeforeCreateAgent` takes
-  //    `(tools) => tools` and needs no agent, so a plugin narrowing DOES exist that this path
-  //    does not get — and neither does the plugin tool gate, since `getToolContext().tools`
-  //    are the raw registry entries. No plugin registers either today, so this is latent
-  //    rather than live; it is named here because the first draft of this comment said "no
-  //    agent and therefore nothing to narrow to", which is a wider claim than the decision
-  //    needs and would have read as a check that had been considered and ruled out.
+  //    ⚠ Precisely "no parent grant", and deliberately not the wider "nothing applies here":
+  //    the first draft of this comment said the latter, which would read as a check that had
+  //    been considered and ruled out. What else this path does or does not receive is tracked
+  //    outside this repo rather than described here.
   const toolContext = engine.getToolContext();
   const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params, {
     tools: toolContext.tools,

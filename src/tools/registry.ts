@@ -24,8 +24,9 @@ export class ToolRegistry {
   /**
    * ⚠ A SECOND resolution of the same allow/deny vocabulary, and it stays one on purpose.
    *
-   * Routing it through `resolveTools` — the single bounding exit every live grant route uses —
-   * was built and then pulled back out of the hardening change, for a reason worth keeping:
+   * Routing it through `resolveTools` — the exit every route that derives a tool list FROM
+   * another agent's list goes through — was built and then pulled back out of the hardening
+   * change, for a reason worth keeping:
    * the two are equivalent in all four shapes (`[]` admits nothing in both, `undefined`
    * filters in neither, same for the denylist), so **no test can tell them apart** and a
    * mutant reverting the routing survives by construction. An unobservable change in a
@@ -37,9 +38,8 @@ export class ToolRegistry {
    * this repo calls may still have a consumer outside it.
    *
    * What remains is the shape this duplication has: a template for the next route that
-   * forgets the bound. Filed as `DEF-registry-scopedview-duplicates-grant-semantics`, where
-   * the delete-or-route decision belongs — it needs an answer about external consumers that
-   * this repo cannot give.
+   * forgets the bound. The delete-or-route decision is tracked outside this repo, because it
+   * needs an answer about external consumers that this repo cannot give.
    */
   scopedView(config: ToolScopeConfig): ToolEntry[] {
     let entries = this.getEntries();
