@@ -605,6 +605,10 @@ describe('resolveCatalogKey', () => {
   it('hostname normalises case', () => {
     expect(resolveCatalogKey('openai', 'https://API.MISTRAL.AI/v1')).toBe('mistral');
   });
+  it('a preset host matches at a label boundary, not as a longer name ending in it', () => {
+    // The preset decides which credential slot an endpoint is handed.
+    expect(resolveCatalogKey('openai', 'https://notmistral.ai/v1')).toBe('openai-compat');
+  });
   it('an openai host with no preset falls through to openai-compat', () => {
     // openrouter.ai is deliberately NOT a preset: it is not on the vetted
     // sub-processor allowlist, so it must keep routing through the generic tile

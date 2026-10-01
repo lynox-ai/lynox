@@ -271,6 +271,17 @@ describe('Engine.reloadUserConfig — Wave 5d allowlist gate', () => {
     await expect(engine.reloadUserConfig()).rejects.toThrow(/my-litellm\.example\.com/);
   });
 
+  it('persisted acceptance matches the active host by its exact name, not a name it merely ends in', async () => {
+    const engine = makeEngine();
+    mockLoadConfig.mockReturnValueOnce({
+      ...NON_ALLOWLISTED_PERSISTED_ACCEPTED,
+      accepted_custom_endpoints: [{ host: 'litellm.example.com', accepted_at: '2026-06-07T12:00:00.000Z' }],
+    });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-byok-key');
+
+    await expect(engine.reloadUserConfig()).rejects.toThrow(/my-litellm\.example\.com/);
+  });
+
   it('gate fires BEFORE the LLM client is rebuilt (defense-in-depth ordering)', async () => {
     // Pin the regression: if the gate is moved AFTER `_recreateClient`, a
     // non-allowlisted URL would briefly bind the engine's `this.client` to
