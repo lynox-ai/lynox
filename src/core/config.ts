@@ -207,7 +207,13 @@ export function loadConfig(): LynoxUserConfig {
   // that may decide it is the user config, not a directory one happens to
   // be working in. `backup_gdrive` was already left out for the same
   // reason, and `config.test.ts` holds both directions plus the user path.
-  'backup_dir', 'backup_schedule', 'backup_retention_days',
+  // `backup_dir` is NOT here either, since 2026-10-01. It names a filesystem
+  // destination the backup manager both writes to and prunes, so it decides
+  // where copies of the engine's stores live — a user-config decision by the
+  // same line this allowlist draws, not a per-directory one. See the comment
+  // on `LYNOX_SECRET_FILES` in `tools/permission-guard.ts` for why the
+  // location of those copies is load-bearing.
+  'backup_schedule', 'backup_retention_days',
     'experience',
   ]);
 
