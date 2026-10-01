@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RunState, AgentOutput } from '../../types/orchestration.js';
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
+import { withinSurface } from '../resolve-tools.js';
 
 // Mock DAG planner
 const mockEstimatePipelineCost = vi.fn().mockReturnValue({ steps: [], totalCostUsd: 0.02 });
@@ -73,7 +74,16 @@ const mockTools: ToolEntry[] = [
   },
 ];
 
-function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: ToolEntry[] }): IAgent {
+/**
+ * @param opts.granted - what `getAvailableTools()` answers, when it must DIFFER from the
+ *   context's set. Omitted it answers the same list, which is the shape every test here but
+ *   one needs: the distinction between the engine's registry and an agent's own grant is
+ *   invisible to a stub that has only one list, and defaulting them equal keeps those tests
+ *   about what they are about.
+ */
+function makePipelineAgent(opts?: {
+  config?: LynoxUserConfig | null; tools?: ToolEntry[]; granted?: ToolEntry[];
+}): IAgent {
   const ctx = createToolContext(opts?.config ?? mockConfig);
   if (opts?.config === null) {
     (ctx as Record<string, unknown>)['userConfig'] = null;
@@ -81,7 +91,14 @@ function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: Too
   ctx.tools = opts?.tools ?? mockTools;
   // noteUntrustedData: the parent-taint seam (CORE-9) — a workflow run must latch
   // the parent's untrusted signal so its end-of-run memory extraction abstains.
-  return { toolContext: ctx, noteUntrustedData: vi.fn() } as unknown as IAgent;
+  return {
+    toolContext: ctx,
+    noteUntrustedData: vi.fn(),
+    // The accessor the pipeline pool is drawn from. Its docblock in `agent.ts` names pipeline
+    // child-agents as its consumers, and a stub without it cannot see which of the two lists
+    // a route reads.
+    getAvailableTools: () => opts?.granted ?? ctx.tools,
+  } as unknown as IAgent;
 }
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
@@ -207,6 +224,33 @@ describe('run_workflow — inline steps', () => {
     );
     expect(result).not.toMatch(/exceeds maximum/); // pipeline.test.ts:<this line> — kills the hardcoded-MAX_STEPS regression
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('draws the step pool from the agent GRANT, not from the engine registry', async () => {
+    // The two lists differ only in a stub that carries both, and that difference is the
+    // subject: `toolContext.tools` is the ENGINE's registry, and for a child agent it is
+    // wider than what the child itself holds. A workflow step naming something outside the
+    // child's grant was served from the wider list.
+    // Built explicitly rather than filtered off `mockTools`: that fixture holds `bash` ALONE,
+    // so a filter produced an empty grant and the handler refused with "No parent tools" —
+    // a fixture failure that reads exactly like the route withholding everything.
+    const readTool: ToolEntry = {
+      definition: { name: 'read_file', description: 'Read', input_schema: { type: 'object' as const, properties: {} } },
+      handler: vi.fn() as ToolEntry['handler'],
+    };
+    const agent = makePipelineAgent({ tools: [readTool, ...mockTools], granted: [readTool] });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ name: 'pool', steps: [makeStep('s1', 'do it')] }, agent);
+    expect(mockRunManifest, `handler returned instead of running: ${String(result)}`).toHaveBeenCalledTimes(1);
+
+    const opts = mockRunManifest.mock.calls[0]![2] as { parentTools?: ToolEntry[] };
+    const pool = opts.parentTools ?? [];
+    expect(withinSurface(pool, agent.getAvailableTools())).toBe(true);
+    expect(pool.map(t => t.definition.name)).not.toContain('bash');
+    // Two controls in the same call, because an empty pool and a narrow pool look alike, and
+    // a fixture without the tool looks like a route that withheld it:
+    expect(pool.length).toBeGreaterThan(0);
+    expect(agent.toolContext.tools.map(t => t.definition.name)).toContain('bash');
   });
 
   it('returns error for duplicate step IDs', async () => {
@@ -1473,7 +1517,12 @@ const RUN_CTX_KEYS = [
 function makeAutonomyAgent(autonomy: AutonomyLevel | undefined): IAgent {
   const ctx = createToolContext(mockConfig);
   ctx.tools = mockTools;
-  return { toolContext: ctx, autonomy } as unknown as IAgent;
+  // `getAvailableTools` belongs here for the same reason `parentTools` is in RUN_CTX_KEYS
+  // above: the pool a workflow step draws from comes through it. The contract these tests
+  // assert is the COMPLETENESS of the run context, and this stub was missing the accessor the
+  // pool is read from — which is why they all threw rather than failed when it started being
+  // read. Same list, because these tests are about autonomy and not about the grant.
+  return { toolContext: ctx, autonomy, getAvailableTools: () => ctx.tools } as unknown as IAgent;
 }
 
 describe('A1: buildRunCtx — complete run-context shaping', () => {

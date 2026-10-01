@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
 	isChunkLoadError,
+	onPreloadError,
 	RELOAD_LOOP_WINDOW_MS,
 	shouldAttemptReload,
 	STALE_RELOAD_ATTEMPT_KEY,
@@ -63,6 +64,15 @@ describe('isChunkLoadError', () => {
 	it('does NOT match a genuine diagram-syntax / logic error', () => {
 		expect(isChunkLoadError(new Error('Parse error on line 3: expected SEMI'))).toBe(false);
 		expect(isChunkLoadError('No diagram type detected matching given configuration')).toBe(false);
+	});
+
+	it('does NOT match a chunk the browser fetched but cannot parse or run (too new for it)', () => {
+		// WebKit raises "Importing a module script failed." on its fetch-failure paths
+		// (ScriptModuleLoader.cpp); a parse failure surfaces as the engine's own
+		// SyntaxError, and a missing API as a TypeError. Neither is fixed by a reload.
+		expect(isChunkLoadError(new SyntaxError('Invalid regular expression: invalid flags'))).toBe(false);
+		expect(isChunkLoadError(new SyntaxError("Unexpected token '.'"))).toBe(false);
+		expect(isChunkLoadError(new TypeError('Object.groupBy is not a function'))).toBe(false);
 	});
 
 	it('returns false for nullish / non-error-like values', () => {
@@ -138,5 +148,37 @@ describe('triggerStaleReload', () => {
 		triggerStaleReload();
 		expect(replaced).toHaveLength(1);
 		expect(replaced[0]).toMatch(/[?&]_v=\d+/);
+	});
+});
+
+describe('onPreloadError (the vite:preloadError listener)', () => {
+	const preloadError = (payload: unknown): Event => Object.assign(new Event('vite:preloadError'), { payload });
+
+	it('reloads for a stale chunk that failed to load', () => {
+		const { replaced } = installWindow();
+		onPreloadError(preloadError(new TypeError('Failed to fetch dynamically imported module: https://x/chunk.js')));
+		expect(replaced).toHaveLength(1);
+	});
+
+	it('reloads for a CSS chunk that failed to preload (Vite fires the same event)', () => {
+		const { replaced } = installWindow();
+		onPreloadError(preloadError(new Error('Unable to preload CSS for /_app/immutable/assets/0.abc.css')));
+		expect(replaced).toHaveLength(1);
+	});
+
+	it('does NOT reload for a chunk that loaded but cannot parse or run here', () => {
+		// e.g. a browser below a library's syntax floor: a reload fetches the same chunk
+		// and fails again. The error must reach the importer's catch instead.
+		const { replaced } = installWindow();
+		onPreloadError(preloadError(new SyntaxError('Invalid regular expression: invalid flags')));
+		onPreloadError(preloadError(new TypeError('Object.groupBy is not a function')));
+		expect(replaced).toHaveLength(0);
+	});
+
+	it('does NOT cancel the event, so Vite rethrows to the importer', () => {
+		installWindow();
+		const e = Object.assign(new Event('vite:preloadError', { cancelable: true }), { payload: new SyntaxError('x') });
+		onPreloadError(e);
+		expect(e.defaultPrevented).toBe(false);
 	});
 });

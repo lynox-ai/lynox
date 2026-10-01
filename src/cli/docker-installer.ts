@@ -563,8 +563,9 @@ export async function runDockerInstaller(): Promise<void> {
     // OpenAI-compatible). Source of truth: src/cli/setup-wizard.ts's prior
     // menu (deleted with this PR — its logic is now ported here so the
     // README/docs promise lines up with what `npx @lynox-ai/core` actually
-    // shows). Vertex stays wired in the engine for existing config.json
-    // users but is no longer offered at install time.
+    // shows). Vertex is no longer offered at install time; its engine code
+    // path remains, but the image this installer sets up does not include
+    // the optional package it needs, so it cannot run there.
     stdout.write(`\n  ${BOLD}LLM Provider${RESET}\n`);
     stdout.write(`  ${DIM}Where should AI requests be sent?${RESET}\n\n`);
 

@@ -685,12 +685,335 @@ describe('Config', () => {
       expect(config.backup_gdrive).toBeUndefined();
       // Positive control in the same fixture: a key that IS project-safe comes through, so an
       // `undefined` above cannot be explained by the project file having been ignored wholesale.
-      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_gdrive: true, backup_retention_days: 7 }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_gdrive: true, max_session_cost_usd: 5 }));
       const { reloadConfig } = await import('./config.js');
       reloadConfig();
       const again = loadConfig();
-      expect(again.backup_retention_days).toBe(7);
+      expect(again.max_session_cost_usd).toBe(5);
       expect(again.backup_gdrive).toBeUndefined();
+    });
+
+    it('backup_encrypt in a PROJECT config is IGNORED in BOTH directions — a cwd file must not decide encryption', async () => {
+      // Taken out of PROJECT_SAFE_KEYS on 2026-10-01. Both directions did damage
+      // from a file in the working directory, and the heavier one is `false`:
+      //   false → the LOCAL archive goes out unencrypted for a user who had set
+      //           LYNOX_VAULT_KEY and never chose that. Nothing to do with uploads.
+      //   true  → the archive becomes encrypted and therefore eligible for the
+      //           Drive upload, reversing the decision of someone who switched
+      //           encryption off in order to suppress it.
+      // The sharpest form of the first is a project file DOWNGRADING a user's
+      // explicit `true`, so that is the one asserted first.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      
+      // Direction 1 (heavy): the user said `true`, a file in the cwd says `false`.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_encrypt: true }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_encrypt: false, max_session_cost_usd: 5 }),
+      );
+      const downgraded = loadConfig();
+      expect(downgraded.backup_encrypt).toBe(true);
+      // Positive control in the same fixture: a key that IS project-safe comes
+      // through, so the `true` above cannot be explained by the project file
+      // having been ignored wholesale.
+      expect(downgraded.max_session_cost_usd).toBe(5);
+      
+      // Direction 2: nothing in the user config, the cwd says `true`.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_encrypt: true }));
+      reloadConfig();
+      expect(loadConfig().backup_encrypt).toBeUndefined();
+      
+      // And the legitimate path must still work: taking a key off the allowlist
+      // must not make it unsettable. Without this third witness, deleting the
+      // field from the schema outright would satisfy the two above as well — and
+      // `false` is the value that matters, because a truthiness bug drops it.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_encrypt: false }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({}));
+      reloadConfig();
+      expect(loadConfig().backup_encrypt).toBe(false);
+    });
+
+    it('backup_dir in a PROJECT config is IGNORED — a cwd file must not move where the stores are copied', async () => {
+      // Taken off the allowlist on 2026-10-01. The field names a filesystem
+      // destination the backup manager writes to AND prunes, so the scope that
+      // decides it is the user config rather than a directory one happens to be
+      // working in. Both directions are asserted, because a project file that
+      // could only redirect and a project file that could only pin would both
+      // be wrong.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      
+      // Direction 1: the user said nothing, the cwd names a directory.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_dir: '/tmp/elsewhere-should-not-win', max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.backup_dir).toBeUndefined();
+      // Positive control in the same fixture: a project-safe key does come
+      // through, so the `undefined` cannot be the project file being ignored.
+      expect(first.max_session_cost_usd).toBe(5);
+      
+      // Direction 2: the user chose a directory, the cwd tries to move it.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_dir: '/var/backups/mine' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_dir: '/tmp/elsewhere-should-not-win' }));
+      reloadConfig();
+      expect(loadConfig().backup_dir).toBe('/var/backups/mine');
+    });
+
+    it('backup_retention_days in a PROJECT config is IGNORED — a cwd file must not decide what gets deleted', async () => {
+      // The other half of the pair. This key does not configure a preference,
+      // it drives `pruneBackups`, which does a recursive remove inside the
+      // backup directory (`worker-loop.ts` → `backup.ts`). The schema allows
+      // 0..365, so a working-directory file could set 1 and have the next
+      // scheduled run delete everything older than a day.
+      // Both directions again, and the second is the one with teeth: a project
+      // file must not be able to SHORTEN a retention the user chose.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_retention_days: 90 }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_retention_days: 1, max_session_cost_usd: 5 }),
+      );
+      const { loadConfig } = await import('./config.js');
+      const merged = loadConfig();
+      expect(merged.backup_retention_days).toBe(90);
+      // Positive control from the verified-accepted set, and deliberately NOT
+      // this key: using the one that deletes backups as the "harmless
+      // project-safe key" is what the previous version of these tests did.
+      expect(merged.max_session_cost_usd).toBe(5);
+    });
+
+    it('bugsink_dsn in a PROJECT config is IGNORED — the error-reporting endpoint is a user-config decision', async () => {
+      // Taken off the allowlist on 2026-10-01. The key names an OUTBOUND
+      // destination: error events are sent there, and `beforeSend` masks
+      // credential shapes in text while leaving structure — stack frames with
+      // absolute paths, and tool and model names in the breadcrumbs — intact.
+      // `network_policy` is already kept off this allowlist for the same
+      // reason, and `bugsink_dsn` is a member of `SECRET_CONFIG_KEYS` besides.
+      //
+      // Both directions, and the second has a job no other assertion here
+      // does: it is the only one that says the field still ARRIVES from the
+      // user config. What it is NOT, measured rather than assumed: the only
+      // thing standing between this test and a wholesale deletion of the
+      // field from the schema. That mutant fails at the positive control
+      // first, because a file the strict schema rejects is discarded whole
+      // and takes the control key with it. Direction 2 fails under it too —
+      // it is simply not the first to speak.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // Direction 1: the user said nothing, the cwd names an endpoint.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ bugsink_dsn: 'https://k@elsewhere.example/9', max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.bugsink_dsn).toBeUndefined();
+      // Positive control from the verified-accepted set, in-process only.
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // Direction 2: the user chose an endpoint and it must still be theirs —
+      // and it must still ARRIVE, which is what keeps this honest about the
+      // field continuing to exist.
+      writeFileSync(
+        join(userDir, 'config.json'),
+        JSON.stringify({ bugsink_dsn: 'https://k@errors.mine.example/1' }),
+      );
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ bugsink_dsn: 'https://k@elsewhere.example/9' }),
+      );
+      reloadConfig();
+      expect(loadConfig().bugsink_dsn).toBe('https://k@errors.mine.example/1');
+    });
+
+    it('plugins in a PROJECT config is IGNORED — which plugins load is a user-config decision', async () => {
+      // Taken off the allowlist on 2026-10-01. The key selects which of the
+      // ALREADY-INSTALLED plugins `loadPlugins` imports and executes, so it
+      // decides which code runs. Nothing is installed from here either way;
+      // the selection is the point, and it is a larger thing than setting a
+      // value.
+      //
+      // THREE witnesses, and the third is the one the other two miss.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // 1: the user said nothing, the cwd names a selection.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ plugins: { 'not-a-real-plugin': true }, max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.plugins).toBeUndefined();
+      // Positive control from the verified-accepted set, in-process only.
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // 2: the user chose, and the choice must still ARRIVE — without this the
+      // test would also pass if the field were deleted from the schema.
+      writeFileSync(
+        join(userDir, 'config.json'),
+        JSON.stringify({ plugins: { 'not-a-real-plugin': true } }),
+      );
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({}));
+      reloadConfig();
+      expect(loadConfig().plugins).toEqual({ 'not-a-real-plugin': true });
+
+      // 3: the sharp one. `loadPlugins` reads
+      // `this.config.plugins ?? readPluginsConfig()`, so a project entry
+      // REPLACES the user's selection instead of adding to it — an empty
+      // object would switch every plugin off. Asserted even though the
+      // removal makes it unreachable: it is the half that would do damage if
+      // the key were ever reinstated without deciding the merge semantics
+      // first, and an unreachable hazard with no witness is one nobody finds
+      // again.
+      writeFileSync(
+        join(userDir, 'config.json'),
+        JSON.stringify({ plugins: { 'not-a-real-plugin': true } }),
+      );
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ plugins: {} }));
+      reloadConfig();
+      expect(loadConfig().plugins).toEqual({ 'not-a-real-plugin': true });
+    });
+
+    it('embedding_provider in a PROJECT config is IGNORED — which embedder writes the memory store is a user-config decision', async () => {
+      // Off the allowlist since 2026-10-01, and this one is IRREVERSIBLE where
+      // the others were not. The selectable `local` provider calls itself, in
+      // its own class comment, a hash-based provider "for testing … Not
+      // suitable for real semantic search"; memory rows carry the model name,
+      // there is no re-embed path, and the similarity search has no model
+      // field. So two providers' vectors meet in one cosine comparison, and
+      // turning the key back does not undo what was written.
+      //
+      // ⚠ The env path is deliberately not touched and is stubbed empty here,
+      // so this test measures the CONFIG sources rather than the machine it
+      // runs on: `LYNOX_EMBEDDING_PROVIDER` is applied after this merge and
+      // still wins.
+      vi.stubEnv('LYNOX_EMBEDDING_PROVIDER', '');
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // Direction 1: the user said nothing, the cwd names the test embedder.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ embedding_provider: 'local', max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.embedding_provider).toBeUndefined();
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // Direction 2: the user chose, and the choice must still arrive.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ embedding_provider: 'onnx' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ embedding_provider: 'local' }));
+      reloadConfig();
+      expect(loadConfig().embedding_provider).toBe('onnx');
+    });
+
+    it('changeset_review in a PROJECT config is IGNORED — whether writes are staged for review is a user-config decision', async () => {
+      // Off the allowlist since 2026-10-01, and the reason is NOT the one above.
+      // This is REVERSIBLE: it destroys nothing.
+      //
+      // ⚠ And it does not "stage writes for review before they land" — that was
+      // wrong, and a review round measured it. Changeset mode is
+      // backup-before-write: the write happens at once, the diff preview and the
+      // permission prompt are deliberately skipped for the two mutating tools,
+      // and the review is a POST-run diff with a rollback. A project `false`
+      // therefore trades the post-run rollback for the write-time guard — it
+      // shifts when review happens rather than removing it.
+      //
+      // The decision rests on origin alone: a cloned repo must not decide
+      // whether rollbackability exists for the writes it causes.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+
+      // Direction 1, and `false` is the value with teeth: the cwd tries to
+      // switch the review off while the user never asked for that.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ changeset_review: false, max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.changeset_review).toBeUndefined();
+      expect(first.max_session_cost_usd).toBe(5);
+
+      // Direction 2: a user `false` must still work — otherwise this test is
+      // also satisfied by the setting having disappeared altogether, which
+      // would be a different change with different costs.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ changeset_review: false }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ changeset_review: true }));
+      reloadConfig();
+      expect(loadConfig().changeset_review).toBe(false);
+    });
+    
+    it('one invalid value in a PROJECT config silently drops ALL of its other keys', async () => {
+      // This replaces a test that was a TAUTOLOGY. It asserted that a project
+      // file holding `backup_retention_days: null` cannot blank the user's
+      // value, and claimed to pin the merge loop's `value !== null` guard.
+      // It passed either way: measured against the schema, NOT ONE allowlisted
+      // key accepts `null` (15 checked), so such a file fails `safeParse`, and
+      // `readConfigFile` returns null for the WHOLE file before the loop runs.
+      // Both guards in that condition are therefore unreachable from a config
+      // file and their mutants are equivalent, not uncovered.
+      //
+      // What is real, and surprising enough to pin: the rejection is
+      // file-wide. One bad value costs the project file every other key it
+      // set, with a single line on stderr and no other signal.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_retention_days: 7 }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_retention_days: null, max_session_cost_usd: 5 }),
+      );
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      const withBadValue = loadConfig();
+      // The user's value survives — but by file-wide rejection, not by the guard.
+      expect(withBadValue.backup_retention_days).toBe(7);
+      // And the cost: `max_session_cost_usd` is allowlisted AND valid, and it is gone.
+      expect(withBadValue.max_session_cost_usd).toBeUndefined();
+
+      // Positive control: the same key DOES arrive once the bad value is removed,
+      // so the `undefined` above is the file-wide rejection and not the key being
+      // unreachable. The first control I reached for was `greeting`, and it failed
+      // here — measured, it IS in the schema but not as a plain string, so the
+      // control would have been a second wrong assumption rather than a check.
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ max_session_cost_usd: 5 }),
+      );
+      reloadConfig();
+      expect(loadConfig().max_session_cost_usd).toBe(5);
     });
 
     it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {

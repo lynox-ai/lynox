@@ -77,7 +77,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 
 ### Legacy: Vertex AI
 
-`provider: vertex` is no longer offered by the installer or in-product wizard but stays wired in the engine for existing self-hosters whose `config.json` still points at Vertex. New installs should use Anthropic direct or `provider: openai` (Mistral) instead. The Vertex path is not regularly tested — expect rough edges.
+`provider: vertex` is no longer offered by the installer or in-product wizard, and **it does not work in the Docker image**: Vertex needs the optional package `@anthropic-ai/vertex-sdk`, which the image does not include, so a `config.json` that still points at Vertex fails when the engine starts. Use Anthropic direct or `provider: openai` (Mistral) instead.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|

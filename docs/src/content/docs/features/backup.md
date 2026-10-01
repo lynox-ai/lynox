@@ -34,13 +34,22 @@ curl -X POST http://localhost:3000/api/backups
 
 ## Scheduled Backups
 
-⚠ **`backup_schedule` does not schedule anything.** The key is declared and documented, and the
-Settings UI offers it — but nothing in the engine reads it, so no backup is ever created because of
-it. Automatic backups run as a **trigger** with the `backup` effect and a cron schedule. You create one
+⚠ **`backup_schedule` does not schedule anything, and there is no longer a control for it.** The key
+is still accepted by the config schema, but nothing in the engine reads it, so no backup is ever
+created because of it. The "Backup schedule" select that used to sit in the Backups view was
+**removed** rather than wired up: a control that writes a key nobody reads is not a missing feature,
+it is a promise the product does not keep.
+
+The key is still *settable* — by hand in `~/.lynox/config.json`, through `PUT /api/config`, or from a
+project `.lynox/config.json` (it is on the project-override allowlist). None of those do anything
+either. It is kept in the schema rather than deleted because the schema is strict and a config file
+it rejects is discarded **whole**: dropping the key would cost everyone who has it their entire
+config file, so retiring it properly needs a migration that strips it, not a one-line deletion.
+
+Automatic backups run as a **trigger** with the `backup` effect and a cron schedule. You create one
 by asking the agent in chat; Automation Hub → Triggers lists them, and "New trigger" opens a chat
 for it. (The Hub's **Tasks** tab is your to-do list, not agent triggers, and Settings has no Tasks
-page.) Until `backup_schedule` is either wired up or removed, treat both it and the "Backup
-schedule" control in Settings as having no effect.
+page.)
 
 The other keys below do work:
 

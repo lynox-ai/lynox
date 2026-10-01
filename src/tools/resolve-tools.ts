@@ -73,6 +73,31 @@ export function resolveTools(
 }
 
 /**
+ * Every tool in `derived` is one that `parent` holds, BY NAME.
+ *
+ * The invariant a route owes when it derives a tool list FROM another agent's list, stated as
+ * a predicate rather than as a comment above each route. Pure and exported for two reasons: a
+ * test asserts the property on a route's real output instead of re-implementing the
+ * comparison, and a mutant that routes around the bound then fails on this assertion rather
+ * than on a count that could move for other reasons.
+ *
+ * ⚠ NOT every route that builds a child's tool list — `spawnViaAgent` builds one from an
+ * agent definition's own functions and takes no parent list at all, so there is no surface
+ * for its result to lie within. That runtime refuses a role instead; the exception is the
+ * reason this docblock does not say "every".
+ *
+ * ⚠ And it certifies the NAME, never the capability behind it. This repo has three producers
+ * of same-named entries with a DIFFERENT handler — `applyPluginToolGate`, `wrapWithGate`,
+ * `convertAgentTools` — so a list whose handlers have had the plugin gate stripped satisfies
+ * this predicate against the gated one. Read it as "names no wider than", and nothing more:
+ * it bounds the surface, it does not vouch for what sits behind a name.
+ */
+export function withinSurface(derived: ToolEntry[], parent: ToolEntry[]): boolean {
+  const held = new Set(parent.map(t => t.definition.name));
+  return derived.every(t => held.has(t.definition.name));
+}
+
+/**
  * The role's upper bound as a set, or `null` when the role declared none.
  *
  * Read the two absent-ish values apart before touching this: `allowedTools: []` is a

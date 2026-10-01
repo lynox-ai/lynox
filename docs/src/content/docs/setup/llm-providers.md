@@ -314,7 +314,7 @@ lynox runs as a single Docker container — any platform that runs containers ca
 ## Legacy: Vertex AI — experimental
 
 :::caution[Not regularly tested]
-`provider: 'vertex'` is wired but not exercised on every release. The installer and in-product wizard no longer offer it. New installs should use Anthropic direct or Mistral. The section below stays in place for self-hosters whose `~/.lynox/config.json` still points at Vertex.
+`provider: 'vertex'` is wired but not exercised on every release. The installer and in-product wizard no longer offer it. New installs should use Anthropic direct or Mistral. **It does not work in the Docker image**: the image does not include `@anthropic-ai/vertex-sdk`, so a `config.json` that points at Vertex fails when the engine starts. The section below applies only to an npm install where you add that package yourself.
 :::
 
 If you still need it, the config shape is:

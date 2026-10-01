@@ -23,6 +23,42 @@ function makeEngine(hooks: LynoxHooks[]): Engine {
   } as unknown as Engine;
 }
 
+describe('runGuardedSavedWorkflow — the headless pool is the engine set, on purpose', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCheckPersistentBudget.mockReturnValue({ allowed: true });
+    mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-h', status: 'completed', costUsd: 0 });
+    _resetTenantInvariantForTests();
+  });
+
+  it('hands the engine tool set to a scheduled run rather than narrowing it', async () => {
+    // Pinned as a DECISION, not as an accident. A scheduled run has no session and therefore
+    // no agent whose grant could bound it; narrowing here would take tools away from a cron
+    // run that nothing promised to withhold. The set a role protects is "a child of a
+    // session", not "everything that is not a root" — and without this assert, the next pass
+    // over the grant routes would quietly bound this one too.
+    const engineTools = [
+      { definition: { name: 'read_file', description: 'r', input_schema: { type: 'object' as const, properties: {} } }, handler: vi.fn() },
+      { definition: { name: 'bash', description: 'b', input_schema: { type: 'object' as const, properties: {} } }, handler: vi.fn() },
+    ];
+    const engine = {
+      getHooks: () => [],
+      getContext: () => null,
+      getUserConfig: () => ({ default_tier: 'balanced' }),
+      getRunHistory: () => ({} as unknown),
+      getToolContext: () => ({ tools: engineTools }),
+      getMemory: () => null,
+    } as unknown as Engine;
+
+    await runGuardedSavedWorkflow(engine, 'wf-headless');
+
+    expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
+    const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { tools?: unknown[] };
+    expect((opts.tools ?? []).length).toBe(2);
+    expect(opts.tools).toBe(engineTools);
+  });
+});
+
 describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();

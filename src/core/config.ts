@@ -187,9 +187,60 @@ export function loadConfig(): LynoxUserConfig {
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
     'default_tier', 'balanced_model', 'thinking_mode', 'effort_level',
-    'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider', 'plugins',
+    'max_session_cost_usd', 'max_concurrent_runs',
+  // `embedding_provider` is NOT here, since 2026-10-01, and this one is
+  // different from the others that came off: it is IRREVERSIBLE. The
+  // selectable `local` provider calls itself, in its own class comment,
+  // a deterministic hash-based provider "for testing … Not suitable for
+  // real semantic search". Memory rows are written with the model name,
+  // there is no re-embed path, and `findSimilarMemories` takes namespace
+  // and scope but NO model field — so vectors from two providers meet in
+  // the same cosine comparison at equal dimension, permanently. Every
+  // other key that left this list could be turned back; this one leaves
+  // a mark in the data. That asymmetry is the reason, not the size of
+  // the effect, which is read from the code and not measured.
+  //
+  // The operator's path stays: `LYNOX_EMBEDDING_PROVIDER` is applied after
+  // this merge and still wins, restricted to `onnx`/`local`. Same shape as
+  // the error endpoint — the env keeps precedence, only the per-directory
+  // source goes away.
+  // `plugins` is NOT here, since 2026-10-01. It selects which of the
+  // already-installed plugins are loaded and executed, so it decides which
+  // CODE runs — a larger thing than setting a value, and a user-config
+  // decision rather than one a working directory makes. Nothing is
+  // installed from here either way; the selection is the point.
+  //
+  // ⚠ If this is ever reinstated, decide the MERGE SEMANTICS before the
+  // key: `loadPlugins` reads `this.config.plugins ?? readPluginsConfig()`,
+  // so a project entry REPLACES the user's selection rather than adding to
+  // it — an empty object would switch all of them off. Whether that is
+  // right depends on the question above, which is why it is written here
+  // and not fixed at a key that no longer carries it.
+  //
+  // ⚠ And there is a SECOND read path, which is why the `??` above is not
+  // the whole story: `readPluginsConfig` (`plugins.ts`) reads the user's
+  // `config.json` as RAW TEXT, without the schema. So a user file this
+  // loader rejects — and `readConfigFile` rejects a file WHOLE, over one
+  // unknown key — still has its `plugins` take effect through that path.
+  // Any reasoning about which selection wins has to account for both.
     'organization_id', 'client_id',
-    'changeset_review', 'greeting', 'context_name',
+    // `changeset_review` is NOT here, since 2026-10-01, and the reason is NOT
+  // the one above: this is REVERSIBLE. It destroys nothing.
+  //
+  // ⚠ And it is NOT "a bar in front of writes" — that description was wrong and
+  // a review round measured it. Changeset mode is backup-BEFORE-write: the write
+  // lands immediately, `agent.ts` explicitly skips the diff preview, the
+  // permission prompt and `isDangerousDetailed` for `write_file`/`edit_file`
+  // ("review happens post-run"), and the review is a post-run diff with a
+  // rollback. So a project `false` removes the post-run diff and the
+  // rollbackability, and in exchange RESTORES the write-time guard. It shifts
+  // the moment of review; it does not simply remove one.
+  //
+  // The decision stands on origin alone: a cloned repo must not decide whether
+  // rollbackability exists for the writes it causes. Note it is inert on
+  // autonomous runs (`isAutonomous ||`) and without an active workspace, and it
+  // never covered bash write paths (`sed -i`, `tee`) at all.
+  'greeting', 'context_name',
     'max_daily_cost_usd', 'max_monthly_cost_usd',
     'max_http_requests_per_hour', 'max_http_requests_per_day',
     'max_mail_sends_per_hour', 'max_mail_sends_per_day', 'mail_dedup_window_sec',
@@ -198,8 +249,33 @@ export function loadConfig(): LynoxUserConfig {
     'pipeline_context_limit', 'pipeline_step_result_limit',
     'memory_extraction_limit', 'http_response_limit', 'http_html_extract',
     'enforce_https',
-    'bugsink_dsn',
-    'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
+    // `bugsink_dsn` is NOT here, since 2026-10-01. It names the endpoint
+  // error reports are sent to — an outbound destination, like
+  // `network_policy`, which this allowlist already keeps off for the same
+  // reason. The scope that may choose where diagnostics go is the user or
+  // global config, not a directory one happens to be working in. It is
+  // also a member of `SECRET_CONFIG_KEYS`, so it sat on the convenience
+  // side of a line it belongs on the other side of. Nothing becomes
+  // impossible: the key is still settable in the user config and still
+  // overridden by LYNOX_BUGSINK_DSN.
+    // `backup_encrypt` is deliberately NOT here, and it was until 2026-10-01.
+  // It controls ENCRYPTION, which puts it on the security side of this
+  // allowlist's own dividing line rather than with the convenience keys —
+  // and it mattered in BOTH directions, so "the project can only loosen"
+  // or "can only tighten" are both wrong reasons to allow it. The scope
+  // that may decide it is the user config, not a directory one happens to
+  // be working in. `backup_gdrive` was already left out for the same
+  // reason, and `config.test.ts` holds both directions plus the user path.
+  // Neither `backup_dir` nor `backup_retention_days` is here, since
+  // 2026-10-01, and they come as a pair on purpose. The first names a
+  // filesystem destination the backup manager writes to; the second decides
+  // what it DELETES there (`pruneBackups` → recursive remove). Removing only
+  // the destination would have left the deletion steerable from a working
+  // directory, which is the same decision with the knife in the other hand.
+  // Both are user-config decisions by the line this allowlist draws itself.
+  // See the comment on `LYNOX_SECRET_FILES` in `tools/permission-guard.ts`
+  // for why the location of those copies is load-bearing.
+  'backup_schedule',
     'experience',
   ]);
 
