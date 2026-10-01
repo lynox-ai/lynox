@@ -1771,14 +1771,134 @@ describe('httpRequestTool', () => {
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.bexio.example/2.0/invoices', method: 'GET' }, agent);
 
-      expect(result).toMatch(/Agent reminder.*USER authorized/i);
       expect(result).toMatch(/Do NOT call api_setup fetch_token/i);
-      expect(result).toContain('connect');
+      // The remedy comes from the enumerated advice, so it is the one that fits
+      // THIS shape: an empty slot behind a consent means re-authorize.
+      expect(result).toContain('connect link');
+      expect(result).toContain('offline_access');
       // The discriminator. The app-only text promises the opposite, and a model
       // that reads it here performs the swap.
       expect(result).not.toMatch(/no user interaction required/i);
       // Still outside the wrap, like its sibling.
       expect(result.indexOf('Agent reminder')).toBeGreaterThan(result.lastIndexOf('</untrusted_data>'));
+    });
+
+    /**
+     * The OTHER refused shape, and the one the first version of this predicate
+     * missed entirely: no consent behind the profile, a refresh token in the
+     * slot, no grant type declared. Its access token is a user's too — somebody
+     * pasted it — and `fetch_token` defaults to client-credentials and
+     * overwrites it. The gate refuses the unattended renewal for exactly this
+     * shape; before this, the 401 line still told the model to do it by hand,
+     * "no user interaction required".
+     *
+     * And the remedy must NOT be the connect link: there is no consent flow
+     * behind this profile to send anyone to.
+     */
+    it('also refuses to recommend fetch_token for an undeclared refresh token, and names the right remedy', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'legacy_api',
+        name: 'Legacy',
+        base_url: 'https://legacy.example/v1',
+        description: 'Legacy',
+        // The attach refuses an un-acked host BEFORE it reads the vault, and
+        // these two tests hand the agent a secretStore — so without the
+        // acceptance the request never leaves and there is no 401 to react to.
+        // (The sibling tests above pass without it only because they give no
+        // secretStore at all, which skips the attach entirely. That is worth
+        // knowing: a fixture can be green for a reason unrelated to its subject.)
+        custom_endpoint_ack: {
+          accepted: true,
+          hosts: ['legacy.example'],
+          accepted_at: '2026-10-01T00:00:00.000Z',
+        },
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['LEGACY_CLIENT_ID', 'LEGACY_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://legacy.example/oauth/token',
+            client_id_key: 'LEGACY_CLIENT_ID',
+            client_secret_key: 'LEGACY_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 401, headers: { 'content-type': 'application/json' }, json: {},
+      })));
+
+      const agent = {
+        toolContext: { apiStore: store },
+        sessionCounters: testCounters,
+        // An access token, so the attach gets past "nothing to attach" and the
+        // request actually reaches the 401 — and the refresh token, which is the
+        // subject: undeclared, in the slot every reader resolves.
+        secretStore: {
+          resolve: (n: string) => (n === 'LEGACY_API_ACCESS_TOKEN' ? 'at-stale'
+            : n === 'LEGACY_API_REFRESH_TOKEN' ? 'rt-1' : null),
+        },
+      } as never;
+      const result = await handler({ url: 'https://legacy.example/v1/things', method: 'GET' }, agent);
+
+      expect(result).toMatch(/Do NOT call api_setup fetch_token/i);
+      expect(result).not.toMatch(/no user interaction required/i);
+      // The remedy that fits a hand-configured profile — declare the token —
+      // and NOT the one that fits a connected one.
+      expect(result).toContain('api_setup update');
+      expect(result).toContain('"refresh_token"');
+      expect(result, 'a profile with no consent behind it was sent to a connect link').not.toContain('connect link');
+    });
+
+    it('keeps the ordinary reminder when nothing is in the refresh slot to lose', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'shop_cc',
+        name: 'Shop',
+        base_url: 'https://cc.example/v1',
+        description: 'Shop',
+        // The attach refuses an un-acked host BEFORE it reads the vault, and
+        // these two tests hand the agent a secretStore — so without the
+        // acceptance the request never leaves and there is no 401 to react to.
+        // (The sibling tests above pass without it only because they give no
+        // secretStore at all, which skips the attach entirely. That is worth
+        // knowing: a fixture can be green for a reason unrelated to its subject.)
+        custom_endpoint_ack: {
+          accepted: true,
+          hosts: ['cc.example'],
+          accepted_at: '2026-10-01T00:00:00.000Z',
+        },
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://cc.example/oauth/token',
+            client_id_key: 'SHOP_CLIENT_ID',
+            client_secret_key: 'SHOP_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 401, headers: { 'content-type': 'application/json' }, json: {},
+      })));
+
+      // The too-wide direction. Shopify's shape: no consent, no refresh token,
+      // an absent grant type that means client_credentials and nothing else.
+      // Silencing the reminder here would take away the one recovery it has.
+      const agent = {
+        toolContext: { apiStore: store },
+        sessionCounters: testCounters,
+        secretStore: { resolve: (n: string) => (n === 'SHOP_CC_ACCESS_TOKEN' ? 'at-stale' : null) },
+      } as never;
+      const result = await handler({ url: 'https://cc.example/v1/orders', method: 'GET' }, agent);
+
+      expect(result).toContain('fetch_token');
+      expect(result).not.toMatch(/Do NOT call api_setup fetch_token/i);
     });
 
     it('still gives the fetch_token reminder to a connected profile that CAN refresh', async () => {
