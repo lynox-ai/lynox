@@ -140,7 +140,7 @@
     "@typescript-eslint/parser": "^8.57.2",
     "@vitest/coverage-v8": "^4.1.4",
     "eslint": "^10.1.0",
-    "google-auth-library": "^10.6.2",
+    "google-auth-library": "^11.1.0",
     "svelte": "^5.55.7",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
