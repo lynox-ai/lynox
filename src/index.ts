@@ -17,7 +17,10 @@ process.emit = function (event: string, ...args: unknown[]) {
   if (event === 'warning' && args[0] && typeof args[0] === 'object' && (args[0] as { name?: string }).name === 'DeprecationWarning') {
     return false;
   }
-  return _origEmit.call(process, event, ...args);
+  // Reflect.apply, not `.call(process, event, ...args)`: same function, same `this`, same
+  // arguments, but it does not depend on how a given @types/node version declares the
+  // overloads of `process.emit` (the spread form fails to type-check against Node 22's types).
+  return Reflect.apply(_origEmit, process, [event, ...args]) as boolean;
 } as typeof process.emit;
 // === Module exports ===
 export { Agent } from './core/agent.js';
