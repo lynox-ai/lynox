@@ -1738,6 +1738,28 @@ describe('what the log says when a renewal is declined', () => {
     expect(line.length).toBeLessThan(800);
   });
 
+  it('keeps the gate reading an empty string as a STORED token, as it did before', async () => {
+    const { oauthProfileMayBeRenewedUnattended, oauthRefreshSlotState } = await import('./http.js');
+    // The one value on which the gate and the diagnosis must DISAGREE, pinned
+    // because the disagreement is deliberate and a refactor erased it once.
+    //
+    // `oauthRefreshSlotState` calls `''` empty — right for a diagnosis, since an
+    // empty string tells an operator nothing useful. But the gate's old
+    // expression was `resolve(slot) !== null`, for which `''` counted as a stored
+    // refresh token and the profile was REFUSED. Routing the gate through the
+    // three-valued state would have flipped that to PERMITTED — a permissive
+    // change to a security gate, arriving as a side effect of a logging
+    // refactor, with no test to notice. `SecretStore.set` has no empty-value
+    // guard, so the value is reachable.
+    expect(oauthRefreshSlotState({ id: 'x', name: 'x', base_url: 'https://x.example', description: 'x' }, 'S', '')).toBe('empty');
+    const profile = { auth: { oauth: {} } };
+    // What the attach passes is `stored !== null`, which for `''` is `true`.
+    expect(oauthProfileMayBeRenewedUnattended(profile, true)).toBe(false);
+    // And what it must NOT pass: the state-derived boolean, which for `''` is
+    // `false` and opens the gate.
+    expect(oauthProfileMayBeRenewedUnattended(profile, false)).toBe(true);
+  });
+
   it('tolerates a written list that is not a list, which the hot path used to throw on', async () => {
     const { oauthRefreshSlotState } = await import('./http.js');
     // `_admit` validates the id, the slot and the host and says nothing about
@@ -1805,6 +1827,74 @@ describe('the two properties the comments claim, which nothing was checking', ()
    * pins the constant — so changing the number and that test together would
    * have removed the behaviour invisibly.
    */
+  /**
+   * THE SHOPIFY SHAPE, driven through the attach — and it had no test here at
+   * all, which a review round found by mutation: hardcoding the gate's occupancy
+   * argument to `true` survived every test in this file and in the pre-change
+   * tree. The cause was the fixture: every attach-driven renewal seeds
+   * `CRM_API_REFRESH_TOKEN`, so the one clause that depends on the slot being
+   * EMPTY — `return !hasStoredRefreshToken`, the shape this whole piece exists
+   * for — was never driven.
+   *
+   * A pre-existing gap rather than one this change opened, and closed here
+   * because the clause it leaves unpinned is the one that decides whether
+   * Shopify renews at all.
+   */
+  it('renews an app-only profile whose refresh slot is empty, which is the shape this exists for', async () => {
+    const past = Date.now() - 1000;
+    const vault = makeVault({
+      CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN',
+      // No refresh token at all. `client_credentials` is then the only thing the
+      // profile can mean, and renewing it replaces nothing a user gave.
+    });
+    const profile = crmProfile({
+      auth: {
+        ...crmProfile().auth!,
+        oauth: { ...crmProfile().auth!.oauth!, grant_type: undefined, token_expires_at: past },
+      },
+    });
+    const { calls } = await run(profile, vault);
+    expect(
+      calls.some((u) => u.includes('/oauth/token')),
+      'the app-only shape was refused a renewal, so the 24-hour token keeps dying',
+    ).toBe(true);
+  });
+
+  /**
+   * The gate's occupancy answer, driven THROUGH THE ATTACH.
+   *
+   * The unit assertion next to `oauthRefreshSlotState` pins what the predicate
+   * answers for each argument — and cannot see which argument the attach hands
+   * it. That is the whole failure mode: a logging refactor replaced
+   * `resolve(slot) !== null` with a state-derived boolean, and for an EMPTY
+   * STRING in the refresh slot the two disagree. The predicate tests stayed
+   * green, because the wiring is what changed.
+   *
+   * So this drives a real request with `''` in the slot and asserts no exchange
+   * was spent. A profile with an undeclared grant type and a stored refresh
+   * token is REFUSED, and `''` has to keep counting as stored.
+   */
+  it('spends no exchange when the refresh slot holds an empty string', async () => {
+    const past = Date.now() - 1000;
+    const vault = makeVault({
+      CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+      CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: '',
+    });
+    const profile = crmProfile({
+      auth: {
+        ...crmProfile().auth!,
+        // No `grant_type`: with a stored refresh token that is the ambiguous
+        // shape the gate refuses, and the one the empty string decides.
+        oauth: { ...crmProfile().auth!.oauth!, grant_type: undefined, token_expires_at: past },
+      },
+    });
+    const { calls } = await run(profile, vault);
+    expect(
+      calls.some((u) => u.includes('/oauth/token')),
+      'an empty string in the refresh slot read as "no token" and opened the gate',
+    ).toBe(false);
+  });
+
   it('renews a token that is inside the buffer but has NOT expired yet', async () => {
     const twoMinutesLeft = Date.now() + 2 * 60 * 1000;
     const { calls } = await run(crmProfile({
