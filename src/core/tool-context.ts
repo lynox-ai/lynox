@@ -134,8 +134,22 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
 }
 
 /**
+ * True iff `domain` (the part after `*.`) names a domain a wildcard entry can
+ * cover: non-empty, no empty label, no further `*`, no whitespace. The floor
+ * matches a wildcard as `host === domain || host.endsWith('.' + domain)`, so
+ * the domain itself must be a real name for that match to mean "this domain
+ * and its subdomains".
+ */
+export function isWildcardDomain(domain: string): boolean {
+  if (/[*\s]/.test(domain)) return false;
+  return domain.split('.').every((label) => label.length > 0);
+}
+
+/**
  * Apply network policy to a ToolContext.
- * Splits wildcard hosts (*.example.com) from exact hosts.
+ * Splits wildcard hosts (*.example.com) from exact hosts. A wildcard entry
+ * whose domain fails `isWildcardDomain` is dropped with a warning: it
+ * covers nothing, and the allowlist stays as narrow as the valid entries.
  */
 export function applyNetworkPolicy(
   ctx: ToolContext,
@@ -148,7 +162,12 @@ export function applyNetworkPolicy(
     const wildcards: string[] = [];
     for (const h of hosts) {
       if (h.startsWith('*.')) {
-        wildcards.push(h.slice(2));
+        const domain = h.slice(2);
+        if (isWildcardDomain(domain)) {
+          wildcards.push(domain);
+        } else {
+          process.stderr.write(`⚠ network_allowed_hosts entry ${JSON.stringify(h)} has no valid domain after "*." — ignoring it\n`);
+        }
       } else {
         exact.add(h);
       }

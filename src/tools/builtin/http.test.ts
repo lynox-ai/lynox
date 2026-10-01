@@ -1161,6 +1161,21 @@ describe('httpRequestTool', () => {
       expect(await handler({ url: 'https://example.com' }, makeAgent())).toContain('HTTP 200');
     });
 
+    it('a wildcard entry without a domain admits no host', async () => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        applyNetworkPolicy(testCtx, 'allow-list', ['*.', 'api.example.com']);
+      } finally {
+        stderr.mockRestore();
+      }
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      // The valid entry still works, so the refusal below is the wildcard's, not an empty list.
+      expect(await handler({ url: 'https://api.example.com' }, makeAgent())).toContain('HTTP 200');
+      await expect(handler({ url: 'https://other.example.org./' }, makeAgent()))
+        .rejects.toThrow('not in the allowed list');
+    });
+
     it('does not let an api_setup-style host bypass the allow-list (authoritative)', async () => {
       // The allow-list is NOT auto-extended by configured API profiles — register
       // a profile for a host that is NOT on the list and confirm it stays blocked.
