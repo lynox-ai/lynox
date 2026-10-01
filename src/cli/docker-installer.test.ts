@@ -70,8 +70,8 @@ describe('docker-installer', () => {
     });
 
     it('does not offer Vertex AI at install time', () => {
-      // Vertex stays wired in the engine for legacy config.json users but
-      // is no longer surfaced by the installer (per docs/README promise).
+      // Vertex is no longer surfaced by the installer (per docs/README
+      // promise); its engine path cannot load in the Docker image anyway.
       expect(INSTALLER_SRC).not.toMatch(/Google Vertex AI/);
       expect(INSTALLER_SRC).not.toMatch(/'vertex'/);
     });

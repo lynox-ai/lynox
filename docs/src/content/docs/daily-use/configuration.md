@@ -238,7 +238,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 
 ### Legacy: Google Vertex AI (experimental)
 
-`provider: vertex` is no longer offered by the installer; the env vars below remain wired for existing `config.json` setups that still point at Vertex but are not regularly tested. New installs should use Anthropic direct or Mistral.
+`provider: vertex` is no longer offered by the installer. The env vars below are still read, but Vertex needs two optional packages, `@anthropic-ai/vertex-sdk` and `google-auth-library`, that the **Docker image does not include**. In the image a Vertex setup fails on the first LLM call; it only works in an npm install where you add both packages yourself, and that path is not regularly tested. New installs should use Anthropic direct or Mistral.
 
 | Variable | Purpose |
 |----------|---------|
