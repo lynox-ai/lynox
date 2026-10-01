@@ -9,7 +9,7 @@ updates:
     labels:
       - dependencies
     # `@types/node` describes the Node API the code may use; it must not run AHEAD of the runtime
-    # the code ships on. Both Dockerfiles run `node:22-slim` and `engines.node` is `>=22`, so a
+    # the code ships on. Every stage of the Dockerfile runs `node:22-slim` and `engines.node` is `>=22`, so a
     # newer major lets the type check pass code that calls APIs Node 22 does not have — a check
     # that reports clean on exactly the error it exists for. Majors are therefore not proposed
     # here. The types should move DOWN to 22 (measured 2026-10-01: one signature error in
