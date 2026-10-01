@@ -44,16 +44,27 @@ export default [
     // BARE `console.warn` warns without the flag, so a warned, incomplete catalogue is
     // served for an hour. `report`'s own call carries the one exemption.
     //
-    // WHAT IT REACHES, measured: of fourteen access shapes tried, SEVEN are caught and
-    // SEVEN are not, and the set is open — five of the fourteen only turned up the first
-    // time somebody looked past the first nine. Caught: `console.warn(x)`,
-    // `console['warn'](x)`, `(console).warn(x)`, `const w = console.warn; w(x)`,
-    // `console?.warn(x)`, `console.warn.call(…)`, `(0, console.warn)(x)`. NOT caught:
-    // `const { warn } = console; warn(x)` (an ObjectPattern, not a MemberExpression),
-    // `globalThis.console.warn(x)`, `globalThis['console'].warn(x)`,
-    // `const c = globalThis.console; c.warn(x)`, `Reflect.get(console,'warn')(x)`, and
-    // `process.std*.write` / `process.emitWarning`, which are a different channel and are
-    // held by spies in the test file instead.
+    // WHAT IT REACHES, measured: of FOURTEEN `console` access shapes tried, seven are
+    // caught and seven are not — and that fourteen is a SAMPLE, not an enumeration. Nine
+    // were tried first (4/5), then five more the first time anybody looked past them
+    // (3/2); the trying has not stopped producing hits, so the set is open.
+    //
+    //   caught      `console.warn(x)` · `console['warn'](x)` · `(console).warn(x)`
+    //               `const w = console.warn; w(x)` · `console?.warn(x)`
+    //               `console.warn.call(…)` · `(0, console.warn)(x)`
+    //   not caught  `const { warn } = console; warn(x)` and its renamed form
+    //               `const { warn: w } = console; w(x)` — an ObjectPattern, not a
+    //               MemberExpression · `globalThis.console.warn(x)` ·
+    //               `globalThis['console'].warn(x)` ·
+    //               `const c = globalThis.console; c.warn(x)` ·
+    //               `const { console: cc } = globalThis; cc.warn(x)` ·
+    //               `Reflect.get(console,'warn')(x)`
+    //
+    // ⚠ `process.std*.write` and `process.emitWarning` are a DIFFERENT channel, outside
+    // this rule by design and held by spies in the test file. They are deliberately not
+    // in the fourteen: an earlier version of this list put them in and dropped two of the
+    // seven uncaught console shapes to make room, and because 7/7 and 14 both still came
+    // out right, the substitution read clean. Right number, wrong set.
     //
     // ⛔ THE HAZARD THIS BLOCK CREATES, both ways. Flat config REPLACES a rule's options
     // instead of merging them, so this block and a repo-wide `no-restricted-syntax`
@@ -67,9 +78,10 @@ export default [
     // `no-restricted-syntax` rather than `no-console` with an empty `allow`, whose schema
     // requires a non-empty list.
     //
-    // Why this is a lint rule and not a test: seven earlier mechanisms for the same
-    // property were built and retired, each defeated by a shape its author had not
-    // enumerated. That history, the open shapes, and the hazard above are a register row;
+    // Why this is a lint rule and not a test: earlier mechanisms for the same property
+    // were built and retired, each defeated by a shape its author had not enumerated.
+    // (No count: this comment said seven retired while the source file said six, and
+    // neither was checkable against the tree.) That history, the open shapes, and the hazard above are a register row;
     // this comment states the rule's reach and stops there, because every review finding
     // on this block has been a sentence claiming more than it measured.
     files: ['src/core/speak/mistral-voxtral-tts.ts'],
