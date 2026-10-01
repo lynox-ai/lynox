@@ -685,11 +685,11 @@ describe('Config', () => {
       expect(config.backup_gdrive).toBeUndefined();
       // Positive control in the same fixture: a key that IS project-safe comes through, so an
       // `undefined` above cannot be explained by the project file having been ignored wholesale.
-      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_gdrive: true, backup_retention_days: 7 }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_gdrive: true, max_session_cost_usd: 5 }));
       const { reloadConfig } = await import('./config.js');
       reloadConfig();
       const again = loadConfig();
-      expect(again.backup_retention_days).toBe(7);
+      expect(again.max_session_cost_usd).toBe(5);
       expect(again.backup_gdrive).toBeUndefined();
     });
 
@@ -713,14 +713,14 @@ describe('Config', () => {
       writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_encrypt: true }));
       writeFileSync(
         join(projectDir, 'config.json'),
-        JSON.stringify({ backup_encrypt: false, backup_retention_days: 7 }),
+        JSON.stringify({ backup_encrypt: false, max_session_cost_usd: 5 }),
       );
       const downgraded = loadConfig();
       expect(downgraded.backup_encrypt).toBe(true);
       // Positive control in the same fixture: a key that IS project-safe comes
       // through, so the `true` above cannot be explained by the project file
       // having been ignored wholesale.
-      expect(downgraded.backup_retention_days).toBe(7);
+      expect(downgraded.max_session_cost_usd).toBe(5);
       
       // Direction 2: nothing in the user config, the cwd says `true`.
       writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
@@ -736,6 +736,107 @@ describe('Config', () => {
       writeFileSync(join(projectDir, 'config.json'), JSON.stringify({}));
       reloadConfig();
       expect(loadConfig().backup_encrypt).toBe(false);
+    });
+
+    it('backup_dir in a PROJECT config is IGNORED — a cwd file must not move where the stores are copied', async () => {
+      // Taken off the allowlist on 2026-10-01. The field names a filesystem
+      // destination the backup manager writes to AND prunes, so the scope that
+      // decides it is the user config rather than a directory one happens to be
+      // working in. Both directions are asserted, because a project file that
+      // could only redirect and a project file that could only pin would both
+      // be wrong.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      
+      // Direction 1: the user said nothing, the cwd names a directory.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_dir: '/tmp/elsewhere-should-not-win', max_session_cost_usd: 5 }),
+      );
+      const first = loadConfig();
+      expect(first.backup_dir).toBeUndefined();
+      // Positive control in the same fixture: a project-safe key does come
+      // through, so the `undefined` cannot be the project file being ignored.
+      expect(first.max_session_cost_usd).toBe(5);
+      
+      // Direction 2: the user chose a directory, the cwd tries to move it.
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_dir: '/var/backups/mine' }));
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ backup_dir: '/tmp/elsewhere-should-not-win' }));
+      reloadConfig();
+      expect(loadConfig().backup_dir).toBe('/var/backups/mine');
+    });
+
+    it('backup_retention_days in a PROJECT config is IGNORED — a cwd file must not decide what gets deleted', async () => {
+      // The other half of the pair. This key does not configure a preference,
+      // it drives `pruneBackups`, which does a recursive remove inside the
+      // backup directory (`worker-loop.ts` → `backup.ts`). The schema allows
+      // 0..365, so a working-directory file could set 1 and have the next
+      // scheduled run delete everything older than a day.
+      // Both directions again, and the second is the one with teeth: a project
+      // file must not be able to SHORTEN a retention the user chose.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_retention_days: 90 }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_retention_days: 1, max_session_cost_usd: 5 }),
+      );
+      const { loadConfig } = await import('./config.js');
+      const merged = loadConfig();
+      expect(merged.backup_retention_days).toBe(90);
+      // Positive control from the verified-accepted set, and deliberately NOT
+      // this key: using the one that deletes backups as the "harmless
+      // project-safe key" is what the previous version of these tests did.
+      expect(merged.max_session_cost_usd).toBe(5);
+    });
+    
+    it('one invalid value in a PROJECT config silently drops ALL of its other keys', async () => {
+      // This replaces a test that was a TAUTOLOGY. It asserted that a project
+      // file holding `backup_retention_days: null` cannot blank the user's
+      // value, and claimed to pin the merge loop's `value !== null` guard.
+      // It passed either way: measured against the schema, NOT ONE allowlisted
+      // key accepts `null` (15 checked), so such a file fails `safeParse`, and
+      // `readConfigFile` returns null for the WHOLE file before the loop runs.
+      // Both guards in that condition are therefore unreachable from a config
+      // file and their mutants are equivalent, not uncovered.
+      //
+      // What is real, and surprising enough to pin: the rejection is
+      // file-wide. One bad value costs the project file every other key it
+      // set, with a single line on stderr and no other signal.
+      const userDir = join(fakeHome, '.lynox');
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(userDir, { recursive: true });
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(userDir, 'config.json'), JSON.stringify({ backup_retention_days: 7 }));
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ backup_retention_days: null, max_session_cost_usd: 5 }),
+      );
+      const { loadConfig, reloadConfig } = await import('./config.js');
+      const withBadValue = loadConfig();
+      // The user's value survives — but by file-wide rejection, not by the guard.
+      expect(withBadValue.backup_retention_days).toBe(7);
+      // And the cost: `max_session_cost_usd` is allowlisted AND valid, and it is gone.
+      expect(withBadValue.max_session_cost_usd).toBeUndefined();
+
+      // Positive control: the same key DOES arrive once the bad value is removed,
+      // so the `undefined` above is the file-wide rejection and not the key being
+      // unreachable. The first control I reached for was `greeting`, and it failed
+      // here — measured, it IS in the schema but not as a plain string, so the
+      // control would have been a second wrong assumption rather than a check.
+      writeFileSync(
+        join(projectDir, 'config.json'),
+        JSON.stringify({ max_session_cost_usd: 5 }),
+      );
+      reloadConfig();
+      expect(loadConfig().max_session_cost_usd).toBe(5);
     });
 
     it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {

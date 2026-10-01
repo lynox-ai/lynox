@@ -207,7 +207,16 @@ export function loadConfig(): LynoxUserConfig {
   // that may decide it is the user config, not a directory one happens to
   // be working in. `backup_gdrive` was already left out for the same
   // reason, and `config.test.ts` holds both directions plus the user path.
-  'backup_dir', 'backup_schedule', 'backup_retention_days',
+  // Neither `backup_dir` nor `backup_retention_days` is here, since
+  // 2026-10-01, and they come as a pair on purpose. The first names a
+  // filesystem destination the backup manager writes to; the second decides
+  // what it DELETES there (`pruneBackups` → recursive remove). Removing only
+  // the destination would have left the deletion steerable from a working
+  // directory, which is the same decision with the knife in the other hand.
+  // Both are user-config decisions by the line this allowlist draws itself.
+  // See the comment on `LYNOX_SECRET_FILES` in `tools/permission-guard.ts`
+  // for why the location of those copies is load-bearing.
+  'backup_schedule',
     'experience',
   ]);
 
