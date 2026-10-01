@@ -51,6 +51,9 @@ ARG BUILD_SHA=
 ENV BUILD_SHA=${BUILD_SHA}
 # See build-engine stage: skip lefthook's git-dependent postinstall in the build.
 ENV LEFTHOOK=0
+# The web-ui install also installs the workspace root's dependencies, so the
+# onnxruntime-node postinstall runs here too (see build-engine stage).
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
@@ -91,6 +94,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     && node -e "const db = require('better-sqlite3')(':memory:'); db.prepare('SELECT 1').get(); db.close(); console.log('better-sqlite3 OK')" \
     && ORT_DIR="$(ls -d node_modules/.pnpm/onnxruntime-node@*/node_modules/onnxruntime-node)" \
     && rm -f "$ORT_DIR"/bin/napi-v6/linux/*/libonnxruntime_providers_*.so \
+    && test -z "$(find "$ORT_DIR/bin" -name 'libonnxruntime_providers_*')" \
     && node -e "require(require('path').resolve(process.argv[1])); console.log('onnxruntime-node OK')" "$ORT_DIR"
 
 # --- Stage 4: Whisper.cpp (audio transcription) ---
