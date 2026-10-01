@@ -4,7 +4,7 @@
 	import { initLocale, setLocale } from '$lib/i18n.svelte.js';
 	import { initTheme } from '$lib/stores/theme.svelte.js';
 	import { configure } from '$lib/config.svelte.js';
-	import { triggerStaleReload } from '$lib/utils/stale-reload.js';
+	import { onPreloadError } from '$lib/utils/stale-reload.js';
 	import ToastContainer from '$lib/components/ToastContainer.svelte';
 	import type { Snippet } from 'svelte';
 	import type { LayoutData } from './$types.js';
@@ -30,11 +30,13 @@
 	// Warm-tab stale-bundle recovery. After a deploy an open tab's cached,
 	// content-hashed dynamic-import chunks 404 against the new server; Vite
 	// fires `vite:preloadError` for each such failure (Mermaid's lazy chunk,
-	// lazy route chunks, …). Hard-reload onto the fresh build. The cold-start
-	// case is handled by the inline SHA guard in app.html. `$effect` runs
-	// client-only, so `window` is never touched during SSR.
+	// lazy route chunks, …). Hard-reload onto the fresh build — but only for a
+	// chunk-load failure: Vite fires the same event for a chunk that loaded and
+	// then failed to parse or run, and a reload cannot fix that (see
+	// `onPreloadError`). The cold-start case is handled by the inline SHA guard
+	// in app.html. `$effect` runs client-only, so `window` is never touched
+	// during SSR.
 	$effect(() => {
-		const onPreloadError = (): void => triggerStaleReload();
 		window.addEventListener('vite:preloadError', onPreloadError);
 		return () => window.removeEventListener('vite:preloadError', onPreloadError);
 	});

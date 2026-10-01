@@ -96,3 +96,19 @@ export function triggerStaleReload(): void {
 		window.location.reload();
 	}
 }
+
+/**
+ * Listener for Vite's `vite:preloadError`. Vite dispatches that event for EVERY rejected
+ * dynamic import — not only a stale chunk that 404s after a deploy, but also a chunk that
+ * was fetched fine and then failed to parse or run (a browser older than the chunk's
+ * syntax floor, a throw at module top level). Reloading helps only in the first case: in
+ * the others the reload fetches the same chunk and fails the same way, so the user gets a
+ * page reload for nothing before the loop guard stops it.
+ *
+ * So reload only for a chunk-load failure. Anything else is left alone: the event is not
+ * cancelled, Vite rethrows the error, and it reaches the importer's own `catch` (the
+ * Mermaid renderer shows its error box there).
+ */
+export function onPreloadError(event: Event): void {
+	if (isChunkLoadError((event as Event & { payload?: unknown }).payload)) triggerStaleReload();
+}
