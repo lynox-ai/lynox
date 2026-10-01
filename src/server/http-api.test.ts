@@ -9902,10 +9902,11 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   async function arrange(opts: {
     expiresAt?: number; tokenBody?: string;
     grant?: import('../core/api-store.js').OAuthGrantRecord;
+    oauthExtra?: Record<string, unknown>;
   } = {}): Promise<{
     cookie: string; store: Awaited<ReturnType<typeof makeStore>>;
   }> {
-    const store = await makeStore(opts.expiresAt, opts.grant);
+    const store = await makeStore(opts.expiresAt, opts.grant, opts.oauthExtra);
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
     mockGetApiStore.mockReturnValue(store);
     mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_CLIENT_ID' ? 'id-1' : 'sec-1'));
@@ -9929,6 +9930,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   async function makeStore(
     expiresAt?: number,
     grant?: import('../core/api-store.js').OAuthGrantRecord,
+    oauthExtra?: Record<string, unknown>,
   ): Promise<InstanceType<
     Awaited<typeof import('../core/api-store.js')>['ApiStore']
   >> {
@@ -9944,6 +9946,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
           client_id_key: 'CRM_CLIENT_ID',
           client_secret_key: 'CRM_CLIENT_SECRET',
           ...(expiresAt === undefined ? {} : { token_expires_at: expiresAt }),
+          ...(oauthExtra ?? {}),
         },
       },
     });
@@ -10226,8 +10229,83 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     // holds is skipped, so a wrong fingerprint is indistinguishable from no
     // record at all — and the delete reports success while the token stays.
     const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
-    const access = (store.get(PROFILE)?.oauth_grant?.written ?? []).find((w) => w.name === 'CRM_API_ACCESS_TOKEN');
+    const written = store.get(PROFILE)?.oauth_grant?.written ?? [];
+    const access = written.find((w) => w.name === 'CRM_API_ACCESS_TOKEN');
     expect(access?.fp, 'the recorded fingerprint does not name the token that was stored').toBe(tokenFingerprint('at-1'));
+    // BOTH entries, because asserting one of two leaves the other free: a
+    // copy-paste that fingerprints the access token under the refresh name
+    // passed every test in this file, and `purgeRecordedTokens` would then skip
+    // the refresh slot forever — the user's refresh token stays in the vault
+    // after a delete that reports success.
+    const refresh = written.find((w) => w.name === 'CRM_API_REFRESH_TOKEN');
+    expect(refresh?.fp, 'the refresh entry does not fingerprint the refresh token').toBe(tokenFingerprint('rt-1'));
+  });
+
+  /**
+   * The SECOND consent, and the reason `grant_type` is cleared and not only set.
+   *
+   * A provider that issues a refresh token on the first grant and none on the
+   * next is ordinary. Without the clear, such a profile keeps `refresh_token`
+   * from the first authorization while the vault still holds the old, dead token
+   * — so the renewal presents it, is told `invalid_grant`, records a revocation,
+   * the user authorizes again, the revocation is cleared, and it starts over. A
+   * loop rather than a dead end, and the clearing of `revoked_*` is what closes
+   * the circle.
+   */
+  it('clears a grant type the new authorization can no longer honour', async () => {
+    const { cookie, store } = await arrange({
+      oauthExtra: { grant_type: 'refresh_token' },
+      grant: { origin: 'callback', state: 'connected' },
+      tokenBody: JSON.stringify({ access_token: 'at-2', expires_in: 3600 }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const saved = store.get(PROFILE);
+    expect(
+      saved?.auth?.oauth?.grant_type,
+      'a refresh_token grant survived an authorization that returned no refresh token',
+    ).toBeUndefined();
+    expect(saved?.oauth_grant?.state).toBe('no-refresh');
+
+    const { oauthProfileMayBeRenewedUnattended } = await import('../tools/builtin/http.js');
+    // `true` for the vault argument: the OLD refresh token is still in the slot.
+    // That is exactly the state that fed the loop, so the gate must refuse it.
+    expect(oauthProfileMayBeRenewedUnattended(saved!, true)).toBe(false);
+  });
+
+  /**
+   * The profile names a refresh slot this route does not write.
+   *
+   * The route stores at the DERIVED name; the attach, `fetch_token` and the
+   * revoked check all resolve `auth.oauth.refresh_token_key ?? derived`. Declare
+   * the grant anyway and the renewal presents whatever sits in THAT slot —
+   * nothing, so every request past the buffer runs a doomed exchange with no
+   * back-off; or a token this engine never minted. `fetch_token` calls the same
+   * split dangerous and tells the operator to remove the field.
+   */
+  it('declares no grant type when the profile reads its refresh token from another slot', async () => {
+    const { cookie, store } = await arrange({
+      oauthExtra: { refresh_token_key: 'CRM_LEGACY_RT' },
+      tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const saved = store.get(PROFILE);
+    // The token itself IS stored — under the derived name, as always.
+    expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0])).toContain('CRM_API_REFRESH_TOKEN');
+    expect(
+      saved?.auth?.oauth?.grant_type,
+      'a refresh_token grant was declared for a slot this route never wrote',
+    ).toBeUndefined();
+    expect(saved?.oauth_grant?.state).toBe('connected');
   });
 
   /**

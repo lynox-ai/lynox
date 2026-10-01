@@ -7828,6 +7828,17 @@ export class LynoxHTTPApi {
         // This is the same reason `persistGrant` re-reads and answers `'gone'`
         // (`tools/builtin/api-setup.ts › persistGrant`). The first version of
         // this block spread the stale snapshot and a review caught it.
+        // RESOLVED BEFORE THE RE-READ, and that order is the whole point.
+        // `apiStore.get` hands back the LIVE stored object and `save` replaces
+        // the map entry wholesale, so everything between them is a
+        // read-modify-write. A dynamic `import()` is an await: a concurrent
+        // `fetch_token` parked on its own exchange resumes inside that window,
+        // calls `persistGrant`, and its `written` entry — the list a delete
+        // needs — is then overwritten by the object read before it ran. That is
+        // the very harm the re-read below exists to prevent, reintroduced two
+        // statements later. `persistGrant` awaits nothing between its get and
+        // its save; this now matches it.
+        const { getLynoxDir } = await import('../core/config.js');
         const fresh = apiStore.get(signed.profileId);
         if (fresh !== undefined) {
           const expiry = tokenExpiryFrom(parsed.expires_in);
@@ -7843,13 +7854,33 @@ export class LynoxHTTPApi {
           // route sent `grant_type: 'authorization_code'` in the token REQUEST and
           // wrote nothing about it; this is where that is corrected.
           //
-          // Only when a refresh token actually came back, because that is what a
-          // `refresh_token` grant needs to present. A provider that answers without
-          // one leaves the field ALONE rather than being given a grant type the
-          // profile cannot perform — and `oauth_grant.state` below says which of
-          // the two happened, so the unattended renewal can refuse that shape
-          // instead of guessing from an absent field.
-          if (refreshToken !== null) oauthNext.grant_type = 'refresh_token';
+          // It is SET and CLEARED, never only set. A second authorization that
+          // comes back WITHOUT a refresh token — the ordinary second-consent
+          // answer from a provider that issues one only on first grant — would
+          // otherwise leave `refresh_token` standing from the first one while the
+          // vault still holds the old, now dead token. The renewal would then
+          // present that token, be told `invalid_grant`, record a revocation, and
+          // the user would be sent to authorize again: a loop, not a dead end,
+          // and the `revoked_*` clearing below is what closes it into a circle.
+          // Clearing the field puts such a profile back where `oauth_grant.origin`
+          // can refuse it.
+          //
+          // And only when the refresh token landed in the slot the READERS use.
+          // This route writes the derived name; the attach, `fetch_token` and the
+          // revoked check all resolve `auth.oauth.refresh_token_key ?? derived`.
+          // A profile naming a different slot would get a `refresh_token` grant
+          // that presents whatever sits in THAT slot — nothing (a renewal that
+          // fails on every request, with no back-off) or a token this engine
+          // never minted. `fetch_token` calls the same split dangerous and tells
+          // the operator to remove the field; until they do, this profile does
+          // not get a grant type from here.
+          const readersRefreshSlot = fresh.auth?.oauth?.refresh_token_key
+            ?? refreshTokenKey(signed.profileId);
+          if (refreshToken !== null && readersRefreshSlot === refreshTokenKey(signed.profileId)) {
+            oauthNext.grant_type = 'refresh_token';
+          } else {
+            delete oauthNext.grant_type;
+          }
           // WHAT THIS EXCHANGE WROTE, by vault name and by a fingerprint of the
           // value. `purgeRecordedTokens` removes a name only while the vault still
           // holds that very value — a name alone proves nothing, since the user can
@@ -7871,11 +7902,27 @@ export class LynoxHTTPApi {
           const grantNext: OAuthGrantRecord = {
             ...fresh.oauth_grant,
             origin: 'callback',
-            // `connected` and `no-refresh` are the two honest outcomes, and
-            // `connect` already branches on them to tell a returning user that
-            // authorizing again replaces what is stored. Nothing wrote them, so
-            // that branch has never once been reached: a user who had already
-            // connected was handed the link as if they never had.
+            // `connected` and `no-refresh` are the two honest outcomes of an
+            // exchange, and nothing in the engine wrote either of them before
+            // this line — so `connect`'s "you are already connected, a new
+            // authorization replaces the stored token" reply had never once been
+            // reached.
+            //
+            // ⚠ It is reached NOW, and stops being reached again at the first
+            // successful renewal: `fetch_token`'s success path does
+            // `delete next.state` (`tools/builtin/api-setup.ts`, the persistGrant
+            // callback after a good exchange), and `connect` requires `origin`
+            // AND one of these two. So this write fixes that reply for the window
+            // between connecting and the first renewal, and no longer. Not
+            // repaired here on purpose: the fix belongs where `state`'s lifecycle
+            // is decided, it would rewrite assertions in the most load-bearing
+            // function of that file, and what is lost is a WARNING — nothing
+            // refuses wrongly and no token moves. Filed rather than bundled.
+            //
+            // The unattended gate does NOT read this field. It reads `origin`.
+            // An earlier version of this comment said the gate would use `state`
+            // to refuse the no-refresh shape; it does not, and saying so made a
+            // mechanism sound built that was not.
             state: refreshToken !== null ? 'connected' : 'no-refresh',
             written: [...recordedWrites(fresh).filter((w) => !rewritten.has(w.name)), ...written],
           };
@@ -7889,8 +7936,7 @@ export class LynoxHTTPApi {
           delete grantNext.revoked_at;
           // `apisDir` for the same reason `api_setup` passes it: an engine
           // without an `engine.db` has no ConnectionStore, and `save` then
-          // persists only when it is told where to.
-          const { getLynoxDir } = await import('../core/config.js');
+          // persists only when it is told where to. Resolved above the re-read.
           const saved = apiStore.save(
             { ...fresh, auth: { ...fresh.auth, oauth: oauthNext }, oauth_grant: grantNext } as typeof fresh,
             join(getLynoxDir(), 'apis'),

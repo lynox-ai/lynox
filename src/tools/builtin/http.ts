@@ -657,44 +657,109 @@ export function oauthProfileMayBeRenewedUnattended(
   // provider. It replaces nothing it did not come from, so where it is named
   // there is nothing to decide.
   if (grantType === 'refresh_token') return true;
-  // Everything past this line would post a CLIENT-CREDENTIALS grant, because
-  // that is what `fetch_token` does for every other value and for none at all.
-  // So the question is no longer "which grant type" but "whose token would that
+  // Past this line the exchange is one the profile cannot mean well: an absent
+  // grant type makes `fetch_token` post CLIENT-CREDENTIALS, and a named one that
+  // is neither of the two it supports is simply posted and rejected. So the
+  // question is no longer "which grant type" but "whose token would that
   // replace", and `oauth_grant.origin` is the one field that answers it: the
-  // engine writes it, a value arriving in a create or update is discarded, and
+  // engine writes it, a value arriving in a create or update is discarded
+  // (`api-setup.ts`, the update path reads the stored record back over it), and
   // `callback` means a human sat at the provider's consent screen for this.
   //
-  // Asked on the ENGINE-owned half on purpose. `auth.oauth` is model-authorable,
-  // so a gate reading only `grant_type` is one an injected `api_setup update`
-  // can open from the inside.
+  // ⚠ What this does NOT claim, because an earlier version of this comment did:
+  // that the engine-owned half is asked FIRST. It is asked second. An injected
+  // `api_setup update` setting `grant_type: 'refresh_token'` passes the clause
+  // above and never reaches this one — and that is deliberate, because the
+  // ordering is what lets a connected profile renew at all. What the engine-owned
+  // half protects against is the CLIENT-CREDENTIALS swap specifically, not every
+  // model-authored edit: a refresh-token grant presents a token from the
+  // profile's own slot and `fetch_token` refuses when that slot is empty, so the
+  // worst an inside edit buys is an exchange the caller could have run by hand —
+  // which `mayRenewOAuthUnattended` already established it may.
   if (profile.oauth_grant?.origin === 'callback') return false;
   if (grantType === 'client_credentials') return true;
   return !hasStoredRefreshToken;
 }
 
 /**
- * Why a renewal was declined, as the sentence the operator reads in the log.
+ * Would running `fetch_token` for this profile replace a token a USER consented
+ * to with an app-level one?
  *
- * Separate from the predicate and pure, so the advice can be asserted without
- * driving an attach — and separate from each other, because the two refusals
- * have OPPOSITE remedies and one sentence covering both sends half its readers
- * the wrong way. A connected profile told to "set grant_type to refresh_token"
- * would be given a grant with no token to present; told to set
- * `client_credentials`, it would perform the very swap the refusal exists to
- * prevent. Its way back is the consent screen, and only the connect link leads
- * there.
+ * The same question the unattended gate asks, factored out because a SECOND
+ * place has to ask it: the 401 reminder further down tells the model to run
+ * `fetch_token`, outside the untrusted-data wrap, as system guidance. Without
+ * this, declining a renewal only moved the swap one model turn later — the token
+ * stays stale, the provider answers 401, and the engine itself instructs the
+ * model to perform exactly what the gate refused. The two populations are the
+ * same set: both conditions require `auth.oauth.token_url`.
+ *
+ * Narrower than the gate on purpose. The gate also refuses shapes that are
+ * merely ambiguous or unperformable; those are fine to run BY HAND, and the
+ * reminder may keep recommending it. This names only the destructive one.
  */
-export function oauthRenewalDeclinedReason(profile: {
+export function oauthFetchTokenWouldSwapDelegatedAccess(profile: {
   auth?: { oauth?: { grant_type?: string | undefined } | undefined } | undefined;
   oauth_grant?: { origin?: 'callback' | undefined } | undefined;
-}): string {
-  if (profile.oauth_grant?.origin === 'callback') {
-    const named = profile.auth?.oauth?.grant_type;
-    return named === undefined
-      ? 'a user authorized it and the provider returned no refresh token, so there is nothing to renew with; renewing anyway would post a client-credentials grant and replace their access with an app-level one. Have the user open the api_setup connect link again — if the provider needs a scope to issue a refresh token (offline_access, for example), it has to be asked for before they authorize.'
-      : `a user authorized it, and it names auth.oauth.grant_type "${named}", which this path would run as a client-credentials grant and replace their access with an app-level one. If that is really wanted, run api_setup fetch_token by hand; otherwise have the user open the connect link again.`;
+}): boolean {
+  return profile.oauth_grant?.origin === 'callback'
+    && profile.auth?.oauth?.grant_type !== 'refresh_token';
+}
+
+/**
+ * One line of a log, sanitised the way every other line out of this file is.
+ *
+ * `migrateV1Profile` says why in `api-store.ts`: a profile can arrive from a
+ * hand-edited or imported JSON, which no validator re-reads, so a field of it
+ * reaching stderr raw can forge `[lynox:…]` lines or carry terminal escapes.
+ * `writeRenewalFailure` below strips the same class. This is that rule, named
+ * once, because it was applied in one of the two places that needed it.
+ */
+function oneLineForLog(value: string, max: number): string {
+  return value.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ').slice(0, max);
+}
+
+/**
+ * Why a renewal was declined, as the sentence the operator reads in the log.
+ *
+ * Pure and separate from the predicate so the advice can be asserted without
+ * driving an attach — and branched, because the refusals have remedies that
+ * CONTRADICT each other. Telling a connected profile to declare
+ * `client_credentials` performs the swap the refusal exists to prevent; telling
+ * one with nothing in its refresh slot to declare `refresh_token` hands it a
+ * grant with no token to present.
+ *
+ * ⚠ It takes `hasStoredRefreshToken` because the first version branched on
+ * `origin` and the grant type alone — and then told a profile that HAD a refresh
+ * token, stored by hand after a no-refresh consent, that the provider had
+ * returned none and it should go back to the consent screen. The caller had the
+ * answer two lines above and this function did not ask for it. A function that
+ * exists to split a sentence by shape has to be given the shape.
+ */
+export function oauthRenewalDeclinedReason(
+  profile: {
+    auth?: { oauth?: { grant_type?: string | undefined } | undefined } | undefined;
+    oauth_grant?: { origin?: 'callback' | undefined } | undefined;
+  },
+  hasStoredRefreshToken: boolean,
+  refreshSlot: string,
+): string {
+  const named = profile.auth?.oauth?.grant_type;
+  const slot = oneLineForLog(refreshSlot, 80);
+  if (named !== undefined) {
+    const shown = oneLineForLog(named, 40);
+    return profile.oauth_grant?.origin === 'callback'
+      ? `a user authorized it, and it names auth.oauth.grant_type "${shown}", which this path would run as a client-credentials grant and replace their access with an app-level one. If that is really wanted, run api_setup fetch_token by hand; otherwise have the user open the connect link again.`
+      : `it names auth.oauth.grant_type "${shown}", which is neither "refresh_token" nor "client_credentials", so this path has no exchange it can run for it. Correct the value with api_setup update.`;
   }
-  return 'it holds a refresh token but names no auth.oauth.grant_type, and the default would post a client-credentials grant that replaces the user\'s delegated token. Set grant_type to "refresh_token" with api_setup update.';
+  if (hasStoredRefreshToken) {
+    return `a refresh token is stored under "${slot}" but the profile names no auth.oauth.grant_type, so the default would post a client-credentials grant instead of presenting it. If that token is this profile's, declare it: api_setup update with grant_type "refresh_token".`;
+  }
+  if (profile.oauth_grant?.origin === 'callback') {
+    return `a user authorized it and no refresh token is stored under "${slot}", so there is nothing to renew with; renewing anyway would post a client-credentials grant and replace their access with an app-level one. Have the user open the api_setup connect link again — if the provider needs a scope to issue a refresh token (offline_access, for example), it has to be asked for before they authorize.`;
+  }
+  // The predicate returns `true` for this shape, so reaching it means the two
+  // have drifted apart. Said out loud rather than guessed at.
+  return 'no reason applies — oauthProfileMayBeRenewedUnattended and this function disagree about which shapes are refused.';
 }
 
 /**
@@ -1005,7 +1070,7 @@ async function attachEngineManagedAuth(
         await renewExpiringOAuthToken(profile.id, agent);
       } else {
         process.stderr.write(
-          `[lynox:http] oauth token renewal declined for profile "${profile.id}": ${oauthRenewalDeclinedReason(profile)}\n`,
+          `[lynox:http] oauth token renewal declined for profile "${profile.id}": ${oauthRenewalDeclinedReason(profile, holdsRefresh, refreshSlot)}\n`,
         );
       }
     }
@@ -1865,7 +1930,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           const reqHostname = new URL(input.url).hostname;
           const matchedProfile = toolContext.apiStore.getByHostname(reqHostname);
           if (matchedProfile?.auth?.type === 'oauth2' && matchedProfile.auth.oauth?.token_url) {
-            wrapped += `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.`;
+            // Which of two reminders, and the split is load-bearing. The text
+            // below the `else` has been here since the 2026-05-18 Shopify
+            // failure and is right for an app-only profile. For a profile a USER
+            // authorized it is the opposite of right: `fetch_token` would post a
+            // client-credentials grant and overwrite their delegated token, and
+            // this reminder is appended OUTSIDE the untrusted-data wrap, so the
+            // model reads it as system guidance and acts on it autonomously.
+            // "no user interaction required" is then precisely the wrong promise
+            // — re-consent is the only thing that works, and it is nothing but
+            // user interaction.
+            wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile)
+              ? `\n\n**[Agent reminder — OAuth2 401 on a profile a USER authorized]**\nThis URL maps to api_profile "${matchedProfile.id}", whose tokens came from a user's consent (oauth_grant.origin=callback) and which names no refresh_token grant. Do NOT call api_setup fetch_token for it: that posts a client-credentials grant and REPLACES the user's access with an app-level one that can see different data, and the old access does not come back. The way back is a new authorization — show the user the link from api_setup({ action: "connect", id: "${matchedProfile.id}" }) and let them click it.`
+              : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.`;
           }
         } catch {
           // Bad URL fell through earlier; nothing to do.

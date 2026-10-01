@@ -1731,6 +1731,92 @@ describe('httpRequestTool', () => {
   // Fix: when a 401 lands on an URL matched by an OAuth2-managed profile,
   // append a system hint pointing at `api_setup fetch_token`.
   describe('OAuth2 401 hint', () => {
+    /**
+     * The reminder a profile a USER authorized must NOT get.
+     *
+     * This text is appended OUTSIDE the untrusted-data wrap, so the model reads
+     * it as system guidance and acts on it without anyone choosing. For an
+     * app-only profile "call fetch_token, no user interaction required" is
+     * right. For a connected one it is the client-credentials swap: the gate in
+     * the attach declines the unattended renewal, the stale token produces a
+     * 401, and this line then instructed the model to perform by hand exactly
+     * what the gate refused — one model turn later. The two populations are the
+     * same set, because both conditions require `auth.oauth.token_url`.
+     */
+    it('tells the model NOT to fetch_token on a 401 for a profile a user authorized', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio_api',
+        name: 'bexio',
+        base_url: 'https://api.bexio.example/2.0',
+        description: 'bexio',
+        oauth_grant: { origin: 'callback', state: 'no-refresh' },
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://idp.bexio.example/token',
+            client_id_key: 'BEXIO_CLIENT_ID',
+            client_secret_key: 'BEXIO_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 401, headers: { 'content-type': 'application/json' }, json: {},
+      })));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://api.bexio.example/2.0/invoices', method: 'GET' }, agent);
+
+      expect(result).toMatch(/Agent reminder.*USER authorized/i);
+      expect(result).toMatch(/Do NOT call api_setup fetch_token/i);
+      expect(result).toContain('connect');
+      // The discriminator. The app-only text promises the opposite, and a model
+      // that reads it here performs the swap.
+      expect(result).not.toMatch(/no user interaction required/i);
+      // Still outside the wrap, like its sibling.
+      expect(result.indexOf('Agent reminder')).toBeGreaterThan(result.lastIndexOf('</untrusted_data>'));
+    });
+
+    it('still gives the fetch_token reminder to a connected profile that CAN refresh', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio_ok',
+        name: 'bexio',
+        base_url: 'https://ok.bexio.example/2.0',
+        description: 'bexio',
+        oauth_grant: { origin: 'callback', state: 'connected' },
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://idp.bexio.example/token',
+            grant_type: 'refresh_token',
+            client_id_key: 'BEXIO_CLIENT_ID',
+            client_secret_key: 'BEXIO_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 401, headers: { 'content-type': 'application/json' }, json: {},
+      })));
+
+      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const result = await handler({ url: 'https://ok.bexio.example/2.0/invoices', method: 'GET' }, agent);
+
+      // The narrower predicate earns its keep here: a callback origin alone must
+      // not silence the reminder, or every connected profile loses the one
+      // recovery that works for it.
+      expect(result).toContain('fetch_token');
+      expect(result).not.toMatch(/Do NOT call api_setup fetch_token/i);
+    });
+
     it('appends fetch_token hint on 401 for an oauth2 profile with token_url', async () => {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
