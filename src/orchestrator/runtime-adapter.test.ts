@@ -1275,6 +1275,38 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     expect(mockGetRole('permissive').denyTools).toBeUndefined();
   });
 
+  it('the pool honours an allowlist CEILING, not only a denylist', async () => {
+    // Added because a mutant that drops `allowedTools` from the pool SURVIVED the first
+    // round: both earlier tests use a role that denies, and a denial and a ceiling are
+    // different halves of `roleToolProfile`. One of them was unwitnessed.
+    mockGetRole.mockReturnValue({
+      model: 'fast', effort: 'low', autonomy: 'guided',
+      allowTools: ['read_file'], description: 'Reads one thing.',
+    } as RoleConfig);
+
+    // Outside the ceiling: the sub-step declares it, the parent set holds it, the ceiling
+    // does not — so the step ends with nothing.
+    const outside: ManifestStep = {
+      id: 'ceil-out', agent: 'ceil-out', runtime: 'pipeline', role: 'narrow',
+      pipeline: [{ id: 'inner-out', task: 'run a script', tools: ['bash'] }],
+    };
+    await spawnPipeline(outside, {}, mockConfig, mockParentTools, 0);
+    const outNames = ((vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(outNames).toEqual([]);
+
+    // Inside it, in the SAME test: the ceiling admits what it names. Without this half the
+    // assertion above would also pass for a pool that admits nothing at all.
+    const inside: ManifestStep = {
+      id: 'ceil-in', agent: 'ceil-in', runtime: 'pipeline', role: 'narrow',
+      pipeline: [{ id: 'inner-in', task: 'read a file', tools: ['read_file'] }],
+    };
+    await spawnPipeline(inside, {}, mockConfig, mockParentTools, 0);
+    const inNames = ((vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>)['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(inNames).toEqual(['read_file']);
+    // And the control that makes the first half a ceiling finding: the parent set carries bash.
+    expect(mockParentTools.map(t => t.definition.name)).toContain('bash');
+  });
+
   it('refuses a role name nothing knows on a pipeline step', async () => {
     // Same silence as the agent runtime had: a typo made the role undefined, the pool stayed
     // the whole parent set, and the author was told nothing.
