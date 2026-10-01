@@ -6907,7 +6907,7 @@ export class LynoxHTTPApi {
     // rationale (stream mode is mandatory to hit the 1.5 s TTFA target on
     // replies > ~200 chars).
     this.addStatic('user', 'POST /api/speak', async (_req, res, _params, body) => {
-      const { hasSpeakProvider, speakStream } = await import('../core/speak.js');
+      const { hasSpeakProvider, speakStream, isVoiceLanguageTag } = await import('../core/speak.js');
       if (!hasSpeakProvider()) {
         errorResponse(res, 503, 'TTS not available (set MISTRAL_API_KEY)');
         return;
@@ -6936,29 +6936,16 @@ export class LynoxHTTPApi {
       const langRaw = b && typeof b['lang'] === 'string' ? b['lang'] : undefined;
       const lang: Lang | 'auto' | undefined =
         langRaw === 'de' || langRaw === 'en' || langRaw === 'auto' ? langRaw : undefined;
-      // A conservative shape rather than "any string": this is a public endpoint, the
-      // value reaches a comparison against provider data, and a language tag has a
-      // known form. Region subtags are accepted because the catalogue carries them
-      // (`en_gb`) and the picker compares on the head.
+      // The shape rule lives in `src/core/speak/voice-for-language.ts` and is SHARED here
+      // rather than re-declared. It used to be a regex in this route, and that placement
+      // was the finding: the consumer validated nothing, so every safety property of this
+      // value rested on one call site. Rejecting early is still worth it — a malformed
+      // value never enters the facade — but the guarantee belongs to the module.
       //
-      // ⚠ `'auto'` deliberately does NOT select a voice. For text preparation it means
-      // "detect from the text"; for a voice there is nothing to detect against until the
-      // text has been analysed, and reaching into the pre-processor's detection from here
-      // would couple the two vocabularies this split exists to keep apart. So `'auto'`
-      // keeps today's behaviour — the provider's default voice — and selecting by the
-      // DETECTED language is a separate step, filed rather than assumed.
-      //
-      // ⚠⚠ The `!== 'auto'` test is REDUNDANT TODAY and has no witness of its own, which
-      // is stated rather than left to look load-bearing: `'auto'` is four characters and
-      // the shape rule below caps a primary subtag at three, so the regex already
-      // rejects it. A mutation removing this clause changes no behaviour (measured — it
-      // took down only unrelated tests, never the `auto` case). It stays as
-      // defence-in-depth for one specific, plausible edit: widening the rule to accept a
-      // four-letter tag would otherwise re-admit `'auto'` as a language, silently.
-      const voiceLanguage =
-        langRaw !== undefined && langRaw !== 'auto' && /^[a-z]{2,3}([_-][a-z0-9]{2,4})?$/i.test(langRaw)
-          ? langRaw
-          : undefined;
+      // `'auto'` is excluded by that rule: for text preparation it means "detect from the
+      // text", and for a voice there is nothing to detect against until the text has been
+      // analysed. Selecting by the DETECTED language is a separate step, filed.
+      const voiceLanguage = isVoiceLanguageTag(langRaw) ? langRaw : undefined;
       if (!text.trim()) { errorResponse(res, 400, 'Missing text'); return; }
       // Hard ceiling on one request to bound Mistral cost + latency. Phase 0
       // tested up to 2 687 chars; 10 k gives headroom for long replies without

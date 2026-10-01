@@ -27,11 +27,11 @@ import type {
   SpeakProvider,
   SpeakResult,
   SpeakStreamMeta,
-  VoiceInfo,
 } from './types.js';
 import { mistralVoxtralTtsProvider, hasMistralVoxtralTts } from './mistral-voxtral-tts.js';
 import { prepareForSpeech } from './text-prep.js';
-import { pickVoiceForLanguage } from './voice-for-language.js';
+import { isVoiceLanguageTag, pickVoiceForLanguage } from './voice-for-language.js';
+import type { VoiceChoice } from './voice-for-language.js';
 
 export type {
   Lang,
@@ -53,6 +53,9 @@ export {
   DEFAULT_VOICE,
 } from './mistral-voxtral-tts.js';
 export type { VoiceInfo } from './mistral-voxtral-tts.js';
+// The shape rule for a voice-language tag, exported so a CALLER can reject early with
+// the same rule the sink enforces — one definition, not a second copy per call site.
+export { isVoiceLanguageTag } from './voice-for-language.js';
 export { prepareForSpeech } from './text-prep.js';
 
 type ProviderChoice = 'mistral' | 'auto';
@@ -147,21 +150,34 @@ async function resolveVoice(
   if (opts.voice !== undefined) return opts.voice;
   const wanted = opts.voiceLanguage?.trim();
   if (!wanted) return undefined;
+  // ⚠ The SINK validates, not only the route. Everything that keeps this value harmless
+  // in the diagnostic below — bounded length, no newline, no quote, no escape sequence —
+  // is this check, and it has to be here so it holds for the NEXT caller too. See
+  // `isVoiceLanguageTag`.
+  if (!isVoiceLanguageTag(wanted)) return undefined;
   if (!provider.listVoices) return undefined;
-  let catalogue: VoiceInfo[];
+  // ⚠ The pick is INSIDE the try, not only the fetch. This runs after the route has
+  // already written its 200 and begun an SSE stream, and the top-level handler cannot
+  // respond once headers are sent — it would log and leave the connection open until the
+  // socket times out. The catalogue is parsed by this module today, so a throw is
+  // unreachable; `SpeakProvider.listVoices` is a contract another provider can implement,
+  // and selection being best-effort has to survive that.
+  let choice: VoiceChoice;
+  let offered: number;
   try {
-    catalogue = await provider.listVoices();
+    const catalogue = await provider.listVoices();
+    offered = catalogue.length;
+    choice = pickVoiceForLanguage(catalogue, wanted);
   } catch {
-    // The catalogue already reports its own failures; selection is best-effort.
+    // The catalogue reports its own failures; selection must not take synthesis with it.
     return undefined;
   }
-  const choice = pickVoiceForLanguage(catalogue, wanted);
   if (choice.matched) return choice.voice;
   // Says WHAT HAPPENED, not that everything is fine: a reassuring line here would
   // teach a rule that does not hold.
   console.warn(
     `[speak] no voice in the ${provider.name} catalogue speaks '${wanted}' ` +
-      `(${String(catalogue.length)} voices offered). Reading it with the provider's ` +
+      `(${String(offered)} voices offered). Reading it with the provider's ` +
       'default voice instead — the speaker identity will not match the text.',
   );
   return undefined;

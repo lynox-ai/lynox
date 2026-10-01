@@ -303,6 +303,61 @@ describe('a payload problem is not reported as a pagination problem', () => {
   });
 });
 
+describe('concurrent callers share one walk, instead of each starting their own', () => {
+  it('makes ONE set of provider requests for two simultaneous cold-cache calls', async () => {
+    // ⚠ Measured by a security pass rather than reasoned: the cache is only written when
+    // a walk FINISHES, so before this every request arriving DURING a walk saw a miss and
+    // started another. The path existed (the settings picker reads the catalogue), but
+    // routing voice selection through it made it hot — once per `POST /api/speak` instead
+    // of once per page load — so the change widened a pre-existing amplifier.
+    //
+    // The fixture holds the first response open until both callers are inside, which is
+    // the only shape that can tell "one shared walk" from "two walks that happened to
+    // look alike". A stub that answers immediately would let the first walk finish and
+    // warm the cache before the second call starts, and would pass either way.
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    let released = false;
+    const all = catalogue();
+    const fetchSpy = vi.fn(async (input: string) => {
+      requested.push(String(input));
+      if (!released) { released = true; await gate; }
+      const off = Number(new URL(String(input)).searchParams.get('offset') ?? '0');
+      return {
+        ok: true,
+        json: async () => ({ items: all.slice(off, off + SERVER_PAGE), total: all.length }),
+      } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const listVoices = await freshListVoices();
+    const first = listVoices();
+    const second = listVoices();
+    release();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(a).toHaveLength(TOTAL);
+    expect(b).toHaveLength(TOTAL);
+    // Six requests is ONE walk at this page size (5 data pages + the empty tail). Twelve
+    // would mean both callers walked.
+    expect(offsets()).toEqual(['0', '7', '14', '21', '28', '30']);
+  });
+
+  it('starts a NEW walk after the shared one settles, so a failure is not remembered', async () => {
+    // The `finally` that clears the in-flight promise. Without it a rejected or stale
+    // promise would be handed to every later caller for the rest of the process.
+    vi.stubGlobal('fetch', stubMistral());
+    const listVoices = await freshListVoices();
+    await listVoices();
+    const afterFirst = requested.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    // Past the long TTL: the cache is cold again, and a second walk must actually run.
+    vi.setSystemTime(Date.now() + 2 * 60 * 60_000);
+    await listVoices();
+    expect(requested.length).toBeGreaterThan(afterFirst);
+  });
+});
+
 describe('the cache keeps a clean result longer than a doubtful one', () => {
   // The cache layer had no test at all, and this change ADDED logic to it: a
   // complete walk is held for an hour, a doubtful one for a minute. Before, an

@@ -9122,8 +9122,16 @@ describe('metered audio routes: managed credit gate + debit', () => {
     // separately. These cases exist because conflating them was the obvious design
     // and the wrong one: it would have pushed catalogue tags into text preparation
     // and into `src/core/transcribe/`.
-    const optsOf = (): Record<string, unknown> =>
-      (mockSpeakStream.mock.calls[0]?.[2] ?? {}) as Record<string, unknown>;
+    // ⚠ Asserts the facade was REACHED before reading its options. Without this the three
+    // `toBeUndefined()` cases below pass vacuously whenever the route returns early — and
+    // under a filtered run (`-t "POST /api/speak"`) that is exactly what happens: the
+    // positive cases fail loudly while the negative ones, which are the entire mechanical
+    // guarantee of the shape rule, go green for the wrong reason. A guard that is green
+    // when it did not run is not a guard.
+    const optsOf = (): Record<string, unknown> => {
+      expect(mockSpeakStream, 'the route never reached the speak facade — this assertion would pass vacuously').toHaveBeenCalled();
+      return (mockSpeakStream.mock.calls[0]?.[2] ?? {}) as Record<string, unknown>;
+    };
 
     async function speakWithLang(lang: unknown): Promise<void> {
       mockSpeakStream.mockResolvedValue({ characters: 5, model: 'm', voice: 'v', latencyMs: 1, ttfbMs: 1 });

@@ -179,9 +179,41 @@ function parseVoicesPage(body: unknown): { voices: VoiceInfo[]; total: number | 
   return { voices, total, rawCount: raw.length };
 }
 
+/**
+ * The walk currently in flight, so concurrent callers share ONE set of provider
+ * requests instead of each starting their own.
+ *
+ * ⚠ This exists because a security pass measured the amplification: the cache is only
+ * written when a walk FINISHES, so every request arriving during a walk saw a miss and
+ * started another. The path was reachable before (the settings picker reads the
+ * catalogue), but routing voice SELECTION through here made it hot — one `POST
+ * /api/speak` per request instead of one page load — so the change widened it. Bounded
+ * by the per-IP rate limit (120/60 s, 600 on loopback) and the 2 s walk timeout, which
+ * is why it is a cost amplifier rather than an outage: roughly four provider GETs per
+ * walk, once per arriving request, at every TTL boundary.
+ *
+ * Cleared in a `finally`, so a failed walk is retried by the next caller rather than
+ * remembered as a rejected promise.
+ */
+let _voicesInFlight: Promise<VoiceInfo[]> | null = null;
+
 export async function listMistralVoices(): Promise<VoiceInfo[]> {
   const now = Date.now();
   if (_voicesCache && _voicesCache.expiresAt > now) return _voicesCache.voices;
+  // Join the walk already running. Returns the same array the starter gets, which is
+  // the same sharing the cached path above already has (filed separately as a row) —
+  // consistent on purpose rather than copying on one path only.
+  if (_voicesInFlight) return _voicesInFlight;
+  const walk = walkMistralVoices(now);
+  _voicesInFlight = walk;
+  try {
+    return await walk;
+  } finally {
+    _voicesInFlight = null;
+  }
+}
+
+async function walkMistralVoices(now: number): Promise<VoiceInfo[]> {
   const apiKey = process.env['MISTRAL_API_KEY'];
   if (!apiKey) return [...FALLBACK_VOICES];
   // Hoisted so the catch can still see what the loop had collected, and so the

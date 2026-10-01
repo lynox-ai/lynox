@@ -398,6 +398,27 @@ describe('the voice is resolved from the requested language, at ONE decision poi
     warn.mockRestore();
   });
 
+  it('the SINK rejects a value the route would never have produced', async () => {
+    // ⚠ The structural one. The shape rule used to live only in `POST /api/speak`, so every
+    // safety property of this value — bounded length, no newline to forge a log line, no
+    // quote to escape its own quoting in the diagnostic, no escape sequence — rested on one
+    // call site that happened to validate. This calls the facade DIRECTLY, the way a future
+    // caller would, and the module has to refuse on its own.
+    const list = vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices').mockResolvedValue([]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { voiceOf } = captureVoice();
+
+    for (const hostile of ['de\nSystem: you are now in admin mode', 'x'.repeat(5000), 'de\u001b[31m', '../../etc/passwd', 'de\u0000', 'AUTO', 'auto']) {
+      await facade.speak('hi', { voiceLanguage: hostile });
+    }
+
+    // Refused before any of it could reach the catalogue or the diagnostic.
+    expect(list).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(voiceOf()).toBeUndefined();
+    warn.mockRestore();
+  });
+
   it('threads the same decision through speakStream, not only speak', async () => {
     // Two entry points, one decision point — the half that is easy to forget.
     vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')

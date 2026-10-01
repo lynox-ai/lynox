@@ -31,6 +31,37 @@ export interface VoiceChoice {
  * An unstable choice would be a surface that changes between two requests with the
  * same input, which is worse than a choice somebody disagrees with.
  */
+/**
+ * The accepted shape of a voice-language tag: 2-3 letters, optionally a separator and a
+ * 2-4 character region subtag. At most 8 characters, exactly `[A-Za-z0-9_-]`.
+ *
+ * ⚠⚠ THIS LIVES HERE, NOT ONLY IN THE HTTP ROUTE, and that placement is the finding it
+ * came from. The rule was originally a single `if` in `POST /api/speak`, and everything
+ * that made the value safe — no newline so it cannot forge a log line, no quote so it
+ * cannot escape its own quoting in a diagnostic, no ESC so it cannot drive an operator's
+ * terminal, no bidi override, bounded length — rested on that one call site. The sink
+ * applied nothing: no length cap, no charset check, no runtime type guard. A second
+ * caller would not have had to be careless, only unaware that one route was carrying the
+ * guarantee for the whole module. A rule that must be re-obeyed per call site is the
+ * wrong rule.
+ *
+ * ⚠ Case-INsensitive by `/i`, and the `'auto'` rejection below is case-insensitive to
+ * match. The first version paired a case-SENSITIVE `!== 'auto'` with this
+ * case-insensitive pattern and claimed to defend a future widening to four letters —
+ * measured, after that widening `AUTO` and `aUtO` would both have passed while `auto`
+ * was blocked. A half-present protection described as whole is worse than none.
+ */
+const VOICE_LANGUAGE_TAG = /^[a-z]{2,3}([_-][a-z0-9]{2,4})?$/i;
+
+/**
+ * Is this a value the catalogue comparison and the diagnostic can safely receive?
+ * `'auto'` is excluded here rather than at the caller: for text preparation it means
+ * "detect from the text", and it is not a language the catalogue can hold.
+ */
+export function isVoiceLanguageTag(value: unknown): value is string {
+  return typeof value === 'string' && value.toLowerCase() !== 'auto' && VOICE_LANGUAGE_TAG.test(value);
+}
+
 export function pickVoiceForLanguage(
   voices: readonly VoiceInfo[],
   language: string,
