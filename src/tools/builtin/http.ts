@@ -744,7 +744,17 @@ export function oauthFetchTokenWouldSwapDelegatedAccess(
  * `writeRenewalFailure` below strips the same class. This is that rule, named
  * once, because it was applied in one of the two places that needed it.
  */
-function oneLineForLog(value: string, max: number): string {
+function oneLineForLog(value: unknown, max: number): string {
+  // `unknown`, not `string`, and that is the point. The two profile fields this
+  // formats are typed `string | undefined` and arrive from `JSON.parse(raw) as
+  // ApiProfile` with no schema check — `_admit` validates the id, the derived
+  // vault slot and the host, and nothing else. `(5).replace` is a TypeError, the
+  // attach is not inside a try/catch, and the result is every request to that
+  // profile failing: the identical defect, on the identical path, as the
+  // `oauth_grant.written` read two functions up. That one was fixed by reaching
+  // for the tolerant reader; this one has no tolerant reader to reach for, so
+  // the tolerance is here.
+  if (typeof value !== 'string') return `<non-string: ${typeof value}>`;
   return value.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ').slice(0, max);
 }
 
@@ -806,52 +816,104 @@ export function oauthRefreshSlotState(
  * not a reason to write a fourth sentence — it is the measurement that says a
  * hand-written remedy per shape cannot be kept true here.
  *
- * So this function states FACTS and forbids exactly one thing. A fact cannot be
- * wrong about a state transition, because it makes no claim about one. The
- * single imperative is negative and true for every refused shape by
- * construction: the refusal IS "an unattended exchange here would be wrong", so
- * "do not resolve this by running the exchange" restates it rather than
- * extending it. Which profile edit is right depends on facts only the operator
- * has — whether the token in that slot is still live at the provider, which the
- * engine cannot ask.
+ * So this function states FACTS and prescribes no profile edit. A fact cannot be
+ * wrong about a state transition, because it makes no claim about one.
  *
- * The per-shape remedy is deferred, with the lesson attached, on
- * `DEF-oauth-api-setup`. If it comes back, it needs the next state computed and
- * asserted, not described.
+ * It carries TWO imperatives, which an earlier version of this comment denied:
+ * a negative one ("do not resolve this by running the exchange"), true for every
+ * refused shape by construction because the refusal IS that; and a positive one
+ * that escalates to a human rather than naming an edit. Both live in
+ * `DECLINED_DIAGNOSIS_TAIL`, which is a constant precisely so a test can hold
+ * the whole closing sentence rather than scan it for banned words.
+ *
+ * ⚠ If the per-shape remedy comes back, the sentence that must survive with it
+ * is this one: **a remedy is a claim about the NEXT state, and all three earlier
+ * versions checked the current one.** "Remove this field and the renewal will
+ * find the token" requires simulating what the gate answers afterwards. It needs
+ * the next state COMPUTED AND ASSERTED, not described. That is written here and
+ * not only on `DEF-oauth-api-setup`, because a comment pointing at a register
+ * row for the one load-bearing lesson is a pointer into a file this function's
+ * next rewrite does not touch — and the row was not yet merged when this comment
+ * first claimed it carried the lesson, which made the pointer a bet.
  */
+/**
+ * The closing sentence, as an exported CONSTANT and not a template.
+ *
+ * Exported because the test that keeps a remedy out of this line checks that the
+ * emitted string ENDS with exactly this and that everything before it is a
+ * clause from a closed set. A constant tail plus an allowlisted head is a
+ * structure a prescription cannot be appended to; the first version of that test
+ * was a list of four banned English phrases, and a review wrote a complete
+ * destructive instruction in the JSON call form this file uses everywhere —
+ * `api_setup({ action: "update", … })` — which contains none of the four and
+ * passed all 376 tests. A blocklist of spellings was never the property.
+ *
+ * ⚠ It makes no per-shape claim, and an earlier version did: it said the
+ * decision "depends on whether the stored token is still live at the provider",
+ * which is false for every refusal whose slot is EMPTY — six of the twenty-five
+ * refused shapes, including the one this whole piece exists for — and false
+ * again for a grant type no exchange can run, where liveness decides nothing.
+ * One register below the removed imperatives, the same defect.
+ */
+export const DECLINED_DIAGNOSIS_TAIL = 'Renewing it unattended is refused. Do NOT resolve this by calling api_setup fetch_token — that is the exchange being refused, and running it by hand runs it. Which change is right depends on facts this engine does not have, so put it in front of the person who owns the connection.';
+
 export function oauthRenewalDeclinedDiagnosis(
   profile: ApiProfile,
   slotState: 'empty' | 'engine-written' | 'foreign',
 ): string {
   const named = profile.auth?.oauth?.grant_type;
   const derived = refreshTokenKey(profile.id);
-  const slot = profile.auth?.oauth?.refresh_token_key ?? derived;
+  const rawSlot: unknown = profile.auth?.oauth?.refresh_token_key;
+  const slot = typeof rawSlot === 'string' ? rawSlot : derived;
+  const shownSlot = oneLineForLog(slot, 80);
   const facts: string[] = [];
 
   // "at the provider", not "through the connect link": the guard that keeps a
-  // remedy from creeping back into this function matches on the phrases a remedy
-  // would use, and a FACT that happens to contain one of them would either
-  // defeat the guard or have to be excepted. The wording avoids the overlap so
-  // the guard can stay exact. (It caught this sentence the moment it existed.)
+  // remedy out of this function allowlists these clauses, and a FACT phrased
+  // like a remedy would either need an exception or teach the next author that
+  // exceptions are available.
   facts.push(profile.oauth_grant?.origin === 'callback'
     ? 'a user authorized it at the provider'
     : 'no consent flow is recorded behind it');
-  facts.push(named === undefined
-    ? 'it declares no auth.oauth.grant_type, so an exchange here would post a client-credentials grant'
-    : `it declares auth.oauth.grant_type "${oneLineForLog(named, 40)}"`);
-  // Both names when they differ, because that is the fact a reader cannot get
-  // anywhere else — and no instruction about it, because which of the two slots
-  // should win is exactly the judgement that went wrong twice.
-  facts.push(slot === derived
-    ? `its refresh token is read from "${oneLineForLog(slot, 80)}"`
-    : `its refresh token is read from "${oneLineForLog(slot, 80)}" while an exchange here stores one under "${oneLineForLog(derived, 80)}"`);
-  facts.push(slotState === 'empty'
-    ? 'that slot is empty'
-    : slotState === 'engine-written'
-      ? 'that slot holds a token this engine stored for an earlier exchange'
-      : 'that slot holds a token this engine has no record of storing');
 
-  return `${facts.join('; ')}. Renewing it unattended is refused. Do NOT resolve this by calling api_setup fetch_token — that is the exchange being refused, and running it by hand runs it. Whether this profile should be re-authorized, given a grant type, or pointed at a different slot depends on whether the stored token is still live at the provider, which this engine cannot ask: put it in front of the person who owns the connection.`;
+  if (named === undefined) {
+    facts.push('it declares no auth.oauth.grant_type, so an exchange here would post a client-credentials grant');
+  } else if (named === 'refresh_token' || named === 'client_credentials') {
+    facts.push(`it declares auth.oauth.grant_type "${oneLineForLog(named, 40)}"`);
+  } else {
+    // Restored. The removal of the per-shape remedies took this with them, and
+    // it is a FACT rather than a remedy: it is the only thing in the line that
+    // explains why this shape is refused at all. Without it the operator reads a
+    // quoted value and no reason.
+    facts.push(`it declares auth.oauth.grant_type "${oneLineForLog(named, 40)}", which is neither "refresh_token" nor "client_credentials", so no exchange here can run it`);
+  }
+
+  // The slot is NAMED in the state clause rather than referred to as "that
+  // slot". In the divergent case two names appear one clause earlier, and the
+  // nearest antecedent of "that slot" was the derived one — which is never read
+  // on this path. So the one fact a reader cannot get anywhere else was attached
+  // to the wrong object, in exactly the shape whose remedy went wrong twice.
+  facts.push(slot === derived
+    ? `its refresh token is read from "${shownSlot}"`
+    : `its refresh token is read from "${shownSlot}" while an exchange here stores one under "${oneLineForLog(derived, 80)}"`);
+
+  if (slotState === 'empty') {
+    facts.push(profile.oauth_grant?.origin === 'callback' && slot === derived
+      // Also restored, and sound only in this state: the engine writes the
+      // derived name, so for a connected profile reading that same name an empty
+      // slot means the authorization returned nothing to put there. Per the
+      // register row this is the decisive fact for a named consumer — a provider
+      // issues a refresh token only when the authorization asked for a scope
+      // that grants one, and the authorize link carries no scope at all.
+      ? `"${shownSlot}" is empty, so the authorization behind it returned no refresh token — a provider issues one only when the authorization asked for a scope that grants it, offline_access for example`
+      : `"${shownSlot}" is empty`);
+  } else {
+    facts.push(slotState === 'engine-written'
+      ? `"${shownSlot}" holds a token this engine stored for an earlier exchange`
+      : `"${shownSlot}" holds a token this engine has no record of storing`);
+  }
+
+  return `${facts.join('; ')}. ${DECLINED_DIAGNOSIS_TAIL}`;
 }
 
 /**

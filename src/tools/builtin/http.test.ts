@@ -1778,7 +1778,7 @@ describe('httpRequestTool', () => {
       // REMEDY here and told the model, two sentences after forbidding
       // `fetch_token`, that it could run it by hand if it really wanted to.
       expect(result).toContain('a user authorized it at the provider');
-      expect(result).toContain('that slot is empty');
+      expect(result).toContain('"BEXIO_API_REFRESH_TOKEN" is empty');
       expect(result).not.toContain('api_setup update');
       // The discriminator. The app-only text promises the opposite, and a model
       // that reads it here performs the swap.
@@ -1855,6 +1855,54 @@ describe('httpRequestTool', () => {
       expect(result).toContain('no consent flow is recorded');
       expect(result).toContain('declares no auth.oauth.grant_type');
       expect(result).not.toContain('connect link');
+    });
+
+    /**
+     * THE SIBLING LINE. The gate's occupancy argument and this one are the same
+     * correction, and a review found the gate's pinned while this one was not:
+     * reverting it to the state-derived boolean survived every test in both
+     * files. For a profile with an EMPTY STRING in its refresh slot the two
+     * disagree, and the mutant sends the model to the ordinary reminder — whose
+     * text is "Recover with: api_setup fetch_token … no user interaction
+     * required", on a profile whose access token a human pasted.
+     */
+    it('treats an empty string in the refresh slot as a token to lose, on the 401 path too', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'legacy_es',
+        name: 'Legacy',
+        base_url: 'https://es.example/v1',
+        description: 'Legacy',
+        custom_endpoint_ack: { accepted: true, hosts: ['es.example'], accepted_at: '2026-10-01T00:00:00.000Z' },
+        auth: {
+          type: 'oauth2',
+          vault_keys: ['LEGACY_CLIENT_ID', 'LEGACY_CLIENT_SECRET'],
+          oauth: {
+            token_url: 'https://es.example/oauth/token',
+            client_id_key: 'LEGACY_CLIENT_ID',
+            client_secret_key: 'LEGACY_CLIENT_SECRET',
+          },
+        },
+      });
+
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        status: 401, headers: { 'content-type': 'application/json' }, json: {},
+      })));
+
+      const agent = {
+        toolContext: { apiStore: store },
+        sessionCounters: testCounters,
+        secretStore: {
+          resolve: (n: string) => (n === 'LEGACY_ES_ACCESS_TOKEN' ? 'at-stale'
+            : n === 'LEGACY_ES_REFRESH_TOKEN' ? '' : null),
+        },
+      } as never;
+      const result = await handler({ url: 'https://es.example/v1/things', method: 'GET' }, agent);
+
+      expect(result).toMatch(/Do NOT resolve this by calling api_setup fetch_token/i);
+      expect(result).not.toMatch(/no user interaction required/i);
     });
 
     it('keeps the ordinary reminder when nothing is in the refresh slot to lose', async () => {
