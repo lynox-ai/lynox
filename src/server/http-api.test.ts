@@ -9144,25 +9144,22 @@ describe('metered audio routes: managed credit gate + debit', () => {
     }
 
     it('derives BOTH fields from ONE tag, and they agree on case and region', async () => {
-      // Two tests in place of five.
+      // ONE tag decides BOTH fields, asserted on every row: `lang` for text preparation and
+      // `voiceLanguage` for the catalogue, agreeing on case and region. The single-case tests
+      // this table replaced are in the git history.
       //
-      // ⚠ The reason this comment first gave was FALSE, and it is kept as the correction:
-      // it credited the per-IP rate budget. The budget is spent per REQUEST, not per `it()`.
-      // Counted, each time by hand: five separate tests made 10 requests, the first table
-      // form made 10, and THIS form makes 12 — eight table rows, three rejected shapes, one
-      // non-string. So collapsing the cases saved nothing and the two rows added later cost
-      // two requests.
-      //
-      // ⚠⚠ And the "10" stood here after a later commit of mine had already added those two
-      // rows twelve lines below. The number was true when written and my own next edit
-      // falsified it — inside the comment whose entire point is that you have to COUNT.
-      // Re-counted above, with the parts named so the next reader can check rather than
-      // trust.
+      // ⚠ There is deliberately no request count in this comment, and the reason is the
+      // history of this very block. Its first version justified the collapse with the per-IP
+      // rate budget — a false reason: the budget is spent per REQUEST, not per `it()`, so
+      // folding cases into a loop saves nothing. Every later revision then re-counted and got
+      // a different number wrong, including one that a later commit of mine falsified a few
+      // lines below while the comment still asserted it. Nothing in the build checks a number
+      // in a comment, so the counts live in the PR body against a head SHA instead.
       //
       // The budget hazard itself is real and was measured (two unrelated oauth tests failing
       // with 429 when an earlier version added requests), and `RATE_WINDOW_MS` /
-      // `RATE_MAX_LOOPBACK` are as quoted. A true general lesson does not make a false
-      // causal claim true.
+      // `RATE_MAX_LOOPBACK` are as quoted — it is simply not what this shape is for. A true
+      // general lesson does not make a false causal claim true.
       //
       // ⚠ `en_GB` expecting `lang: 'en'` is a CHANGED expectation. The first version of this
       // test asserted `lang` was undefined there — it encoded the inconsistency it should
@@ -9192,8 +9189,14 @@ describe('metered audio routes: managed credit gate + debit', () => {
 
     it('refuses a value that is not shaped like a language tag', async () => {
       // A public endpoint whose value reaches a comparison against provider data and a
-      // diagnostic. Three shapes rather than five, for the budget reason above: a traversal
-      // string, a statement separator, and something far too long.
+      // diagnostic: a traversal string, a statement separator, and something far too long.
+      //
+      // Two further shapes an earlier version carried here — the empty string and a long
+      // hyphenated word — are gone, and NOT for the budget reason the comment above retracts.
+      // They are dominated by the shape rule's own reject table in voice-for-language.test.ts:
+      // `'d'` rejects anything below the minimum length, which subsumes the empty string, and
+      // `'abcd'` plus `'deu_latn_ch'` cover an over-long first segment and a three-subtag
+      // value. A case whose mutant another case already kills is not coverage.
       for (const bogus of ['../../etc/passwd', 'de; DROP TABLE', 'x'.repeat(50)]) {
         mockSpeakStream.mockClear();
         await speakWithLang(bogus);
