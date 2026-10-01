@@ -9,6 +9,10 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # onnxruntime-node's postinstall downloads only CUDA/TensorRT providers on
+  # linux/x64 (~300 MB, never loaded: the CPU runtime ships in the npm package).
+  # Skipping it removes a CDN dependency from every install.
+  ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
   build:
