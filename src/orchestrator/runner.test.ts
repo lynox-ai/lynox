@@ -770,6 +770,25 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
   });
 
+  it('threads options.parentActiveScopes into the inline spawner, also through a nested pipeline', async () => {
+    // Inline steps run the caller's task and memory tools, which filter by `agent.activeScopes`.
+    // spawnInline's parentActiveScopes is the 16th positional argument (index 15).
+    const scopes = [{ type: 'global', id: 'global' }, { type: 'context', id: 'ctx-a' }] as const;
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+
+    mockSpawnInline.mockClear();
+    await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
+      CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
+    expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
+
+    mockSpawnInline.mockClear();
+    await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
+      CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
+    // The inner inline step of the REAL spawnPipeline lands on the stub.
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
+  });
+
   it('a nested pipeline receives the SAME accumulator object (identity across nesting)', async () => {
     // Pins two lines at once: the spawnPipeline dispatch in the runner, and
     // spawnPipeline forwarding the object (not a copy) into the nested

@@ -900,6 +900,18 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
     expect(agentConfig['secretStore']).toBe(mockSecretStore);
   });
 
+  it('spawnInline gives the built Agent the calling session\'s scopes', async () => {
+    const step: ManifestStep = { id: 'scoped', agent: 'scoped', runtime: 'inline', task: 'tidy up tasks' };
+    const scopes = [{ type: 'global', id: 'global' }, { type: 'context', id: 'ctx-a' }] as const;
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      [...scopes],
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['activeScopes']).toEqual(scopes);
+  });
+
   it('spawnInline leaves secretStore undefined when none supplied (backward-compat)', async () => {
     const step: ManifestStep = { id: 'no-creds', agent: 'no-creds', runtime: 'inline', task: 'no secret' };
     await spawnInline(step, {}, mockConfig, mockParentTools);

@@ -1510,7 +1510,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'limits', 'secretStore', 'runTaint',
+  'limits', 'secretStore', 'runTaint', 'parentActiveScopes',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1823,6 +1823,41 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // emits the keys, so a key-only check would not catch a re-introduced drop).
     expect(retryOpts['parentToolContext']).toBe(agent.toolContext);
     expect(retryOpts['userTimezone']).toBe('Europe/Zurich');
+  });
+
+  // Inline steps run the caller's task and memory tools, which filter by `agent.activeScopes`.
+  // Each entrypoint must hand the caller's scopes to the run (value, not just key: buildRunCtx
+  // always emits the key).
+  describe('the calling session\'s scopes reach the run', () => {
+    const scopes = [{ type: 'global', id: 'global' }, { type: 'context', id: 'ctx-a' }] as IAgent['activeScopes'];
+    function scopedAgent(): IAgent {
+      const agent = makeAutonomyAgent(undefined);
+      (agent as unknown as { activeScopes: IAgent['activeScopes'] }).activeScopes = scopes;
+      return agent;
+    }
+
+    it('inline run', async () => {
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ name: 'inline', steps: [makeStep('s1', 'do thing')] }, scopedAgent());
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['parentActiveScopes']).toBe(scopes);
+    });
+
+    it('stored run', async () => {
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id }, scopedAgent());
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['parentActiveScopes']).toBe(scopes);
+    });
+
+    it('retry', async () => {
+      const id = seedStoredPipeline();
+      const agent = scopedAgent();
+      mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+      await runWorkflowTool.handler({ workflow_id: id }, agent);
+      mockRetryManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+      expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['parentActiveScopes']).toBe(scopes);
+    });
   });
 
   it('the stored-run path seeds its accumulator from a tainted caller (value, not just key)', async () => {

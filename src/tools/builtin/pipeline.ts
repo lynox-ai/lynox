@@ -431,6 +431,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
+      parentActiveScopes: deps.parentAgent?.activeScopes,
       hooks,
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
@@ -701,6 +702,8 @@ export async function runSavedWorkflow(
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
+      // Headless: no calling session, so no memory scopes to inherit.
+      parentActiveScopes: undefined,
       parentMemory: runtime?.memory ?? null,
       // Slice B: the stored capability-contract authorises this headless run's
       // declared outbound writes (enforced per-tool-call at isDangerous); the
@@ -816,6 +819,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
+        parentActiveScopes: deps.parentAgent?.activeScopes,
         hooks,
         runHistory: deps.runHistory ?? undefined,
         parentPrompt: deps.parentPrompt,
@@ -897,6 +901,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
+      parentActiveScopes: deps.parentAgent?.activeScopes,
       hooks,
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
