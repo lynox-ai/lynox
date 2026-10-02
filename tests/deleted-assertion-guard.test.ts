@@ -31,6 +31,7 @@ import {
   diffContentLines,
   isPureMove,
   casesFor,
+  render,
   reasonLine,
   mergeBase,
   check,
@@ -481,6 +482,87 @@ describe('deleted-assertion-guard', () => {
     // that only asked for letters-or-digits let it through. Measured on a real run.
     expect(reasonLine('collected the suite\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯')).toBe('collected the suite');
     expect(reasonLine('')).toBe('(the run produced no readable output)');
+  });
+
+  it('the EXIT CONTRACT: a verdict line on 0 and on 1, never on 2', () => {
+    // \u26d4 Nothing exercised this before, which is exactly why the workflow shipped with its
+    // polarity inverted. The workflow treats an exit code arriving WITHOUT its verdict line as ill
+    // health, so dropping the line from the report path turns every finding red \u2014 the one outcome
+    // the design forbids \u2014 and dropping it from the clean path turns every clean run red.
+    const report = render({ status: 1, reason: 'checked', findings: [{ file: 'src/a.test.ts', basePassing: 3, headRunning: 1 }], skipped: [], moves: [], candidates: ['src/a.test.ts'] });
+    expect(report.code).toBe(1);
+    expect(report.lines.join('\n')).toContain('VERDICT report');
+    expect(report.lines.join('\n')).toContain('3 case(s) passed before, 1 run now');
+
+    const clean = render({ status: 0, reason: 'checked', findings: [], skipped: [], moves: [], candidates: ['src/a.test.ts'] });
+    expect(clean.code).toBe(0);
+    expect(clean.lines.join('\n')).toContain('VERDICT clean');
+
+    const none = render({ status: 0, reason: 'no-candidates', findings: [], skipped: [], moves: [], candidates: [] });
+    expect(none.code).toBe(0);
+    expect(none.lines.join('\n')).toContain('VERDICT clean');
+
+    for (const reason of ['tree-dirty', 'head-mismatch', 'runner-list-empty', 'runner-unhealthy', 'tree-unreadable']) {
+      const ill = render({ status: 2, reason, trackedDirty: ['M src/a.ts'] });
+      expect(ill.code).toBe(2);
+      // \u26d4 A crash must not be able to wear a verdict. If it could, the workflow would believe it.
+      expect(ill.lines.join('\n')).not.toContain('VERDICT');
+      expect(ill.lines[0]).not.toBe(reason); // every reason has a sentence, not just its key
+    }
+  });
+
+  it('only cases that PASSED count on the base side — a partly broken base must not invent a loss', () => {
+    // ⛔ A mutation round found this with no witness at all: comparing what the base RAN instead of
+    // what it PASSED survived every test, because in every other fixture the base passes completely.
+    // It is not academic — it is the ordinary shape of a refactor, and it was measured on real
+    // history: a renamed export left 4 of 8 base cases passing while the head ran 6, so `ran` would
+    // have reported "8 before, 6 now" for a pull request that lost nothing.
+    const baseBody = 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\nit("d", () => {});\n';
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': baseBody }, 'base');
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\n' }, 'drop one');
+    const partlyBroken = (file: string): Measurement => {
+      if (!existsSync(file)) return { ok: false, out: 'No test files found', json: null };
+      if (readFileSync(file, 'utf-8') === baseBody) {
+        const states = ['passed', 'passed', 'failed', 'failed'];
+        return { ok: false, out: 'FAIL  src/a.test.ts', json: { testResults: [{ name: resolve(file), assertionResults: states.map((status) => ({ status })) }] } };
+      }
+      return measuring(file);
+    };
+
+    const r = check({ base, head, measure: partlyBroken, listFiles: listsEverything, log: () => {} });
+    // 2 of the base's 4 cases still hold; 3 run at head. Nothing held that stopped running.
+    expect(r.findings).toEqual([]);
+    expect(r.status).toBe(0);
+  });
+
+  it('a diff reader must RESET between files, or the next file\'s header reads as content', () => {
+    // ⛔ Also a survivor with no witness: the `@@`/`diff --git` state machine stays "inside a hunk"
+    // across a file boundary unless it is reset, and the following file's `+++ b/<path>` line then
+    // enters the result as an added line `++ b/<path>`.
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\n' }, 'base');
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\nit("x", () => {});\n', 'src/b.test.ts': 'it("y", () => {});\n' }, 'two files gain lines');
+    const mb = mergeBase(base, head);
+
+    const added = diffContentLines(['diff', '-M', `${mb}...${head}`], '+');
+    expect(added).toContain('it("x", () => {});');
+    expect(added).toContain('it("y", () => {});');
+    expect(added.filter((l) => l.includes('b/src/'))).toEqual([]);
+  });
+
+  it('a true RENAME record names the destination, not the source', () => {
+    // ⛔ The third survivor. An earlier fixture meant to pin this used a two-line file, which git
+    // classified as add+delete rather than a rename — so the branch that resolves a rename pair was
+    // never executed and the test asserted nothing about it. git needs real similarity: ten lines
+    // kept and one added is `R091`, and only then does `--numstat -z` emit the pair form.
+    const ten = Array.from({ length: 10 }, (_, i) => `it("case ${String(i)}", () => {});`).join('\n');
+    const base = commit({ 'src/a.ts': SRC, 'src/long.test.ts': `${ten}\n` }, 'base');
+    sh(['mv', 'src/long.test.ts', 'src/moved.test.ts']);
+    const head = commit({ 'src/moved.test.ts': `${ten}\nit("extra", () => {});\n` }, 'rename and add one');
+    expect(sh(['diff', '-M', '--name-status', `${base}`, `${head}`])).toContain('R0');
+
+    const mb = mergeBase(base, head);
+    expect(addedTo(mb, head)).toContain('src/moved.test.ts');
+    expect(addedTo(mb, head)).not.toContain('src/long.test.ts');
   });
 
   it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {

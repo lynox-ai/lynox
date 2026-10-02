@@ -441,6 +441,54 @@ export function reasonLine(out) {
  */
 export const VERDICT = { clean: 'VERDICT clean', report: 'VERDICT report' };
 
+/**
+ * What a result PRINTS and what it EXITS with — pulled out of `main` so it has a witness.
+ *
+ * ⛔ Nothing exercised `main` or the 0/1/2 contract, which is precisely why the workflow shipped
+ * with its polarity inverted: the only thing that could have caught it was a test that runs the
+ * decision. The rule a test can now hold onto: **a verdict line is printed on exit 0 and on exit 1
+ * and never on exit 2.** Remove it from the report path and the workflow correctly reads every
+ * finding as ill health — red on a finding, the one outcome this design forbids.
+ */
+export function render(r) {
+  const lines = [];
+  if (r.status === 2) {
+    const why = {
+      'tree-unreadable': 'could not read the working tree state',
+      'tree-dirty': 'the working tree has tracked changes; this guard writes a file into the tree to run it, so it refuses rather than touch your work',
+      'head-mismatch': 'the checked-out commit is not the head it was asked about, so the head side and the diff side would describe different code',
+      'runner-list-empty': 'the runner enumerated NO test files, so nothing could have been measured',
+      'runner-unhealthy': 'the runner cannot count a file this diff does not touch, so it cannot count one it does',
+    }[r.reason] ?? r.reason;
+    lines.push(`deleted-assertion-guard: ${why}`);
+    if (r.want) lines.push(`    asked about ${r.want}, checked out ${String(r.have)}`);
+    if (r.canary) lines.push(`    positive control: ${r.canary} — ${String(r.detail)}`);
+    for (const l of (r.trackedDirty ?? []).slice(0, 10)) lines.push(`    ${l}`);
+    return { lines, code: 2 };
+  }
+  if (r.reason === 'no-candidates') {
+    lines.push(`deleted-assertion-guard: nothing to look at (this diff removes no lines from any tracked file) — ${VERDICT.clean}`);
+    return { lines, code: 0 };
+  }
+  for (const [file, why] of r.skipped) lines.push(`  skip      ${file} — ${why}`);
+  if (r.findings.length === 0) {
+    lines.push(`deleted-assertion-guard: nothing to report (${String(r.candidates.length)} candidate(s) examined) — ${VERDICT.clean}`);
+    return { lines, code: 0 };
+  }
+  lines.push('');
+  for (const { file, basePassing, headRunning } of r.findings) {
+    lines.push(`  REPORT  ${file}: ${String(basePassing)} case(s) passed before, ${String(headRunning)} run now — the missing ones still pass against the new source.`);
+  }
+  lines.push('');
+  lines.push('  What this knows: that many cases held and no longer run, measured by the runner itself.');
+  lines.push('  What it does NOT know, and cannot: whether something else now covers them. It compares');
+  lines.push('  only the NUMBER of cases per file — deleting two while adding three keeps the number up');
+  lines.push('  and does not appear here at all.');
+  lines.push('  Nothing is blocked. If the removal was deliberate, the commit message is where to say so.');
+  lines.push(`deleted-assertion-guard: ${VERDICT.report}`);
+  return { lines, code: 1 };
+}
+
 function main() {
   const [base, head] = process.argv.slice(2);
   if (!base || !head) {
@@ -489,41 +537,9 @@ function main() {
     process.exit(2);
   }
 
-  if (r.status === 2) {
-    const why = {
-      'tree-unreadable': 'could not read the working tree state',
-      'tree-dirty': 'the working tree has tracked changes; this guard writes a file into the tree to run it, so it refuses rather than touch your work',
-      'head-mismatch': 'the checked-out commit is not the head it was asked about, so the head side and the diff side would describe different code',
-      'runner-list-empty': 'the runner enumerated NO test files, so nothing could have been measured',
-      'runner-unhealthy': 'the runner cannot count a file this diff does not touch, so it cannot count one it does',
-    }[r.reason] ?? r.reason;
-    console.log(`deleted-assertion-guard: ${why}`);
-    if (r.want) console.log(`    asked about ${r.want}, checked out ${String(r.have)}`);
-    if (r.canary) console.log(`    positive control: ${r.canary} — ${String(r.detail)}`);
-    if (r.trackedDirty) for (const l of r.trackedDirty.slice(0, 10)) console.log(`    ${l}`);
-    process.exit(2);
-  }
-  if (r.reason === 'no-candidates') {
-    console.log(`deleted-assertion-guard: nothing to look at (this diff removes no lines from any tracked file) — ${VERDICT.clean}`);
-    process.exit(0);
-  }
-  for (const [file, why] of r.skipped) console.log(`  skip      ${file} — ${why}`);
-  if (r.findings.length === 0) {
-    console.log(`deleted-assertion-guard: nothing to report (${String(r.candidates.length)} candidate(s) examined) — ${VERDICT.clean}`);
-    process.exit(0);
-  }
-  console.log('');
-  for (const { file, basePassing, headRunning } of r.findings) {
-    console.log(`  REPORT  ${file}: ${String(basePassing)} case(s) passed before, ${String(headRunning)} run now — the missing ones still pass against the new source.`);
-  }
-  console.log('');
-  console.log('  What this knows: that many cases held and no longer run, measured by the runner itself.');
-  console.log('  What it does NOT know, and cannot: whether something else now covers them. It compares');
-  console.log('  only the NUMBER of cases per file — deleting two while adding three keeps the number up');
-  console.log('  and does not appear here at all.');
-  console.log('  Nothing is blocked. If the removal was deliberate, the commit message is where to say so.');
-  console.log(`deleted-assertion-guard: ${VERDICT.report}`);
-  process.exit(1);
+  const decided = render(r);
+  for (const l of decided.lines) console.log(l);
+  process.exit(decided.code);
 }
 
 if (process.argv[1] && process.argv[1].endsWith('deleted-assertion-guard.mjs')) main();
