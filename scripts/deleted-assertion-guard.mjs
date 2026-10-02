@@ -205,14 +205,8 @@ export function check({ base, head, runFile, listFiles, log = () => {} }) {
     let headCount = 0;
     const existedAtHead = existsSync(file);
     if (existedAtHead) {
-      const headList = listFiles();
-      if (!headList.includes(file)) {
+      if (!listFiles().includes(file)) {
         skipped.push([file, 'the runner does not run this file (it is not in the runner\'s own file list)']);
-        continue;
-      }
-      const alsoMatched = filterMatches(headList, file).filter((f) => f !== file);
-      if (alsoMatched.length > 0) {
-        skipped.push([file, `the runner's path filter is ambiguous — "${file}" also matches ${alsoMatched.join(', ')}, so the case count would be a sum over several files`]);
         continue;
       }
       const headRun = runFile(file);
@@ -234,8 +228,13 @@ export function check({ base, head, runFile, listFiles, log = () => {} }) {
         skipped.push([file, 'the runner does not run this file (it is not in the runner\'s own file list)']);
         continue;
       }
-      // Asked again here, not only at head: a file the diff deletes WHOLLY never reached the head
-      // check above, so this is the only place its filter is ever measured.
+      // ⭐ ONE site, and deliberately this one — a mutation round is why. The check sat at the head
+      // path too, and the mutant that weakened it there survived: a candidate the head copy let
+      // through was caught here anyway, so each copy hid the other's absence and NO test could
+      // distinguish them. Two controls that stand in for one another are not redundancy, they are
+      // an untestable branch. This site sees every candidate, including a file the diff deletes
+      // wholly, which never reaches the head path at all; the head copy only ever saved one
+      // runner start, and bought it with a branch nothing could measure.
       const alsoMatchedAtBase = filterMatches(baseList, file).filter((f) => f !== file);
       if (alsoMatchedAtBase.length > 0) {
         skipped.push([file, `the runner's path filter is ambiguous \u2014 "${file}" also matches ${alsoMatchedAtBase.join(', ')}, so the case count would be a sum over several files`]);
