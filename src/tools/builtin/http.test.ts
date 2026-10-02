@@ -1205,11 +1205,16 @@ describe('httpRequestTool', () => {
       expect(result).toContain('base64');
     });
 
-    it('allows GET with a long encoded path as a parameter: decoded, it is letters and slashes, not data', async () => {
+    // The parameter name's tail (`to=`) joins the decoded run, so the third row uses an
+    // upper-case name to keep lower case out of it.
+    it.each([
+      ['upper and lower case, no digits', 'return_to', '%2FOrders%2FCustomerAccounts%2FSettingsProfile%2FWebhookDeliveries%2FRecentEvents'],
+      ['lower case and digits, no upper case', 'return_to', '%2Forders%2F2024%2Fcustomer42accounts%2Fsettings7profile%2Fwebhook9deliveries%2Frecent'],
+      ['upper case and digits, no lower case', 'NEXT', '%2FORDERS%2F2024%2FCUSTOMER42ACCOUNTS%2FSETTINGS7PROFILE%2FWEBHOOK9DELIVERIES%2FRECENT'],
+    ])('allows GET with an encoded path whose decoded run has %s', async (_label, param, path) => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
-      const path = '%2Fusers%2Fjohndoe%2Frepositories%2Fmyproject%2Fsettings%2Fwebhooks%2Fdeliveries%2Frecent';
-      const result = await handler({ url: `http://example.com/login?return_to=${path}` }, makeAgent());
+      const result = await handler({ url: `http://example.com/login?${param}=${path}` }, makeAgent());
       expect(result).toContain('HTTP 200');
     });
 

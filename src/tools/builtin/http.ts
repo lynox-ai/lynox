@@ -479,10 +479,6 @@ export function detectSecretInContent(content: string): string | null {
   return null;
 }
 
-/**
- * Detect GET-based data exfiltration via suspiciously long query strings
- * or base64-encoded data in URL parameters.
- */
 const BASE64_RUN = /[A-Za-z0-9+/=]{64,}/;
 
 /** A run of 64+ base64 characters that mixes upper case, lower case and digits. */
@@ -490,6 +486,10 @@ function hasBase64ShapedRun(text: string): boolean {
   return (text.match(/[A-Za-z0-9+/=]{64,}/g) ?? []).some((run) => /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run));
 }
 
+/**
+ * Detect GET-based data exfiltration via suspiciously long query strings
+ * or base64-encoded data in URL parameters.
+ */
 function detectGetExfiltration(url: string): string | null {
   try {
     const parsed = new URL(url);
@@ -499,12 +499,11 @@ function detectGetExfiltration(url: string): string | null {
     if (parsed.search.length > 500) {
       return 'suspiciously long query string (>500 chars, possible data exfiltration)';
     }
-    // Detect base64-looking blobs in URL params — in the query as sent, and in the form the
-    // server decodes it to (`urlScanForms`). A run found only in a decoded form must also look
-    // like base64 (upper case, lower case and digits): decoding turns an encoded path (`%2F`)
-    // into a long run of letters and slashes, which is not data. Measured on 14 realistic API
-    // queries: with that condition the decoded form adds one match, an encoded base64 cursor;
-    // without it, a second one, a long encoded path.
+    // Detect base64-looking blobs in URL params — in the query as sent, and in the forms
+    // `urlScanForms` decodes it to (one round of percent-decoding). A run found only in a decoded
+    // form must also mix upper case, lower case and digits: decoding joins the segments of an
+    // encoded path (`%2F`) into one long run, and a path that lacks one of the three classes is
+    // not flagged for that. A path that has all three is flagged, as it already is unencoded.
     const [asSent, ...decoded] = urlScanForms(parsed.search);
     if (BASE64_RUN.test(asSent!) || decoded.some(hasBase64ShapedRun)) {
       return 'base64-like data in URL parameters (possible data exfiltration)';
