@@ -215,14 +215,15 @@ describe('every range hook scans the pushed ref, not the checked-out HEAD', () =
  */
 describe('every range hook passes each refusal of pushed-ranges.sh on, by itself', () => {
   const ZERO = '0'.repeat(40);
-  const runHook = (c: ReturnType<typeof setup>, hook: string, input: string | null) => {
+  /** `unreadable`: stdin opens but cannot be READ (a directory: EISDIR). `closed`: no fd 0 at all —
+   *  the case that used to HANG, because the first command substitution took the free fd 0; the
+   *  timeout turns a hang into a failure (status null) instead of a stuck suite. An empty input
+   *  reads /dev/null — spawnSync leaves a pipe open for `input: ''`, and the hook would wait on it. */
+  const runHook = (c: ReturnType<typeof setup>, hook: string, input: string | 'unreadable' | 'closed') => {
     const path = join('.lefthook/pre-push', hook);
-    // input null = stdin that opens but cannot be READ (a directory: EISDIR), the read error the
-    // refusal exists for. Not a closed fd 0: the hook's own command-substitution pipe would take
-    // fd 0 and `cat` would wait on it forever. An empty input reads /dev/null — spawnSync leaves a
-    // pipe open for `input: ''`, and the hook would wait on that too.
-    const r = input === null
-      ? spawnSync('bash', ['-c', 'exec bash "$0" < /', path], { cwd: c.work, encoding: 'utf8', env: c.env, timeout: T })
+    const r = input === 'unreadable' || input === 'closed'
+      ? spawnSync('bash', ['-c', input === 'closed' ? 'exec bash "$0" <&-' : 'exec bash "$0" < /', path],
+        { cwd: c.work, encoding: 'utf8', env: c.env, timeout: 10_000 })
       : input === ''
         ? spawnSync('bash', [path], { cwd: c.work, encoding: 'utf8', env: c.env, stdio: ['ignore', 'pipe', 'pipe'] })
         : spawnSync('bash', [path], { cwd: c.work, encoding: 'utf8', env: c.env, input });
@@ -243,9 +244,16 @@ describe('every range hook passes each refusal of pushed-ranges.sh on, by itself
 
     it(`${hook}: stdin that cannot be read → exit 2`, () => {
       const c = setup();
-      const r = runHook(c, hook, null);
+      const r = runHook(c, hook, 'unreadable');
       expect(r.status, r.err).toBe(2);
       expect(r.err).toContain(`${label(hook)}: could not read the refs`);
+    }, T);
+
+    it(`${hook}: stdin that is closed → exit 2, not a hang`, () => {
+      const c = setup();
+      const r = runHook(c, hook, 'closed');
+      expect(r.status, r.err).toBe(2);
+      expect(r.err).toContain(`${label(hook)}: stdin is closed`);
     }, T);
 
     it(`${hook}: a line that is not a ref line → exit 2`, () => {
@@ -263,6 +271,81 @@ describe('every range hook passes each refusal of pushed-ranges.sh on, by itself
       expect(r.err).toContain(`${label(hook)}: no ref is pushed`);
     }, T);
   }
+});
+
+/**
+ * The first field of a pre-push line is called "local ref" but holds the source exactly as typed —
+ * here a reflog expression with spaces. Only the back three fields have a guaranteed form, which is
+ * why pushed-ranges.sh anchors its match from the right.
+ */
+describe('a push whose source is a reflog expression with spaces', () => {
+  const SPEC = 'HEAD@{0 seconds ago}:refs/heads/w';
+  const pushSpec = (c: ReturnType<typeof setup>) => {
+    const r = spawnSync('git', ['push', 'origin', SPEC], { cwd: c.work, encoding: 'utf8', env: c.env });
+    const landed = c.git('ls-remote', 'origin', 'refs/heads/w').stdout.trim() !== '';
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, landed };
+  };
+
+  it('lands when neutral', () => {
+    const c = setup();
+    writeFileSync(join(c.work, 'notes.md'), 'call back\n');
+    c.git('add', 'notes.md');
+    c.git('commit', '-q', '-m', 'Add notes');
+    const r = pushSpec(c);
+    expect(r.status, r.out).toBe(0);
+    expect(r.landed, r.out).toBe(true);
+    expect(r.out).not.toContain('not a pre-push ref line');
+  }, T);
+
+  it('is still scanned: a name in the message is refused', () => {
+    const c = setup();
+    c.git('commit', '-q', '--allow-empty', '-m', `Note for ${NAME}`);
+    const r = pushSpec(c);
+    expect(r.landed, r.out).toBe(false);
+    expect(r.out).toMatch(/private name in the message of commit/);
+  }, T);
+});
+
+describe('pushed-ranges.sh knows both object-name lengths and never prints field 1 raw', () => {
+  const ranges = (c: ReturnType<typeof setup>, input: string) => {
+    const r = spawnSync('bash', [join('.lefthook/pre-push', RANGES), 't'], { cwd: c.work, encoding: 'utf8', env: c.env, input });
+    return { status: r.status, out: r.stdout, err: r.stderr };
+  };
+  const Z64 = '0'.repeat(64);
+
+  it('a delete line with a 64-digit zero sha yields no range', () => {
+    const c = setup();
+    const tip = c.git('rev-parse', 'HEAD').stdout.trim();
+    const r = ranges(c, `(delete) ${Z64} refs/heads/z ${tip}\n`);
+    expect(r.status, r.err).toBe(0);
+    expect(r.out).toBe('');
+    expect(r.err).toContain('no ref is pushed');
+  }, T);
+
+  it('a new ref with a 64-digit zero remote sha and no origin/main gets the NEW-branch message', () => {
+    const c = setup();
+    c.git('update-ref', '-d', 'refs/remotes/origin/main');
+    const tip = c.git('rev-parse', 'HEAD').stdout.trim();
+    const r = ranges(c, `refs/heads/n ${tip} refs/heads/n ${Z64}\n`);
+    expect(r.status, r.err).toBe(2);
+    expect(r.err).toContain('no origin/main here to measure a new branch');
+    expect(r.err).not.toContain('the remote has');
+  }, T);
+
+  it('run directly with stdin closed → exit 2, not a hang (its own check, not the hook\'s)', () => {
+    const c = setup();
+    const r = spawnSync('bash', ['-c', 'exec bash "$0" t <&-', join('.lefthook/pre-push', RANGES)],
+      { cwd: c.work, encoding: 'utf8', env: c.env, timeout: 10_000 });
+    expect(r.status, r.stderr).toBe(2);
+    expect(r.stderr).toContain('t: could not read the refs');
+  }, T);
+
+  it('a malformed line is quoted when printed', () => {
+    const c = setup();
+    const r = ranges(c, 'bad $(x) line\n');
+    expect(r.status).toBe(2);
+    expect(r.err).toContain('bad\\ \\$\\(x\\)\\ line');
+  }, T);
 });
 
 describe('a push with nothing to do scans nothing, even without origin/main', () => {

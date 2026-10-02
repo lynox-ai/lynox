@@ -7,7 +7,12 @@
 #
 #   bash .lefthook/pre-push/pushed-ranges.sh <hook-name>      (the pre-push ref lines on stdin)
 #
-# The refs come from git on stdin (`<local ref> <local sha> <remote ref> <remote sha>` per line):
+# The refs come from git on stdin (`<local ref> <local sha> <remote ref> <remote sha>` per line).
+# Only the BACK three fields have a guaranteed form, so a line is matched anchored from the RIGHT:
+# the first field is called "local ref" but holds the source exactly as the user typed it
+# (`HEAD@{1 second ago}`, with spaces and characters no ref name may carry). It is never put into
+# a command and never printed unquoted. A command a person is told to copy names only the remote
+# ref (field 3), which git restricts to a real ref name.
 #   · a deleted ref (local sha all zeros) adds nothing and yields no line;
 #   · a ref whose remote sha this clone has is measured from it: exactly what this push adds;
 #   · a new ref is measured from where it leaves origin/main;
@@ -23,38 +28,50 @@
 #   · stdin read to its end and empty — git sends no line for a push with nothing to do (up to
 #     date, or every ref rejected): nothing is transferred, so nothing is scanned and none is
 #     yielded;
-#   · stdin not readable (closed, a read error) — what is pushed is unknown: refused (exit 2).
-# `cat` reports a read error in its exit status, which a `while read` loop cannot: there, an error
-# and the end of input both just end the loop.
+#   · stdin not readable — closed, or a read error — what is pushed is unknown: refused (exit 2).
+# A closed fd 0 is checked FIRST, before any command substitution: the pipe of the first `$(…)`
+# would take the free fd 0, and `cat` would later wait on a pipe nobody writes. It is checked by
+# duplicating fd 0, because `0<&0` is a no-op that succeeds on a closed fd. `cat` then reports a
+# read error in its exit status, which a `while read` loop cannot: there, an error and the end of
+# input both just end the loop. The hooks run the same fd check first, for the same reason: their
+# own `cd "$(…)"` comes before this script is started.
 #
 # A terminal on stdin is a hand run (`bash .lefthook/pre-push/<hook>.sh`) and measures the current
-# branch as a new ref. A run from a SCRIPT has no terminal: it reads that script's stdin, and if
-# that is empty it scans nothing and says so. A wrapper must pass git's ref lines through on stdin
-# — silence there is not a verdict.
+# branch as a new ref. That holds only while the hook's lefthook entry sets `use_stdin: true`:
+# without it, lefthook hands a script run from a terminal that terminal, and it would measure HEAD
+# instead of the pushed refs (the push-level tests run without a terminal and fail on that removal).
+# A run from a SCRIPT has no terminal: it reads that script's stdin, and if that is empty it scans
+# nothing and says so. A wrapper must pass git's ref lines through on stdin — silence there is not
+# a verdict.
 #
 # Like every hook file, this only runs where it exists: a branch cut from an older main pushes with
 # the older hooks until it merges origin/main, which brings the guards along with the base.
-cd "$(git rev-parse --show-toplevel)" || exit 2
 label=${1:-pre-push}
-zero='0000000000000000000000000000000000000000'
-ref_line='^[^ ]+ [0-9a-f]{40}([0-9a-f]{24})? [^ ]+ [0-9a-f]{40}([0-9a-f]{24})?$'
+unreadable() {
+  echo "$label: could not read the refs git hands this hook on stdin, so what this push" >&2
+  echo "  transfers is unknown. Push again; a wrapper must pass git's pre-push lines through." >&2
+  exit 2
+}
+if { exec 3<&0; } 2>/dev/null; then exec 3<&-; else unreadable; fi
+cd "$(git rev-parse --show-toplevel)" || exit 2
+# An object name is 40 hex digits (sha1) or 64 (sha256). This repo is sha1; the check knows both,
+# and "zero" means all zeros at either length, so the two can never disagree about a length.
+sha='([0-9a-f]{40}|[0-9a-f]{64})'
+ref_line="^(.+) $sha ([^ ]+) $sha\$"
+is_zero() { [[ $1 =~ ^(0{40}|0{64})$ ]]; }
 pairs=()
 if [ -t 0 ]; then
-  pairs=("HEAD $zero")
+  pairs=("HEAD 0000000000000000000000000000000000000000")
 else
-  if ! input=$(cat); then
-    echo "$label: could not read the refs git hands this hook on stdin, so what this push" >&2
-    echo "  transfers is unknown. Push again; a wrapper must pass git's pre-push lines through." >&2
-    exit 2
-  fi
+  input=$(cat) || unreadable
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if ! [[ $line =~ $ref_line ]]; then
-      echo "$label: not a pre-push ref line, so the range cannot be told: ${line:0:80}" >&2
+      printf '%s: not a pre-push ref line, so the range cannot be told: %q\n' "$label" "${line:0:80}" >&2
       exit 2
     fi
-    read -r _local_ref local_sha remote_ref remote_sha <<<"$line"
-    [ "$local_sha" = "$zero" ] && continue
+    local_sha=${BASH_REMATCH[2]} remote_ref=${BASH_REMATCH[3]} remote_sha=${BASH_REMATCH[4]}
+    is_zero "$local_sha" && continue
     pairs+=("$local_sha $remote_sha $remote_ref")
   done <<<"$input"
   if [ "${#pairs[@]}" -eq 0 ]; then
@@ -64,10 +81,10 @@ else
 fi
 for pair in "${pairs[@]}"; do
   read -r tip remote remote_ref <<<"$pair"
-  if [ "$remote" != "$zero" ] && git cat-file -e "${remote}^{commit}" 2>/dev/null; then
+  if ! is_zero "$remote" && git cat-file -e "${remote}^{commit}" 2>/dev/null; then
     base="$remote"
   elif ! git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
-    if [ "$remote" != "$zero" ]; then
+    if ! is_zero "$remote"; then
       echo "$label: the remote has ${remote_ref:-this ref} at ${remote:0:9}, which this clone does not have," >&2
       echo "  and there is no origin/main to measure from instead." >&2
       echo "  Fetch it, then push again:  git fetch origin $remote_ref" >&2
