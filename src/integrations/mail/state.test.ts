@@ -308,7 +308,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(16);
+    expect(row.v).toBe(17);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -503,6 +503,63 @@ describe('MailStateDb — migration v7 (Unified Inbox)', () => {
   });
 });
 
+describe('MailStateDb — migration v17 (claim a scheduled send)', () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-mail-mig17-'));
+    path = join(dir, 'mail-state.db');
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  /** A database as v16 left it, with one row already queued. */
+  function atV16WithQueuedRow(): string {
+    const fresh = new MailStateDb({ path });
+    const id = fresh.insertScheduledSend({
+      accountId: 'acct-1', to: [{ address: 'a@x', name: undefined }], subject: 's', bodyMd: 'b',
+      scheduledAt: new Date(Date.now() - 5000),
+    });
+    fresh.close();
+    const raw = new BetterSqlite3(path);
+    raw.exec('ALTER TABLE mail_scheduled DROP COLUMN sending_at; DELETE FROM schema_version WHERE version = 17;');
+    raw.close();
+    return id;
+  }
+
+  it('adds sending_at, and a row queued before it stays due', () => {
+    const id = atV16WithQueuedRow();
+    const db = new MailStateDb({ path });
+    try {
+      const raw = (db as unknown as { db: BetterSqlite3.Database }).db;
+      expect((raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(17);
+      expect((raw.prepare("PRAGMA table_info('mail_scheduled')").all() as { name: string }[]).map((c) => c.name)).toContain('sending_at');
+      expect(db.listDueScheduledSends().map((r) => r.id)).toEqual([id]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('a v17 that fails inside its transaction leaves nothing half done and no lock behind', () => {
+    atV16WithQueuedRow();
+    // The column is already there, so the ALTER inside v17's transaction fails after its
+    // version insert.
+    const raw = new BetterSqlite3(path);
+    raw.exec('ALTER TABLE mail_scheduled ADD COLUMN sending_at INTEGER;');
+    raw.close();
+    expect(() => new MailStateDb({ path })).toThrow(/duplicate column/i);
+    // Rolled back, and the file is writable — no open transaction holds it. The write is the
+    // witness: under WAL another connection never sees an uncommitted version insert, so the
+    // version check alone would pass without the rollback.
+    const after = new BetterSqlite3(path, { timeout: 200 });
+    try {
+      expect((after.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(16);
+      expect(() => after.exec('CREATE TABLE probe_write (x INTEGER)')).not.toThrow();
+    } finally {
+      after.close();
+    }
+  });
+});
+
 describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
   // Faithful replay: hand-craft a pre-v16 DB pinned at schema_version 15
   // (the head before this slice), then open MailStateDb on the same file so
@@ -537,6 +594,8 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       );
       INSERT INTO inbox_items (id, draft_id) VALUES ('itm-1', 'drf-1'), ('itm-2', NULL);
       INSERT INTO inbox_drafts (id, item_id, superseded_by) VALUES ('drf-1', 'itm-1', NULL);
+      -- Every real v15 database has mail_scheduled (v14); the migrations after v16 alter it.
+      CREATE TABLE mail_scheduled (id TEXT PRIMARY KEY, sent_at INTEGER, failed_at INTEGER);
     `);
     raw.close();
   });
@@ -551,7 +610,7 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       const raw = (migrated as unknown as { db: BetterSqlite3.Database }).db;
       // Migration ran to the new head.
       const version = raw.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-      expect(version.v).toBe(16);
+      expect(version.v).toBe(17);
       // The table is gone.
       const drafts = raw
         .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'inbox_drafts'`)

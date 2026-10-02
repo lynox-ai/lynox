@@ -541,6 +541,15 @@ const MIGRATIONS: string[] = [
   `UPDATE inbox_items SET draft_id = NULL WHERE draft_id IS NOT NULL;
    DROP TABLE IF EXISTS inbox_drafts;
    INSERT OR IGNORE INTO schema_version (version) VALUES (16);`,
+
+  // v17: a scheduled send is claimed before it is sent. `sending_at` is stamped by the one
+  // poller tick that wins the claim, so a second tick or a second process cannot send the same
+  // row, and a row left claimed by a crash is found and reported instead of sent again. One
+  // transaction: the version and the column land together or not at all.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (17);
+   ALTER TABLE mail_scheduled ADD COLUMN sending_at INTEGER;
+   COMMIT;`,
 ];
 
 export interface MailStateDbOptions {
@@ -817,7 +826,15 @@ function rowToAccount(row: AccountRow): MailAccountConfig {
 
 /** Multi-statement runner — bracket access avoids a noisy lint false-positive. */
 function runMultiStatement(db: Database.Database, sql: string): void {
-  db['exec'](sql);
+  try {
+    db['exec'](sql);
+  } catch (err) {
+    // A migration that opens its own transaction and fails inside it leaves that transaction
+    // open — better-sqlite3 does not roll back for us — holding the write lock on a connection
+    // the constructor is about to abandon.
+    if (db.inTransaction) db['exec']('ROLLBACK');
+    throw err;
+  }
 }
 
 /**
@@ -1328,6 +1345,7 @@ export class MailStateDb {
          WHERE scheduled_at <= ?
            AND sent_at IS NULL
            AND failed_at IS NULL
+           AND sending_at IS NULL
          ORDER BY scheduled_at ASC
          LIMIT ?`,
       )
@@ -1335,27 +1353,63 @@ export class MailStateDb {
     return rows.map(rowToScheduledSend);
   }
 
-  /** Mark a scheduled send as delivered. Stamps sent_at + bumps attempts. */
-  markScheduledSent(id: string, when: Date = new Date()): boolean {
+  /**
+   * Claim a due row for sending. True only for the caller whose UPDATE changed it: a row that
+   * is sent, failed, or already claimed is not claimed again — not by a second tick, not by a
+   * second process on the same file.
+   */
+  claimScheduledSend(id: string, when: Date = new Date()): boolean {
     const result = this.db
       .prepare<[number, string], unknown>(
-        `UPDATE mail_scheduled
-         SET sent_at = ?, attempts = attempts + 1
-         WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL`,
+        `UPDATE mail_scheduled SET sending_at = ?
+         WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL AND sending_at IS NULL`,
       )
       .run(when.getTime(), id) as { changes: number };
     return result.changes > 0;
   }
 
   /**
-   * Increment the attempt counter on a transient failure. The poller
-   * will retry the row on the next tick. After MAX_SCHEDULED_ATTEMPTS
-   * the caller should switch to `markScheduledFailed` instead.
+   * Rows claimed before `olderThan` that were never marked sent or failed: the process that
+   * claimed them stopped mid-send. Whether the mail went out is unknown, so they are marked
+   * failed with `reason` — shown, for a human to check — and never sent again on their own.
+   * Returns how many.
+   */
+  failStaleScheduledSends(olderThan: Date, reason: string, when: Date = new Date()): number {
+    const result = this.db
+      .prepare<[number, string, number], unknown>(
+        `UPDATE mail_scheduled SET failed_at = ?, fail_reason = ?
+         WHERE sending_at IS NOT NULL AND sending_at < ? AND sent_at IS NULL AND failed_at IS NULL`,
+      )
+      .run(when.getTime(), reason, olderThan.getTime()) as { changes: number };
+    return result.changes;
+  }
+
+  /**
+   * Mark a scheduled send as delivered. Stamps sent_at + bumps attempts. Also over a row that
+   * was marked failed in the meantime: a send that outlived its claim is reported by another
+   * tick as "may have been sent", and when it then succeeds, that is the truth — leaving the
+   * failure would invite a re-queue, i.e. the duplicate the claim exists to prevent.
+   */
+  markScheduledSent(id: string, when: Date = new Date()): boolean {
+    const result = this.db
+      .prepare<[number, string], unknown>(
+        `UPDATE mail_scheduled
+         SET sent_at = ?, attempts = attempts + 1, failed_at = NULL, fail_reason = NULL, sending_at = NULL
+         WHERE id = ? AND sent_at IS NULL`,
+      )
+      .run(when.getTime(), id) as { changes: number };
+    return result.changes > 0;
+  }
+
+  /**
+   * Increment the attempt counter on a failure that sent nothing, and release the claim. The
+   * poller will retry the row on the next tick. After MAX_SCHEDULED_ATTEMPTS the caller should
+   * switch to `markScheduledFailed` instead.
    */
   bumpScheduledAttempt(id: string): number {
     const row = this.db
       .prepare<[string], { attempts: number }>(
-        `UPDATE mail_scheduled SET attempts = attempts + 1
+        `UPDATE mail_scheduled SET attempts = attempts + 1, sending_at = NULL
          WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL
          RETURNING attempts`,
       )
@@ -1386,11 +1440,17 @@ export class MailStateDb {
     return rows.map(rowToScheduledSend);
   }
 
-  /** Cancel a not-yet-sent row — UI delete-from-outbox path. */
+  /**
+   * Cancel a send that is still pending — not sent, not failed, not being sent. A row being
+   * sent may already be on its way, and a failed row is not pending: if its reason says the
+   * mail may have gone out, the row is the only record of that, and a send that outlived its
+   * claim may still complete. Cancelling either would tell the user something stopped that
+   * did not.
+   */
   cancelScheduledSend(id: string): boolean {
     const result = this.db
       .prepare<[string], unknown>(
-        `DELETE FROM mail_scheduled WHERE id = ? AND sent_at IS NULL`,
+        `DELETE FROM mail_scheduled WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL AND sending_at IS NULL`,
       )
       .run(id) as { changes: number };
     return result.changes > 0;

@@ -26,6 +26,7 @@ import {
   personaFor,
   type MailAccountConfig,
   type MailAddress,
+  type MailErrorCode,
   type MailSendInput,
   type MailSendResult,
 } from './provider.js';
@@ -98,7 +99,7 @@ export interface SendCoreBeforeSendCtx {
 
 export type SendCoreResult =
   | { ok: true; result: MailSendResult; followupId: string | null }
-  | { ok: false; status: SendCoreFailureStatus; message: string; secretLabel?: string | undefined };
+  | { ok: false; status: SendCoreFailureStatus; message: string; secretLabel?: string | undefined; errorCode?: MailErrorCode | undefined };
 
 export type SendCoreFailureStatus =
   | 'rate_limit'
@@ -203,7 +204,7 @@ export async function sendMail(
     result = await provider.send(sendInput);
   } catch (err) {
     if (err instanceof MailError) {
-      return { ok: false, status: 'provider_error', message: `${err.code}: ${err.message}` };
+      return { ok: false, status: 'provider_error', message: `${err.code}: ${err.message}`, errorCode: err.code };
     }
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, status: 'provider_error', message: msg };
