@@ -454,8 +454,19 @@ export function evaluate({ body, head, files, author }) {
   //
   // ⚠ Case-insensitive and a trailing full stop allowed, deliberately, like `head:` and
   // `closes: none` — a false red here is how a guard earns a bypass. The model slot is NOT an
-  // allowlist (it would date) but must be at least three characters, so `1 x round` cannot pass as
-  // evidence.
+  // allowlist (it would date) but must START WITH A LETTER and have at least two characters, so
+  // neither `1 x round` nor `1 ... round` passes as evidence.
+  //
+  // ⚠ Two characters, not three, and the floor was MEASURED rather than chosen: three refused `o3`
+  // and `r1`, which are real model names, and a gate that refuses a true answer earns a bypass. The
+  // two halves also do different work — punctuation satisfied the old class (`...` passed AS the
+  // model name), while a single letter still says nothing — so each half owes its own witness.
+  //
+  // Which witness carries which half, because getting this backwards is easy: `1 x round` is the
+  // LENGTH witness — `[a-z]` ACCEPTS `x`, and only the floor refuses it — and `1 ... round` is the
+  // LETTER witness, because three dots clear the floor. What `1 x round` cannot witness is the SIZE
+  // of the floor: `{2,}` and `{1,}` both refuse a bare `x`, which is exactly why the mutant that
+  // lowered it survived, and why the ACCEPTING side needs its own assertion (`1 o3 round`).
   //
   // Not demanded for the other gates: `delta` carries its verdict in `delta:`, `legal` in
   // `approved:`. ⚠ `security` has NO evidence line and wants the same treatment — left out so this
@@ -470,12 +481,16 @@ export function evaluate({ body, head, files, author }) {
         'The model is the one that RAN the round (your own, if you reviewed it yourself).',
       );
     } else {
-      const m = /^(\d+)\s+([a-z][a-z0-9.+-]{2,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
+      const m = /^(\d+)\s+([a-z][a-z0-9.+-]{1,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
       if (!m) {
         errors.push(
           `\`review: ${raw}\` is not \`<n> <model> round(s), <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
-          'The model name must start with a letter and be at least three characters, so neither `x` nor',
-        '`...` can pass as evidence — three characters alone was not enough, measured.',
+          'The model slot takes a short HANDLE: a letter, then at least one more character from',
+          '`[a-z0-9.+-]` — so neither `1 x round` nor `1 ... round` passes as evidence. Two characters,',
+          'not three, because a floor of three refused `o3` and `r1`.',
+          'Write the handle, not a provider id: `gpt_4o`, `deepseek/r1` and `llama3:8b` are refused',
+          'because `_`, `/` and `:` are outside the class, and a space cannot occur at all — the',
+          'format reads the slot as ONE token.',
         );
       } else if (Number(m[1]) < 1) {
         errors.push(`\`review: ${raw}\` claims ${m[1]} rounds — a gate with no round is the omission this field exists for.`);
