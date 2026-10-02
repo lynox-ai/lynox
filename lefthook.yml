@@ -33,27 +33,31 @@ pre-push:
       # without this the class would be enforced nowhere at all locally, since
       # the scan above never looks at a message.
       #
-      # merge-base gives the commits this push adds, relative to HEAD. Known
-      # limit, stated rather than hidden: pushing a branch you are not standing
-      # on (`git push origin other`) computes the range from HEAD, so it walks
-      # nothing. That case prints "NO commits scanned" — visible, not silent —
-      # and this class has no CI twin to catch it afterwards.
-      #
       # Without ~/.lynox/private-names.re the class warns and stands down rather
       # than blocking: an unpushable hook is how people learn --no-verify.
-      # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
-      # origin/main — a --single-branch clone, a differently named remote, a repo
-      # with no origin at all — makes the substitution empty, the guard sees a
-      # missing argument and exits 2, and the push is BLOCKED for a reason its
-      # message never mentions. Falling back to HEAD yields an empty range, which
-      # the guard reports as "NO commits" and lets through: it says it checked
-      # nothing rather than blocking. That is the deliberate trade, and it is NOT
-      # softened by a CI twin — this class has none (see the comment above, and
-      # CLAUDE.md). It is chosen because a hook nobody can push through is how
-      # people learn --no-verify, and because the state it lets through announces
-      # itself in the output instead of passing as a clean scan.
+      #
+      # WHAT is pushed comes from .lefthook/pre-push/pushed-ranges.sh, shared by
+      # all three range hooks: the pushed refs on stdin (hence use_stdin), a ref
+      # the remote already has measured from the remote's sha (when this clone
+      # has it), a new one from where it leaves origin/main. This hook used to take
+      # `merge-base origin/main HEAD`..HEAD instead, so pushing a branch you are
+      # not standing on (`git push origin other`) scanned nothing of `other`.
+      #
+      # That form also carried `|| echo HEAD`: a clone with no local origin/main
+      # got an empty range, reported as "NO commits" and let through. The trade
+      # is reversed on purpose. This class has no CI twin, so the empty range
+      # was the only check there was, and it passed; a line in the output is not
+      # a barrier. A new branch with no origin/main is now refused (exit 2) with
+      # the one command that fixes it:
+      #   git fetch origin main:refs/remotes/origin/main
+      # A ref the remote has at a sha this clone also has needs no origin/main;
+      # one at a sha this clone lacks is measured like a new branch, and with
+      # no origin/main refused with the fetch of that ref. A push with nothing
+      # to do (git hands no ref line) scans nothing; closed or unreadable stdin
+      # is refused. pushed-ranges.sh lists each case.
       # The invocation lives in .lefthook/pre-push/public-repo-guard-meta.sh.
       runner: bash
+      use_stdin: true
       skip:
         - merge
         - rebase
@@ -69,11 +73,11 @@ pre-push:
       # tree-scanning version of this class deleted. tests/public-repo-guard.test.ts
       # asserts that no workflow invokes `check-files` — keep it that way.
       #
-      # Same range expression, same fallback, same reasons as the block above:
-      # `|| echo HEAD` yields an empty range that the guard reports as "NO files"
-      # rather than blocking a clone that has no local origin/main.
+      # Same ranges, same refusal, same reasons as the block above: both come
+      # from pushed-ranges.sh.
       # The invocation lives in .lefthook/pre-push/public-repo-guard-files.sh.
       runner: bash
+      use_stdin: true
       skip:
         - merge
         - rebase
@@ -83,10 +87,7 @@ pre-push:
       # and a later one removes is not there and still ships. THIS hook is what prevents the
       # publication — once pushed, the commit is readable on the pull request. Its CI twin (the
       # required public-repo-guard job) only prevents the merge. A script, not a command, for the
-      # reason at the top of this block. Unlike the two above it reads the pushed refs from stdin,
-      # so pushing a branch you are not standing on checks that branch, and a ref the remote already
-      # has is checked from the remote's sha. A new branch with no origin/main to compare against is
-      # refused with the fetch that fixes it, rather than passed as an empty range.
+      # reason at the top of this block. Its ranges come from pushed-ranges.sh, like the two above.
       # The invocation lives in .lefthook/pre-push/public-repo-guard-commits.sh.
       runner: bash
       use_stdin: true

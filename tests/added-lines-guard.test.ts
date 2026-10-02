@@ -15,6 +15,7 @@ import { addedLines, findingsIn } from '../scripts/added-lines-guard.mjs';
 const GUARD = fileURLToPath(new URL('../scripts/added-lines-guard.mjs', import.meta.url));
 const ENTRY = fileURLToPath(new URL('../scripts/public-repo-guard.sh', import.meta.url));
 const HOOK = fileURLToPath(new URL('../.lefthook/pre-push/public-repo-guard-commits.sh', import.meta.url));
+const RANGES = fileURLToPath(new URL('../.lefthook/pre-push/pushed-ranges.sh', import.meta.url));
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
 
 /** An invented id, assembled so this file carries none. */
@@ -264,6 +265,8 @@ describe('the pre-push hook checks what is pushed, not what is checked out', () 
     mkdirSync(join(dir, 'scripts'), { recursive: true });
     copyFileSync(ENTRY, join(dir, 'scripts', 'public-repo-guard.sh'));
     copyFileSync(GUARD, join(dir, 'scripts', 'added-lines-guard.mjs'));
+    mkdirSync(join(dir, '.lefthook', 'pre-push'), { recursive: true });
+    copyFileSync(RANGES, join(dir, '.lefthook', 'pre-push', 'pushed-ranges.sh'));
   }
 
   it('checks a pushed branch the caller is not standing on', () => {
