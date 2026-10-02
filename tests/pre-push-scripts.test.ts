@@ -378,7 +378,9 @@ describe('a ref the remote has at a sha this clone lacks, with no origin/main', 
     c.git('commit', '-q', '-m', 'Add notes');
     c.git('remote', 'set-head', 'origin', '--delete');
     c.git('update-ref', '-d', 'refs/remotes/origin/main');
-    const force = () => spawnSync('git', ['push', '--force', 'origin', 'feat/x'], { cwd: c.work, encoding: 'utf8', env: c.env });
+    // The source is a reflog expression, so field 1 differs from the remote ref: the printed fetch
+    // must name the remote ref (field 3), the only field with a guaranteed form.
+    const force = () => spawnSync('git', ['push', '--force', 'origin', 'HEAD@{0 seconds ago}:refs/heads/feat/x'], { cwd: c.work, encoding: 'utf8', env: c.env });
     const first = force();
     expect(first.status, first.stderr).not.toBe(0);
     expect(first.stderr).toContain('the remote has refs/heads/feat/x at');
