@@ -753,8 +753,11 @@ export class BulkLedger {
     const db = this.engineDb.getDb();
     let triggerId = '';
     const moved = db.transaction((): UndoRefusal | boolean => {
-      // In the same transaction as the arming, so no approve or resume of the other run
-      // slips in between the check and this one's trigger.
+      // In the same transaction as the arming, and an IMMEDIATE one: it takes the write lock
+      // before the check, so an approve or resume of another run of the family in another
+      // process waits for this one and then sees it, instead of checking a state this one is
+      // about to change. (A deferred transaction would let both check, and fail the second at
+      // its write with SQLITE_BUSY_SNAPSHOT instead of a refusal.)
       const blocked = this.writeBlocked(run);
       if (blocked !== null) return blocked;
       const res = db.prepare(
@@ -769,7 +772,7 @@ export class BulkLedger {
       new TriggerStore(this.engineDb).remove(bulkPreviewTriggerId(runId));
       triggerId = this.armTrigger(run, now);
       return true;
-    })();
+    }).immediate();
     if (typeof moved === 'string') return { ok: false, reason: moved };
     if (!moved) return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
@@ -814,7 +817,7 @@ export class BulkLedger {
         .run(runId);
       triggerId = this.armTrigger(run, now);
       return true;
-    })();
+    }).immediate();
     if (typeof moved === 'string') return { ok: false, reason: moved };
     if (!moved) return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
@@ -827,9 +830,11 @@ export class BulkLedger {
    *  - an undo waits while its source may write (`source_running`), any run while another
    *    run of its family may (`undo_open`);
    *  - an undo whose plan misses a target its source has applied since the planning would
-   *    finish, report the source undone, and leave that target written (`undo_stale`); so does
-   *    an undo of a source already undone — another undo took it back, and an undo of that one
-   *    may have written it again since, which the source's own rows do not show.
+   *    finish, report the source undone, and leave that target written (`undo_stale`). An undo
+   *    of a source already undone is refused the same way: there is nothing left for it in the
+   *    source's rows, and taking back what an undo of the later undo wrote again is that undo's
+   *    job. (A source only partly taken back by another undo is not refused: each target is
+   *    still checked against the state the source wrote, so nothing is overwritten unseen.)
    *
    * "May write" means approved or writing and NOT halted. Two states are left out
    * on purpose, and each would look like a gap to a reader who does not know why:
@@ -840,6 +845,10 @@ export class BulkLedger {
    *  - A halted undo holds nothing either, for the same reason: it may never be resumed (an
    *    expired window, a checksum halt), and nothing withdraws it. When it is resumed, this
    *    check runs again.
+   *
+   * A guard whose precondition fails together with the thing it guards against would hold the
+   * family still for good after a crash — a live claim left by a dead loop, say. So it reads
+   * only states a human can move on (approve, resume), never one only a lost process could.
    *
    * What it does not cover: a second loop on the same run. The product runs one loop per run
    * (one trigger, and a lease across engine processes); a second one exists only when two

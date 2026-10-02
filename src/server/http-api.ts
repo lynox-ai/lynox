@@ -6348,7 +6348,7 @@ export class LynoxHTTPApi {
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
-      undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned: it wrote more targets, or another undo took it back. Plan the undo again if anything is left to take back.'],
+      undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo took it back, undo that undo instead.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.

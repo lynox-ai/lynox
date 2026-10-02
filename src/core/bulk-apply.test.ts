@@ -796,6 +796,20 @@ describe('a run and an undo of it never write at the same time', () => {
     expect(state.get('k000')).toBe('w0');
   });
 
+  it('a new undo is not planned while a run two levels down the family may write', async () => {
+    const { runId, writer } = await halfWritten();
+    // U takes back one of the two and halts: the run is stopped, not undone.
+    const u = ledger.planUndo(runId);
+    if (!u.ok) throw new Error(u.reason);
+    expect(ledger.approve(u.status.id, { checksum: ledger.computeChecksum(u.status.id)!, maxTargets: 1 }).ok).toBe(true);
+    expect((await runBulkEffect(u.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('halted');
+    // An undo of U is approved: not a direct undo of the run, but of its family.
+    const redo = ledger.planUndo(u.status.id);
+    if (!redo.ok) throw new Error(redo.reason);
+    expect(approveUndo(redo.status.id).ok).toBe(true);
+    expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'undo_open' });
+  });
+
   it('a local target whose write failed is not part of the undo: nothing reached it', async () => {
     // One failure in a hundred stays under the halt thresholds: 99 applied, 1 failed.
     const { runId, initial } = recordMemoryRun(100);
