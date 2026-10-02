@@ -59,12 +59,10 @@ jobs:
       - name: Run gitleaks
         run: gitleaks detect --source . --verbose --redact
 
+  # `test` is NOT gated on detect: it carries the dependency gate (osv), and
+  # tests/osv-workflow-pin.test.ts forbids any condition on that job. It therefore runs on
+  # docs-only changes too — stricter than the old stub, which reported `test` with an `echo`.
   test:
-    needs: detect
-    # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
-    # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
-    # `needs` would turn a broken `detect` into four green required checks.
-    if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     # Scoped because this job downloads a third-party executable and runs it
     # over the checkout, and because the install action is handed a token: the
@@ -127,7 +125,7 @@ jobs:
     needs: detect
     # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
     # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
-    # `needs` would turn a broken `detect` into four green required checks.
+    # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     steps:
@@ -156,7 +154,7 @@ jobs:
     needs: detect
     # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
     # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
-    # `needs` would turn a broken `detect` into four green required checks.
+    # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -204,7 +202,7 @@ jobs:
     needs: detect
     # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
     # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
-    # `needs` would turn a broken `detect` into four green required checks.
+    # `needs` would turn a broken `detect` into three green required checks.
     if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20

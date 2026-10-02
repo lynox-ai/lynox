@@ -37,7 +37,7 @@ function twinNames(files: Array<[string, Workflow]>): Record<string, string[]> {
 }
 
 const FAIL_CLOSED_IF = "${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}";
-const GATED = ['test', 'docker-scan', 'greenmail', 'smoke'];
+const GATED = ['docker-scan', 'greenmail', 'smoke'];
 
 describe('one run per required check name', () => {
   it('no two pull-request jobs report the same check name — and the sweep sees a twin when there is one', () => {
@@ -62,12 +62,15 @@ describe('one run per required check name', () => {
       expect(jobs[id]?.needs, id).toBe('detect');
       expect(jobs[id]?.if, id).toBe(FAIL_CLOSED_IF);
     }
-    // gitleaks runs on every change, docs-only included; detect has nothing to wait for
-    expect(jobs['gitleaks']?.if).toBeUndefined();
-    expect(jobs['gitleaks']?.needs).toBeUndefined();
+    // gitleaks and test run on every change, docs-only included (test carries the osv gate, which
+    // tests/osv-workflow-pin.test.ts keeps unconditional); detect has nothing to wait for
+    for (const id of ['gitleaks', 'test']) {
+      expect(jobs[id]?.if, id).toBeUndefined();
+      expect(jobs[id]?.needs, id).toBeUndefined();
+    }
     expect(jobs['detect']?.if).toBeUndefined();
     // every other job of ci.yml is named here — a new one has to be placed on purpose
-    expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', ...GATED].sort());
+    expect(Object.keys(jobs).sort()).toEqual(['detect', 'gitleaks', 'test', ...GATED].sort());
   });
 });
 

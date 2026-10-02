@@ -67,7 +67,7 @@ No interactive REPL — CLI is for single-task, watch, manifest, and server mode
 Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by category:
 - `getting-started/`, `daily-use/`, `features/`, `setup/`, `developers/`, `integrations/`, `archive/`
 - Sidebar uses `autogenerate` — add new page = drop `.md` file + set `sidebar.order` frontmatter
-- CI: `docs.yml` builds docs on `docs/**` changes; `ci.yml` ignores `docs/**`
+- CI: `docs.yml` builds docs on `docs/**` changes. `ci.yml` runs on every change: its `detect` job decides once whether a change is docs-only, and then `docker-scan`, `greenmail` and `smoke` are skipped (`gitleaks` and `test` still run — `test` carries the osv dependency gate, which may not be conditional). There is no docs-only stub workflow any more — it reported every required name a second time on mixed PRs.
 
 ## TypeScript Rules
 

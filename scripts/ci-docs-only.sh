@@ -2,8 +2,8 @@
 # ci-docs-only.sh <base> <head> — print `docs-only=true` when EVERY file changed between the two
 # commits lives under docs/, else `docs-only=false`. Used by the `detect` job in ci.yml.
 #
-# The answer decides whether the expensive required jobs (test, docker-scan, greenmail, smoke)
-# run, so every doubt answers `false` — they then run for real:
+# The answer decides whether the expensive required jobs (docker-scan, greenmail, smoke) run,
+# so every doubt answers `false` — they then run for real:
 #   · an empty change list (nothing to prove docs-only),
 #   · a base of all zeros (the first push of a branch; there is no "before"),
 #   · a base or head git cannot resolve.
@@ -31,5 +31,5 @@ if printf '%s\n' "$changed" | grep -qv '^docs/'; then
   echo "verdict: code touched — running every check" >&2
 else
   echo "docs-only=true"
-  echo "verdict: docs-only — test, docker-scan, greenmail and smoke are SKIPPED, their core step does not run; gitleaks still runs" >&2
+  echo "verdict: docs-only — docker-scan, greenmail and smoke are SKIPPED, their core step does not run; gitleaks and test still run" >&2
 fi

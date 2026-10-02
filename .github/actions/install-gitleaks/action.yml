@@ -2,9 +2,10 @@ name: Install gitleaks
 description: >
   Install a pinned, checksummed gitleaks onto PATH.
 
-# ONE COPY, ON PURPOSE. Two jobs install this binary — the `gitleaks` job in ci.yml
-# and its twin in ci-docs-stub.yml, which is kept identical to it. Both used to
-# carry the same inline `curl | tar` with no check on the bytes at all.
+# ONE COPY, ON PURPOSE. The `gitleaks` job in ci.yml installs this binary. (A twin in
+# a docs-only stub workflow used to install it too; that stub is gone, ci.yml now runs
+# on every change.) Both copies used to carry the same inline `curl | tar` with no
+# check on the bytes at all.
 #
 # The hash is written down HERE rather than fetched beside the artefact: the release
 # publishes `gitleaks_<version>_checksums.txt`, but taking the expectation from the
