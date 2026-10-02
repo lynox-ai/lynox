@@ -81,6 +81,7 @@ fabricated line is worse than none.)
 head: <short SHA>
 gates: <which gates ran>
 review: <n> <model> round(s), <result>
+security: <origin>, <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived
 closes: <DEF-… ids this PR settles, or none>
@@ -92,6 +93,21 @@ author was in a hurry, so nobody can tell those apart afterwards — which is ho
 two rows sat at `open` for four days after their fix merged, and how a query for
 "which merged PR closed this row" comes back empty. Writing `none` costs four
 characters and makes the silence a statement.
+
+**`security:` is only due when the diff touches the security path map**, and its
+first half says WHERE the round came from, not what it asked. Three origins,
+and the third is a full answer rather than an admission:
+
+- `security: own round, no findings`
+- `security: leaning on the v1/v2 parity run, no findings` — a round run for
+  another question, which is a different claim and should read as one
+- `security: origin unclear, 1 finding, 1 filed` — **use this when you do not
+  know whether the round was yours.** Writing `own round` instead is the lie
+  the field exists to prevent; one PR on record carried the gate on a parity
+  run whose brief was behavioural equality, and only a question caught it.
+
+A `leaning on …` reference carries no comma: the comma separates origin from
+result. The result half is the same grammar as `review:`.
 
 ## Notes
 
