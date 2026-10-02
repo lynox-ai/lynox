@@ -30,7 +30,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `provider` | `anthropic` (tested), `openai` (Mistral tested; Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini experimental), `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) | `anthropic` |
+| `provider` | `anthropic` (tested), `openai` (Mistral tested; Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini experimental), `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental, not usable in the Docker image; see [Legacy: Google Vertex AI](#legacy-google-vertex-ai-experimental)) | `anthropic` |
 | `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
 | `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-medium-2604`, `llama3.2`) | — |
 
