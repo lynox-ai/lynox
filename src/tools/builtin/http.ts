@@ -1,4 +1,5 @@
 import type { ToolEntry } from '../../types/index.js';
+import { urlScanForms } from '../../core/url-scan-forms.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from '../../core/api-store.js';
@@ -2044,7 +2045,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       urlAuthType = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname)?.auth?.type;
     } catch { /* invalid URL — assertHostPolicy reports it below */ }
     if (urlAuthType !== 'query') {
-      const urlSecretMatch = detectSecretInContent(input.url);
+      const urlSecretMatch = urlScanForms(input.url).map(detectSecretInContent).find((m) => m !== null) ?? null;
       if (urlSecretMatch) {
         blockedVerbatim(egressSecretRefusal('request URL', urlSecretMatch, profileState()));
       }

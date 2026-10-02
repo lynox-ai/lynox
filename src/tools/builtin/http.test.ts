@@ -1137,6 +1137,21 @@ describe('httpRequestTool', () => {
       expect(result).toContain('GitHub token');
     });
 
+    it('blocks a key in the URL in the form the server decodes it to', async () => {
+      mockDnsPublic();
+      const encoded = ANT_KEY.replace(/-/g, '%2D');
+      const result = await visible({ url: `http://example.com/collect?token=${encoded}` }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('Anthropic API key');
+    });
+
+    it('allows a normal URL whose percent-encoding decodes to nothing secret', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const result = await handler({ url: 'http://example.com/search?q=caf%C3%A9%20menu' }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+
     it('allows a normal URL with a long but non-secret path', async () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
