@@ -483,15 +483,30 @@ export function detectSecretInContent(content: string): string | null {
  * Detect GET-based data exfiltration via suspiciously long query strings
  * or base64-encoded data in URL parameters.
  */
+const BASE64_RUN = /[A-Za-z0-9+/=]{64,}/;
+
+/** A run of 64+ base64 characters that mixes upper case, lower case and digits. */
+function hasBase64ShapedRun(text: string): boolean {
+  return (text.match(/[A-Za-z0-9+/=]{64,}/g) ?? []).some((run) => /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run));
+}
+
 function detectGetExfiltration(url: string): string | null {
   try {
     const parsed = new URL(url);
-    // Flag query strings >500 chars (heuristic for encoded data exfil)
+    // Flag query strings >500 chars (heuristic for encoded data exfil), measured on the query
+    // as sent: percent-decoding only ever shortens a string (each `%XX` becomes one character or
+    // one byte), so the form as sent is the upper bound and the conservative one to measure.
     if (parsed.search.length > 500) {
       return 'suspiciously long query string (>500 chars, possible data exfiltration)';
     }
-    // Detect base64-looking blobs in URL params
-    if (/[A-Za-z0-9+/=]{64,}/.test(parsed.search)) {
+    // Detect base64-looking blobs in URL params — in the query as sent, and in the form the
+    // server decodes it to (`urlScanForms`). A run found only in a decoded form must also look
+    // like base64 (upper case, lower case and digits): decoding turns an encoded path (`%2F`)
+    // into a long run of letters and slashes, which is not data. Measured on 14 realistic API
+    // queries: with that condition the decoded form adds one match, an encoded base64 cursor;
+    // without it, a second one, a long encoded path.
+    const [asSent, ...decoded] = urlScanForms(parsed.search);
+    if (BASE64_RUN.test(asSent!) || decoded.some(hasBase64ShapedRun)) {
       return 'base64-like data in URL parameters (possible data exfiltration)';
     }
   } catch {

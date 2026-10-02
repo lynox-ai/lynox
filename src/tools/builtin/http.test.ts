@@ -1196,6 +1196,31 @@ describe('httpRequestTool', () => {
       expect(result).toContain('base64');
     });
 
+    it('blocks GET with a base64 blob whose + / = are percent-encoded (no promptUser)', async () => {
+      mockDnsPublic();
+      // No run of 64 as sent; one of 92 once the server decodes it.
+      const encoded = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef%2Bghijklmnopqrstuvwxyz0123456789%2FABCDEFGHIJKLMNOPQRSTUVWXYZ%3D%3D';
+      const result = await visible({ url: `http://example.com/api?data=${encoded}` }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('base64');
+    });
+
+    it('allows GET with a long encoded path as a parameter: decoded, it is letters and slashes, not data', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const path = '%2Fusers%2Fjohndoe%2Frepositories%2Fmyproject%2Fsettings%2Fwebhooks%2Fdeliveries%2Frecent';
+      const result = await handler({ url: `http://example.com/login?return_to=${path}` }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+
+    it('measures the query length as sent, the longest form (no promptUser)', async () => {
+      mockDnsPublic();
+      // 600 characters as sent, 200 once decoded.
+      const result = await visible({ url: `http://example.com/api?data=${'%41'.repeat(200)}` }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('query string');
+    });
+
     it('allows GET exfil when user approves', async () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
