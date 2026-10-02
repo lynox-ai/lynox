@@ -869,6 +869,14 @@ const MIGRATIONS: string[] = [
    ALTER TABLE triggers ADD COLUMN lease_until TEXT;
    ALTER TABLE triggers ADD COLUMN lease_holder TEXT;
    ALTER TABLE triggers ADD COLUMN lease_since TEXT;`,
+
+  // v17 (bulk run families): a run's undos, and theirs, are found by `source_run_id`, and
+  // every approve or resume walks that family inside its write transaction
+  // (`BulkLedger.openInFamily`). Without an index SQLite builds an automatic one over
+  // `bulk_runs` on every walk — a full scan per call, of a table that only grows. IF NOT
+  // EXISTS: tests that rewind past v16 keep the table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (17);
+   CREATE INDEX IF NOT EXISTS idx_bulk_runs_source ON bulk_runs(source_run_id);`,
 ];
 
 /**

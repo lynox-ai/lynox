@@ -252,6 +252,15 @@ function parseContractPaths(json: string | null): string[] {
   }
 }
 
+/**
+ * A run of the family under root `?1`, other than `?2`, that may write. Exported for the test
+ * that holds the lookup to its index (`idx_bulk_runs_source`, engine.db v17).
+ */
+export const OPEN_IN_FAMILY_SQL =
+  `WITH RECURSIVE fam(id) AS (SELECT ? UNION SELECT r.id FROM bulk_runs r JOIN fam ON r.source_run_id = fam.id)
+   SELECT b.id FROM bulk_runs b JOIN fam ON b.id = fam.id
+   WHERE b.phase IN ('approved','writing') AND b.halt_reason IS NULL AND b.id IS NOT ? LIMIT 1`;
+
 /** Why a run may not start writing because of an undo — see `BulkLedger.writeBlocked`. */
 export type UndoRefusal = 'undo_open' | 'source_running' | 'undo_stale';
 
@@ -883,11 +892,7 @@ export class BulkLedger {
       if (up === null || seen.has(up)) break;
       root = up;
     }
-    const row = this.engineDb.getDb().prepare(
-      `WITH RECURSIVE fam(id) AS (SELECT ? UNION SELECT r.id FROM bulk_runs r JOIN fam ON r.source_run_id = fam.id)
-       SELECT b.id FROM bulk_runs b JOIN fam ON b.id = fam.id
-       WHERE b.phase IN ('approved','writing') AND b.halt_reason IS NULL AND b.id IS NOT ? LIMIT 1`,
-    ).get(root, exceptRunId) as { id: string } | undefined;
+    const row = this.engineDb.getDb().prepare(OPEN_IN_FAMILY_SQL).get(root, exceptRunId) as { id: string } | undefined;
     return row?.id ?? null;
   }
 
