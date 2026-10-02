@@ -107,7 +107,26 @@ export function validateContractAgainstSteps(planned: {
 }
 
 /** The methods the default autonomous posture denies, i.e. the only ones a
- *  contract has any reason to grant. Mirrors `WRITE_METHODS` in `http.ts`. */
+ *  contract has any reason to grant.
+ *
+ *  A deliberate SUBSET of `isWriteMethod` in `http.ts` (which also classifies
+ *  DELETE), not a mirror of it — this comment said "Mirrors `WRITE_METHODS`"
+ *  until that list was replaced by a predicate derived from the `undo` classes.
+ *
+ *  DELETE is left out on purpose, and NOT because of its undo class — POST is
+ *  `none` too and is in this set. PUT/PATCH are the clear half: they overwrite
+ *  state a prior read can image. POST is a JUDGEMENT, not a derivation, and the
+ *  sibling comment on `undoClassFor` carries the condition this one must not drop:
+ *  a POST that created something is compensatable per target, a POST that is an
+ *  RPC (send, charge, trigger) is as irreversible as a DELETE, and only the
+ *  response can tell them apart. Granting it anyway is the price this set pays
+ *  knowingly. DELETE is excluded because putting the state back is not generally
+ *  possible at all — the same hedge the sibling carries, and for the same reason:
+ *  re-creating the resource needs an id the server usually owns.
+ *
+ *  So that the next reader does not undo this as a bug: restoring the wider set
+ *  here could make an irreversible delete standing-granted with no prompt, once
+ *  this producer is wired — see the note below on why nothing calls it today. */
 const MINTABLE_WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 /** Characters `globToRegex` gives meaning to. A pattern containing one no longer

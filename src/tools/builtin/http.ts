@@ -324,7 +324,52 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
 // between conversations, and dedup is naturally bounded to the Session
 // that issued the prompt. See SessionCounters JSDoc on types/agent.ts
 // for the per-Session ownership contract.
-const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+/**
+ * The undo class of a method's effect on the remote, or `null` when it has none.
+ *
+ * ONE source for two questions that used to be two separate literals in this file: the
+ * `undo` class this tool declares, and the method set the consent path plus the
+ * request-body secret scan read. A method that changes remote state has an undo
+ * class; a read has none — so "does this write?" IS "does it have one?".
+ *
+ * What that does and does NOT buy: the two answers are the same BY DERIVATION, so they
+ * cannot be edited apart. Nothing stops a future change from writing a second copy of
+ * the classification and reading that instead, and no test can catch it — an identical
+ * copy is indistinguishable from the original to any assertion. Refusing the copy needs
+ * a guard over the source, and there is none here.
+ *
+ * The set is closed only because `validateToolInput` enforces the schema enum below
+ * (`agent.ts` → `tool-input-validator.ts`), case-sensitively, on the one dispatch path.
+ * For anything outside that enum this returns `null`, which the consent gate reads as
+ * "no consent needed" — so the enum is load-bearing for the gate, not just for the
+ * model's choices.
+ *
+ * PUT/PATCH overwrite a resource that a prior GET can image, so they are `restorable`.
+ * POST is `none`: it is as often an RPC (send, charge, trigger) as a create, and only the
+ * response can tell — a POST that returned a created id is compensatable per TARGET,
+ * which is the bulk ledger's call, not this declaration's. DELETE is `none`: re-creating
+ * a remote resource from its image is not generally possible (the id is the server's).
+ */
+export function undoClassFor(method: string): 'restorable' | 'none' | null {
+  const m = method.toUpperCase();
+  if (m === 'PUT' || m === 'PATCH') return 'restorable';
+  if (m === 'POST' || m === 'DELETE') return 'none';
+  return null;
+}
+
+/**
+ * A method that changes state on the remote — exactly those `undoClassFor` classifies.
+ *
+ * Read by both gates below, so the set they apply and the set this tool declares as
+ * having an undo class are the same set by construction rather than by agreement.
+ *
+ * "Exactly" holds over the schema enum, which is what a caller on the dispatch path can
+ * send. A caller that bypasses that validation and passes an unlisted write verb gets
+ * `false` here, i.e. no gate — the premise, not a property of this function.
+ */
+export function isWriteMethod(method: string): boolean {
+  return undoClassFor(method) !== null;
+}
 
 /**
  * The message for a request that ran out of time. A request that can change something on the
@@ -1823,17 +1868,10 @@ interface HttpRequestInput {
 }
 
 export const httpRequestTool: ToolEntry<HttpRequestInput> = {
-  // PUT/PATCH overwrite a resource that a prior GET can image. POST is `none`: it is as
-  // often an RPC (send, charge, trigger) as a create, and only the response can tell —
-  // a POST that returned a created id is compensatable per TARGET, which is the bulk
-  // ledger's call, not this declaration's. DELETE is `none`: re-creating a remote
-  // resource from its image is not generally possible (the id is the server's).
-  undo: (input) => {
-    const method = (input.method ?? 'GET').toUpperCase();
-    if (method === 'PUT' || method === 'PATCH') return 'restorable';
-    if (method === 'POST' || method === 'DELETE') return 'none';
-    return null;
-  },
+  // The classification itself lives at `undoClassFor`, which the two gates in the handler
+  // read as well — see its docblock for why PUT/PATCH are restorable and POST/DELETE are
+  // not. Declaring it here a second time is what let the two drift.
+  undo: (input) => undoClassFor(input.method ?? 'GET'),
   definition: {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only
@@ -1852,7 +1890,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         url: { type: 'string', description: 'The URL to request' },
         method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'], description: 'HTTP method (default: GET)' },
         headers: { type: 'object', description: 'Request headers as key-value pairs' },
-        body: { type: 'string', description: 'Request body (for POST/PUT/PATCH)' },
+        // This string is in the STATIC PREFIX: it ships on every turn of every session
+        // that holds this tool — a role's `allowTools` or the user's `disabled_tools` can
+        // leave it out — so a sentence here costs fleet-wide tokens. The caveat that
+        // belongs with it and NOT in the prefix: many servers ignore or reject a body on
+        // DELETE, so a DELETE body is sent and scanned but may not be read.
+        body: { type: 'string', description: 'Request body (not for GET/HEAD)' },
         timeout_ms: { type: 'number', description: 'Request timeout in milliseconds (default: 30000, hard cap: 60000). Includes both connection and full body read — a hung response body still trips the timeout. If an API legitimately needs >60s, use webhooks or polling instead.' },
       },
       required: ['url'],
@@ -2044,15 +2087,35 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
-    // Request body secret scanning (POST/PUT/PATCH)
-    if (input.body && WRITE_METHODS.has(method)) {
+    // Request body secret scanning. The question here is "does a body go out?", which is
+    // NOT the consent gate's question ("does this change remote state?"). Over the schema
+    // enum both answers coincide, so this is the right set today, and they are still two
+    // different questions.
+    //
+    // They also differ on case: this predicate folds, the place that actually decides
+    // whether a body is sent (`opts.body`, below) compares the RAW method. So for a
+    // spelling outside the enum they part company — a lowercase read has its body sent
+    // and not scanned, and the GET-exfiltration check above is skipped too. Folding is
+    // not what causes that: an unfolded predicate answers the same for a lowercase read.
+    // What folding changes is the mirror case — a lowercase write IS a write to this
+    // predicate, where a raw comparison sees none. None of it is reachable through the
+    // validated dispatch path, which enforces the enum case-sensitively; that makes the
+    // enum the premise this set rests on, not a property of the predicate.
+    //
+    // A body-carrying READ (an RFC QUERY, say) would be the second divergence and the
+    // quiet one: classified `null` correctly, with the scan off for it. The schema test
+    // in `http.test.ts` forces a DECISION when the enum grows — it pins the read set
+    // exactly — but cannot keep the right decision from having that consequence.
+    if (input.body && isWriteMethod(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
         blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileState()));
       }
     }
 
-    // First-use consent for outbound data requests (POST/PUT/PATCH).
+    // First-use consent for outbound data requests: every method `undoClassFor`
+    // classifies as a write. Named as the rule and not as a list, so that this heading
+    // cannot be the copy that disagrees with the gate under it.
     // Approvals + in-flight dedup live on this Session's counters object so
     // they don't leak between conversations. Concurrent tool_use blocks
     // against the same hostname share one prompt so we don't collide on
@@ -2063,11 +2126,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // same way an interactive "Allow" would (the grant `isDangerous` already
     // enforced before this tool ran). This is what makes a contract-governed
     // headless write actually execute; without it the gate below would block
-    // every unattended POST/PUT/PATCH (no `promptUser` in a background run).
+    // every unattended write (no `promptUser` in a background run).
     const contractGrantsWrite =
       agent.capabilityContract !== undefined &&
       contractGrants('http_request', input, agent.capabilityContract);
-    if (WRITE_METHODS.has(method) && !contractGrantsWrite) {
+    if (isWriteMethod(method) && !contractGrantsWrite) {
       const hostname = new URL(input.url).hostname;
       const approved = agent.sessionCounters.approvedOutboundDomains;
       const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
@@ -2389,8 +2452,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // friendly string. The refusal would arrive as `is_error` with a
       // double-mapped message, i.e. a behaviour change, silently.
       //
-      // No refusal site is inside this try today (all fourteen are above line
-      // 900). This exists because `blockedFriendly`'s doc comment tells the next
+      // No refusal site is inside this try today — all fourteen precede it. (This line
+      // used to say "above line 900"; the count was right and the LINE number had long
+      // since moved, so it names the region instead. The count stays — it is checkable.)
+      // This exists because `blockedFriendly`'s doc comment tells the next
       // person to throw rather than return, and following that rule HERE would
       // otherwise be the trap. A rule that is safe only outside one region of
       // the file needs the region to enforce it, not the reader to remember.
