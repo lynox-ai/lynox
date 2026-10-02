@@ -7,7 +7,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, isWriteMethod, undoClassFor } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -306,6 +306,122 @@ describe('httpRequestTool', () => {
       expect(result).toContain('Hello World');
     });
 
+    /**
+     * The witnesses for binding the consent path and the body scan to ONE predicate.
+     *
+     * `fetch` is stubbed in each one that reaches the handler, so the effect this gate
+     * exists to prevent cannot happen even on a green run: what is asserted is the
+     * PREDICATE (was the gate reached, was the call refused), never the outcome of an
+     * outbound call. The schema test below reaches no handler and so needs no stub — and
+     * must not be read as "the request was prevented", because nothing in it could issue
+     * one. Worth knowing before trusting a green run anywhere in this file: there is no
+     * `unstubAllGlobals` here, so a test that does not stub `fetch` runs on whatever the
+     * previous one left behind.
+     */
+    it('the first write to a host is gated even when it carries no body', async () => {
+      // "first": consent is keyed on the hostname alone (`approvedOutboundDomains`),
+      // not on (host, method) — so an "Allow" for one write covers every later write
+      // to that host for the session. This drives a host that holds no approval yet.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 204, statusText: 'No Content', body: '' }));
+      vi.stubGlobal('fetch', fetchMock);
+      // No `promptUser`: the background shape, where the gate must refuse rather than ask.
+      await expect(handler({ url: 'http://example.com/api/thing/7', method: 'DELETE' }, makeAgent()))
+        .rejects.toThrow(/requires user consent/);
+      // The predicate, and the only assertion that distinguishes a refusal from a failure:
+      // the request never reached the transport.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('the body scan reaches a method with an undo class, before the dialog', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, statusText: 'OK', body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      // An own mock rather than `agentWithPromptFn()`, to assert the ORDER: the scan runs
+      // before the consent dialog. Swapped, a secret body would first raise a prompt a
+      // human can wave through, and the refusal would arrive only after that. Nothing
+      // else in the suite asserts that order, so without this line it is unwitnessed.
+      const promptUser = vi.fn().mockResolvedValue('Allow');
+      await expect(handler(
+        { url: 'http://example.com/api', method: 'DELETE', body: 'key: sk-ant-api03-abc123def456ghi789jkl012mno345' },
+        makeAgent({ promptUser }),
+      )).rejects.toThrow(/Anthropic API key/);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(promptUser).not.toHaveBeenCalled();
+    });
+
+    it('leaves the reading methods ungated — the counter-direction', async () => {
+      // Without this, the two asserts above would also pass for a gate that asks on
+      // EVERY call, which would make the dialog a permanent prompt and the consent
+      // meaningless. Driven with no `promptUser` at all: a read must not need one.
+      for (const method of ['GET', 'HEAD'] as const) {
+        mockDnsPublic();
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, statusText: 'OK', body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        await handler({ url: 'http://example.com/thing', method }, makeAgent());
+        expect(fetchMock, `${method} must not need consent`).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('the predicate folds case, and a lowercase read is not treated as a write', async () => {
+      // Two different things are witnessed here, and keeping them apart is the point.
+      //
+      // (1) The case folding. Apart from these three asserts it is witnessed only by
+      // `undo-declaration.test.ts`, which asserts the DECLARATION, not the gates.
+      expect(isWriteMethod('post')).toBe(true);
+      expect(isWriteMethod('delete')).toBe(true);
+      expect(isWriteMethod('get')).toBe(false);
+      // (2) The handler run below is NOT a second witness for the folding: an unfolded
+      // `undoClassFor` returns `null` for 'get' as well, so that input cannot tell the two
+      // apart. What it does kill is a gate rebuilt as "everything that is not GET or HEAD",
+      // which satisfies every assertion above and then demands consent for a read.
+      //
+      // It asserts that no CONSENT decision was taken, not that the request was sent: if a
+      // later change refuses a spelling outside the schema enum outright, that is a
+      // hardening, and a test that had pinned "it went out" would turn red for it.
+      // The limit of that choice, stated rather than left to be discovered: the `catch`
+      // swallows any refusal, so a mutant that refused BEFORE reaching the gate would
+      // also leave this green. It witnesses "the gate did not ask", not "the gate ran".
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, statusText: 'OK', body: 'ok' })));
+      const promptUser = vi.fn().mockResolvedValue('Allow');
+      let refusal: unknown;
+      try {
+        await handler({ url: 'http://example.com/thing', method: 'get' }, makeAgent({ promptUser }));
+      } catch (err) {
+        refusal = err;
+      }
+      expect(promptUser).not.toHaveBeenCalled();
+      expect(String(refusal ?? '')).not.toMatch(/requires user consent|denied by user/);
+    });
+
+    it('the gated set is exactly the declared undo classes, over the schema the model sees', () => {
+      // The root cause was two lists in one file that disagreed. This asserts them as ONE:
+      // every method the tool OFFERS is classified, and the unclassified remainder is
+      // written out — so a seventh method added to the schema without a decision turns
+      // this red instead of silently counting as a read (the enum holds six today).
+      const schema = httpRequestTool.definition.input_schema as {
+        properties: { method: { enum: string[] } };
+      };
+      const offered = schema.properties.method.enum;
+      const writes = offered.filter(m => isWriteMethod(m));
+      const reads = offered.filter(m => !isWriteMethod(m));
+      expect(writes.sort()).toEqual(['DELETE', 'PATCH', 'POST', 'PUT']);
+      expect(reads.sort()).toEqual(['GET', 'HEAD']);
+      // And the binding, at the one place a second source could reappear: what the tool
+      // DECLARES as its undo class must be this function's answer, for every method
+      // offered. Asserting `isWriteMethod(m) === (undoClassFor(m) !== null)` instead would
+      // restate the definition of `isWriteMethod` — f(m) === f(m), green against any
+      // production mutant, so it is not the assertion to reach for here.
+      const declared = httpRequestTool.undo;
+      if (typeof declared !== 'function') {
+        throw new Error('http_request must declare `undo` as a per-input function');
+      }
+      for (const m of offered) {
+        expect(declared({ url: 'http://example.com', method: m }), m).toBe(undoClassFor(m));
+      }
+    });
+
     it('POST request sends body', async () => {
       mockDnsPublic();
       const mockResp = createMockResponse({
@@ -515,13 +631,16 @@ describe('httpRequestTool', () => {
       }));
     });
 
-    it('DELETE method works', async () => {
+    it('DELETE method works once consent is given', async () => {
+      // Rewritten rather than deleted: it pinned the behaviour this change replaces, and a
+      // deleted pin is a silent change of contract — so it keeps its subject (the call
+      // works end to end) and takes the agent every other write method here already uses.
       mockDnsPublic();
       const mockResp = createMockResponse({ status: 204, statusText: 'No Content', body: '' });
       const fetchMock = vi.fn().mockResolvedValue(mockResp);
       vi.stubGlobal('fetch', fetchMock);
 
-      const result = await handler({ url: 'http://example.com/resource', method: 'DELETE' }, makeAgent());
+      const result = await handler({ url: 'http://example.com/resource', method: 'DELETE' }, agentWithPromptFn());
       expect(result).toContain('HTTP 204 No Content');
       expect(fetchMock).toHaveBeenCalledWith('http://example.com/resource', expect.objectContaining({
         method: 'DELETE',

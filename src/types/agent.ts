@@ -218,9 +218,11 @@ export interface SessionCounters {
    */
   costUSD: number;
   /**
-   * Hostnames the user has approved for outbound writes (POST/PUT/PATCH)
-   * within this Session. Approval does not carry between Sessions — a
-   * new conversation re-prompts.
+   * Hostnames the user has approved for outbound writes within this Session.
+   * Approval does not carry between Sessions — a new conversation re-prompts.
+   *
+   * Which methods count as a write is `isWriteMethod` in `tools/builtin/http.ts`
+   * and is not restated here.
    */
   approvedOutboundDomains: Set<string>;
   /**
