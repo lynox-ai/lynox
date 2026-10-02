@@ -466,7 +466,7 @@ export function render(r) {
     if (lost.length === dropped) {
       lines.push(`  REPORT  ${file}: ${String(dropped)} case(s) gone — passed before, run nowhere now (${String(headRunning)} of ${String(basePassing)} still run):`);
     } else {
-      lines.push(`  REPORT  ${file}: the case count dropped by ${String(dropped)} (${String(basePassing)} passed before, ${String(headRunning)} run now). ${String(lost.length)} name(s) no longer run, so at least ${String(lost.length - dropped)} of them was renamed rather than removed — look at all of them:`);
+      lines.push(`  REPORT  ${file}: the case count dropped by ${String(dropped)} (${String(basePassing)} passed before, ${String(headRunning)} run now). ${String(lost.length)} name(s) no longer run, so at least ${String(lost.length - dropped)} of them ${lost.length - dropped === 1 ? 'was' : 'were'} renamed rather than removed — look at all of them:`);
     }
     for (const n of lost.slice(0, 20)) lines.push(`            · ${n}`);
     if (lost.length > 20) lines.push(`            … and ${String(lost.length - 20)} more`);

@@ -35,6 +35,7 @@ import {
   reasonLine,
   restoreInFlight,
   vitestMeasure,
+  vitestRoster,
 } from '../scripts/deleted-assertion-guard.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -503,7 +504,7 @@ describe('deleted-assertion-guard', () => {
       findings: [{ file: 'src/a.test.ts', lost: ['old one', 'old two', 'deleted'], basePassing: 8, headRunning: 7 }],
     }).lines.join('\n');
     expect(mixed).toContain('count dropped by 1');
-    expect(mixed).toContain('at least 2 of them was renamed rather than removed');
+    expect(mixed).toContain('at least 2 of them were renamed rather than removed');
     expect(mixed).not.toContain('3 case(s) gone');
   });
 
@@ -590,6 +591,15 @@ describe('deleted-assertion-guard', () => {
       expect(out).toContain(wantMarker);
     }
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('vitestRoster THROWS when the runner cannot be asked, instead of answering "no test files"', () => {
+    // ⛔ It used to return `[]`, and the verdict was the same (exit 2) — which is why this survived a
+    // mutation round as "equivalent". It is not: the two paths print DIFFERENT causes, and one of them
+    // is false. "The runner enumerated NO test files" describes a repository with no tests; the truth
+    // was that the runner could not be asked. A message that names the wrong cause sends the next
+    // person to look for a missing glob instead of a broken toolchain.
+    expect(() => vitestRoster({ PATH: '/nonexistent-on-purpose' })()).toThrow(/could not enumerate/);
   });
 
   it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {
