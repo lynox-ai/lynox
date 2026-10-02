@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -772,39 +772,35 @@ describe('gate-record — the `review:` evidence line', () => {
   });
 
   it('REJECTS an UNDER-count — a finding nobody accounted for', () => {
-    const v = evaluate({ body: record({ review: '1 opus round, 5 findings, 1 fixed, 1 filed' }), head: HEAD, files: CODE });
-    expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/sums to 2, not 5/);
-    expect(v.errors.join(' ')).toMatch(/nobody accounted for/);
+    const e = roundResultErrors('5 findings, 1 fixed, 1 filed', 'review: x').join(' ');
+    expect(e).toMatch(/sums to 2, not 5/);
+    expect(e).toMatch(/nobody accounted for/);
   });
 
   it('REJECTS an OVER-count — the same finding counted twice', () => {
     // ⭐ The mutant this exists for: `!== total` weakened to `< total` keeps every other test green,
     // and then `2 findings, 9 fixed, 9 filed` passes. Both directions are errors.
-    const v = evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 3 filed' }), head: HEAD, files: CODE });
-    expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/sums to 6, not 5/);
-    expect(v.errors.join(' ')).toMatch(/counted twice/);
+    const e = roundResultErrors('5 findings, 3 fixed, 3 filed', 'review: x').join(' ');
+    expect(e).toMatch(/sums to 6, not 5/);
+    expect(e).toMatch(/counted twice/);
   });
 
   it('names the two directions differently, so the message says which mistake it is', () => {
-    const under = evaluate({ body: record({ review: '1 opus round, 9 findings, 1 fixed' }), head: HEAD, files: CODE }).errors.join(' ');
-    const over = evaluate({ body: record({ review: '1 opus round, 1 findings, 9 fixed' }), head: HEAD, files: CODE }).errors.join(' ');
+    const under = roundResultErrors('9 findings, 1 fixed', 'review: x').join(' ');
+    const over = roundResultErrors('1 findings, 9 fixed', 'review: x').join(' ');
     expect(under).toMatch(/nobody accounted for/);
     expect(over).toMatch(/counted twice/);
   });
 
   it('rejects `0 findings` and names the one spelling it wants', () => {
-    const v = evaluate({ body: record({ review: '1 opus round, 0 findings' }), head: HEAD, files: CODE });
-    expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/`no findings` rather than `0 findings`/);
+    expect(roundResultErrors('0 findings', 'review: x').join(' ')).toMatch(/`no findings` rather than `0 findings`/);
   });
 
   it('rejects a zero breakdown, which the first cut let through', () => {
     // `all fixed` had an N<1 guard and the breakdown branch did not, so `0 findings, 0 fixed,
     // 0 filed` passed and the "one canonical spelling" was bypassable.
-    expect(evaluate({ body: record({ review: '1 opus round, 0 findings, 0 fixed, 0 filed' }), head: HEAD, files: CODE }).ok).toBe(false);
-    expect(evaluate({ body: record({ review: '1 opus round, 0 findings, all fixed' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(roundResultErrors('0 findings, 0 fixed, 0 filed', 'review: x')).not.toHaveLength(0);
+    expect(roundResultErrors('0 findings, all fixed', 'review: x')).not.toHaveLength(0);
   });
 
   it('rejects zero rounds — a gate with no round is the omission this field exists for', () => {
@@ -875,24 +871,102 @@ describe('gate-record — the `review:` evidence line', () => {
   // assertion, so two anchors asserted in one `it()` means the second is only witnessed when the
   // first already passes: a mutant that removes just the second is then killed by a test that never
   // reached it. Measured — that is how one of these looked covered while it was not.
+  //
+  // ⭐ And they drive `roundResultErrors` DIRECTLY rather than through `evaluate`, because the
+  // grammar now has two callers. A test that reaches it through one of them witnesses that
+  // caller's wiring as much as the grammar, and when the second caller lands, the same assertion
+  // would say nothing about it. The wiring has its own test below — two claims, two witnesses.
+  //
+  // ⚠ The precise claim, because the first version of this comment overstated it: every grammar
+  // case is witnessed directly — rejections AND acceptances. The `evaluate` tests that also carry
+  // grammar shapes stay, because for a POSITIVE case going through the caller is the only way to
+  // witness that the caller does not reject what the grammar accepts.
   it('refuses trailing junk after `no findings`', () => {
-    expect(evaluate({ body: record({ review: '1 opus round, no findings and 3 left open' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(roundResultErrors('no findings and 3 left open', 'review: x')).not.toHaveLength(0);
+    expect(roundResultErrors('no findings', 'review: x')).toHaveLength(0);
   });
 
   it('refuses trailing junk after a breakdown count', () => {
-    expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed extra' }), head: HEAD, files: CODE }).ok).toBe(false);
-    expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed but also more' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(roundResultErrors('2 findings, 2 fixed extra', 'review: x')).not.toHaveLength(0);
+    expect(roundResultErrors('2 findings, 2 fixed but also more', 'review: x')).not.toHaveLength(0);
   });
 
   it('refuses trailing junk after `all fixed`, the third anchor', () => {
     // The one the first pass left unwitnessed: without its `$`, `5 findings, all fixed extra` and
     // `all fixed and 2 left` both pass, and the result trails off into free text again.
-    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed extra' }), head: HEAD, files: CODE }).ok).toBe(false);
-    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed and 2 left' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(roundResultErrors('5 findings, all fixed extra', 'review: x')).not.toHaveLength(0);
+    expect(roundResultErrors('5 findings, all fixed and 2 left', 'review: x')).not.toHaveLength(0);
+  });
+
+  it('cites the field the author wrote in EVERY message, not only one', () => {
+    // `quoted` exists so a second caller's message names ITS field. A grammar that hard-codes
+    // `review:` would mislabel every error the next field produces, and the mislabel is the kind
+    // of defect that survives review because the message still reads plausibly.
+    //
+    // ⚠ THREE messages interpolate it, and the first version of this test witnessed one: deleting
+    // `${quoted}` from either of the other two survived all 129 tests. Found by refuting, and the
+    // lesson is the general one — a test that says "every message" has to drive every message.
+    // ⚠ The inputs avoid the anchors on purpose. `no findings and more` and `2 fixed extra` reach
+    // the right messages, but they reach them THROUGH the end-anchors — so this test would also
+    // kill the anchor mutants, and each of those would then die in two tests. A kill count that
+    // counts a collateral hit overstates the coverage. `something else` and an unknown disposition
+    // trigger the same two messages without touching an anchor.
+    const cases: Array<[string, RegExp]> = [
+      ['something else', /must read/],
+      ['2 findings, 1 ignored, 1 fixed', /is not `<n> fixed/],
+      ['5 findings, 1 fixed', /does not add up/],
+    ];
+    for (const [input, shape] of cases) {
+      const msgs = roundResultErrors(input, 'security: own round, X');
+      expect(msgs.join(' '), input).toMatch(shape);
+      expect(msgs[0], input).toContain('security: own round, X');
+      expect(msgs[0], input).not.toContain('review:');
+    }
+  });
+
+  it('REFUSES to run without `quoted`, because the message would read `undefined`', () => {
+    // The failure mode of a second caller forgetting the argument is a message that looks right
+    // and names no field. So it throws rather than producing one.
+    // @ts-expect-error — the runtime guard is the subject; the type already forbids this.
+    expect(() => roundResultErrors('no findings', undefined)).toThrow(/needs `quoted`/);
+    expect(() => roundResultErrors('no findings', '')).toThrow(/needs `quoted`/);
+  });
+
+  it('ACCEPTS the forms it is meant to — directly, not only through a caller', () => {
+    // ⚠ Refute-round finding: the REJECTION cases drove the grammar directly, the ACCEPTANCE cases
+    // still went through `evaluate`. So the `i`-flag mutants hung on a test that runs through one
+    // caller, and would have said nothing about a second one.
+    for (const r of ['no findings', 'No Findings', '3 findings, all fixed', '3 findings, All Fixed',
+                     '3 findings, 2 fixed, 1 filed', '3 findings, 1 fixed, 1 filed, 1 refuted',
+                     '3 findings, 2 Fixed, 1 Filed'])
+      expect(roundResultErrors(r, 'review: x'), r).toHaveLength(0);
+  });
+
+  it('ACCEPTS the SINGULAR `1 finding`, which no test covered', () => {
+    // Mutant `findings?` → `findings` survived all 129 tests: every case used the plural, so the
+    // optional `s` was unwitnessed and `1 finding, 1 fixed` would have started being refused.
+    expect(roundResultErrors('1 finding, 1 fixed', 'review: x')).toHaveLength(0);
+  });
+
+  it('TOLERATES a trailing comma in the breakdown, deliberately', () => {
+    // `.filter(Boolean)` is what allows it, and removing it survived all 129 tests. A trailing
+    // comma is a typo, not a different claim — refusing it would be a false red, and a false red
+    // is how a guard earns a bypass. So the tolerance is ASSERTED rather than left to a filter
+    // nobody witnesses; whoever tightens it now has to argue with a test.
+    expect(roundResultErrors('2 findings, 2 fixed,', 'review: x')).toHaveLength(0);
+  });
+
+  it('REACHES the grammar from the review field — the wiring, not the grammar', () => {
+    // ⛔ Its own test, and it is not redundant with the three above: delete the
+    // `roundResultErrors(...)` call from the `review:` branch and those three stay green while
+    // every malformed result is ACCEPTED. This one dies instead. Measured.
+    const r = evaluate({ body: record({ review: '1 opus round, 5 findings, 1 fixed' }), head: HEAD, files: CODE });
+    expect(r.ok).toBe(false);
+    expect((r.errors ?? []).join('\n')).toContain('sums to 1, not 5');
   });
 
   it('rejects an unknown disposition', () => {
-    expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 1 fixed, 1 ignored' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(roundResultErrors('2 findings, 1 fixed, 1 ignored', 'review: x')).not.toHaveLength(0);
   });
 
   it('rejects a REPEATED disposition even when the sum happens to work out', () => {
@@ -901,17 +975,18 @@ describe('gate-record — the `review:` evidence line', () => {
     // the earlier and the sum then fails. So that case proved nothing about the check it named.
     // `2 findings, 2 fixed, 2 fixed` is the case that separates them: overwriting leaves a sum of 2,
     // which MATCHES, so only the duplicate check can refuse it.
-    const v = evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed, 2 fixed' }), head: HEAD, files: CODE });
-    expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/repeats a kind/);
+    expect(roundResultErrors('2 findings, 2 fixed, 2 fixed', 'review: x').join(' ')).toMatch(/repeats a kind/);
   });
 
   it('is case-insensitive and tolerates a trailing full stop, like `head:` and `closes:`', () => {
     // A false red here is how a guard earns a bypass — and `head:`/`closes:` are deliberately lax
     // about case for exactly that reason. Being pedantic about `Opus` while accepting `1 x round`
     // would be strict where it does not help and open where it counts.
-    expect(evaluate({ body: record({ review: '1 Opus round, No findings' }), head: HEAD, files: CODE }).ok).toBe(true);
-    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, All Fixed.' }), head: HEAD, files: CODE }).ok).toBe(true);
+    // ⚠ The MODEL slot's case is this test's subject; the RESULT's case belongs to the grammar and
+    // is witnessed directly above. Asserting both here made the `all fixed` `i`-flag mutant die in
+    // two tests, which reads as better coverage than it is.
+    expect(evaluate({ body: record({ review: '1 Opus round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed.' }), head: HEAD, files: CODE }).ok).toBe(true);
     expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 Fixed, 2 Filed' }), head: HEAD, files: CODE }).ok).toBe(true);
   });
 
