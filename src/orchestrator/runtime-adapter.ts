@@ -404,10 +404,28 @@ interface GateMeta {
 /**
  * Wrap a ToolEntry handler with gate approval logic.
  * Zero changes to Agent — tool_gates handled entirely here.
+ *
+ * Spreading `...tool` rather than naming the fields to keep is load-bearing, and the
+ * sibling on the session side (`applyPluginToolGate`) carries the receipt: a
+ * `{definition, handler}` reconstruction there dropped `endsTurn` once, so a terminal
+ * tool never ended its turn, and dropped `detailedGuidance`, so on-use guidance never
+ * fired. This function was the same shape — it kept `definition` and `handler` and
+ * dropped every other field.
+ *
+ * On today's path that drop has no named effect: the only caller in this repo wraps the
+ * output of `convertAgentTools`, which builds `{definition, handler}` and sets none of
+ * ToolEntry's optional fields, so there is nothing here to lose yet. This is a
+ * hardening, and what makes it right without a present symptom is where the field set
+ * is declared — `ToolEntry` in `types/tools.ts`, not at this call site. A reconstruction
+ * here silently decides which fields survive, and that decision has to be re-made
+ * correctly every time a field is added; the spread does not.
+ *
+ * The spread is what covers a field added to ToolEntry LATER; the test only covers the
+ * fields that exist today, and no test can cover a wrapper nobody has written yet.
  */
 export function wrapWithGate(tool: ToolEntry, gateAdapter: GateAdapter, meta: GateMeta): ToolEntry {
   return {
-    definition: tool.definition,
+    ...tool,
     handler: async (input: unknown, agent: IAgent): Promise<string> => {
       const approvalId = await gateAdapter.submit({
         ...meta,
