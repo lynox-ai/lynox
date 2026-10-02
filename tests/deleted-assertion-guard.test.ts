@@ -149,11 +149,19 @@ describe('deleted-assertion-guard', () => {
     );
     const head = commit({ 'tests/smoke/ui.spec.ts': 'it("a", () => {});\n' }, 'drop one');
 
-    // The runner's own list excludes it, so the guard must not pretend to have checked it.
-    const r = check({ base, head, runFile: counting, listFiles: () => [], log: () => {} });
+    // ⚠ The runner must FAIL on it, the way vitest really does on a Playwright spec. A fake that
+    // succeeds let a mutant survive: with the first list check removed, the second one still caught
+    // the file, so the verdict was identical and only the MESSAGE differed. Asserting the exact
+    // reason is what pins the first check — the one that stops a pointless run from happening.
+    const playwrightUnderVitest = (): { ok: boolean; out: string } => ({
+      ok: false,
+      out: " FAIL  tests/smoke/ui.spec.ts\nError: Playwright Test did not expect test() to be called here\n",
+    });
+    const r = check({ base, head, runFile: playwrightUnderVitest, listFiles: () => [], log: () => {} });
     expect(r.status).toBe(0);
     expect(r.findings).toEqual([]);
     expect(r.skipped[0]?.[1]).toContain("runner's own file list");
+    expect(r.skipped[0]?.[1]).not.toContain('collected no cases');
   });
 
   it('uses the MERGE BASE: a file only the base branch changed is not a candidate', () => {
