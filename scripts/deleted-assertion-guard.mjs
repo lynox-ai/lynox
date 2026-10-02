@@ -131,9 +131,26 @@ export function isPureMove(base, head, file, addedSet) {
  *          log?: (s: string) => void}} opts
  */
 export function check({ base, head, runner, log = console.log }) {
+  // ⚠ TRACKED changes only, and the narrowing is a correction found by running this for real.
+  // The first version refused on ANY porcelain output — including untracked files — and an
+  // untracked editor leftover was enough to make the guard exit 2. Exit 2 does not block, so the
+  // guard would simply never run while still reading as coverage on the board: the exact failure
+  // this file's header warns about for the opposite polarity.
+  //   · a modified or staged TRACKED file ⇒ refuse. Two reasons, and the second is the sharper
+  //     one: the file could be a candidate we would overwrite, and any tracked modification means
+  //     the run no longer measures the HEAD source, so a green verdict would be about something
+  //     else.
+  //   · an UNTRACKED file ⇒ name it and proceed. It is not part of HEAD, and it cannot be
+  //     clobbered by a restore that only ever writes back what it read.
   const dirty = tryRun('git', ['status', '--porcelain']);
   if (!dirty.ok) return { status: 2, reason: 'tree-unreadable', findings: [], forced: [], unreadable: [], moves: [] };
-  if (dirty.out.trim().length > 0) return { status: 2, reason: 'tree-dirty', findings: [], forced: [], unreadable: [], moves: [] };
+  const lines = dirty.out.split('\n').filter((l) => l.trim().length > 0);
+  const trackedDirty = lines.filter((l) => !l.startsWith('??'));
+  const untracked = lines.filter((l) => l.startsWith('??')).map((l) => l.slice(3));
+  if (trackedDirty.length > 0) {
+    return { status: 2, reason: 'tree-dirty', findings: [], forced: [], unreadable: [], moves: [], trackedDirty };
+  }
+  for (const u of untracked) log(`  note  untracked, ignored: ${u}`);
 
   let candidates;
   try {

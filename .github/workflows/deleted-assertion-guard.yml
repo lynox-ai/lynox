@@ -1,0 +1,85 @@
+name: deleted-assertion-guard
+
+# ⭐ WHY `pull_request` AND NOT `push`. The guard needs two commits: the base the pull request
+# started from and its head. A push event gives neither reliably — `github.event.before` is the
+# previous commit on the branch, not the merge base, so on a branch with several commits it would
+# compare against the wrong point and report a deletion that an earlier commit of the same branch
+# had already made.
+#
+# ⛔ FAIL DIRECTION — OPEN. The guard exits 2 when it cannot check (a dirty tree, an unreadable
+# diff), and 2 does NOT fail this job. Only a PROVEN unnecessary deletion (exit 1) turns it red.
+# The reason is in the script header: the old test file is run against source it was not written
+# for, so a red run is ambiguous and a green run is proof. A guard that stopped every honest
+# signature change would be switched off within two weeks, and a switched-off guard still reads as
+# coverage on the board.
+
+on:
+  pull_request:
+    paths:
+      - '**/*.test.ts'
+      - '**/*.spec.ts'
+      - '**/*.test.tsx'
+      - '**/*.spec.tsx'
+      - 'scripts/deleted-assertion-guard.mjs'
+      - '.github/workflows/deleted-assertion-guard.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deleted-assertion-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deleted-assertion-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # fetch-depth 0: the guard reads the BASE version of a file with `git show <base>:<path>`,
+      # which a shallow clone does not have.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5.0.1
+        with:
+          fetch-depth: 0
+          # `head.sha`, deliberately — NOT `head.ref`. A ref is a name an author chooses and is
+          # the documented injection surface; a sha is the commit this run was triggered for.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.0.0
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v4.2.0
+
+      - run: pnpm install --frozen-lockfile
+
+      # The guard refuses to run on a dirty tree. `pnpm install` can touch the lockfile on a
+      # mismatch, so the state is asserted here rather than discovered as an exit 2 later.
+      - name: Assert the tree is clean before the guard writes to it
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::the tree is dirty after install; the guard will exit 2 and not block"
+            git status --porcelain | head -20
+          fi
+
+      - name: Run the old test files against the new source
+        # ⛔ The two SHAs go through `env:` and NOT into the command line. They are 40-hex values
+        # that GitHub produces, so interpolating them would in fact be safe — but the safety would
+        # rest on a claim about the field's FORMAT, and a later edit that swaps in `head.ref` or a
+        # title inherits the shape without inheriting the argument. `env:` is safe by structure.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          node scripts/deleted-assertion-guard.mjs "$BASE_SHA" "$HEAD_SHA"
+          CODE=$?
+          # 0 = nothing to report or every deletion was forced · 1 = proven unnecessary · 2 = could
+          # not check. Only 1 is a failure, and the mapping is spelled out here so that a future
+          # edit has to decide deliberately rather than inherit `set -e`.
+          case "$CODE" in
+            0) echo "guard: pass" ;;
+            1) echo "::error::guard: a deleted assertion still holds — see the lines above"; exit 1 ;;
+            2) echo "::warning::guard: could not check (exit 2) — deliberately NOT blocking"; exit 0 ;;
+            *) echo "::warning::guard: unexpected exit $CODE — not blocking"; exit 0 ;;
+          esac

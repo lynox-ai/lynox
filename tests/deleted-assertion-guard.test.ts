@@ -112,6 +112,19 @@ describe('deleted-assertion-guard', () => {
     expect(r.reason).toBe('no-candidates');
   });
 
+  it('resolves a rename even when the repo DISABLES rename detection — `-M` is load-bearing', () => {
+    // ⚠ This case exists because a mutant survived without it. Dropping the explicit `-M` changed
+    // nothing, since git's own `diff.renames` defaults to true — so the previous rename case could
+    // not tell whether the protection came from this script or from a default anybody can switch
+    // off. Here the repo switches it off, which makes `-M` the only thing left doing the work.
+    sh(['config', 'diff.renames', 'false']);
+    const body = 'it("holds", () => {});\nit("also holds", () => {});\n';
+    const base = commit({ 'src/a.ts': 'export const f = () => 1;\n', 'src/old.test.ts': body }, 'base');
+    const head = commit({ 'src/old.test.ts': null, 'src/new.test.ts': body }, 'move the test file');
+
+    expect(candidateFiles(base, head)).toEqual([]);
+  });
+
   it('treats lines MOVED to another file as a move — the shape that cost 101 false findings', () => {
     const moved = 'it("rejects a negative", () => {});\n';
     const base = commit(
@@ -148,17 +161,37 @@ describe('deleted-assertion-guard', () => {
     expect(r.findings).toEqual(['src/a.test.ts']);
   });
 
-  it('refuses on a dirty tree rather than touching uncommitted work, and does not block', () => {
+  it('refuses on a TRACKED modification rather than touching uncommitted work, and does not block', () => {
     const base = commit(
       { 'src/a.ts': 'export const f = () => 1;\n', 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' },
       'base',
     );
     const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
-    writeFileSync(join(repo, 'src', 'uncommitted.ts'), 'export const x = 1;\n', 'utf-8');
+    // ⚠ A TRACKED file, deliberately. An untracked one is ignored by design (see the case below),
+    // so probing with an untracked file would assert the rule this guard no longer has — which is
+    // exactly what the first version of this test did.
+    writeFileSync(join(repo, 'src', 'a.ts'), 'export const f = () => 99;\n', 'utf-8');
 
     const r = check({ base, head, runner: greenRunner, log: () => {} });
     expect(r.status).toBe(2);
     expect(r.reason).toBe('tree-dirty');
+    expect(r.trackedDirty?.join('\n')).toContain('src/a.ts');
+  });
+
+  it('an UNTRACKED file does not stop it — refusing on one made the guard never run', () => {
+    // ⚠ Found by running the real path, not by reading the code: the first version refused on any
+    // porcelain output, so an untracked leftover produced exit 2. Exit 2 does not block, so the
+    // guard would have been permanently silent while still counting as coverage.
+    const base = commit(
+      { 'src/a.ts': 'export const f = () => 1;\n', 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
+    writeFileSync(join(repo, 'untracked-leftover.log'), 'noise\n', 'utf-8');
+
+    const r = check({ base, head, runner: greenRunner, log: () => {} });
+    expect(r.status).toBe(1);
+    expect(r.findings).toEqual(['src/a.test.ts']);
   });
 
   it('restores the tree afterwards — the file it wrote to run is put back byte-identically', () => {
