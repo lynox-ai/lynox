@@ -363,6 +363,56 @@ describe('httpRequestTool', () => {
       }
     });
 
+    it('a verb the classifier does not know is a write, and carries an undo class', async () => {
+      // The direction of the fallthrough, which is the whole change. Only the two methods
+      // this tool reads get `null`; a verb the classifier does not know gets `none`.
+      //
+      // Why `none` and not `null`, decided rather than inherited: by the contract in
+      // `types/tools.ts` BOTH are wrong for an unknown verb — `none` says "it ran and
+      // cannot be reversed", which overclaims, and `null` says "no effect", which
+      // underclaims AND opens the gate. There is no value for "unknown". The overclaim is
+      // unobservable — nothing in `src` reads the declaration, and over the schema enum
+      // this changes nothing — while the open gate is not. The wrong value that is safe
+      // wins, and that is the whole justification.
+      expect(undoClassFor('MOVE')).toBe('none');
+      expect(isWriteMethod('MOVE')).toBe(true);
+      // The counter-direction, so this is not satisfied by "everything is a write":
+      expect(undoClassFor('HEAD')).toBeNull();
+      expect(isWriteMethod('HEAD')).toBe(false);
+      // And the declaration site reads the same answer, since both derive from one function.
+      const declared = httpRequestTool.undo;
+      if (typeof declared !== 'function') {
+        throw new Error('http_request must declare `undo` as a per-input function');
+      }
+      expect(declared({ url: 'http://example.com', method: 'MOVE' })).toBe('none');
+
+      // The gate, at the level where it is reachable: a direct handler call. Through the
+      // validated dispatch an unlisted verb never arrives — the enum is enforced there, and
+      // that premise is exactly what this change stops relying on. So the witness drives the
+      // handler directly, with no `promptUser`, and asserts the REFUSAL rather than an
+      // outcome. `fetch` is stubbed, so the request this gate exists to stop cannot happen
+      // even if the gate were removed.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, statusText: 'OK', body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(handler({ url: 'http://example.com/thing', method: 'MOVE' }, makeAgent()))
+        .rejects.toThrow(/requires user consent/);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // The SECOND observable effect of the flip, and it had no witness: the body secret
+      // scan reads the same predicate, so it now covers an unknown verb too. A copy of the
+      // old write-list in that gate passes every other test in this file — measured, it
+      // survived the whole suite — so this is the only line that holds it. The refusal text
+      // is what distinguishes the two: the scan runs BEFORE the consent gate, so with the
+      // predicate the secret is caught; with a stale copy the scan is skipped and the
+      // consent gate answers instead, with a different message.
+      await expect(handler(
+        { url: 'http://example.com/thing', method: 'MOVE', body: 'key: sk-ant-api03-abc123def456ghi789jkl012mno345' },
+        makeAgent(),
+      )).rejects.toThrow(/Anthropic API key/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('the predicate folds case, and a lowercase read is not treated as a write', async () => {
       // Two different things are witnessed here, and keeping them apart is the point.
       //
@@ -371,10 +421,14 @@ describe('httpRequestTool', () => {
       expect(isWriteMethod('post')).toBe(true);
       expect(isWriteMethod('delete')).toBe(true);
       expect(isWriteMethod('get')).toBe(false);
-      // (2) The handler run below is NOT a second witness for the folding: an unfolded
-      // `undoClassFor` returns `null` for 'get' as well, so that input cannot tell the two
-      // apart. What it does kill is a gate rebuilt as "everything that is not GET or HEAD",
-      // which satisfies every assertion above and then demands consent for a read.
+      // (2) The handler run below is NOT a witness for the folding, and the reason is the
+      // abort semantics rather than the input: an unfolded classifier makes the third
+      // assert above fail, so the run never executes. Measured — the unfolded mutant dies
+      // on that assert, not here. A later assertion shadowed by an earlier one in the same
+      // `it()` is not an independent witness for anything the earlier one catches.
+      //
+      // What it does kill is a gate rebuilt as "everything that is not GET or HEAD", which
+      // satisfies every assertion above and then demands consent for a read.
       //
       // It asserts that no CONSENT decision was taken, not that the request was sent: if a
       // later change refuses a spelling outside the schema enum outright, that is a
@@ -397,17 +451,33 @@ describe('httpRequestTool', () => {
 
     it('the gated set is exactly the declared undo classes, over the schema the model sees', () => {
       // The root cause was two lists in one file that disagreed. This asserts them as ONE:
-      // every method the tool OFFERS is classified, and the unclassified remainder is
-      // written out — so a seventh method added to the schema without a decision turns
-      // this red instead of silently counting as a read (the enum holds six today).
+      // every method the tool OFFERS is classified, and both halves are written out, so a
+      // seventh added to the schema turns this red (the enum holds six today).
+      //
+      // Which half goes red is worth knowing: since the reads are the enumerated set, an
+      // undecided addition is classified `none`, lands in `writes`, and is GATED. That is
+      // the safe direction, so this test does not protect the request — it forces the
+      // DECISION to be made deliberately rather than by default.
       const schema = httpRequestTool.definition.input_schema as {
         properties: { method: { enum: string[] } };
       };
       const offered = schema.properties.method.enum;
       const writes = offered.filter(m => isWriteMethod(m));
       const reads = offered.filter(m => !isWriteMethod(m));
-      expect(writes.sort()).toEqual(['DELETE', 'PATCH', 'POST', 'PUT']);
-      expect(reads.sort()).toEqual(['GET', 'HEAD']);
+      // The message carries the instruction, not just the diagnosis: a red test whose
+      // obvious repair is "update the expected list" teaches that the list is the point.
+      const decide =
+        'A method was added to the schema enum. DECIDE whether this tool reads it and it '
+        + 'provably has no effect. If so: add it to the reads in `undoClassFor` and to '
+        + '`reads` here. If it might have an effect, or you are unsure: change NOTHING in '
+        + '`undoClassFor` — it is already classified `none`, so it is gated and asks for '
+        + 'consent, which is the intended direction — and add it to `writes` here. Do not '
+        + 'widen the reads to make this pass: that list is what this tool reads, not what '
+        + 'cannot have an effect. And note the consequence of the read branch, which is '
+        + 'easy to miss: a method classified as a read gets NO request-body secret scan, '
+        + 'so a read that can carry a body needs that scan widened separately.';
+      expect(writes.sort(), decide).toEqual(['DELETE', 'PATCH', 'POST', 'PUT']);
+      expect(reads.sort(), decide).toEqual(['GET', 'HEAD']);
       // And the binding, at the one place a second source could reappear: what the tool
       // DECLARES as its undo class must be this function's answer, for every method
       // offered. Asserting `isWriteMethod(m) === (undoClassFor(m) !== null)` instead would

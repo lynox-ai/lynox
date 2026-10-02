@@ -326,24 +326,20 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
 // that issued the prompt. See SessionCounters JSDoc on types/agent.ts
 // for the per-Session ownership contract.
 /**
- * The undo class of a method's effect on the remote, or `null` when it has none.
+ * The undo class of a method's effect on the remote; `null` for the two methods this
+ * tool treats as reads.
  *
  * ONE source for two questions that used to be two separate literals in this file: the
  * `undo` class this tool declares, and the method set the consent path plus the
- * request-body secret scan read. A method that changes remote state has an undo
- * class; a read has none — so "does this write?" IS "does it have one?".
+ * request-body secret scan read.
  *
  * What that does and does NOT buy: the two answers are the same BY DERIVATION, so they
  * cannot be edited apart. Nothing stops a future change from writing a second copy of
- * the classification and reading that instead, and no test can catch it — an identical
- * copy is indistinguishable from the original to any assertion. Refusing the copy needs
- * a guard over the source, and there is none here.
- *
- * The set is closed only because `validateToolInput` enforces the schema enum below
- * (`agent.ts` → `tool-input-validator.ts`), case-sensitively, on the one dispatch path.
- * For anything outside that enum this returns `null`, which the consent gate reads as
- * "no consent needed" — so the enum is load-bearing for the gate, not just for the
- * model's choices.
+ * the classification and reading that instead. A copy that re-enumerates the WRITES is
+ * caught — it disagrees on every verb outside the enum, and the unknown-verb witness in
+ * `http.test.ts` asserts that disagreement at all three sites that read it. A
+ * byte-identical copy is not catchable by any test; refusing that one needs a guard over
+ * the source, and there is none here.
  *
  * PUT/PATCH overwrite a resource that a prior GET can image, so they are `restorable`.
  * POST is `none`: it is as often an RPC (send, charge, trigger) as a create, and only the
@@ -353,20 +349,36 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
  */
 export function undoClassFor(method: string): 'restorable' | 'none' | null {
   const m = method.toUpperCase();
+  // The READS are enumerated, not the writes. Two methods get `null`; everything else gets
+  // at least `none` — it may have done something, and putting it back is not ours to
+  // promise. (`types/tools.ts` defines the per-input `null` as "an input with no effect".)
+  //
+  // Enumerating the writes instead left `null` carrying two claims, "a read" and "a verb I
+  // do not know", and handed the second one the first one's answer. Since the gate below
+  // reads "has an undo class", an unknown verb was then not a write and needed no consent.
+  //
+  // Why THESE two, and not the four the HTTP spec calls safe: these are the two the schema
+  // offers as reads. A verb that is not offered needs no classification here, and the
+  // conservative answer for it is the gated one. So this list is "what this tool reads",
+  // NOT "what cannot have an effect" — it does not claim to be complete, and adding a
+  // method to the enum is a decision the schema test asks for by name.
+  if (m === 'GET' || m === 'HEAD') return null;
   if (m === 'PUT' || m === 'PATCH') return 'restorable';
-  if (m === 'POST' || m === 'DELETE') return 'none';
-  return null;
+  return 'none';
 }
 
 /**
- * A method that changes state on the remote — exactly those `undoClassFor` classifies.
+ * A method this tool must not send without consent: everything `undoClassFor` gives an
+ * undo class, which after the polarity above means everything except the two reads.
  *
  * Read by both gates below, so the set they apply and the set this tool declares as
  * having an undo class are the same set by construction rather than by agreement.
  *
- * "Exactly" holds over the schema enum, which is what a caller on the dispatch path can
- * send. A caller that bypasses that validation and passes an unlisted write verb gets
- * `false` here, i.e. no gate — the premise, not a property of this function.
+ * Deliberately WIDER than "changes state on the remote", and the difference is the point:
+ * for a verb the classifier does not know, we do not know that it changes anything — only
+ * that we cannot rule it out. The name `isWriteMethod` IS that stronger claim and is kept
+ * for continuity; read it as "not known to be a read", and resist narrowing it back to the
+ * verbs we are sure about, because the write set is the open one.
  */
 export function isWriteMethod(method: string): boolean {
   return undoClassFor(method) !== null;
@@ -2110,19 +2122,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // different questions.
     //
     // They also differ on case: this predicate folds, the place that actually decides
-    // whether a body is sent (`opts.body`, below) compares the RAW method. So for a
-    // spelling outside the enum they part company — a lowercase read has its body sent
-    // and not scanned, and the GET-exfiltration check above is skipped too. Folding is
-    // not what causes that: an unfolded predicate answers the same for a lowercase read.
-    // What folding changes is the mirror case — a lowercase write IS a write to this
-    // predicate, where a raw comparison sees none. None of it is reachable through the
-    // validated dispatch path, which enforces the enum case-sensitively; that makes the
-    // enum the premise this set rests on, not a property of the predicate.
+    // whether a body is sent (`opts.body`, below) compares the RAW method. So a lowercase
+    // read has its body sent and not scanned, and the GET-exfiltration check above is
+    // skipped too — none of it reachable through the validated dispatch, which enforces
+    // the enum case-sensitively.
     //
-    // A body-carrying READ (an RFC QUERY, say) would be the second divergence and the
-    // quiet one: classified `null` correctly, with the scan off for it. The schema test
-    // in `http.test.ts` forces a DECISION when the enum grows — it pins the read set
-    // exactly — but cannot keep the right decision from having that consequence.
+    // Worth stating because it is the opposite of what one would guess: the folding is what
+    // CREATES the unscanned body. (The skipped exfiltration check is not its doing — that
+    // comparison is raw on both sides of this change.) Unfolded, `'get'` is not a read, so
+    // classified `none` and scanned. Folding stays because the declaration needs it — a
+    // lowercase write must classify, and `undo-declaration.test.ts` pins that — so the cost
+    // lands on one unreachable spelling and is paid knowingly.
     if (input.body && isWriteMethod(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {

@@ -106,12 +106,12 @@ export function validateContractAgainstSteps(planned: {
   return null;
 }
 
-/** The methods the default autonomous posture denies, i.e. the only ones a
- *  contract has any reason to grant.
+/** The write methods a contract has any reason to grant. NOT an equality with
+ *  what the autonomous posture denies — that is every method but GET and HEAD.
  *
- *  A deliberate SUBSET of `isWriteMethod` in `http.ts` (which also classifies
- *  DELETE), not a mirror of it — this comment said "Mirrors `WRITE_METHODS`"
- *  until that list was replaced by a predicate derived from the `undo` classes.
+ *  A deliberate SUBSET of `isWriteMethod` in `http.ts`, not a mirror of it — this
+ *  comment said "Mirrors `WRITE_METHODS`" until that list was replaced by a predicate
+ *  derived from the `undo` classes.
  *
  *  DELETE is left out on purpose, and NOT because of its undo class — POST is
  *  `none` too and is in this set. PUT/PATCH are the clear half: they overwrite

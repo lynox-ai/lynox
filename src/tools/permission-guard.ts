@@ -875,7 +875,13 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     }
     // Block write methods in autonomous mode — can send emails, create invoices, modify records.
     // No [BLOCKED] marker so operators can pre-approve specific endpoints.
-    if (['POST', 'PUT', 'PATCH'].includes(method) && autonomy === 'autonomous') {
+    //
+    // The READS are enumerated here, not the writes, for the reason `undoClassFor` in
+    // `tools/builtin/http.ts` spells out: a list of writes leaves a verb nobody listed
+    // unwarned, and this branch was the last place that still needed the schema enum to
+    // make that unreachable. DELETE never arrives here in autonomous mode — the branch
+    // above returns for it.
+    if (!['GET', 'HEAD'].includes(method) && autonomy === 'autonomous') {
       return `⚠ ${toolName}: HTTP ${method} — write operation (pre-approve to allow)`;
     }
   }
