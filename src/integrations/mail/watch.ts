@@ -10,10 +10,12 @@
 // Lifecycle: instantiate once, attach() each configured account, call
 // stopAll() on engine shutdown. Each attach() returns an unsubscribe handle.
 
-import type {
-  MailEnvelope,
-  MailProvider,
-  MailWatchHandle,
+import {
+  MailError,
+  type MailEnvelope,
+  type MailErrorCode,
+  type MailProvider,
+  type MailWatchHandle,
 } from './provider.js';
 import { prefilter } from './triage/rules.js';
 import type { MailStateDb } from './state.js';
@@ -54,6 +56,18 @@ export class MailWatcher {
   private readonly state: MailStateDb;
   private readonly handler: MailWatcherHandler;
   private readonly attachments = new Map<string, Attachment>();
+  /**
+   * The last background polling error per account, so the account settings can
+   * say why a mailbox went quiet. Without it a poll failure reached nobody: the
+   * user saw an empty inbox and no reason.
+   *
+   * Set on a CHANGE of error code, cleared by the next successful poll. A
+   * different error after the first one IS a change, so a first failure never
+   * hides a later one. Flapping (error, success, error, …) flips the field each
+   * time; that is fine for a status field, but anyone wiring this to an event
+   * channel must not assume it is throttled in that case.
+   */
+  private readonly lastErrors = new Map<string, { code: MailErrorCode; at: string }>();
   private followupTimer: ReturnType<typeof setInterval> | null = null;
   /** Optional callback invoked each time the followup-check fires. */
   private followupCheckCallback: (() => Promise<void>) | null = null;
@@ -91,6 +105,11 @@ export class MailWatcher {
     return this.attachments.size;
   }
 
+  /** The last background polling error for this account, or null while polling works. */
+  lastError(accountId: string): { code: MailErrorCode; at: string } | null {
+    return this.lastErrors.get(accountId) ?? null;
+  }
+
   /** True if a provider with this accountId is currently attached. */
   has(accountId: string): boolean {
     return this.attachments.has(accountId);
@@ -120,10 +139,15 @@ export class MailWatcher {
       },
       async (event) => {
         if (event.type === 'error') {
-          // Phase 0: swallow watcher errors silently. Phase 1 will route
-          // them through the engine's observability channel.
+          const code: MailErrorCode = event.error instanceof MailError ? event.error.code : 'unknown';
+          if (this.lastErrors.get(accountId)?.code !== code) {
+            this.lastErrors.set(accountId, { code, at: new Date().toISOString() });
+          }
           return;
         }
+        // A successful poll, with or without new mail, ends any error state.
+        this.lastErrors.delete(accountId);
+        if (event.type === 'ok') return;
 
         // 1. Dedup against the SQLite state DB
         const { fresh } = this.state.partition(accountId, event.envelopes);
@@ -187,6 +211,7 @@ export class MailWatcher {
     const attached = this.attachments.get(accountId);
     if (!attached) return;
     this.attachments.delete(accountId);
+    this.lastErrors.delete(accountId);
     await attached.handle.stop();
   }
 

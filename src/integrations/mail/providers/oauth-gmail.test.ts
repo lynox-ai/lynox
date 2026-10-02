@@ -1012,6 +1012,22 @@ describe('OAuthGmailProvider — watch', () => {
     expect(lag).toBeLessThanOrEqual(63);
   });
 
+  it('reports an empty successful poll as ok, so an error state can clear without new mail', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) return Promise.resolve(respondJson({ messages: [] }));
+      return Promise.resolve(respondJson({}));
+    });
+    const types: string[] = [];
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const handle = await provider.watch({ intervalMs: 50 }, async (ev) => { types.push(ev.type); });
+    await new Promise((r) => setTimeout(r, 100));
+    await handle.stop();
+    await provider.close();
+    expect(types.length, 'at least one tick ran').toBeGreaterThan(0);
+    expect(new Set(types)).toEqual(new Set(['ok']));
+  });
+
   it('deduplicates the same Gmail message across two overlapping ticks', async () => {
     fetchMock.mockImplementation((url: string) => {
       const s = String(url);
