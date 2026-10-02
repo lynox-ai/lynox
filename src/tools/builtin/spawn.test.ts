@@ -3748,4 +3748,99 @@ describe('spawn_agent tool', () => {
       expect(meta.stepId).toBe('load');
     });
   });
+
+  // The child runs its inherited task and memory tools against the same stores as its parent.
+  // Each pair below drives the real tool handler with the context spawn built for the child:
+  // the parent's own scopes still reach (the normal case), another scope does not.
+  describe('inherited session context', () => {
+    let dir: string;
+    let history: import('../../core/run-history.js').RunHistory;
+    let engineDb: import('../../core/engine-db.js').EngineDb;
+    let tm: import('../../core/task-manager.js').TaskManager;
+
+    beforeEach(async () => {
+      const { mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const { RunHistory } = await import('../../core/run-history.js');
+      const { EngineDb } = await import('../../core/engine-db.js');
+      const { TaskManager } = await import('../../core/task-manager.js');
+      dir = mkdtempSync(join(tmpdir(), 'lynox-spawn-context-'));
+      history = new RunHistory(join(dir, 'history.db'));
+      engineDb = new EngineDb(join(dir, 'engine.db'));
+      history.setVerbGraph(engineDb);
+      tm = new TaskManager(history);
+    });
+
+    afterEach(async () => {
+      const { rmSync } = await import('node:fs');
+      try { engineDb.close(); } catch { /* already closed */ }
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    const A = { type: 'context', id: 'ctx-a' } as const;
+    const B = { type: 'context', id: 'ctx-b' } as const;
+    const GLOBAL = { type: 'global', id: 'global' } as const;
+
+    /** Memory that answers for every scope it is asked about, so a refusal can only come from the tool. */
+    const memoryForEveryScope = {
+      loadScoped: async (ns: string, scope: { type: string; id: string }) => ns === 'knowledge' ? `note in ${scope.type}:${scope.id}` : null,
+    } as unknown as NonNullable<IAgent['memory']>;
+
+    /** Spawns one child from a parent with `scopes` and returns a caller for the child's own tools. */
+    async function spawnChild(scopes: IAgent['activeScopes']): Promise<(tool: string, input: Record<string, unknown>) => Promise<string>> {
+      const { taskUpdateTool } = await import('./task.js');
+      const { memoryListTool } = await import('./memory.js');
+      const { createToolContext } = await import('../../core/tool-context.js');
+      const ctx = createToolContext({});
+      ctx.taskManager = tm;
+      const parentTools = [taskUpdateTool, memoryListTool] as unknown as ToolEntry[];
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'child', task: 'Tidy up' }] },
+        makeAgent({ tools: parentTools, getAvailableTools: () => parentTools, activeScopes: scopes, memory: memoryForEveryScope, toolContext: ctx }),
+      );
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as {
+        tools: ToolEntry[]; activeScopes: IAgent['activeScopes']; memory: IAgent['memory']; toolContext: IAgent['toolContext'];
+      };
+      const child = makeAgent({ name: 'child', tools: cfg.tools, activeScopes: cfg.activeScopes, memory: cfg.memory, toolContext: cfg.toolContext });
+      return async (name, input) => {
+        const entry = cfg.tools.find((t) => t.definition.name === name);
+        if (!entry) throw new Error(`child did not inherit ${name}`);
+        return (entry.handler as (i: unknown, a: IAgent) => Promise<string>)(input, child);
+      };
+    }
+
+    it('a child reaches a task in its parent\'s scope', async () => {
+      const task = tm.create({ title: 'In A', scopeType: A.type, scopeId: A.id });
+      const call = await spawnChild([GLOBAL, A]);
+      expect(await call('task_update', { task_id: task.id, status: 'in_progress' })).toContain('Task updated');
+    });
+
+    it('a child does not reach a task in a scope its parent does not have', async () => {
+      const task = tm.create({ title: 'In B', scopeType: B.type, scopeId: B.id });
+      const call = await spawnChild([GLOBAL, A]);
+      expect(await call('task_update', { task_id: task.id, status: 'in_progress' })).toContain('not found');
+      expect(tm.getTask(task.id)?.status, 'the task in B stays as it was').toBe('open');
+    });
+
+    it('a child of a session with only the global scope still reaches global tasks', async () => {
+      const task = tm.create({ title: 'Global', scopeType: GLOBAL.type, scopeId: GLOBAL.id });
+      const call = await spawnChild([GLOBAL]);
+      expect(await call('task_update', { task_id: task.id, status: 'in_progress' })).toContain('Task updated');
+    });
+
+    it('a child lists memory in its parent\'s scope', async () => {
+      const call = await spawnChild([GLOBAL, A]);
+      expect(await call('memory_list', { scope: 'context:ctx-a' })).toContain('note in context:ctx-a');
+    });
+
+    it('a child is refused memory in a scope its parent does not have', async () => {
+      const call = await spawnChild([GLOBAL, A]);
+      const result = await call('memory_list', { scope: 'context:ctx-b' });
+      expect(result).toContain('unauthorized scope');
+      expect(result).not.toContain('note in context:ctx-b');
+    });
+  });
 });
