@@ -7,7 +7,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -1735,6 +1735,60 @@ describe('httpRequestTool', () => {
       }
       expect(err).toBeDefined();
       expect(Date.now() - started).toBeLessThan(3000);
+    }, 5000);
+  });
+
+  // A request that changes something may have landed before its time ran out. "Timed out"
+  // alone reads as "did not happen", and the model sends it again — a second order, a second
+  // mail, wherever the receiver cannot tell a repeat from a new request.
+  describe('a timed-out request that changes something says it may have landed', () => {
+    const MAY_HAVE_LANDED = /may still have reached the server and taken effect/;
+
+    it('the message: every method but GET and HEAD carries the warning, in any case', () => {
+      for (const m of ['POST', 'PUT', 'PATCH', 'DELETE', 'post']) {
+        expect(httpTimeoutMessage(30_000, m, false)).toMatch(MAY_HAVE_LANDED);
+      }
+      expect(httpTimeoutMessage(30_000, 'patch', true)).toBe(
+        'HTTP request timed out after 30000ms (wall clock). The PATCH may still have reached the server and taken effect — check the result there before sending it again.',
+      );
+      expect(httpTimeoutMessage(30_000, 'GET', false)).toBe('HTTP request timed out after 30000ms');
+      expect(httpTimeoutMessage(30_000, 'head', true)).toBe('HTTP request timed out after 30000ms (wall clock)');
+    });
+
+    /** A fetch that never answers but gives up when aborted, as the real one does. */
+    const abortableHang = () => vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => new Promise<never>((_resolve, reject) => {
+      opts?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }));
+
+    async function timeoutOf(method: 'GET' | 'POST', fetchImpl: ReturnType<typeof vi.fn>): Promise<string> {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', fetchImpl);
+      const input = method === 'GET'
+        ? { url: 'https://hung.example.com/x', timeout_ms: 50 }
+        : { url: 'https://hung.example.com/x', method, body: '{}', timeout_ms: 50 };
+      try {
+        await handler(input, agentWithPromptFn());
+      } catch (e) {
+        return (e as Error).message;
+      }
+      throw new Error('expected a timeout');
+    }
+
+    it('a POST that is aborted at its timeout says so', async () => {
+      const msg = await timeoutOf('POST', abortableHang());
+      expect(msg).toMatch(/^HTTP request timed out after 50ms\./);
+      expect(msg).toMatch(MAY_HAVE_LANDED);
+    }, 5000);
+
+    it('a POST that outlives its abort (the wall clock) says so too', async () => {
+      const msg = await timeoutOf('POST', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));
+      expect(msg).toMatch(/\(wall clock\)/);
+      expect(msg).toMatch(MAY_HAVE_LANDED);
+    }, 5000);
+
+    it('a GET that times out does not', async () => {
+      const msg = await timeoutOf('GET', abortableHang());
+      expect(msg).toBe('HTTP request timed out after 50ms');
     }, 5000);
   });
 

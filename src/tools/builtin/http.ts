@@ -327,6 +327,19 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 /**
+ * The message for a request that ran out of time. A request that can change something on the
+ * other side — any method but GET and HEAD — may have been received and carried out before the
+ * time ran out. "Timed out" alone reads as "did not happen", and sending it again would do it
+ * twice wherever the receiver cannot tell a repeat from a new request (most can't).
+ */
+export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean): string {
+  const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
+  const verb = method.toUpperCase();
+  if (verb === 'GET' || verb === 'HEAD') return base;
+  return `${base}. The ${verb} may still have reached the server and taken effect — check the result there before sending it again.`;
+}
+
+/**
  * Max http_request invocations per Session. Previously enforced via the
  * module-level `sessionHttpRequestCount`; that masqueraded as per-session
  * but actually accumulated for the lifetime of the process (no reset
@@ -2106,7 +2119,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const wallTimeout = new Promise<never>((_, reject) => {
       wallTimeoutId = setTimeout(() => {
         controller.abort();
-        reject(new Error(`HTTP request timed out after ${timeoutMs}ms (wall clock)`));
+        reject(new Error(httpTimeoutMessage(timeoutMs, method, true)));
       }, timeoutMs + 1000);
     });
 
@@ -2369,7 +2382,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // the file needs the region to enforce it, not the reader to remember.
       if (err instanceof ToolSoftFailure) throw err;
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
+        throw new Error(httpTimeoutMessage(timeoutMs, method, false));
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {
