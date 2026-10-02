@@ -7,7 +7,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -1735,6 +1735,103 @@ describe('httpRequestTool', () => {
       }
       expect(err).toBeDefined();
       expect(Date.now() - started).toBeLessThan(3000);
+    }, 5000);
+  });
+
+  // A request that changes something may have landed before its time ran out. "Timed out"
+  // alone reads as "did not happen", and the model sends it again — a second order, a second
+  // mail, wherever the receiver cannot tell a repeat from a new request.
+  describe('a timed-out request that changes something says it may have landed', () => {
+    const MAY_HAVE_LANDED = /may still have reached the server and taken effect/;
+
+    it('the message: every method but GET and HEAD carries the warning, in any case', () => {
+      for (const m of ['POST', 'PUT', 'PATCH', 'DELETE', 'post']) {
+        expect(httpTimeoutMessage(30_000, m, false)).toMatch(MAY_HAVE_LANDED);
+      }
+      expect(httpTimeoutMessage(30_000, 'patch', true)).toBe(
+        'HTTP request timed out after 30000ms (wall clock). The PATCH may still have reached the server and taken effect — check the result there before sending it again.',
+      );
+      expect(httpTimeoutMessage(30_000, 'GET', false)).toBe('HTTP request timed out after 30000ms');
+      expect(httpTimeoutMessage(30_000, 'head', true)).toBe('HTTP request timed out after 30000ms (wall clock)');
+      // Headers in, body stalled: the request reached the server, and the message says so.
+      expect(httpTimeoutMessage(30_000, 'POST', false, '201 Created')).toBe(
+        'HTTP request timed out after 30000ms while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
+      expect(httpTimeoutMessage(30_000, 'GET', false, '200 OK')).toBe(
+        'HTTP request timed out after 30000ms while reading the response; the server had already answered 200 OK',
+      );
+    });
+
+    /** A fetch that never answers but gives up when aborted, as the real one does. */
+    const abortableHang = () => vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => new Promise<never>((_resolve, reject) => {
+      opts?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }));
+
+    async function timeoutOf(method: 'GET' | 'POST', fetchImpl: ReturnType<typeof vi.fn>): Promise<string> {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', fetchImpl);
+      const input = method === 'GET'
+        ? { url: 'https://hung.example.com/x', timeout_ms: 50 }
+        : { url: 'https://hung.example.com/x', method, body: '{}', timeout_ms: 50 };
+      try {
+        await handler(input, agentWithPromptFn());
+      } catch (e) {
+        return (e as Error).message;
+      }
+      throw new Error('expected a timeout');
+    }
+
+    it('a POST that is aborted at its timeout says so', async () => {
+      const msg = await timeoutOf('POST', abortableHang());
+      expect(msg).toMatch(/^HTTP request timed out after 50ms\./);
+      expect(msg).toMatch(MAY_HAVE_LANDED);
+    }, 5000);
+
+    it('a POST that outlives its abort (the wall clock) says so too', async () => {
+      const msg = await timeoutOf('POST', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));
+      expect(msg).toMatch(/\(wall clock\)/);
+      expect(msg).toMatch(MAY_HAVE_LANDED);
+    }, 5000);
+
+    /** Headers arrive at once, then the body hangs; on abort it fails as the real transport's
+     *  does when it destroys the socket — a plain `aborted`, not an AbortError. */
+    const answersThenStalls = () => vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(c) { opts?.signal?.addEventListener('abort', () => c.error(new Error('aborted'))); },
+      });
+      return Promise.resolve(new Response(body, { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } }));
+    });
+
+    it('a POST whose response body stalls after the headers says it reached the server', async () => {
+      const msg = await timeoutOf('POST', answersThenStalls());
+      expect(msg).toBe(
+        'HTTP request timed out after 50ms while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
+    }, 5000);
+
+    it('a POST that outlives even the abort while reading the body says so with the wall clock', async () => {
+      const ignoresAbort = vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ start() { /* never enqueues, never errors */ } }),
+        { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } },
+      )));
+      const msg = await timeoutOf('POST', ignoresAbort);
+      expect(msg).toMatch(/^HTTP request timed out after 50ms \(wall clock\) while reading the response; the server had already answered 201 Created\. The POST reached the server/);
+    }, 5000);
+
+    it('a body that fails on its own before the limit is not reported as a timeout', async () => {
+      // Same shape as the stall — headers in, then a plain `aborted` from the body — but before
+      // our limit fires. Only our own limit makes it a timeout, not the message or the headers.
+      const failsEarly = vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ start(c) { setTimeout(() => c.error(new Error('aborted')), 5); } }),
+        { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } },
+      )));
+      const msg = await timeoutOf('POST', failsEarly);
+      expect(msg).toBe('aborted');
+    }, 5000);
+
+    it('a GET that times out does not', async () => {
+      const msg = await timeoutOf('GET', abortableHang());
+      expect(msg).toBe('HTTP request timed out after 50ms');
     }, 5000);
   });
 

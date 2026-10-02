@@ -327,6 +327,26 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 /**
+ * The message for a request that ran out of time. A request that can change something on the
+ * other side — any method but GET and HEAD — may have been received and carried out before the
+ * time ran out, and "timed out" alone reads as "did not happen". For a POST or PATCH, sending it
+ * again can do it twice; PUT and DELETE are meant to be safe to repeat, but only if the server
+ * keeps to that, so they are warned the same way. When the response headers had already arrived
+ * (`answeredStatus`, from the final hop after any redirect) and only the body stalled, the
+ * request certainly reached a server — a redirect is itself an answer to it.
+ */
+export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string): string {
+  const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
+  const verb = method.toUpperCase();
+  const read = answeredStatus === undefined ? '' : ` while reading the response; the server had already answered ${answeredStatus}`;
+  if (verb === 'GET' || verb === 'HEAD') return `${base}${read}`;
+  const landed = answeredStatus === undefined
+    ? `The ${verb} may still have reached the server and taken effect`
+    : `The ${verb} reached the server`;
+  return `${base}${read}. ${landed} — check the result there before sending it again.`;
+}
+
+/**
  * Max http_request invocations per Session. Previously enforced via the
  * module-level `sessionHttpRequestCount`; that masqueraded as per-session
  * but actually accumulated for the lifetime of the process (no reset
@@ -2096,7 +2116,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const requestedTimeout = input.timeout_ms ?? 30_000;
     const timeoutMs = Math.min(Math.max(1, requestedTimeout), HTTP_HARD_CAP_MS);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    // Which of OUR two limits fired, if any. The catch below decides on this, not on the error's
+    // name: an abort after the headers arrived ends the body read with a plain `aborted` error
+    // (the transport destroys the socket), which a name check took for an unrelated failure.
+    let timedOut: 'abort' | 'wall' | null = null;
+    let answeredStatus: string | undefined;
+    const timeoutId = setTimeout(() => { timedOut ??= 'abort'; controller.abort(); }, timeoutMs);
     opts.signal = controller.signal;
 
     // Wall-clock timeout that wins even if the abort signal doesn't fire (e.g.
@@ -2105,8 +2130,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     let wallTimeoutId: ReturnType<typeof setTimeout> | undefined;
     const wallTimeout = new Promise<never>((_, reject) => {
       wallTimeoutId = setTimeout(() => {
+        timedOut = 'wall';
         controller.abort();
-        reject(new Error(`HTTP request timed out after ${timeoutMs}ms (wall clock)`));
+        reject(new Error(httpTimeoutMessage(timeoutMs, method, true, answeredStatus)));
       }, timeoutMs + 1000);
     });
 
@@ -2124,6 +2150,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;
+      answeredStatus = status;
       // Strip sensitive response headers to prevent credential leakage to agent
       const REDACTED_HEADERS = new Set([
         'set-cookie', 'authorization', 'www-authenticate', 'proxy-authenticate',
@@ -2166,9 +2193,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const readLimit = isJson && explicitLimit === undefined
         ? JSON_SHAPE_READ_CEILING
         : responseLimit;
-      // Race the body read against the same wall-clock — Node fetch's response
-      // body stream doesn't honour signal aborts after headers arrive, so a
-      // chunked-transfer stall here would otherwise hang the run.
+      // Race the body read against the same wall-clock. The abort timer normally ends a
+      // stalled body (the transport destroys the socket, and the read fails with a plain
+      // `aborted`); the wall clock is the backstop for a stream that ignores even that.
       const { text, truncated } = await Promise.race([
         readBodyLimited(response, readLimit),
         wallTimeout,
@@ -2368,8 +2395,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // otherwise be the trap. A rule that is safe only outside one region of
       // the file needs the region to enforce it, not the reader to remember.
       if (err instanceof ToolSoftFailure) throw err;
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
+      if (timedOut !== null) {
+        throw new Error(httpTimeoutMessage(timeoutMs, method, timedOut === 'wall', answeredStatus));
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {
