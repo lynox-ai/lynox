@@ -306,7 +306,8 @@ const SELF_OWNER = '__self__';
 // tables (people/organizations/… where subject_id IS the PK) are handled separately
 // (COALESCE-merge), as are the junction tables (memory_subjects / subject_cooccurrences,
 // composite PKs) whose repoint can collide. Table + column names here are STATIC
-// literals — never user input — so interpolating them into SQL is injection-safe.
+// literals. A merge ledger stores a copy of them, and that copy is read back from a
+// file, so {@link isRepointTarget} holds it to this list before it reaches SQL.
 interface RepointTarget { table: string; pkCol: string; column: string }
 const REPOINT_TARGETS: readonly RepointTarget[] = [
   { table: 'memories',      pkCol: 'id',         column: 'subject_id' },
@@ -330,6 +331,18 @@ const REPOINT_TARGETS: readonly RepointTarget[] = [
   // guard) via `canonicalParentWasDup`, so canonical is EXCLUDED from these pks.
   { table: 'subjects',      pkCol: 'id',         column: 'parent_id' },
 ];
+
+/**
+ * Whether a repoint a merge ledger names is one a merge makes. The literals above are
+ * static, but a ledger carries a COPY of them: the rollback reads it back from a file,
+ * and `executeMerge`, which is public, takes whatever entry it is handed. Both check
+ * the copy against this list before building a statement from it.
+ */
+export function isRepointTarget(t: { table: unknown; pkCol: unknown; column: unknown }): boolean {
+  return REPOINT_TARGETS.some(r => r.table === t.table && r.pkCol === t.pkCol && r.column === t.column);
+}
+
+const FOREIGN_REPOINT_REASON = 'names a reference that this version of the merge never moves — nothing was changed';
 
 /** The 1:1 detail table per kind (subject_id PK) + its non-PK columns for COALESCE-merge. */
 const DETAIL_TABLE: Record<string, { table: string; cols: readonly string[] }> = {
@@ -1540,6 +1553,8 @@ export class SubjectStore {
     if (!dupNow || !canonNow) throw new Error(`executeMerge: subject vanished (${dupId} / ${canonicalId})`);
     if (dupNow.owner_user_id !== canonNow.owner_user_id) throw new Error('executeMerge: owner_user_id mismatch — a merge never crosses owners');
     if (dupNow.kind !== canonNow.kind) throw new Error(`executeMerge: kind mismatch (${dupNow.kind} ≠ ${canonNow.kind})`);
+    if (entry.kind !== dupNow.kind) throw new Error(`executeMerge: the entry's kind (${entry.kind}) is not the subjects' kind (${dupNow.kind})`);
+    if (!entry.repoints.every(isRepointTarget)) throw new Error(`executeMerge: the merge entry ${FOREIGN_REPOINT_REASON}`);
     db.transaction(() => {
       // 1. Plain FK repoints (drive off the live column; the pks are the rollback record).
       for (const t of entry.repoints) {
@@ -1655,7 +1670,10 @@ export class SubjectStore {
         // ledger file, so the normal path is not the only path.
         throw new Error('this merge ledger names the same entry on both sides — it cannot be a real merge');
       }
-      const dupRow = db.prepare('SELECT merged_into FROM subjects WHERE id = ?').get(dupId) as { merged_into: string | null } | undefined;
+      // Step 6 builds its statements from the ledger's table and column names, so those are
+      // checked against the list a merge writes before the first write.
+      if (!entry.repoints.every(isRepointTarget)) throw new Error(`this merge ledger ${FOREIGN_REPOINT_REASON}`);
+      const dupRow = db.prepare('SELECT merged_into, kind FROM subjects WHERE id = ?').get(dupId) as { merged_into: string | null; kind: string } | undefined;
       const canonPresent = db.prepare('SELECT 1 AS ok FROM subjects WHERE id = ?').get(canonicalId) as { ok: number } | undefined;
       const missing = [
         ...(dupRow ? [] : ['the merged-away entry']),
@@ -1675,6 +1693,11 @@ export class SubjectStore {
             ? 'this merge is not in effect — it has already been reversed. If an earlier rollback reported a PARTIAL failure, the engine side is already undone and only the datastore/thread side still needs attention; re-running the whole reversal is not the repair.'
             : `this merge is not in effect — the entry is currently merged into ${dupRow!.merged_into}, not into the entry this ledger names. Reversing it from here would un-archive the entry while the other merge still holds its aliases.`,
         );
+      }
+      // Step 3 picks the detail table by the ledger's kind; a merge never crosses kinds, so a
+      // ledger whose kind is not the entry's own was not written for this entry.
+      if (dupRow!.kind !== entry.kind) {
+        throw new Error(`this merge ledger names the kind ${entry.kind}, but the entry is a ${dupRow!.kind} — nothing was changed`);
       }
 
       // 1. restore dup archive/redirect state. A UNIQUE-index collision here THROWS →

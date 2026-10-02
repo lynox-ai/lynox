@@ -41,6 +41,9 @@ const MAX_DB_SIZE_BYTES = 500 * 1024 * 1024;
 const VALID_COLUMN_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
 const SYSTEM_COLUMNS = new Set(['_id', '_created_at', '_updated_at']);
 
+/** Why a merge rollback refused a data-store record: {@link DataStore.repointRecordState} said `foreign`. */
+export const FOREIGN_REPOINT_RECORD_REASON = 'the merge ledger names a column that is not a subject column of this data store — nothing was changed';
+
 /**
  * Bound in place of an unresolvable subject NAME when filtering a subject column
  * by name (R1.5). A `subject_id` is a UUID; this sentinel equals no id, so the
@@ -714,12 +717,35 @@ export class DataStore {
     return changed;
   }
 
+  /**
+   * Whether a record a merge ledger names can be moved back. `ok`: it names a `subject`
+   * column of a collection this store holds. `gone`: no such collection, or no such column
+   * in its schema — dropped (or dropped and re-created) since the merge, or never there;
+   * either way there is nothing to move back, and the record is skipped, never written.
+   * `foreign`: a column the schema holds that is not a subject column. The names are read
+   * back from a ledger file, unlike in {@link repointSubjectId}, so this check is what holds
+   * them to the stored schema.
+   */
+  repointRecordState(rec: { collection: unknown; column: unknown }): 'ok' | 'gone' | 'foreign' {
+    if (typeof rec.collection !== 'string' || typeof rec.column !== 'string') return 'foreign';
+    const meta = this._getCollectionMeta(rec.collection);
+    if (!meta) return 'gone';
+    const col = (JSON.parse(meta.schema_json) as DataStoreColumnDef[]).find(c => c.name === rec.column);
+    if (!col) return 'gone';
+    return col.type === 'subject' ? 'ok' : 'foreign';
+  }
+
   /** Reverse a {@link repointSubjectId} (merge rollback): move each captured cell back to `oldId`. */
   rollbackRepoint(oldId: string, newId: string, records: readonly SubjectRepointRecord[]): void {
+    const states = records.map(rec => this.repointRecordState(rec));
+    if (states.includes('foreign')) {
+      throw new Error(FOREIGN_REPOINT_RECORD_REASON);
+    }
     this.db.transaction(() => {
-      for (const rec of records) {
+      for (const [i, rec] of records.entries()) {
+        if (states[i] === 'gone') continue;
         const tableName = `ds_${rec.collection}`;
-        // Same validated-identifier / bound-value split as repointSubjectId.
+        // Identifiers checked by repointRecordState above; values are bound.
         const updateSql = `UPDATE "${tableName}" SET "${rec.column}" = ? WHERE _id = ? AND "${rec.column}" = ?`;
         const stmt = this.db.prepare(updateSql);
         for (const id of rec.ids) stmt.run(oldId, id, newId);
