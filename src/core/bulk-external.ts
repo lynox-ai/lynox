@@ -53,6 +53,8 @@ export type ExternalRead =
   | { kind: 'blocked' }
   /** The run's contract does not grant this call; nothing was sent. */
   | { kind: 'not_granted' }
+  /** The address or the body looked like it carries a secret; nothing was sent. */
+  | { kind: 'secret' }
   /** The profile's own rate limit is spent; nothing was sent. */
   | { kind: 'rate_limited' }
   /** 429: wait this long (capped) before the next request to the host. */
@@ -267,6 +269,11 @@ export interface ExternalClientDeps {
   attach: (url: string, headers: Record<string, string>) => Promise<boolean>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
+  /**
+   * The egress secret scan `http_request` runs on what it sends: non-null when `text` looks
+   * like it carries a secret. Required, so no caller can build a client that sends unscanned.
+   */
+  scan: (text: string) => string | null;
   now?: () => number;
 }
 
@@ -295,6 +302,12 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     } catch {
       return { kind: 'blocked' };
     }
+    // The one place every bulk request leaves the engine, reads and writes alike. The plan scans
+    // the after-image when it is made; this also covers the address, and a body the plan never
+    // saw (an undo writes back what the host held). Before the credential is attached: the
+    // header it adds carries a secret by design and is the profile's, not the request's.
+    const payload = method !== 'GET' ? JSON.stringify(body) : undefined;
+    if (deps.scan(url) !== null || (payload !== undefined && deps.scan(payload) !== null)) return { kind: 'secret' };
     const headers: Record<string, string> = { accept: 'application/json' };
     if (method !== 'GET') headers['content-type'] = 'application/json';
     if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
@@ -305,7 +318,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     try {
       res = await fetchPinned(url, {
         method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-        ...(method !== 'GET' ? { body: JSON.stringify(body) } : {}),
+        ...(payload !== undefined ? { body: payload } : {}),
       });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
@@ -402,6 +415,7 @@ export function externalWriter(client: ExternalClient, opts: {
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
       case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
+      case 'secret': throw new BulkWriterHalt(BULK_HALT_REASONS.secret);
       case 'redirect': throw new BulkRedirectError();
       default: return got;
     }

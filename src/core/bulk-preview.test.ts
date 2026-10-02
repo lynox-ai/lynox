@@ -92,6 +92,7 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
       return true;
     },
     rateLimit: () => opts.rateLimit ?? null,
+    scan: detectSecretInContent,
   });
 }
 
@@ -504,6 +505,21 @@ describe('the preview effect', () => {
     }), { status: 200 }));
     try {
       expect(await client().get(url(0))).toEqual({ kind: 'failed' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('halts the read of a target whose address looks like it carries a secret, and sends nothing', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      // Built at run time so no pattern scan reads a key in this file.
+      const keyed = url(['sk', 'ant', 'x'.repeat(24)].join('-'));
+      const run = planRun([{ target: keyed, after: { price: '1' } }]);
+      expect((await runBulkPreview(run, previewDeps(client({ keys: [keyed] })))).status).toBe('halted');
+      expect(ledger.getStatus(run)!.haltReason).toBe(BULK_HALT_REASONS.secret);
+      expect(s.requests).toEqual([]);
     } finally {
       restore();
     }

@@ -148,6 +148,7 @@ export const BULK_HALT_REASONS = {
   unauthorized: 'the host did not accept the stored credential',
   blocked: 'the network policy does not allow this host',
   contract: 'a target lies outside the run\'s contract',
+  secret: 'a request would carry what looks like a secret',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 

@@ -91,7 +91,7 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLimit?: () => string | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
@@ -102,6 +102,7 @@ function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLim
       return true;
     },
     rateLimit: opts.rateLimit ?? (() => null),
+    scan: opts.scan ?? detectSecretInContent,
   });
 }
 
@@ -283,6 +284,46 @@ describe('applying an external run', () => {
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
       expect(ledger.getStatus(runId)!.phase).toBe('undone');
       expect(s.items.get('/products/1')!['price']).toBe('12.00');
+    } finally {
+      restore();
+    }
+  });
+
+  // Built at run time so no pattern scan reads a key in this file.
+  const LOOKS_LIKE_A_KEY = ['sk', 'ant', 'x'.repeat(24)].join('-');
+
+  it('sends nothing whose address or body looks like it carries a secret', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const keyed = url(`${LOOKS_LIKE_A_KEY}`);
+      const c = client({ contract: mintBulkContract(HOST, [url(0), keyed]) });
+      expect(await c.write(url(0), 'PATCH', { note: `token ${LOOKS_LIKE_A_KEY}` })).toEqual({ kind: 'secret' });
+      expect(await c.get(keyed)).toEqual({ kind: 'secret' });
+      // The same calls without the key go out: the refusal is the scan, not something else.
+      expect((await c.write(url(0), 'PATCH', { note: 'plain' })).kind).not.toBe('secret');
+      expect(s.requests.map((r) => `${r.method} ${r.path}`)).toEqual(['PATCH /products/0']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo that would write back a value that looks like a secret halts, and sends nothing for it', async () => {
+    const s = shop();
+    s.items.get('/products/0')!['note'] = `old ${LOOKS_LIKE_A_KEY}`;
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { note: 'clean' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      expect(s.items.get('/products/0')!['note']).toBe('clean');
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      s.requests.length = 0;
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('halted');
+      expect(ledger.getStatus(undo.status.id)!.haltReason).toBe(BULK_HALT_REASONS.secret);
+      expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
+      expect(s.items.get('/products/0')!['note']).toBe('clean');
     } finally {
       restore();
     }
@@ -530,6 +571,52 @@ describe('applying an external run', () => {
       expect(s.requests.map((r) => [r.method, r.auth])).toEqual([
         ['GET', `Bearer ${TOKEN}`], ['PUT', `Bearer ${TOKEN}`], ['GET', `Bearer ${TOKEN}`],
       ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('the worker\'s own client scans what it sends: a target whose address looks like a secret halts the run', async () => {
+    const s = shop();
+    const key = ['sk', 'ant', 'x'.repeat(24)].join('-');
+    s.items.set(`/products/${key}`, { id: 9, title: 'Keyed', price: '12.00' });
+    const restore = serve(s);
+    try {
+      // The preview runs on a client without the scan, so the run reaches approval; what the
+      // worker builds for the write is the client under test.
+      const runId = await approvedRun([{ target: url(key), after: { price: '15' } }], client({ scan: () => null, contract: mintBulkContract(HOST, [url(key)]) }));
+      const apiStore = new ApiStore();
+      apiStore.register({
+        id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      const triggers = new TriggerStore(engineDb);
+      const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+        triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+        triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+      });
+      const engine = {
+        getTaskManager: () => ({
+          getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+          claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
+          getTrigger: (id: string) => triggers.getById(id), recordTaskRun,
+        }),
+        getBulkLedger: () => ledger,
+        getDataStore: () => null,
+        getApiStore: () => apiStore,
+        getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
+        getToolContext: () => createToolContext({}),
+        getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+        getUserConfig: () => ({}),
+      } as unknown as Engine;
+      const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
+      s.requests.length = 0;
+      await loop.tick();
+      await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.secret);
+      expect(s.requests).toEqual([]);
+      expect(s.items.get(`/products/${key}`)!['price']).toBe('12.00');
     } finally {
       restore();
     }
