@@ -2,13 +2,17 @@
  * The reporter that notices vanished test cases, tested against real git history.
  *
  * ⭐ WHY A THROWAWAY REPO AND NOT FIXTURE STRINGS. Every input comes from git: the merge base,
- * `--diff-filter=MD`, rename detection, the base version of a file. A fixture of diff text would
- * test my idea of what git prints — which is the mistake this guard exists to catch — so each case
- * commits real files and lets git produce the diff.
+ * `--diff-filter=MD`, rename detection, `-z` path quoting, the base version of a file. A fixture of
+ * diff text would test my idea of what git prints — which is the mistake this guard exists to catch —
+ * so each case commits real files and lets git produce the diff.
  *
- * ⚠ THE RUNNER IS INJECTED, and the fake is deliberately a COUNTER: it reads the file and reports
- * how many `it(` it sees, in the runner's own summary format. The property under test is what the
- * guard concludes from two counts, not how vitest arrives at one.
+ * ⚠ THE RUNNER IS INJECTED, and the fake mirrors the three states that matter: a plain `it(` is a
+ * case that RAN and passed, `it.skip(` is skipped, `it.todo(` is todo. An earlier fake counted `it(`
+ * only and answered in the runner's PROSE format, and that fake diverged from vitest in exactly the
+ * three ways that hid real defects: it emitted no ANSI (so a text parse always worked, while in CI it
+ * never did), it could not see `it.skip(` (so a skip-out looked like a drop under the fake and was
+ * invisible in reality), and it returned success for every existing file. A fake must be wrong in
+ * harmless ways, not in the ways the subject is wrong.
  *
  * ⛔ THE FIRST TEST IS THE REGRESSION TEST FOR A WRONG PREMISE. An earlier version asked "did this
  * diff remove test lines?", which every retitle answers yes to, and reported a finding for a pure
@@ -16,11 +20,21 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
-import { removedFrom, isPureMove, addedMultiset, caseCount, reasonLine, mergeBase, check, filterMatches } from '../scripts/deleted-assertion-guard.mjs';
+import { join, resolve } from 'node:path';
+import {
+  removedFrom,
+  addedTo,
+  addedMultiset,
+  diffContentLines,
+  isPureMove,
+  casesFor,
+  reasonLine,
+  mergeBase,
+  check,
+} from '../scripts/deleted-assertion-guard.mjs';
 
 let repo: string;
 let cwd: string;
@@ -46,30 +60,47 @@ function commit(files: Record<string, string | null>, message: string): string {
   return sh(['rev-parse', 'HEAD']).trim();
 }
 
-/** Counts `it(` in whatever is on disk and answers in the runner's summary format. */
-const counting = (file: string): { ok: boolean; out: string } => {
-  if (!existsSync(file)) return { ok: false, out: 'No test files found' };
-  const n = (readFileSync(file, 'utf-8').match(/\bit\(/g) ?? []).length;
-  return { ok: true, out: ` Test Files  1 passed (1)\n      Tests  ${String(n)} passed (${String(n)})\n` };
+type Measurement = { ok: boolean; out: string; json: unknown };
+
+/** One `assertionResults` entry per `it(` / `it.skip(` / `it.todo(` on disk, with its real state. */
+function statesOf(src: string): string[] {
+  const states: string[] = [];
+  for (const m of src.matchAll(/\bit(\.skip|\.todo)?\(/g)) {
+    states.push(m[1] === '.skip' ? 'skipped' : m[1] === '.todo' ? 'todo' : 'passed');
+  }
+  return states;
+}
+
+const measuring = (file: string): Measurement => {
+  if (!existsSync(file)) return { ok: false, out: 'No test files found', json: null };
+  const states = statesOf(readFileSync(file, 'utf-8'));
+  return {
+    ok: true,
+    out: '',
+    json: { testResults: [{ name: resolve(file), assertionResults: states.map((status) => ({ status })) }] },
+  };
 };
+
 /**
- * A runner that fails only for a GIVEN body — the base version — and counts normally otherwise.
+ * A runner that cannot build ONE given body — the base version — and measures normally otherwise.
  *
- * ⚠ The first version of this fake failed for every call, so the HEAD run collected nothing and the
+ * ⚠ An earlier version of this fake failed for every call, so the HEAD run produced nothing and the
  * file was skipped before the base run happened: the test asserted a message the code never reached.
  * A fake that answers the same way for every input cannot test a comparison between two inputs.
  */
-const failingFor = (baseBody: string) => (file: string): { ok: boolean; out: string } => {
-  if (!existsSync(file)) return { ok: false, out: 'No test files found' };
+const unbuildableFor = (baseBody: string) => (file: string): Measurement => {
+  if (!existsSync(file)) return { ok: false, out: 'No test files found', json: null };
   if (readFileSync(file, 'utf-8') === baseBody) {
-    return { ok: false, out: ' FAIL  src/a.test.ts\nError: No "f" export is defined on the module\n' };
+    return { ok: false, out: 'FAIL  src/a.test.ts\nError: No "f" export is defined on the module\n', json: { testResults: [] } };
   }
-  return counting(file);
+  return measuring(file);
 };
-const listsEverything = (): string[] => {
-  const out = sh(['ls-files']).split('\n').map((s) => s.trim());
-  return out.filter((s) => /\.(test|spec)\.tsx?$/.test(s));
-};
+
+const listsEverything = (): string[] =>
+  sh(['ls-files'])
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => /\.(test|spec)\.tsx?$/.test(s));
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'delrep-'));
@@ -86,207 +117,356 @@ afterEach(() => {
 });
 
 const SRC = 'export const f = (n: number) => n + 1;\n';
+const HEAD_AT = (): string => sh(['rev-parse', 'HEAD']).trim();
 
 describe('deleted-assertion-guard', () => {
   it('a pure RETITLE is not a finding — the premise the first version got wrong', () => {
     const base = commit(
-      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("adds one", () => {});\nit("rejects a negative", () => {});\n' },
+      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("adds one", () => {});\nit("handles zero", () => {});\n' },
       'base',
     );
-    // Same two cases, both rewritten. Lines are removed; coverage is not.
-    const head = commit(
-      { 'src/a.test.ts': 'it("adds 1 to its argument", () => {});\nit("refuses a negative input", () => {});\n' },
-      'retitle both',
-    );
+    const head = commit({ 'src/a.test.ts': 'it("adds 1", () => {});\nit("handles 0", () => {});\n' }, 'retitle only');
 
-    const r = check({ base, head, runFile: counting, listFiles: listsEverything, log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
     // ⛔ If this ever reads 1 again, the guard is back to blocking every rename.
     expect(r.status).toBe(0);
     expect(r.findings).toEqual([]);
-    expect(r.candidates).toContain('src/a.test.ts');
   });
 
-  it('reports a genuine deletion, with both counts', () => {
+  it('reports a genuine deletion, with both numbers', () => {
     const base = commit(
       { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\n' },
       'base',
     );
     const head = commit({ 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'drop one case');
 
-    const r = check({ base, head, runFile: counting, listFiles: listsEverything, log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
     expect(r.status).toBe(1);
-    expect(r.findings).toEqual([{ file: 'src/a.test.ts', baseCount: 3, headCount: 2 }]);
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', basePassing: 3, headRunning: 2 }]);
   });
 
-  it('a WHOLLY deleted test file reports with headCount 0 — the case --diff-filter=ACMR hides', () => {
-    const base = commit({ 'src/a.ts': SRC, 'src/gone.test.ts': 'it("x", () => {});\nit("y", () => {});\n' }, 'base');
+  it('a WHOLLY deleted test file reports with headRunning 0 — the case --diff-filter=ACMR hides', () => {
+    const base = commit({ 'src/a.ts': SRC, 'src/gone.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
     const head = commit({ 'src/gone.test.ts': null }, 'delete the file');
 
-    expect(removedFrom(mergeBase(base, head), head)).toEqual(['src/gone.test.ts']);
-    const r = check({ base, head, runFile: counting, listFiles: () => ['src/gone.test.ts'], log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: () => ['src/gone.test.ts'], log: () => {} });
     expect(r.status).toBe(1);
-    expect(r.findings[0]).toMatchObject({ file: 'src/gone.test.ts', baseCount: 2, headCount: 0 });
+    expect(r.findings).toEqual([{ file: 'src/gone.test.ts', basePassing: 2, headRunning: 0 }]);
   });
 
-  it('a base version that FAILS against the new source is skipped, never reported', () => {
-    const baseBody = 'it("a", () => {});\nit("b", () => {});\n';
-    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': baseBody }, 'base');
-    const head = commit(
-      { 'src/a.ts': 'export const g = (s: string) => s.length;\n', 'src/a.test.ts': 'it("a", () => {});\n' },
-      'change the signature',
-    );
-
-    const r = check({ base, head, runFile: failingFor(baseBody), listFiles: listsEverything, log: () => {} });
-    expect(r.status).toBe(0);
-    expect(r.findings).toEqual([]);
-    expect(r.skipped[0]?.[0]).toBe('src/a.test.ts');
-    expect(r.skipped[0]?.[1]).toContain('the removal was forced');
-  });
-
-  it('a file the RUNNER does not run is skipped — the eight Playwright specs', () => {
+  it('converting cases to it.skip IS a loss — a case that does not run is not coverage', () => {
+    // ⛔ The runner's own total counts `skipped` and `todo`, so a version of this that read the total
+    // saw 4 before and 4 after and logged "nothing was lost" while three cases stopped running.
     const base = commit(
-      { 'src/a.ts': SRC, 'tests/smoke/ui.spec.ts': 'it("a", () => {});\nit("b", () => {});\n' },
+      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\nit("d", () => {});\n' },
       'base',
     );
-    const head = commit({ 'tests/smoke/ui.spec.ts': 'it("a", () => {});\n' }, 'drop one');
+    const head = commit(
+      { 'src/a.test.ts': 'it("a", () => {});\nit.skip("b", () => {});\nit.skip("c", () => {});\nit.todo("d");\n' },
+      'skip three of four',
+    );
 
-    // ⚠ The runner must FAIL on it, the way vitest really does on a Playwright spec. A fake that
-    // succeeds let a mutant survive: with the first list check removed, the second one still caught
-    // the file, so the verdict was identical and only the MESSAGE differed. Asserting the exact
-    // reason is what pins the first check — the one that stops a pointless run from happening.
-    const playwrightUnderVitest = (): { ok: boolean; out: string } => ({
-      ok: false,
-      out: " FAIL  tests/smoke/ui.spec.ts\nError: Playwright Test did not expect test() to be called here\n",
-    });
-    const r = check({ base, head, runFile: playwrightUnderVitest, listFiles: () => [], log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
+    expect(r.status).toBe(1);
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', basePassing: 4, headRunning: 1 }]);
+  });
+
+  it('a file emptied of ALL its cases is reported, not skipped — the loudest form of the thing', () => {
+    // An earlier version read "no count" from the runner's `Tests  no tests` and skipped this.
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
+    const head = commit({ 'src/a.test.ts': 'export const nothing = 1;\n' }, 'remove every case, keep the file');
+
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
+    expect(r.status).toBe(1);
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', basePassing: 2, headRunning: 0 }]);
+  });
+
+  it("a test's own stdout cannot forge the count — the number comes from the runner's JSON", () => {
+    // ⛔ The head side is the pull-request author's side and `headRunning` is what suppresses a
+    // finding. While the count was parsed out of the summary on stdout, one `console.log` inside a
+    // test set it to 99 and silenced the whole file. The forged line is in `out` here on purpose.
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\n' }, 'base');
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop two');
+    const forging = (file: string): Measurement => ({ ...measuring(file), out: '      Tests  99 passed (99)\n' });
+
+    const r = check({ base, head, measure: forging, listFiles: listsEverything, log: () => {} });
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', basePassing: 3, headRunning: 1 }]);
+  });
+
+  it('a base version the runner cannot build passes nothing, so it is skipped and never reported', () => {
+    const baseBody = 'it("a", () => { f(1); });\nit("b", () => { f(2); });\n';
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': baseBody }, 'base');
+    const head = commit({ 'src/a.ts': 'export const g = 1;\n', 'src/a.test.ts': 'it("a", () => { g; });\n' }, 'rename the export');
+
+    const r = check({ base, head, measure: unbuildableFor(baseBody), listFiles: listsEverything, log: () => {} });
     expect(r.status).toBe(0);
     expect(r.findings).toEqual([]);
-    expect(r.skipped[0]?.[1]).toContain("runner's own file list");
-    expect(r.skipped[0]?.[1]).not.toContain('collected no cases');
+    expect(r.skipped[0][1]).toContain('no result for the base version');
+  });
+
+  it('casesFor picks the file BY PATH, so a filter that matched two files is not summed', () => {
+    // The runner's path argument is a substring filter: `vitest run src/a.test.ts` also runs
+    // `pkg/src/a.test.ts`. A run TOTAL would be the sum; the named entry is the answer.
+    const json = {
+      testResults: [
+        { name: resolve('src/a.test.ts'), assertionResults: [{ status: 'passed' }, { status: 'failed' }] },
+        { name: resolve('pkg/src/a.test.ts'), assertionResults: [{ status: 'passed' }, { status: 'passed' }, { status: 'passed' }] },
+      ],
+    };
+    expect(casesFor(json, 'src/a.test.ts')).toEqual({ ran: 2, passed: 1 });
+    expect(casesFor(json, 'pkg/src/a.test.ts')).toEqual({ ran: 3, passed: 3 });
+  });
+
+  it('casesFor is null when the run produced no entry for the file, and skipped/todo never count as run', () => {
+    expect(casesFor({ testResults: [] }, 'src/a.test.ts')).toBe(null);
+    expect(casesFor(null, 'src/a.test.ts')).toBe(null);
+    const mixed = {
+      testResults: [
+        {
+          name: resolve('src/a.test.ts'),
+          assertionResults: [{ status: 'passed' }, { status: 'skipped' }, { status: 'todo' }, { status: 'failed' }],
+        },
+      ],
+    };
+    expect(casesFor(mixed, 'src/a.test.ts')).toEqual({ ran: 2, passed: 1 });
   });
 
   it('uses the MERGE BASE: a file only the base branch changed is not a candidate', () => {
-    const base0 = commit(
-      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\n', 'src/other.test.ts': 'it("x", () => {});\nit("y", () => {});\n' },
+    const forkPoint = commit(
+      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n', 'src/other.test.ts': 'it("x", () => {});\nit("y", () => {});\n' },
       'fork point',
     );
-    // The PR branch touches only a.test.ts.
     sh(['checkout', '-q', '-b', 'pr']);
-    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\nit("a2", () => {});\n' }, 'add a case on the branch');
-    // main meanwhile REMOVES a case from other.test.ts — nothing to do with this PR.
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\nit("b2", () => {});\n' }, 'retitle on the branch');
     sh(['checkout', '-q', 'main']);
-    const mainTip = commit({ 'src/other.test.ts': 'it("x", () => {});\n' }, 'main drops a case elsewhere');
+    const mainTip = commit({ 'src/other.test.ts': 'it("x", () => {});\n' }, 'main deletes a case elsewhere');
     sh(['checkout', '-q', 'pr']);
 
-    expect(mergeBase(mainTip, head)).toBe(base0);
-    // Against the merge base the PR removed nothing; a two-dot diff would have shown other.test.ts.
-    expect(removedFrom(mergeBase(mainTip, head), head)).toEqual([]);
-    // ⚠ The contrast needs a RAW two-dot diff. An earlier version of this line called
-    // `removedFrom(mainTip, head)` to show what the old form would have caught — but that function
-    // is three-dot by construction now, so the assertion tested the new code against the old
-    // expectation and failed for the right reason.
-    const twoDot = execFileSync('git', ['diff', '-M', '--diff-filter=MD', '--numstat', `${mainTip}..${head}`], { cwd: repo, encoding: 'utf-8' });
-    expect(twoDot).toContain('src/other.test.ts');
-    const r = check({ base: mainTip, head, runFile: counting, listFiles: listsEverything, log: () => {} });
-    expect(r.reason).toBe('no-candidates');
+    expect(mergeBase(mainTip, head)).toBe(forkPoint);
+    const r = check({ base: mainTip, head, measure: measuring, listFiles: listsEverything, log: () => {} });
+    // ⛔ With a two-dot diff, main's deletion in other.test.ts would be reported against this branch.
+    expect(r.candidates).not.toContain('src/other.test.ts');
   });
 
   it('a RENAME is resolved by git, even when the repo disables rename detection', () => {
     sh(['config', 'diff.renames', 'false']);
-    const body = 'it("holds", () => {});\nit("also holds", () => {});\n';
-    const base = commit({ 'src/a.ts': SRC, 'src/old.test.ts': body }, 'base');
-    const head = commit({ 'src/old.test.ts': null, 'src/new.test.ts': body }, 'move the file');
-
-    // ⚠ `diff.renames=false` is the point: without it the git DEFAULT does the work, and the test
-    // would pass with `-M` removed from the script.
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
+    sh(['mv', 'src/a.test.ts', 'src/renamed.test.ts']);
+    const head = commit({}, 'rename only');
+    // Without `-M` this is D+A and the old path becomes a candidate reporting 2 → 0.
     expect(removedFrom(mergeBase(base, head), head)).toEqual([]);
   });
 
-  it('lines moved to ANOTHER file are a move', () => {
-    const moved = 'it("rejects a negative", () => {});\n';
-    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': `it("adds", () => {});\n${moved}` }, 'base');
-    const head = commit({ 'src/a.test.ts': 'it("adds", () => {});\n', 'src/b.test.ts': moved }, 'split');
+  it('lines moved to another file THE RUNNER RUNS are a move', () => {
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("holds", () => {});\nit("b", () => {});\n' }, 'base');
+    const head = commit({ 'src/a.test.ts': 'it("b", () => {});\n', 'src/b.test.ts': 'it("holds", () => {});\n' }, 'move one case');
 
-    const r = check({ base, head, runFile: counting, listFiles: listsEverything, log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
     expect(r.moves).toEqual(['src/a.test.ts']);
     expect(r.findings).toEqual([]);
   });
 
-  it('MULTIPLICITY: one added copy does not absolve five lost ones', () => {
-    const dup = 'expect(x).toBe(1);\n';
-    const base = commit(
-      { 'src/a.ts': SRC, 'src/a.test.ts': `it("a", () => {});\n${dup.repeat(5)}` },
-      'base',
-    );
-    // One copy reappears in another file; four are gone for good.
-    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n', 'src/b.test.ts': dup }, 'keep one copy');
+  it('lines pasted into a file the runner does NOT run are a DELETION, not a move', () => {
+    // ⛔ Measured: a test file whose whole text was pasted into an added markdown file was logged as
+    // "every lost line is matched by an added one" while its cases were gone.
+    const body = 'it("holds", () => {});\nit("also holds", () => {});\n';
+    // ⚠ The destination is an EXISTING doc that keeps its own content. With the text pasted into a
+    // NEW file, git called the pair `R072` — a rename of a test file into markdown — and
+    // `--diff-filter=MD` then selected nothing at all, so the fixture was quietly testing the
+    // registered rename gap instead of the move budget. Appending to a tracked file is both the
+    // realistic shape and the one that reaches the code under test.
+    const prose = ['# guide', '', 'Some prose that keeps this file recognisably itself.', ''].join('\n');
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': body, 'docs/guide.md': `${prose}\n` }, 'base');
+    const head = commit({ 'src/a.test.ts': null, 'docs/guide.md': `${prose}\n\`\`\`ts\n${body}\`\`\`\n` }, 'paste it into docs');
 
-    const mb = mergeBase(base, head);
-    expect(isPureMove(mb, head, 'src/a.test.ts', addedMultiset(mb, head))).toBe(false);
+    const r = check({ base, head, measure: measuring, listFiles: () => ['src/a.test.ts'], log: () => {} });
+    expect(r.moves).toEqual([]);
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', basePassing: 2, headRunning: 0 }]);
+  });
+
+  it('ONE budget for the whole run: a single added copy absolves ONE file, not five', () => {
+    // ⛔ With a copy of the multiset per candidate, five files each losing the same line were all
+    // absolved by the one copy the diff added — four cases gone, nothing reported, while the comment
+    // above the function claimed a multiset prevented exactly that.
+    const files: Record<string, string | null> = { 'src/a.ts': SRC };
+    for (let i = 0; i < 5; i += 1) files[`src/t${String(i)}.test.ts`] = 'it("holds", () => {});\nit("keeps", () => {});\n';
+    const base = commit(files, 'base');
+    const head = commit(
+      {
+        ...Object.fromEntries([0, 1, 2, 3, 4].map((i) => [`src/t${String(i)}.test.ts`, 'it("keeps", () => {});\n'])),
+        'src/z.test.ts': 'it("holds", () => {});\n',
+      },
+      'one copy added, five lost',
+    );
+
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
+    expect(r.moves.length).toBe(1);
+    expect(r.findings.length).toBe(4);
+  });
+
+  it('MULTIPLICITY inside one file: one added copy does not absolve five lost ones', () => {
+    const five = 'it("x", () => {});\n'.repeat(5);
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': `${five}it("keep", () => {});\n` }, 'base');
+    const head = commit({ 'src/a.test.ts': 'it("x", () => {});\nit("keep", () => {});\n' }, 'keep one of five');
+
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
+    expect(r.moves).toEqual([]);
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', basePassing: 6, headRunning: 2 }]);
   });
 
   it('refuses on a TRACKED modification and reports which file', () => {
     const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
     const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
-    put('src/a.ts', 'export const f = (n: number) => n + 99;\n');
+    writeFileSync(join(repo, 'src/a.ts'), 'export const f = 2;\n', 'utf-8');
 
-    const r = check({ base, head, runFile: counting, listFiles: listsEverything, log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
     expect(r.status).toBe(2);
     expect(r.reason).toBe('tree-dirty');
-    expect(r.trackedDirty?.join('\n')).toContain('src/a.ts');
+    expect(r.trackedDirty?.join(' ')).toContain('src/a.ts');
   });
 
   it('an UNTRACKED file does not stop it — refusing on one made the guard permanently silent', () => {
     const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
     const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
-    put('leftover.log', 'noise\n');
+    writeFileSync(join(repo, 'editor-leftover.txt'), 'x\n', 'utf-8');
 
-    const r = check({ base, head, runFile: counting, listFiles: listsEverything, log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
     expect(r.status).toBe(1);
   });
 
-  it('puts the file back byte-identically, measured against the TREE not against git status', () => {
-    const headBody = 'it("a", () => {});\n';
+  it('refuses when the CHECKED-OUT commit is not the head it was asked about', () => {
+    // ⛔ The head side reads the working tree, the diff side reads the ref. Measured with the tree on
+    // main and `head` at a branch tip: it compared head against head and reported nothing.
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\n' }, 'base');
+    sh(['checkout', '-q', '-b', 'pr']);
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop two');
+    sh(['checkout', '-q', 'main']);
+
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, headCommit: HEAD_AT, log: () => {} });
+    expect(r.status).toBe(2);
+    expect(r.reason).toBe('head-mismatch');
+    // and with the tree where it belongs, the same call reaches a verdict
+    sh(['checkout', '-q', 'pr']);
+    expect(check({ base, head, measure: measuring, listFiles: listsEverything, headCommit: HEAD_AT, log: () => {} }).status).toBe(1);
+  });
+
+  it('an EMPTY runner file list is ill health, not a clean repository', () => {
+    // ⛔ `listFiles()` used to return `[]` whenever `vitest list` failed. Every candidate was then
+    // skipped as "the runner does not run this file" and the run printed "nothing to report", green.
     const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
-    const head = commit({ 'src/a.test.ts': headBody }, 'drop one');
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
 
-    check({ base, head, runFile: counting, listFiles: listsEverything, log: () => {} });
+    const r = check({ base, head, measure: measuring, listFiles: () => [], log: () => {} });
+    expect(r.status).toBe(2);
+    expect(r.reason).toBe('runner-list-empty');
+  });
+
+  it('a runner that cannot count an UNTOUCHED file is ill health — the positive control', () => {
+    const base = commit(
+      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n', 'src/untouched.test.ts': 'it("u", () => {});\n' },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
+    const brokenRunner = (): Measurement => ({ ok: false, out: 'Error: Failed to load vite config', json: null });
+
+    const r = check({ base, head, measure: brokenRunner, listFiles: listsEverything, log: () => {} });
+    expect(r.status).toBe(2);
+    expect(r.reason).toBe('runner-unhealthy');
+    expect(r.canary).toBe('src/untouched.test.ts');
+  });
+
+  it('a candidate that is not a test file by NAME costs no runner start', () => {
+    const base = commit(
+      { 'src/a.ts': 'const a = 1;\nconst b = 2;\n', 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n', 'src/u.test.ts': 'it("u", () => {});\n' },
+      'base',
+    );
+    const head = commit({ 'src/a.ts': 'const a = 1;\n' }, 'drop a source line only');
+    const seen: string[] = [];
+    const recording = (f: string): Measurement => { seen.push(f); return measuring(f); };
+
+    const r = check({ base, head, measure: recording, listFiles: listsEverything, log: () => {} });
+    expect(r.skipped).toEqual([['src/a.ts', 'not a test file by name']]);
+    // ⛔ Only the positive control may have run. A runner start is ~20 s; twenty source files in a
+    // diff put the job's 20-minute budget within reach of an ordinary refactor.
+    expect(seen).toEqual(['src/a.test.ts']);
+  });
+
+  it('puts the file back byte-identically, measured against the TREE not against git status', () => {
+    const body = 'it("a", () => {});\nit("b", () => {});\n';
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': body }, 'base');
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop one');
+    const headBody = readFileSync(join(repo, 'src/a.test.ts'), 'utf-8');
+
+    check({ base, head, measure: measuring, listFiles: listsEverything, log: () => {} });
     expect(readFileSync(join(repo, 'src/a.test.ts'), 'utf-8')).toBe(headBody);
-    expect(sh(['status', '--porcelain']).trim()).toBe('');
   });
 
-  it('leaves no file behind when the candidate was deleted at head', () => {
-    const base = commit({ 'src/a.ts': SRC, 'src/gone.test.ts': 'it("x", () => {});\n' }, 'base');
-    const head = commit({ 'src/gone.test.ts': null }, 'delete it');
+  it('leaves no file and no recreated DIRECTORY behind when the candidate was deleted at head', () => {
+    // ⚠ git cannot represent an empty directory, so `git status --porcelain` is structurally unable
+    // to see a directory this guard recreated to write a file into. Checked on the tree itself.
+    const base = commit({ 'src/a.ts': SRC, 'nested/deep/gone.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
+    const head = commit({ 'nested/deep/gone.test.ts': null }, 'delete the only file in the directory');
+    // `git add -A` records the deletion but leaves the now-empty directory on disk; a fresh checkout
+    // of this head would not have it, so the precondition is established rather than assumed.
+    rmSync(join(repo, 'nested/deep'), { recursive: true, force: true });
+    expect(existsSync(join(repo, 'nested/deep'))).toBe(false);
 
-    check({ base, head, runFile: counting, listFiles: () => ['src/gone.test.ts'], log: () => {} });
-    expect(existsSync(join(repo, 'src/gone.test.ts'))).toBe(false);
-    expect(sh(['status', '--porcelain']).trim()).toBe('');
+    const r = check({ base, head, measure: measuring, listFiles: () => ['nested/deep/gone.test.ts'], log: () => {} });
+    expect(r.findings.length).toBe(1);
+    expect(existsSync(join(repo, 'nested/deep/gone.test.ts'))).toBe(false);
+    expect(existsSync(join(repo, 'nested/deep'))).toBe(false);
   });
 
-  it('reads the count from the runner summary, and null when nothing was collected', () => {
-    expect(caseCount('      Tests  12 passed (12)\n')).toBe(12);
-    expect(caseCount('      Tests  1 failed | 10 passed (11)\n')).toBe(11);
-    expect(caseCount('No test files found, exiting with code 1')).toBe(0);
-    expect(caseCount('some unrelated output')).toBe(null);
+  it('a diff reader must see content lines that BEGIN with -- or ++', () => {
+    // ⛔ Judging the header by `startsWith('---')`/`'+++'` also swallows content. Measured: 2 of 3
+    // removed lines and the only added line vanished, which both hides deletions and invents moves.
+    const base = commit(
+      { 'src/a.ts': SRC, 'src/a.test.ts': 'const css = `\n--color: red;\n--size: 2px;\n`;\nit("a", () => {});\nit("b", () => {});\n' },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': 'const css = `\n++plus: 1;\n`;\nit("a", () => {});\n' }, 'rewrite the literal');
+    const mb = mergeBase(base, head);
+
+    const lost = diffContentLines(['diff', '-M', `${mb}...${head}`, '--', 'src/a.test.ts'], '-');
+    expect(lost).toContain('--color: red;');
+    expect(lost).toContain('--size: 2px;');
+    expect(diffContentLines(['diff', '-M', `${mb}...${head}`], '+')).toContain('++plus: 1;');
   });
 
-  it('the reported reason is the ERROR, never a progress separator', () => {
-    const real = [
-      'RUN  v4.1.7',
-      '',
-      'src/core/a.test.ts > does a thing  Error: No "getAudioDurationSec" export is defined',
-      '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯',
-      ' Test Files  1 failed (1)',
-      '   Duration  812ms',
-    ].join('\n');
-    expect(reasonLine(real)).toContain('No "getAudioDurationSec" export is defined');
+  it('a NON-ASCII path survives the numstat, and a rename names its DESTINATION', () => {
+    // ⛔ Without `-z`, git C-quotes the path and `git show <base>:<it>` throws — the file was then
+    // skipped as "the merge base has no such file", a diagnosis that is false.
+    const base = commit({ 'src/a.ts': SRC, 'src/grüß.test.ts': 'it("x", () => {});\nit("y", () => {});\n', 'src/r.test.ts': 'it("r", () => {});\n' }, 'base');
+    sh(['mv', 'src/r.test.ts', 'src/renamed.test.ts']);
+    const head = commit({ 'src/grüß.test.ts': 'it("x", () => {});\n', 'src/renamed.test.ts': 'it("r", () => {});\nit("r2", () => {});\n' }, 'head');
+    const mb = mergeBase(base, head);
+
+    expect(removedFrom(mb, head)).toContain('src/grüß.test.ts');
+    expect(addedTo(mb, head)).toContain('src/renamed.test.ts');
+    expect(addedTo(mb, head)).not.toContain('src/r.test.ts');
+  });
+
+  it('addedMultiset counts only where the runner looks', () => {
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\n' }, 'base');
+    const head = commit({ 'src/b.test.ts': 'it("moved", () => {});\n', 'docs/x.md': 'it("moved", () => {});\n' }, 'two destinations');
+    const mb = mergeBase(base, head);
+
+    expect(addedMultiset(mb, head, (f) => f === 'src/b.test.ts').get('it("moved", () => {});')).toBe(1);
+    expect(addedMultiset(mb, head, () => false).size).toBe(0);
+  });
+
+  it('isPureMove PUTS BACK what it took when the file turns out not to be a move', () => {
+    const base = commit({ 'src/a.ts': SRC, 'src/a.test.ts': 'it("one", () => {});\nit("two", () => {});\n' }, 'base');
+    const head = commit({ 'src/a.test.ts': null }, 'delete it');
+    const mb = mergeBase(base, head);
+    const budget = new Map([['it("one", () => {});', 1]]); // enough for the first lost line only
+
+    expect(isPureMove(mb, head, 'src/a.test.ts', budget)).toBe(false);
+    // ⛔ Without the put-back, a failed match would starve the next candidate of a line it could use.
+    expect(budget.get('it("one", () => {});')).toBe(1);
   });
 
   it("the runner's own verdict outranks a console line that merely SOUNDS like a failure", () => {
-    // Measured on a real run: this exact console warning won over the FAIL line below it, so the
-    // skip was explained by a push-notification log that had nothing to do with the removal.
-    // ⛔ If the tiers are ever collapsed back into one alternation, this reads the console line.
     const out = [
       'stderr | src/server/http-api.test.ts',
       '[http-api] push notifications unavailable: this.engine.getPushNotifier is not a function',
@@ -295,73 +475,32 @@ describe('deleted-assertion-guard', () => {
     expect(reasonLine(out)).toBe('FAIL  src/server/http-api.test.ts > boots');
   });
 
-  it("a GLYPH verdict is a verdict — \\b after a non-word character never matched", () => {
-    // The two glyph markers were dead on arrival for exactly this reason, and a dead marker is
-    // invisible: the line still came back, just from the weakest tier and often the wrong line.
-    expect(reasonLine('\u00d7 src/a.test.ts > boots 3ms\nsomething undefined here')).toBe(
-      '\u00d7 src/a.test.ts > boots 3ms',
-    );
+  it('a GLYPH verdict is a verdict, and a progress separator is never the answer', () => {
+    expect(reasonLine('× src/a.test.ts > boots 3ms\nsomething undefined here')).toBe('× src/a.test.ts > boots 3ms');
+    // ⚠ The separator survives stripping its own glyphs as `[4/4]`, which has digits — so a filter
+    // that only asked for letters-or-digits let it through. Measured on a real run.
+    expect(reasonLine('collected the suite\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯')).toBe('collected the suite');
+    expect(reasonLine('')).toBe('(the run produced no readable output)');
   });
 
-  it('an AMBIGUOUS path filter is skipped, because the count would be a sum over two files', () => {
-    // The runner's path argument is a substring filter. Core's 569 test files collide for none of
-    // them today, so this is a precondition the guard measures rather than a bug it has — but the
-    // failure it prevents is silent in the worst direction: a deletion in one file masked by an
-    // addition in the other, reported as nothing.
-    const base = commit(
-      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\n' },
-      'base',
-    );
-    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop two cases');
-
-    const colliding = (): string[] => ['src/a.test.ts', 'pkg/src/a.test.ts'];
-    const r = check({ base, head, runFile: counting, listFiles: colliding, log: () => {} });
-
-    // ⛔ Without the precondition this is status 1 with a finding — the deletion IS real here. The
-    // point is that the guard must not put a NUMBER on it when the number would be a sum.
-    expect(r.status).toBe(0);
-    expect(r.findings).toEqual([]);
-    expect(r.skipped).toEqual([
-      ['src/a.test.ts', expect.stringContaining('pkg/src/a.test.ts')] as unknown as [string, string],
-    ]);
-    expect(r.skipped[0][1]).toContain('sum over several files');
+  it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {
+    commit({ 'src/a.ts': SRC }, 'base');
+    expect(() => mergeBase('deadbeefdeadbeef', 'cafebabecafebabe')).toThrow();
   });
 
-  it('a WHOLLY deleted file also has its filter measured — the second site, which the first test cannot reach', () => {
-    // ⚠ The head-side precondition is unreachable for a file that no longer exists at head, so
-    // without this witness the base-side copy could be deleted and every test would stay green.
-    const base = commit({ 'src/a.ts': SRC, 'src/gone.test.ts': 'it("a", () => {});\n' }, 'base');
-    const head = commit({ 'src/gone.test.ts': null }, 'delete the file');
-
-    const colliding = (): string[] => ['src/gone.test.ts', 'pkg/src/gone.test.ts'];
-    const r = check({ base, head, runFile: counting, listFiles: colliding, log: () => {} });
-
-    expect(r.status).toBe(0);
-    expect(r.findings).toEqual([]);
-    expect(r.skipped[0][1]).toContain('sum over several files');
-  });
-
-  it('filterMatches is the substring relation the runner uses, not equality', () => {
-    expect(filterMatches(['a/foo.test.ts', 'b/a/foo.test.ts', 'c.test.ts'], 'a/foo.test.ts')).toEqual([
-      'a/foo.test.ts',
-      'b/a/foo.test.ts',
-    ]);
-    expect(filterMatches(['a/foo.test.ts', 'c.test.ts'], 'a/foo.test.ts')).toEqual(['a/foo.test.ts']);
-  });
-
-  it("the WORKFLOW's exit mapping is executed, not read \u2014 a finding must leave the step green", () => {
-    // \u26d4 This test exists because the mapping was BROKEN and every text-level check passed.
-    // GitHub invokes a `run:` block as `bash -e {0}`, so `-e` is on before the block's own `set`
-    // runs. With a bare call followed by `CODE=$?` the step aborted the instant the guard exited
-    // non-zero: the `case` never ran, no warning was printed, and the job went RED on a finding \u2014
-    // the one polarity this design forbids. Nothing short of RUNNING the block sees that.
+  it("the WORKFLOW's exit mapping is executed, and a code without a VERDICT line is ill health", () => {
+    // ⛔ Two measured defects live here. GitHub invokes a `run:` block as `bash -e {0}`, so `-e` is on
+    // before the block's own `set` runs: with a bare call followed by `CODE=$?` the step aborted the
+    // instant the guard exited non-zero — the `case` never ran, nothing was printed, and the job went
+    // RED on a finding. And an exit code alone cannot tell a verdict from a crash: node exits 1 for a
+    // module-load failure too, so a pull request deleting this script made the job announce a finding
+    // nobody had measured. Nothing short of RUNNING the block sees either.
     const ymlPath = fileURLToPath(new URL('../.github/workflows/deleted-assertion-guard.yml', import.meta.url));
     const yml = readFileSync(ymlPath, 'utf-8').split('\n');
     const starts = yml.flatMap((l, i) => (l.trim() === 'run: |' ? [i] : []));
-    const last = starts[starts.length - 1];
     const body: string[] = [];
     let indent: number | null = null;
-    for (const l of yml.slice(last + 1)) {
+    for (const l of yml.slice(starts[starts.length - 1] + 1)) {
       if (l.trim() === '') { body.push(''); continue; }
       const ind = l.length - l.trimStart().length;
       if (indent === null) indent = ind;
@@ -369,43 +508,39 @@ describe('deleted-assertion-guard', () => {
       body.push(l.slice(indent));
     }
     const block = body.join('\n');
-    // Positive control on the EXTRACTION. Without it a silently empty block would pass every
-    // assertion below: `bash -e` on nothing exits 0, which reads exactly like "nothing to report".
+    // Positive control on the EXTRACTION. Without it a silently empty block passes every assertion
+    // below: `bash -e` on nothing exits 0, which reads exactly like "nothing to report".
     expect(block).toContain('case "$CODE" in');
     expect(body.some((l) => l.startsWith('env:') || l.startsWith('- name:'))).toBe(false);
 
     const dir = mkdtempSync(join(tmpdir(), 'ghstep-'));
-    for (const [code, wantStatus, wantMarker] of [
-      [0, 0, 'nothing to report'],
-      [1, 0, '::warning::'],
-      [2, 1, '::error::'],
-      [127, 1, '::error::'],
-    ] as Array<[number, number, string]>) {
-      const sh = join(dir, `step-${String(code)}.sh`);
-      // \u26a0 `[^|\n]*`, not `.*`. With `.*$` this substitution swallowed the trailing
-      // `|| CODE=$?` as well \u2014 so the probe rebuilt the very broken form it was written to
-      // detect, and reported a failure that was its own doing. A transformation that removes
-      // the mechanism under test cannot test it.
-      const replaced = block.replace(
-        /node scripts\/deleted-assertion-guard\.mjs [^|\n]*/m,
-        `( exit ${String(code)} ) `,
-      );
-      expect(replaced).not.toBe(block); // the invocation must have been found
-      expect(replaced).toContain('|| CODE=$?'); // \u2026 and the mechanism must still be there
-      writeFileSync(sh, replaced, 'utf-8');
-      const r = spawnSync('bash', ['-e', sh], { encoding: 'utf-8' });
-      expect({ code, status: r.status, out: (r.stdout + r.stderr).slice(0, 120) }).toMatchObject({
-        status: wantStatus,
-      });
-      expect(r.stdout + r.stderr).toContain(wantMarker);
+    const cases: Array<[number, string | null, number, string]> = [
+      [0, 'VERDICT clean', 0, 'nothing to report'],
+      [1, 'VERDICT report', 0, '::warning::'],
+      [2, null, 1, '::error::'],
+      [127, null, 1, '::error::'],
+      [1, null, 1, '::error::'], // a crash wearing a finding's exit code
+      [0, null, 1, '::error::'], // exit 0 without reaching a conclusion
+    ];
+    for (const [code, sentinel, wantStatus, wantMarker] of cases) {
+      // ⚠ No space in the name: the substitution lands in an unquoted command position, so
+      // `stub-0-VERDICT clean.sh` ran as two words and the step failed for a reason the test invented.
+      const tag = `${String(code)}-${(sentinel ?? 'none').replace(/\W+/g, '_')}`;
+      const stub = join(dir, `stub-${tag}.sh`);
+      writeFileSync(stub, `${sentinel === null ? '' : `printf '%s\\n' 'deleted-assertion-guard: ${sentinel}'\n`}exit ${String(code)}\n`, 'utf-8');
+      // ⚠ Only the COMMAND is substituted. Replacing to end of line swallowed the trailing
+      // `|| CODE=$?` once, so the probe rebuilt the broken form and reported its own doing.
+      const replaced = block.replace(/node scripts\/deleted-assertion-guard\.mjs/m, `bash ${stub}`);
+      expect(replaced).not.toBe(block);
+      expect(replaced).toContain('|| CODE=$?');
+      const sh2 = join(dir, `step-${tag}.sh`);
+      writeFileSync(sh2, replaced, 'utf-8');
+      const r = spawnSync('bash', ['-e', sh2], { encoding: 'utf-8', env: { ...process.env, BASE_SHA: 'b', HEAD_SHA: 'h' } });
+      const out = `${r.stdout}${r.stderr}`;
+      expect({ code, sentinel, status: r.status, out: out.slice(0, 160) }).toMatchObject({ status: wantStatus });
+      expect(out).toContain(wantMarker);
     }
     rmSync(dir, { recursive: true, force: true });
-  });
-
-  it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {
-    commit({ 'src/a.ts': SRC }, 'base');
-    // ⛔ The point is that it throws here. An earlier version let the throw reach node's default
-    // exit of 1, which the workflow announced as a finding nobody had measured.
-    expect(() => mergeBase('deadbeefdeadbeef', 'cafebabecafebabe')).toThrow();
+    expect(readdirSync(tmpdir()).length).toBeGreaterThan(0);
   });
 });
