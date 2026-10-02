@@ -1,264 +1,317 @@
 #!/usr/bin/env node
 /**
- * deleted-assertion-guard.mjs — a restructuring that DELETES a working assertion looks exactly like
- * one that replaces it, and nothing in the build can tell the difference.
+ * deleted-assertion-guard.mjs — did this pull request remove test CASES that still hold?
  *
- *   node scripts/deleted-assertion-guard.mjs <base-sha> <head-sha>
+ *   node scripts/deleted-assertion-guard.mjs <base-ref> <head-ref>
  *
- * Exit 0 = nothing to report, or every deletion was FORCED · 1 = at least one deletion was
- * UNNECESSARY, proven · 2 = could not check, and that does NOT block.
+ * Exit 0 = checked, nothing to report · 1 = something to report (ADVISORY) · 2 = could not check.
  *
- * ⭐ WHAT IT MEASURES, and why it is a measurement and not a style rule. For every test file the
- * diff removes lines from, it takes that file **as it stood at the base commit** and runs it
- * against the **new** source.
+ * ⛔ IT IS A REPORTER, NOT A GATE, and the polarity is the opposite of the obvious one: **the
+ * workflow fails only on exit 2.** A finding costs a reader one minute; a false alarm costs nothing;
+ * and the blind spot below breaks nothing, because nothing is allowed to rest on this. What IS gated
+ * is the instrument's HEALTH — a check that silently stops looking still reads as coverage.
  *
- *   · the old test passes  ⇒ the assertion it carried still holds, so deleting it removed cover
- *                            for nothing. That is a FINDING, not a preference.
- *   · the old test fails    ⇒ the deletion was forced by the change, and the reason belongs in the
- *                            commit message. Reported, never blocked.
+ * ⭐ WHAT IT MEASURES, and the measuring device is the RUNNER, never a regular expression.
+ * For every file the diff removes lines from, and that vitest itself says it would run:
+ *   1. count the test cases the BASE version declares  (run it, read `Tests … (N)`)
+ *   2. count the test cases the HEAD version declares  (0 if the file is gone)
+ *   3. report only when the count DROPPED **and** the base version passes against the new source.
  *
- * ⛔ FAIL DIRECTION — OPEN, on purpose, and this is the half that gets built backwards. The old
- * file is run against source it was not written for. A legitimate signature change makes it fail to
- * compile, and a compile failure is indistinguishable here from a real regression. So ONLY A GREEN
- * RUN BLOCKS: green is positive proof that the deletion cost cover, and nothing else is proof of
- * anything. Built the other way round, this guard would stop every honest rename and be switched
- * off inside two weeks — which is worse than not having it, because a disabled guard still reads as
- * coverage on the board.
+ * ⛔ WHY THE COUNT AND NOT "REMOVED LINES" — this is the premise the first version got wrong, and it
+ * was wrong in the direction that gets a guard switched off. "Removed test lines" is a PROXY for
+ * "removed coverage", and a bad one: a retitled `it()`, a renamed variable, `toBe` rewritten as
+ * `toStrictEqual`, a prettier re-wrap, an assertion extracted into a helper — each removes lines and
+ * removes no coverage. The base file then passes, and a green run there is **not a finding: it is
+ * the proof that nothing is missing**, because it tests the same thing. Measured in a throwaway
+ * repository: a change that only retitled two tests was reported as a finding. A guard that blocks
+ * every rename is switched off in days.
  *
- * ⭐ WHY THIS EXISTS AT ALL. The rule is already written down — *replacing is a suspicion,
- * extending is the default* — and prose lost to the normal case: a session restructured a guard,
- * removed three assertions, and typecheck, lint and the whole suite stayed green while **two
- * attacks were open again**. The old test file, run against the new source, scored 125/125 and
- * killed both. "Unnecessary" was therefore measured, not argued — which is the only reason this
- * guard can be built from a second test run instead of a parser.
+ * ⚠ ITS BLIND SPOT, stated here AND in its own output, because a report must say what it KNOWS:
+ * deleting two cases while adding three keeps the count up and does not appear. Closing that needs
+ * the property instead of the proxy — coverage instrumentation — which is a different and much
+ * larger instrument. The limit is named, not papered over.
  *
- * ⚠ WHAT IT DOES NOT SEE. Assertions that do not live in a test file (a `satisfies` weld, a type
- * constraint, a guard clause in `src/`) are invisible to it. It is a floor for one shape of loss,
- * not a classifier for loss in general.
+ * ⚠ WHAT IT DOES NOT SEE AT ALL: assertions outside a test file (a `satisfies` weld, a type
+ * constraint, a guard clause in `src/`), and a test file renamed AND edited in the same commit — git
+ * reports that as `R`, which `--diff-filter=MD` does not select, so the edit inside the rename is
+ * invisible. A floor for one shape of loss, not a classifier for loss.
  *
- * ⚠ A MOVE IS NOT A DELETION, and getting this wrong is expensive rather than theoretical: an
- * "added/removed lines" check fired 101, 108 and 264 false findings on a single pull request that
- * only moved files. Two defences, both structural rather than per-directory exceptions:
- *   1. renames are resolved by git itself (`-M`), so a renamed test file never becomes a candidate;
- *   2. a removed line that reappears byte-identically among the diff's ADDED lines is a move, and a
- *      file whose every removed line reappears is skipped entirely.
+ * ⚠ A MOVE IS NOT A DELETION, with MULTIPLICITY. An "added/removed lines" check once fired 101, 108
+ * and 264 false findings on a pull request that only moved files. Three defences: renames are
+ * resolved by git (`-M`), so a renamed file is never a candidate; a lost line counts as moved only
+ * if an added line is still AVAILABLE to match it (a multiset, so one added `});` cannot absolve
+ * five lost ones); and the comparison spans the whole diff, because a move to another file is a move.
  *
- * ⛔ IT REFUSES TO RUN ON A DIRTY TREE. It writes an old file into the working tree to run it. In
- * CI that tree is disposable; on a developer's machine it is not, and a mutation in a live tree has
- * real side effects — so an uncommitted change anywhere is exit 2, not a cleanup attempt.
+ * ⛔ IT REFUSES ON A TRACKED MODIFICATION. It writes a file into the tree to run it. A tracked change
+ * means the run would not measure HEAD anyway, and it could be work to clobber. An UNTRACKED file is
+ * named and ignored — refusing on those made an earlier version exit 2 on an editor leftover, and
+ * since exit 2 reports no finding, the guard would have been permanently silent while still counting
+ * as a check.
+ *
+ * ⛔ EVERY FAILURE IS EXIT 2. An earlier version let a thrown git error reach node's default exit of
+ * 1, which the workflow read as "a deleted assertion still holds" — announcing a finding nobody had
+ * measured. There is now one try/catch around the whole run and no path to 1 except a real report.
  */
 
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 
-const TEST_GLOBS = ['*.test.ts', '*.spec.ts', '*.test.tsx', '*.spec.tsx'];
-
-/** Run a command and return stdout; throws on a non-zero exit. */
-function git(args, opts = {}) {
-  return execFileSync('git', args, { encoding: 'utf-8', maxBuffer: 1 << 28, ...opts });
+/** Run a command; throws on a non-zero exit. */
+function git(args) {
+  return execFileSync('git', args, { encoding: 'utf-8', maxBuffer: 1 << 28 });
 }
 
-/** stdout of a command that is allowed to fail; returns `{ ok, out }`. */
+/** Run a command that is allowed to fail. */
 function tryRun(cmd, args, opts = {}) {
   try {
-    const out = execFileSync(cmd, args, { encoding: 'utf-8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-    return { ok: true, out };
+    return { ok: true, out: execFileSync(cmd, args, { encoding: 'utf-8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'pipe'], ...opts }) };
   } catch (e) {
     return { ok: false, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
   }
 }
 
 /**
- * Test files this diff removes lines from.
+ * The point the two refs diverge.
  *
- * ⚠ The filter is `MD`, not `ACMR`. `ACMR` omits deleted files, and a test file deleted WHOLE is
- * the main case this guard is for — the one that would silently never be a candidate.
- * `-M` is what keeps a rename out: git reports it as `R`, which neither letter selects.
+ * ⛔ `merge-base`, not `base..head`. A two-dot diff also carries everything the base branch moved
+ * since the fork, so a test file this pull request never touched shows removed lines and becomes a
+ * candidate. An earlier version's own comment named this problem and then used the two-dot form.
  */
-export function candidateFiles(base, head) {
-  const out = git(['diff', '-M', '--diff-filter=MD', '--numstat', `${base}..${head}`, '--', ...TEST_GLOBS]);
+export function mergeBase(base, head) {
+  return git(['merge-base', base, head]).trim();
+}
+
+/** Files the diff removes lines from. `MD`, because `ACMR` omits the wholly deleted file — the main case. */
+export function removedFrom(base, head) {
+  const out = git(['diff', '-M', '--diff-filter=MD', '--numstat', `${base}...${head}`]);
   const files = [];
   for (const line of out.split('\n')) {
     const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line.trim());
     if (!m) continue;
-    const deletions = m[2] === '-' ? 0 : Number(m[2]);
-    if (deletions > 0) files.push(m[3]);
+    if (m[2] !== '-' && Number(m[2]) > 0) files.push(m[3]);
   }
   return files;
 }
 
-/**
- * Every line this diff REMOVED and every line it ADDED, as trimmed multisets.
- * Used only to recognise a move; never to judge a file on its own.
- */
-export function movedLineSets(base, head) {
-  const out = git(['diff', '-M', `${base}..${head}`]);
-  const removed = [];
-  const added = [];
-  for (const line of out.split('\n')) {
-    if (/^(---|\+\+\+)/.test(line)) continue;
-    if (line.startsWith('-')) removed.push(line.slice(1).trim());
-    else if (line.startsWith('+')) added.push(line.slice(1).trim());
+/** A MULTISET of every line the diff adds: line → how many times it was added. */
+export function addedMultiset(base, head) {
+  const counts = new Map();
+  for (const line of git(['diff', '-M', `${base}...${head}`]).split('\n')) {
+    if (line.startsWith('+++')) continue;
+    if (!line.startsWith('+')) continue;
+    const t = line.slice(1).trim();
+    if (t.length === 0) continue;
+    counts.set(t, (counts.get(t) ?? 0) + 1);
   }
-  return { removed, added: new Set(added.filter((l) => l.length > 0)) };
+  return counts;
 }
 
-/** True when every non-empty line this file lost reappears byte-identically among the added lines. */
-export function isPureMove(base, head, file, addedSet) {
-  const out = git(['diff', '-M', `${base}..${head}`, '--', file]);
+/**
+ * True when every non-empty line this file lost can be matched by a STILL-AVAILABLE added line.
+ * Consumes from the multiset, so one added `});` cannot absolve five lost ones.
+ */
+export function isPureMove(base, head, file, addedCounts) {
   const lost = [];
-  for (const line of out.split('\n')) {
-    if (/^(---|\+\+\+)/.test(line)) continue;
-    if (line.startsWith('-')) {
-      const t = line.slice(1).trim();
-      if (t.length > 0) lost.push(t);
-    }
+  for (const line of git(['diff', '-M', `${base}...${head}`, '--', file]).split('\n')) {
+    if (line.startsWith('---')) continue;
+    if (!line.startsWith('-')) continue;
+    const t = line.slice(1).trim();
+    if (t.length > 0) lost.push(t);
   }
   if (lost.length === 0) return false;
-  return lost.every((l) => addedSet.has(l));
+  const budget = new Map(addedCounts);
+  for (const l of lost) {
+    const left = budget.get(l) ?? 0;
+    if (left === 0) return false;
+    budget.set(l, left - 1);
+  }
+  return true;
 }
 
 /**
- * The whole check, with the test RUNNER passed in.
+ * How many test cases a run declared, or null when the run collected none.
  *
- * ⚠ The runner is a parameter and not an environment variable on purpose. An env switch would be a
- * bypass — someone could point it at `true` and the guard would report every deletion as
- * unnecessary… or at `false` and it would report none. As a parameter, the shipped path has exactly
- * one runner (`main` below) and the test supplies its own, so there is nothing to set at runtime.
+ * ⚠ Read from the runner's own summary line, not counted from the source: `it.each`, `test`,
+ * `describe.each` and a commented-out block all defeat a textual count, and the runner does not.
+ */
+export function caseCount(out) {
+  const m = /^\s*Tests\s+.*?\((\d+)\)\s*$/m.exec(out);
+  if (m) return Number(m[1]);
+  if (/No test files found/.test(out)) return 0;
+  return null;
+}
+
+/**
+ * The whole check, with the runner passed in.
  *
- * @param {{base: string, head: string, runner: (file: string) => {ok: boolean, out: string},
+ * ⚠ The runner is a parameter and not an environment variable. An env switch would be a bypass:
+ * point it at `true` and every deletion reads as a finding, at `false` and none does. As a parameter
+ * the shipped path has exactly one runner and the test supplies its own.
+ *
+ * @param {{base: string, head: string,
+ *          runFile: (f: string) => {ok: boolean, out: string},
+ *          listFiles: () => string[],
  *          log?: (s: string) => void}} opts
  */
-export function check({ base, head, runner, log = console.log }) {
-  // ⚠ TRACKED changes only, and the narrowing is a correction found by running this for real.
-  // The first version refused on ANY porcelain output — including untracked files — and an
-  // untracked editor leftover was enough to make the guard exit 2. Exit 2 does not block, so the
-  // guard would simply never run while still reading as coverage on the board: the exact failure
-  // this file's header warns about for the opposite polarity.
-  //   · a modified or staged TRACKED file ⇒ refuse. Two reasons, and the second is the sharper
-  //     one: the file could be a candidate we would overwrite, and any tracked modification means
-  //     the run no longer measures the HEAD source, so a green verdict would be about something
-  //     else.
-  //   · an UNTRACKED file ⇒ name it and proceed. It is not part of HEAD, and it cannot be
-  //     clobbered by a restore that only ever writes back what it read.
+export function check({ base, head, runFile, listFiles, log = () => {} }) {
   const dirty = tryRun('git', ['status', '--porcelain']);
-  if (!dirty.ok) return { status: 2, reason: 'tree-unreadable', findings: [], forced: [], unreadable: [], moves: [] };
+  if (!dirty.ok) return { status: 2, reason: 'tree-unreadable' };
   const lines = dirty.out.split('\n').filter((l) => l.trim().length > 0);
   const trackedDirty = lines.filter((l) => !l.startsWith('??'));
-  const untracked = lines.filter((l) => l.startsWith('??')).map((l) => l.slice(3));
-  if (trackedDirty.length > 0) {
-    return { status: 2, reason: 'tree-dirty', findings: [], forced: [], unreadable: [], moves: [], trackedDirty };
-  }
-  for (const u of untracked) log(`  note  untracked, ignored: ${u}`);
+  if (trackedDirty.length > 0) return { status: 2, reason: 'tree-dirty', trackedDirty };
+  for (const u of lines.filter((l) => l.startsWith('??'))) log(`  note      untracked, ignored: ${u.slice(3)}`);
 
-  let candidates;
-  try {
-    candidates = candidateFiles(base, head);
-  } catch {
-    return { status: 2, reason: 'diff-unreadable', findings: [], forced: [], unreadable: [], moves: [] };
-  }
-  if (candidates.length === 0) return { status: 0, reason: 'no-candidates', findings: [], forced: [], unreadable: [], moves: [], candidates };
+  const mb = mergeBase(base, head);
+  const candidates = removedFrom(mb, head);
+  if (candidates.length === 0) return { status: 0, reason: 'no-candidates', findings: [], skipped: [], moves: [], candidates: [] };
 
-  const { added } = movedLineSets(base, head);
+  const addedCounts = addedMultiset(mb, head);
   const findings = [];
-  const forced = [];
-  const unreadable = [];
+  const skipped = [];
   const moves = [];
 
   for (const file of candidates) {
-    if (isPureMove(base, head, file, added)) {
+    if (isPureMove(mb, head, file, addedCounts)) {
       moves.push(file);
-      log(`  move  ${file} — every removed line reappears byte-identically; not a deletion`);
+      log(`  move      ${file} — every lost line is matched by an added one`);
       continue;
     }
-    let oldSource;
+
+    let baseSource;
     try {
-      oldSource = git(['show', `${base}:${file}`]);
+      baseSource = git(['show', `${mb}:${file}`]);
     } catch {
-      unreadable.push([file, 'the base commit has no such file']);
+      skipped.push([file, 'the merge base has no such file']);
       continue;
     }
+
+    // The HEAD count comes first, while the tree is still untouched. A file that is gone declares none.
+    let headCount = 0;
     const existedAtHead = existsSync(file);
+    if (existedAtHead) {
+      if (!listFiles().includes(file)) {
+        skipped.push([file, 'the runner does not run this file (it is not in the runner\'s own file list)']);
+        continue;
+      }
+      const headRun = runFile(file);
+      const hc = caseCount(headRun.out);
+      if (hc === null) {
+        skipped.push([file, `the head version collected no cases, so there is no count to compare: ${reasonLine(headRun.out)}`]);
+        continue;
+      }
+      headCount = hc;
+    }
+
     const backup = existedAtHead ? readFileSync(file, 'utf-8') : null;
     try {
       mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, oldSource, 'utf-8');
-      const run = runner(file);
-      if (run.ok) findings.push(file);
-      else forced.push([file, lastMeaningfulLine(run.out)]);
+      writeFileSync(file, baseSource, 'utf-8');
+      // Asked here for a wholly deleted file: it cannot be in the runner's list before it is written back.
+      if (!listFiles().includes(file)) {
+        skipped.push([file, 'the runner does not run this file (it is not in the runner\'s own file list)']);
+        continue;
+      }
+      const baseRun = runFile(file);
+      // ⚠ ORDER MATTERS, and a test found it. A base version that fails to compile ALSO has no
+      // parseable count, so checking the count first swallowed the more specific and more useful
+      // diagnosis — "the removal was forced" — and reported "collected no cases" instead. The
+      // failing run is the sharper fact, so it is read first.
+      if (!baseRun.ok) {
+        skipped.push([file, `the base version fails against the new source — the removal was forced: ${reasonLine(baseRun.out)}`]);
+        continue;
+      }
+      const baseCount = caseCount(baseRun.out);
+      if (baseCount === null) {
+        skipped.push([file, `the base version ran but declared no readable case count: ${reasonLine(baseRun.out)}`]);
+        continue;
+      }
+      if (baseCount > headCount) findings.push({ file, baseCount, headCount });
+      else log(`  same      ${file} — ${String(baseCount)} case(s) before, ${String(headCount)} after; the count did not drop`);
     } finally {
       if (backup === null) rmSync(file, { force: true });
       else writeFileSync(file, backup, 'utf-8');
     }
   }
-  return { status: findings.length > 0 ? 1 : 0, reason: 'checked', findings, forced, unreadable, moves, candidates };
+  return { status: findings.length > 0 ? 1 : 0, reason: 'checked', findings, skipped, moves, candidates };
+}
+
+/**
+ * The line of a run that tells a human WHY.
+ *
+ * ⚠ Measured: taking the last non-empty line reported `⎯⎯⎯[4/4]⎯`, a progress separator. Where the
+ * output IS the purpose, the output is what has to be tested.
+ */
+export function reasonLine(out) {
+  const lines = out
+    .split('\n')
+    .map((l) => l.replace(/\u001b\[[0-9;]*m/g, '').trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => /[A-Za-z0-9]/.test(l.replace(/[─-╿⎯—–]/g, '')))
+    .filter((l) => !/^(Duration|Start at|RUN|Test Files|Tests)\b/.test(l));
+  const marked = lines.find((l) => /\b(error|Error|FAIL|failed|Cannot|cannot|is not|undefined|TS\d{4})\b/.test(l));
+  const pick = marked ?? lines[lines.length - 1];
+  return pick ? pick.slice(0, 150) : '(the run produced no readable output)';
 }
 
 function main() {
   const [base, head] = process.argv.slice(2);
   if (!base || !head) {
-    console.error('deleted-assertion-guard: usage: node scripts/deleted-assertion-guard.mjs <base-sha> <head-sha>');
+    console.log('deleted-assertion-guard: usage: node scripts/deleted-assertion-guard.mjs <base-ref> <head-ref>');
     process.exit(2);
   }
-  const runner = (file) => tryRun('npx', ['vitest', 'run', file, '--reporter', 'dot'], { env: { ...process.env, CI: '1' } });
-  const r = check({ base, head, runner });
+  let r;
+  try {
+    const env = { ...process.env, CI: '1' };
+    r = check({
+      base,
+      head,
+      runFile: (f) => tryRun('npx', ['vitest', 'run', f, '--reporter', 'dot'], { env }),
+      // ⚠ The runner names its own file set. An earlier version used a glob, which pulled in eight
+      // Playwright specs vitest cannot run — they read as "forced" forever, so the guard did not
+      // exist for an eighth of its own set. Also: vitest's path argument is a SUBSTRING filter, so
+      // membership is asserted here rather than inferred from the argument being accepted.
+      listFiles: () => {
+        const l = tryRun('npx', ['vitest', 'list', '--filesOnly'], { env });
+        return l.ok ? l.out.split('\n').map((s) => s.trim()).filter((s) => /\.(test|spec)\.tsx?$/.test(s)) : [];
+      },
+      log: console.log,
+    });
+  } catch (e) {
+    // ⛔ ONE catch for everything, and it is exit 2.
+    console.log(`deleted-assertion-guard: could not check — ${String(e).split('\n')[0].slice(0, 160)}`);
+    process.exit(2);
+  }
 
   if (r.status === 2) {
     const why = {
       'tree-unreadable': 'could not read the working tree state',
-      'tree-dirty': 'the working tree has uncommitted changes. This guard writes a file into the tree to run it,\n  so it refuses rather than touch your work. Commit or stash, then re-run.',
-      'diff-unreadable': 'could not read the diff',
+      'tree-dirty': 'the working tree has tracked changes; this guard writes a file into the tree to run it, so it refuses rather than touch your work',
     }[r.reason] ?? r.reason;
-    console.log(`deleted-assertion-guard: ${why} — NOT blocking (exit 2)`);
+    console.log(`deleted-assertion-guard: ${why}`);
+    if (r.trackedDirty) for (const l of r.trackedDirty.slice(0, 10)) console.log(`    ${l}`);
     process.exit(2);
   }
   if (r.reason === 'no-candidates') {
-    console.log('deleted-assertion-guard: clean ✓ (this diff removes no lines from any test file)');
+    console.log('deleted-assertion-guard: nothing to look at (this diff removes no lines from any tracked file)');
     process.exit(0);
   }
-  for (const [file, why] of r.unreadable) console.log(`  skip  ${file} — ${why}`);
-  for (const [file, why] of r.forced) {
-    console.log(`  forced  ${file}`);
-    console.log(`          the base version does not pass against the new source: ${why}`);
-    console.log('          → the deletion was forced. Say so in the commit message; nothing is blocked.');
-  }
-  if (r.status === 0) {
-    console.log(`deleted-assertion-guard: clean ✓ (${r.candidates.length} candidate(s); no deletion was unnecessary)`);
+  for (const [file, why] of r.skipped) console.log(`  skip      ${file} — ${why}`);
+  if (r.findings.length === 0) {
+    console.log(`deleted-assertion-guard: nothing to report (${String(r.candidates.length)} candidate(s) examined)`);
     process.exit(0);
   }
   console.log('');
-  for (const file of r.findings) {
-    console.log(`::error::deleted-assertion-guard: ${file} — the version at ${base.slice(0, 8)} PASSES against the new source.`);
+  for (const { file, baseCount, headCount } of r.findings) {
+    console.log(`  REPORT  ${file}: ${String(baseCount)} test case(s) before, ${String(headCount)} after — and all ${String(baseCount)} still pass against the new source.`);
   }
   console.log('');
-  console.log('  The assertions this diff removed still hold. Deleting them removed cover for nothing.');
-  console.log('  Restore them, or say in the commit message what the new code asserts instead and where.');
-  console.log('  This is the one case the guard blocks on, because a green run is positive proof.');
+  console.log('  What this knows: that many cases are gone, and the ones that were there still hold.');
+  console.log('  What it does NOT know, and cannot: whether something else now covers them. It compares');
+  console.log('  only the NUMBER of cases per file — deleting two while adding three keeps the number up');
+  console.log('  and does not appear here at all.');
+  console.log('  Nothing is blocked. If the removal was deliberate, the commit message is where to say so.');
   process.exit(1);
-}
-
-/**
- * The line of a failing run that tells a human WHY.
- *
- * ⚠ The first version took the last non-empty line, and a real run reported `⎯⎯⎯[4/4]⎯` — a
- * progress separator. Since the whole purpose of the `forced` branch is that somebody reads the
- * reason, a separator there makes the branch useless while looking like it works. So: prefer a line
- * that carries an error marker, and never return one that is only box-drawing or punctuation.
- */
-export function lastMeaningfulLine(out) {
-  const lines = out
-    .split('\n')
-    .map((l) => l.replace(/\u001b\[[0-9;]*m/g, '').trim())
-    .filter((l) => l.length > 0)
-    // Drop progress bars, rules and timing furniture: anything with no letters and no digits.
-    .filter((l) => /[A-Za-z0-9]/.test(l.replace(/[\u2500-\u257f\u23af\u2014\u2013]/g, '')))
-    .filter((l) => !/^(Duration|Start at|RUN|Test Files|Tests)\b/.test(l));
-  const marked = lines.find((l) =>
-    /\b(error|Error|FAIL|failed|Cannot|cannot|is not|undefined|TS\d{4})\b/.test(l),
-  );
-  const pick = marked ?? lines[lines.length - 1];
-  return pick ? pick.slice(0, 160) : '(the run produced no readable output)';
 }
 
 if (process.argv[1] && process.argv[1].endsWith('deleted-assertion-guard.mjs')) main();

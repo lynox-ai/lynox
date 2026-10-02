@@ -6,15 +6,27 @@ name: deleted-assertion-guard
 # compare against the wrong point and report a deletion that an earlier commit of the same branch
 # had already made.
 #
-# ⛔ FAIL DIRECTION — OPEN. The guard exits 2 when it cannot check (a dirty tree, an unreadable
-# diff), and 2 does NOT fail this job. Only a PROVEN unnecessary deletion (exit 1) turns it red.
-# The reason is in the script header: the old test file is run against source it was not written
-# for, so a red run is ambiguous and a green run is proof. A guard that stopped every honest
-# signature change would be switched off within two weeks, and a switched-off guard still reads as
-# coverage on the board.
+# ⛔ IT REPORTS, IT DOES NOT GATE — and the mapping is the opposite of the obvious one:
+#   exit 0 → pass        nothing to report
+#   exit 1 → PASS        there IS something to report; printed as a warning, never red
+#   exit 2 → FAIL        it could not look
+#   anything else → FAIL also ill health
+# What is gated is the instrument's HEALTH, not its judgement. The reason: the check compares the
+# NUMBER of test cases per file, which is a narrower proxy than the property — deleting two cases
+# while adding three keeps the number up and escapes. A proxy may inform a person; it may not stop
+# a merge. And a check that silently stops looking still reads as coverage, which is why ill health
+# is the one thing that goes red.
+#
+# ⚠ An earlier version had this backwards and it blocked on a finding. It also mapped an uncaught
+# crash — node's default exit of 1 — onto "a deleted assertion still holds", announcing a finding
+# nobody had measured.
 
 on:
   pull_request:
+    # ⚠ A FILTER, not the candidate set. The candidate set comes from the runner's own file list at
+    # run time (`vitest list`); this only decides whether the job starts at all. Kept wide on
+    # purpose: a path filter that tried to mirror the runner's include patterns would be a second,
+    # drifting copy of them.
     paths:
       - '**/*.test.ts'
       - '**/*.spec.ts'
@@ -78,8 +90,8 @@ jobs:
           # not check. Only 1 is a failure, and the mapping is spelled out here so that a future
           # edit has to decide deliberately rather than inherit `set -e`.
           case "$CODE" in
-            0) echo "guard: pass" ;;
-            1) echo "::error::guard: a deleted assertion still holds — see the lines above"; exit 1 ;;
-            2) echo "::warning::guard: could not check (exit 2) — deliberately NOT blocking"; exit 0 ;;
-            *) echo "::warning::guard: unexpected exit $CODE — not blocking"; exit 0 ;;
+            0) echo "guard: nothing to report" ;;
+            1) echo "::warning::guard: test cases vanished and still pass — see the lines above. ADVISORY, nothing is blocked."; exit 0 ;;
+            2) echo "::error::guard: could not check. The instrument's health is what this job gates."; exit 1 ;;
+            *) echo "::error::guard: unexpected exit $CODE — treated as ill health"; exit 1 ;;
           esac
