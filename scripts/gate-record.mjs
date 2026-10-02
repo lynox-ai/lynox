@@ -590,6 +590,114 @@ export function evaluate({ body, head, files, author }) {
     }
   }
 
+  // ⭐ `security:` — what the security round ASKED, by naming where it came from.
+  //
+  // WHY IT IS THE ORIGIN AND NOT THE QUESTION. `review:` carries round count, model and result,
+  // all of them enumerable. The obvious shape for this field was "name the question the round
+  // asked" — and the question is free text, which is exactly what was measured as uncheckable
+  // when `review:` was built (three patterns too narrow, one of them against this file's own PR
+  // body). A mandatory free-text field at the scale this gate runs becomes a phrase nobody reads.
+  //
+  // MEASURED, because the scale is the argument: `security` appears in the `gates:` line of
+  // 90 of 202 merged PRs with a gate record (17 of 55 in pro, 73 of 147 in core, over the last
+  // 150 merged PRs per repo). A second count over a wider set found 127 of 281 — different sets,
+  // and the QUOTE is what survives both: 44.6 % against 45.2 %, so roughly every second PR with
+  // a record owes this gate. A field that is wrong for one PR in two is not a field.
+  //
+  // ⚠ What this buys is not a true line — it will often be wrong. It is a FALSIFIABLE one.
+  // `gates: security` without a line is an assumption nobody can contradict; `security: own round`
+  // is a claim a refuter can take apart. The one instance on record surfaced exactly that way: a
+  // track carried `security` on the strength of a PARITY run, whose brief was "does v2 behave like
+  // v1", which is behavioural equality and not "what is new or loosened". It was caught by a
+  // question, not by a measurement — and `leaning on …` is that question, built in.
+  //
+  // ⭐⭐ THREE values, and the third is the one that makes the other two honest.
+  // `own round` and `leaning on <what>` cover two states. The third exists too: the session does
+  // not KNOW whether the round was its own. ⚠ An earlier draft of this comment called it "the most
+  // common", which is UNMEASURED — one instance is on record (the parity run of 2026-10-02), and a
+  // frequency claim in a paragraph that argues from measurement is the thing this file keeps
+  // catching elsewhere. What is established is that the state OCCURS and produced a wrong record.
+  // That is how the recorded instance arose — not by deception, but because nobody had asked.
+  // A closed vocabulary of two
+  // forces that session to write `own round`, i.e. to lie, and this field exists to stop exactly
+  // that. So `origin unclear` is a FULL value, not an escape hatch: when an instrument cannot
+  // tell two cases apart, the repair is to SAY so, not to guess better.
+  //
+  // The result half is `roundResultErrors`, the same grammar `review:` uses — one grammar, two
+  // callers, and the mutants that witness it witness it for both.
+  //
+  // ⚠ `leaning on <what>` takes no comma, because the comma is what separates origin from result.
+  // That is a real limit and the message says it rather than letting the parse go wrong quietly.
+  //
+  // ⭐ `[^,]*?` and not `[^,]+?`, which looks like a loosening and is the opposite: with `+?` the
+  // reference `leaning on , x` fails the SHAPE and gets the generic "is not `<origin>, <result>`"
+  // message, while `leaning on  , x` (two spaces) reaches the empty-reference check and gets the
+  // precise one. Same defect, two diagnoses, decided by a space the author cannot see. With `*?`
+  // the shape accepts the empty reference and the content check refuses it — one defect, one
+  // message. Measured both ways; the refusal is identical, only the diagnosis differs, and a
+  // diagnosis that depends on invisible whitespace is the kind a reader cannot act on.
+  //
+  // ⭐ And the `[^,]` in that pattern is an ANCHOR AGAINST A LATER EDIT, not a second check on the
+  // input — measured, because it looks like a duplicate of what `+?` already does. Over eight
+  // reference shapes, `[^,]+?` and `.+?` produce identical origin/result splits: lazy matching
+  // stops at the first comma either way, so removing the class ALONE changes nothing and that
+  // mutant is equivalent. ⚠ Equivalent FOR THIS FIELD, not for the regex: `.` does not match `\r`
+  // or a newline and `[^,]` does, so the two patterns differ on a value containing one. That value
+  // cannot reach here — the record parser refuses a line that is not `field: value` before this
+  // code runs — which is why the equivalence holds where it is claimed and nowhere wider. What the class defends against is the quantifier losing its `?`:
+  // `.+` greedy reads `leaning on a, b, no findings` as origin `leaning on a, b` and result
+  // `no findings`, which PASSES — silently, because that result is valid. `[^,]+` greedy still
+  // stops at the comma. So the class and the laziness guard one door from two sides, and only
+  // removing BOTH opens it; that combination is a mutant the tests kill.
+  if (required.has('security')) {
+    const raw = (f.security ?? '').trim().replace(/\.$/, '');
+    if (!raw) {
+      errors.push(
+        'this diff owes the `security` gate, so the record needs a `security:` line saying WHERE the',
+        'round came from and what it found. Format: `security: <origin>, <result>`, where origin is',
+        '`own round`, `leaning on <what>`, or `origin unclear` — e.g. `security: own round, no findings`,',
+        '`security: leaning on the parity run, no findings`, `security: origin unclear, 1 finding, 1 filed`.',
+        '⚠ `origin unclear` is a FULL answer, not an admission: if you cannot tell whether the round was',
+        'its own, saying so is the true line, and writing `own round` instead is the lie this field exists for.',
+      );
+    } else {
+      const m = /^(own\s+round|origin\s+unclear|leaning\s+on\s+[^,]*?)\s*,\s*(.+)$/i.exec(raw);
+      if (!m) {
+        errors.push(
+          `\`security: ${raw}\` is not \`<origin>, <result>\`.`,
+          'The origin is one of three: `own round` · `leaning on <what>` · `origin unclear`.',
+          '⚠ A `leaning on <what>` reference carries NO comma — the comma separates origin from result,',
+          'so write `leaning on the v1/v2 parity run, no findings` and keep the reference in one piece.',
+        );
+      } else if (/^leaning/i.test(m[1]) && !/[\p{L}\p{N}]/u.test(m[1].replace(/^leaning\s+on/i, ''))) {
+        // ⛔ A reference made of whitespace or punctuation passes the shape and says nothing.
+        // `leaning on  , no findings` and `leaning on -, no findings` were ACCEPTED — measured —
+        // and the whole point of this origin is that it names something a reader can go and check.
+        // An empty reference is the one answer that is neither true nor false, which is exactly
+        // what `origin unclear` exists for: it is the honest form of "I cannot name it".
+        errors.push(
+          `\`security: ${raw}\` leans on nothing — the reference has no letters or digits.`,
+          'Name what the round was: `leaning on the v1/v2 parity run`. If you cannot name it,',
+          '`origin unclear` is the honest answer and carries no penalty.',
+        );
+      } else {
+        const resultErrors = roundResultErrors(m[2].trim(), `security: ${raw}`);
+        errors.push(...resultErrors);
+        // ⚠ The diagnosis would otherwise point at the wrong end. `leaning on a, b, no findings`
+        // parses as origin `leaning on a` and result `b, no findings`, so the grammar refuses the
+        // RESULT and the author reads "the result must read `no findings` or …" while the actual
+        // cause is a comma inside the reference. A message that is technically true and points
+        // somewhere else costs more than no message: it sends the reader to the wrong half.
+        if (resultErrors.length > 0 && /^leaning/i.test(m[1])) {
+          errors.push(
+            '⚠ If your `leaning on …` reference contains a COMMA, that comma was read as the',
+            'separator and everything after it as the result — write the reference without one.',
+          );
+        }
+      }
+    }
+  }
+
   if (required.has('delta')) {
     // A delta round that did not come back clean is a reason not to merge, so
     // there is exactly one accepted value.

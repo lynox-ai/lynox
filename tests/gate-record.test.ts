@@ -35,6 +35,10 @@ function record(over: Record<string, string> = {}): string {
 }
 
 const CODE = ['src/core/agent.ts'];
+/** A file the SECURITY path map covers, so the `security` gate becomes due. Asserted below rather
+ *  than assumed: a test that silently stopped owing the gate would pass for the wrong reason. */
+const SEC = ['src/core/secret-store.ts'];
+
 
 describe('gate-record — the SHA pin', () => {
   it('accepts a record taken at this head', () => {
@@ -298,13 +302,28 @@ describe('gate-record — which gates a diff requires', () => {
     expect(requiredGates(['src/core/agent.ts']).has('security')).toBe(false);
   });
 
-  it('lets a security-listed path pass once the gate is claimed', () => {
-    const v = evaluate({
+  it('needs the `security:` LINE on a listed path, not just the gate named', () => {
+    // ⚠ This test used to be called "lets a security-listed path pass once the gate is claimed"
+    // and asserted `ok === true` for exactly the body below. That was the old contract — naming
+    // the gate was the whole obligation — and the `security:` field is what changed it, so this
+    // is the witness of the change rather than a test that quietly moved.
+    //
+    // Both directions, because a correction is a NEW claim and not just the absence of the old
+    // one: named without a line is refused, named WITH a line passes.
+    const named = evaluate({
       body: record({ gates: 'code-review, delta, security' }),
       head: HEAD,
       files: ['src/core/data-boundary.ts'],
     });
-    expect(v.ok).toBe(true);
+    expect(named.ok).toBe(false);
+    expect(named.errors.join(' ')).toMatch(/needs a `security:` line/);
+
+    const proven = evaluate({
+      body: record({ gates: 'code-review, delta, security', security: 'own round, no findings' }),
+      head: HEAD,
+      files: ['src/core/data-boundary.ts'],
+    });
+    expect(proven.ok).toBe(true);
   });
 });
 
@@ -403,6 +422,15 @@ describe('gate-record — the shipped template does not answer its own questions
     // field and forgetting the template leaves the perfectly-filled template REJECTED — measured:
     // that is what happened on pro's first cut, and this test is the one that would have caught it.
     expect(errors).toContain('`review: <n> <model> round(s), <result>`');
+  });
+
+  it('is rejected on `security:` too, which needs a diff that OWES that gate', () => {
+    // ⚠ The test above runs against `CODE`, which does not owe `security` — so the template's
+    // `security:` placeholder is not read there at all. Without this case the field could be added
+    // to the template, be nonsense, and nothing would notice until a security diff hit it. Same
+    // reasoning as the assertion above, one gate further.
+    const errors = evaluate({ body: TEMPLATE, head: HEAD, files: SEC }).errors.join(' ');
+    expect(errors).toContain('`security: <origin>, <result>`');
   });
 });
 
@@ -1000,5 +1028,146 @@ describe('gate-record — the `review:` evidence line', () => {
 
   it('accepts a human round, because a person reviewing is not a format error', () => {
     expect(evaluate({ body: record({ review: '1 human round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+});
+
+describe('the `security:` evidence line', () => {
+  // The gate must actually be due for these to mean anything — a fixture that stopped owing it
+  // would make every test below pass by not applying. Checked, not assumed.
+  it('owes the gate for this fixture at all', () => {
+    const r = requiredGates(SEC);
+    expect(r).not.toBeNull();
+    expect([...(r as Set<string>)]).toContain('security');
+  });
+
+  it('demands the line when the gate is due', () => {
+    const v = evaluate({ body: record({ gates: 'code-review, security, delta' }), head: HEAD, files: SEC });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/needs a `security:` line/);
+  });
+
+  it('does NOT demand it when the diff does not owe the gate', () => {
+    expect(evaluate({ body: record(), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts `own round` and `leaning on <what>`', () => {
+    for (const sec of ['own round, no findings', 'leaning on the v1/v2 parity run, no findings',
+                       'own round, 2 findings, 1 fixed, 1 filed', 'Own Round, no findings.'])
+      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }), sec).toMatchObject({ ok: true });
+  });
+
+  it('accepts `origin unclear` as a FULL value, not an escape hatch', () => {
+    // ⭐ The third value is what makes the other two honest. A vocabulary of two forces the session
+    // that does not KNOW whose round it was to write `own round` — which is the lie this field
+    // exists to prevent, and which is how the one recorded instance arose. So this is a plain
+    // accept, with no penalty and no second-class message.
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, 2 findings, 1 fixed, 1 filed' }), head: HEAD, files: SEC }).ok).toBe(true);
+  });
+
+  it('names `origin unclear` in the message a missing line produces', () => {
+    // If the field demands an origin but never tells the author the honest option exists, the
+    // vocabulary is three values wide and two values discoverable.
+    const e = evaluate({ body: record({ gates: 'code-review, security, delta' }), head: HEAD, files: SEC }).errors.join(' ');
+    expect(e).toMatch(/origin unclear/);
+    expect(e).toMatch(/FULL answer/);
+  });
+
+  it('rejects an origin outside the three', () => {
+    for (const sec of ['nonsense, no findings', 'leaning, no findings', 'own, no findings'])
+      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(false);
+  });
+
+  it('rejects an origin with no result', () => {
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round' }), head: HEAD, files: SEC }).ok).toBe(false);
+  });
+
+  it('REACHES the shared result grammar — the wiring, not the grammar', () => {
+    // Delete the `roundResultErrors(...)` call from this branch and every other test here stays
+    // green while `own round, 2 findings, 1 fixed` passes. One grammar, two callers, two wirings.
+    const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round, 2 findings, 1 fixed' }), head: HEAD, files: SEC });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/sums to 1, not 2/);
+  });
+
+  it('points at the REFERENCE when a comma inside it broke the parse', () => {
+    // ⚠ `leaning on a, b, no findings` parses as origin `leaning on a` and result `b, no findings`,
+    // so the grammar refuses the RESULT — technically true and aimed at the wrong half. The hint
+    // sends the reader to the reference instead.
+    const e = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on a, b, no findings' }), head: HEAD, files: SEC }).errors.join(' ');
+    expect(e).toMatch(/read as the/);
+  });
+
+  it('anchors the origin at the START — a valid origin as a SUFFIX does not count', () => {
+    // ⛔ The mutant this exists for: drop the `^` and `x own round, no findings` is ACCEPTED,
+    // while every other test here stays green, because none of them put junk in front of a VALID
+    // origin. `nonsense` and `own` do not contain one, so they witness the vocabulary and not the
+    // anchor. Measured by refuting, not by reading.
+    for (const sec of ['x own round, no findings', 'my own round, no findings',
+                       'see origin unclear, no findings'])
+      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(false);
+  });
+
+  it('needs a SPACE after `on`, so `leaning onwards` is not an origin', () => {
+    // `leaning\s+on\s+` weakened to `\s*` accepts `leaning onwards, no findings`, with `wards` as
+    // the reference. Three origins, and each needs its word boundary witnessed — a vocabulary that
+    // matches prefixes is not closed.
+    for (const sec of ['leaning onwards, no findings', 'own rounds, no findings',
+                       'origin unclearly, no findings'])
+      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(false);
+  });
+
+  it('TOLERATES extra whitespace around the words and the comma', () => {
+    // The other side of the same patterns: `\s+` rather than a literal space, and `\s*,` rather
+    // than `,`. Without these the field would refuse `own  round` and `own round , …`, which are
+    // typos and not different claims — and a false red is how a guard earns a bypass. Asserting
+    // the tolerance is what keeps a later tightening honest.
+    for (const sec of ['own  round, no findings', 'own round , no findings',
+                       'own round,no findings', 'origin   unclear, no findings'])
+      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }).ok, sec).toBe(true);
+  });
+
+  it('refuses a reference made of nothing, and says THAT rather than the shape', () => {
+    // ⛔ Measured as accepted before the fix: `leaning on  , no findings` (two spaces),
+    // `leaning on ., …` and `leaning on -, …` all passed the shape. A reference with no letters
+    // names nothing a reader can check, so it is the one answer that is neither true nor false —
+    // and `origin unclear` is the honest form of that, which the message points at.
+    // ⚠ `leaning on , …` with ONE space is in this list on purpose: with `[^,]+?` it failed the
+    // SHAPE and got the generic message, while two spaces got the precise one — same defect, two
+    // diagnoses, decided by whitespace the author cannot see. The pattern is `*?` for that reason,
+    // and this case is what holds it there.
+    for (const sec of ['leaning on , no findings', 'leaning on  , no findings',
+                       'leaning on ., no findings', 'leaning on -, no findings']) {
+      const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC });
+      expect(v.ok, sec).toBe(false);
+      expect(v.errors.join(' '), sec).toMatch(/leans on nothing/);
+    }
+    // And it does not fire on a reference that says something.
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on x, no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
+  });
+
+  it('adds the comma hint for a CAPITALISED origin too', () => {
+    // `/^leaning/i` → `/^leaning/` survives every other test here, because they all write the
+    // origin in lower case. The hint would then go missing for `Leaning on …`, which the field
+    // accepts — a guard that is case-insensitive in the parse and case-sensitive in the advice.
+    const e = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'Leaning on a, b, no findings' }), head: HEAD, files: SEC }).errors.join(' ');
+    expect(e).toMatch(/read as the/);
+  });
+
+  it('adds NO comma hint when the result is fine, even for a reference origin', () => {
+    // The second half of the hint's condition: `resultErrors.length > 0`. Without it the hint
+    // would ride along on a perfectly good line — and advice that appears when nothing is wrong
+    // is how advice stops being read.
+    const v = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'leaning on the parity run, no findings' }), head: HEAD, files: SEC });
+    expect(v.ok).toBe(true);
+    expect((v.errors ?? []).join(' ')).not.toMatch(/read as the/);
+  });
+
+  it('does NOT add the comma hint when the origin was not a reference', () => {
+    // The discriminator: a sum error under `own round` has nothing to do with commas, and a hint
+    // that fires on every result error would be noise — which is how a message stops being read.
+    const e = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round, 2 findings, 1 fixed' }), head: HEAD, files: SEC }).errors.join(' ');
+    expect(e).toMatch(/sums to 1, not 2/);
+    expect(e).not.toMatch(/read as the/);
   });
 });
