@@ -875,11 +875,16 @@ export function oauthRefreshSlotState(
  * is this one: **a remedy is a claim about the NEXT state, and all three earlier
  * versions checked the current one.** "Remove this field and the renewal will
  * find the token" requires simulating what the gate answers afterwards. It needs
- * the next state COMPUTED AND ASSERTED, not described. That is written here and
- * not only on `DEF-oauth-api-setup`, because a comment pointing at a register
- * row for the one load-bearing lesson is a pointer into a file this function's
- * next rewrite does not touch — and the row was not yet merged when this comment
- * first claimed it carried the lesson, which made the pointer a bet.
+ * the next state COMPUTED AND ASSERTED, not described. It is written here rather
+ * than only in the private deferred-work note that tracks this piece, because a
+ * comment that points elsewhere for its one load-bearing lesson points into a
+ * file this function's next rewrite does not touch — and that note was not yet
+ * merged when this comment first claimed it carried the lesson, which made the
+ * pointer a bet rather than a reference.
+ *
+ * (The id of that note is deliberately not named: this is the PUBLIC repo, and
+ * the guard that refuses a bare internal register id in it is right to. The
+ * reason belongs inline, which is what the sentence above now does.)
  */
 /**
  * The closing sentence, as an exported CONSTANT and not a template.
