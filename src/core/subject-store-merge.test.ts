@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, personNameTokens, isProperTokenSubset, isPersonSubsetSafe, personTokenKey } from './subject-store.js';
+import { SubjectStore, personNameTokens, isProperTokenSubset, isPersonSubsetSafe, personTokenKey, isRepointTarget } from './subject-store.js';
 import { DataStore } from './data-store.js';
 
 /**
@@ -284,6 +284,89 @@ describe('SubjectStore.mergeSubjects (PR-C dedup)', () => {
     engine.close();
   });
 
+  // ── ledger repoints are held to the list a merge makes ─────────
+
+  it('isRepointTarget accepts exactly the repoints planMerge records', () => {
+    expect(isRepointTarget({ table: 'tasks', pkCol: 'id', column: 'assignee_subject_id' })).toBe(true);
+    expect(isRepointTarget({ table: 'engagements', pkCol: 'subject_id', column: 'client_subject_id' })).toBe(true);
+    expect(isRepointTarget({ table: 'engagements', pkCol: 'id', column: 'client_subject_id' })).toBe(false); // wrong key column
+    expect(isRepointTarget({ table: 'memories', pkCol: 'id', column: 'scope_id' })).toBe(false);
+    expect(isRepointTarget({ table: ['tasks'], pkCol: 'id', column: 'subject_id' })).toBe(false);
+  });
+
+  it('rollbackMerge REFUSES a ledger naming a repoint outside that list, and changes nothing', () => {
+    const { store, engine, db } = makeStore();
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    db.prepare('INSERT INTO tasks (id, title, subject_id) VALUES (?,?,?)').run('t1', 'T', dup);
+    // A real column whose value is the canonical's id, so a reversal that wrote it would change it.
+    db.prepare('INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?,?,?,?,?)').run('m1', 'x', 'knowledge', 'global', canon);
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const forged = { ...res.entry, repoints: [...res.entry.repoints, { table: 'memories', pkCol: 'id', column: 'scope_id', pks: ['m1'] }] };
+
+    const rb = store.rollbackMerge(forged);
+    expect(rb.ok).toBe(false);
+    expect(rb.reason).toMatch(/never moves/);
+    const g = (sql: string, ...a: unknown[]) => db.prepare(sql).get(...a) as Record<string, unknown>;
+    expect(g('SELECT scope_id FROM memories WHERE id=?', 'm1').scope_id).toBe(canon);
+    expect(g('SELECT subject_id FROM tasks WHERE id=?', 't1').subject_id).toBe(canon);   // the real repoint stays too
+    expect(store.getSubject(dup)!.merged_into).toBe(canon);
+    engine.close();
+  });
+
+  it('rollbackMerge REFUSES a ledger whose kind is not the entry\'s own, and changes nothing', () => {
+    const { store, engine, db } = makeStore();
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    db.prepare('INSERT INTO tasks (id, title, subject_id) VALUES (?,?,?)').run('t1', 'T', dup);
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    const rb = store.rollbackMerge({ ...res.entry, kind: 'organization' });
+    expect(rb.ok).toBe(false);
+    expect(rb.reason).toMatch(/names the kind organization, but the entry is a person/);
+    expect((db.prepare('SELECT subject_id FROM tasks WHERE id=?').get('t1') as { subject_id: string }).subject_id).toBe(canon);
+    expect(store.getSubject(dup)!.merged_into).toBe(canon);
+    engine.close();
+  });
+
+  it('executeMerge REFUSES an entry whose kind is not the subjects\' kind, before any write', () => {
+    const { store, engine, db } = makeStore();
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    db.prepare('INSERT INTO tasks (id, title, subject_id) VALUES (?,?,?)').run('t1', 'T', dup);
+    const plan = store.planMerge(dup, canon);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+
+    expect(() => store.executeMerge({ ...plan.entry, kind: 'organization' })).toThrow(/kind \(organization\) is not the subjects' kind \(person\)/);
+    expect((db.prepare('SELECT subject_id FROM tasks WHERE id=?').get('t1') as { subject_id: string }).subject_id).toBe(dup);
+    expect(store.getSubject(dup)!.merged_into).toBeNull();
+    engine.close();
+  });
+
+  it('executeMerge REFUSES an entry naming a repoint outside that list, before any write', () => {
+    const { store, engine, db } = makeStore();
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    db.prepare('INSERT INTO tasks (id, title, subject_id) VALUES (?,?,?)').run('t1', 'T', dup);
+    db.prepare('INSERT INTO memories (id, text, namespace, scope_type, scope_id) VALUES (?,?,?,?,?)').run('m1', 'x', 'knowledge', 'global', dup);
+    const plan = store.planMerge(dup, canon);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    const forged = { ...plan.entry, repoints: [...plan.entry.repoints, { table: 'memories', pkCol: 'id', column: 'scope_id', pks: ['m1'] }] };
+
+    expect(() => store.executeMerge(forged)).toThrow(/never moves/);
+    const g = (sql: string, ...a: unknown[]) => db.prepare(sql).get(...a) as Record<string, unknown>;
+    expect(g('SELECT scope_id FROM memories WHERE id=?', 'm1').scope_id).toBe(dup);
+    expect(g('SELECT subject_id FROM tasks WHERE id=?', 't1').subject_id).toBe(dup);
+    expect(store.getSubject(dup)!.merged_into).toBeNull();
+    engine.close();
+  });
+
   // ── resolvePersonSubject (write-time subset dedup) ──────────────
 
   it('resolvePersonSubject: exact→canonical, alias→alias, unambiguous subset→alias, ambiguous→new', () => {
@@ -405,5 +488,43 @@ describe('DataStore.repointSubjectId (Record-on-spine merge follow-through)', ()
     ds.rollbackRepoint('old-id', 'new-id', rec);
     expect(rows().filter(r => r['client'] === 'old-id' || r['vendor'] === 'old-id')).toHaveLength(2);
     expect(rows().some(r => r['client'] === 'new-id' || r['vendor'] === 'new-id')).toBe(false);
+  });
+
+  it('rollbackRepoint REFUSES a record naming a non-subject column, and changes nothing', () => {
+    const ds = makeDs();
+    ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [
+      { name: 'client', type: 'subject', subjectKind: 'organization' },
+      { name: 'note', type: 'string' },
+    ] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: 'new-id', note: 'new-id' }] });
+
+    expect(ds.repointRecordState({ collection: 'invoices', column: 'client' })).toBe('ok');
+    expect(ds.repointRecordState({ collection: 'invoices', column: 'note' })).toBe('foreign');
+    expect(ds.repointRecordState({ collection: 'nope', column: 'client' })).toBe('gone');
+    expect(ds.repointRecordState({ collection: 'invoices', column: 'vendor' })).toBe('gone');   // not in the schema
+    expect(ds.repointRecordState({ collection: 'invoices', column: '_id' })).toBe('gone');      // system column: skipped, never written
+    expect(ds.repointRecordState({ collection: 1, column: 'client' })).toBe('foreign');
+
+    expect(() => ds.rollbackRepoint('old-id', 'new-id', [
+      { collection: 'invoices', column: 'client', ids: [1] },
+      { collection: 'invoices', column: 'note', ids: [1] },
+    ])).toThrow(/not a subject column/);
+    const row = ds.queryRecords({ collection: 'invoices' }).rows[0]!;
+    expect(row['client']).toBe('new-id');
+    expect(row['note']).toBe('new-id');
+  });
+
+  it('rollbackRepoint skips a record with nothing left to move back and reverses the rest', () => {
+    const ds = makeDs();
+    ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [
+      { name: 'client', type: 'subject', subjectKind: 'organization' },
+    ] });
+    ds.insertRecords({ collection: 'invoices', records: [{ client: 'new-id' }] });
+    ds.rollbackRepoint('old-id', 'new-id', [
+      { collection: 'quotes', column: 'client', ids: [1] },      // collection dropped since
+      { collection: 'invoices', column: 'vendor', ids: [1] },    // column no longer in the schema
+      { collection: 'invoices', column: 'client', ids: [1] },
+    ]);
+    expect(ds.queryRecords({ collection: 'invoices' }).rows[0]!['client']).toBe('old-id');
   });
 });

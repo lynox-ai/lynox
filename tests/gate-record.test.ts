@@ -21,6 +21,7 @@ function record(over: Record<string, string> = {}): string {
   const f = {
     head: HEAD.slice(0, 8),
     gates: 'code-review, delta',
+    review: '1 opus round, no findings',
     delta: 'clean',
     mutations: '12 killed, 0 survived',
     closes: 'none',
@@ -398,6 +399,10 @@ describe('gate-record — the shipped template does not answer its own questions
     expect(errors).toContain('unknown gate');
     expect(errors).toContain('`delta:`');
     expect(errors).toContain('`mutations:`');
+    // ⭐ This assertion is why the field is in the template at all. Without it, adding a mandatory
+    // field and forgetting the template leaves the perfectly-filled template REJECTED — measured:
+    // that is what happened on pro's first cut, and this test is the one that would have caught it.
+    expect(errors).toContain('`review: <n> <model> round(s), <result>`');
   });
 });
 
@@ -720,5 +725,156 @@ describe('gate-record — boundaries a foreign mutation set walked straight thro
     expect(onDocs.notes?.join(' ')).toContain('is a bot');
     // The control: without the bot author, the empty list is refused.
     expect(evaluate({ body: record(), head: HEAD, files: [] }).ok).toBe(false);
+  });
+});
+
+describe('gate-record — the `review:` evidence line', () => {
+  // ⛔ Why this block is long: the field exists because a PR listed `code-review` with no round
+  // behind it, went green because the LINE was there, and merged — the late review then found five
+  // things, four with code effect. And the FORM had to be rebuilt once, so both the accepted and the
+  // refused shapes are pinned here, including the arithmetic in both directions.
+  it('is required when the diff owes the code-review gate', () => {
+    const v = evaluate({ body: record({ review: '' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/needs a `review:` line/);
+  });
+
+  it('is NOT required for a docs-only diff, which owes no code gate', () => {
+    // No `gates:` at all, which is what a docs-only record looks like — `none` would be read as a
+    // gate NAME and rejected as unknown, which is right and cost me one red test.
+    const body = `## Summary\n\nDocs.\n\n\`\`\`gate-record\nhead: ${HEAD.slice(0, 8)}\ncloses: none\n\`\`\`\n`;
+    expect(evaluate({ body, head: HEAD, files: ['docs/internal/x.md'] }).ok).toBe(true);
+  });
+
+  it('accepts `no findings`', () => {
+    expect(evaluate({ body: record({ review: '2 sonnet rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts `all fixed`, which needs no arithmetic', () => {
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts `<N> fixed` for all of them — the first line anybody actually wrote', () => {
+    // ⛔ The first cut REFUSED this, and it was the shape the first real `review:` line in an open
+    // PR used: `2 findings, 2 fixed`. A format whose only way to say "all of them" is a special
+    // word rejects the natural sentence, and then the gate looks like pedantry.
+    expect(evaluate({ body: record({ review: '1 sonnet round, 2 findings, 2 fixed' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts a breakdown with `refuted`, the slot whose absence forced a lie', () => {
+    // ⛔ A finding the author CHECKED AND REJECTED has to be sayable. Without this slot the honest
+    // author must write `filed` for a register row that does not exist, or quietly lower N.
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts fixed + filed when they sum to N', () => {
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 2 filed' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('REJECTS an UNDER-count — a finding nobody accounted for', () => {
+    const v = evaluate({ body: record({ review: '1 opus round, 5 findings, 1 fixed, 1 filed' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/sums to 2, not 5/);
+    expect(v.errors.join(' ')).toMatch(/nobody accounted for/);
+  });
+
+  it('REJECTS an OVER-count — the same finding counted twice', () => {
+    // ⭐ The mutant this exists for: `!== total` weakened to `< total` keeps every other test green,
+    // and then `2 findings, 9 fixed, 9 filed` passes. Both directions are errors.
+    const v = evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 3 filed' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/sums to 6, not 5/);
+    expect(v.errors.join(' ')).toMatch(/counted twice/);
+  });
+
+  it('names the two directions differently, so the message says which mistake it is', () => {
+    const under = evaluate({ body: record({ review: '1 opus round, 9 findings, 1 fixed' }), head: HEAD, files: CODE }).errors.join(' ');
+    const over = evaluate({ body: record({ review: '1 opus round, 1 findings, 9 fixed' }), head: HEAD, files: CODE }).errors.join(' ');
+    expect(under).toMatch(/nobody accounted for/);
+    expect(over).toMatch(/counted twice/);
+  });
+
+  it('rejects `0 findings` and names the one spelling it wants', () => {
+    const v = evaluate({ body: record({ review: '1 opus round, 0 findings' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/`no findings` rather than `0 findings`/);
+  });
+
+  it('rejects a zero breakdown, which the first cut let through', () => {
+    // `all fixed` had an N<1 guard and the breakdown branch did not, so `0 findings, 0 fixed,
+    // 0 filed` passed and the "one canonical spelling" was bypassable.
+    expect(evaluate({ body: record({ review: '1 opus round, 0 findings, 0 fixed, 0 filed' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 opus round, 0 findings, all fixed' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('rejects zero rounds — a gate with no round is the omission this field exists for', () => {
+    const v = evaluate({ body: record({ review: '0 opus rounds, no findings' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/claims 0 rounds/);
+  });
+
+  it('rejects free text, which is exactly what the field replaces', () => {
+    // Measured before building this: three attempts to detect "names a result" in PROSE all failed,
+    // the third against my own PR body. If a pattern cannot find it, a gate cannot demand it.
+    const v = evaluate({ body: record({ review: 'a reviewer looked at it and was happy' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/is not `<n> <model> round\(s\), <result>`/);
+  });
+
+  it('rejects a model that is not a name, so a placeholder cannot pass as evidence', () => {
+    // Strict where it counts: the first cut checked the result carefully and let `1 x round` through.
+    // ⚠ And "at least three characters" was not enough either — `1 ... round` and `1 --- rounds` were
+    // ACCEPTED, with `...` as the model name, because punctuation satisfies the character class. The
+    // name must now START with a letter, which is what a model name does.
+    expect(evaluate({ body: record({ review: '1 x round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 ... round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 --- rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 4.6 rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('refuses TRAILING JUNK after a result, which the end-anchors are there for', () => {
+    // ⛔ Two mutants survived the first round of this field: drop the `$` from `/^no\s+findings$/i`
+    // or from the breakdown part pattern, and every other test here stays green — while
+    // `no findings and 3 left open` and `2 fixed extra` start passing. A result that trails off into
+    // free text is exactly what the field replaces, so the anchors need witnesses of their own.
+    expect(evaluate({ body: record({ review: '1 opus round, no findings and 3 left open' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed extra' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed but also more' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('rejects an unknown disposition', () => {
+    expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 1 fixed, 1 ignored' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('rejects a REPEATED disposition even when the sum happens to work out', () => {
+    // ⛔ The discriminator, and the first version of this test did not have it: `3 findings, 2 fixed,
+    // 1 fixed` is rejected with OR without the duplicate check, because the later value overwrites
+    // the earlier and the sum then fails. So that case proved nothing about the check it named.
+    // `2 findings, 2 fixed, 2 fixed` is the case that separates them: overwriting leaves a sum of 2,
+    // which MATCHES, so only the duplicate check can refuse it.
+    const v = evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed, 2 fixed' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/repeats a kind/);
+  });
+
+  it('is case-insensitive and tolerates a trailing full stop, like `head:` and `closes:`', () => {
+    // A false red here is how a guard earns a bypass — and `head:`/`closes:` are deliberately lax
+    // about case for exactly that reason. Being pedantic about `Opus` while accepting `1 x round`
+    // would be strict where it does not help and open where it counts.
+    expect(evaluate({ body: record({ review: '1 Opus round, No findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, All Fixed.' }), head: HEAD, files: CODE }).ok).toBe(true);
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 Fixed, 2 Filed' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts a model name with a version or a combination, because our rounds mix them', () => {
+    // CLAUDE.md prescribes a regime of a fable round, an opus delta and a fable close — sayable as
+    // one combined slot. ⚠ NOT per-round models; that is a limit of this form, named rather than
+    // hidden: `3 fable+opus rounds` says which models ran, not which ran when.
+    expect(evaluate({ body: record({ review: '1 sonnet-4.6 round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+    expect(evaluate({ body: record({ review: '3 fable+opus rounds, 7 findings, 5 fixed, 2 filed' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts a human round, because a person reviewing is not a format error', () => {
+    expect(evaluate({ body: record({ review: '1 human round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
   });
 });
