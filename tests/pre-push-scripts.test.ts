@@ -276,9 +276,10 @@ describe('every range hook passes each refusal of pushed-ranges.sh on, by itself
 });
 
 /**
- * The first field of a pre-push line is called "local ref" but holds the source exactly as typed —
- * here a reflog expression with spaces. Only the back three fields have a guaranteed form, which is
- * why pushed-ranges.sh anchors its match from the right.
+ * The first field of a pre-push line is the push's source: a resolved ref (`main:w3` →
+ * `refs/heads/main`) or, when the source is not a ref, the expression verbatim — here a reflog
+ * expression with spaces. It can be a ref name and is not guaranteed to be one; only the back three
+ * fields have a guaranteed form, which is why pushed-ranges.sh anchors its match from the right.
  */
 describe('a push whose source is a reflog expression with spaces', () => {
   const SPEC = 'HEAD@{0 seconds ago}:refs/heads/w';
@@ -381,7 +382,8 @@ describe('a ref the remote has at a sha this clone lacks, with no origin/main', 
     c.git('remote', 'set-head', 'origin', '--delete');
     c.git('update-ref', '-d', 'refs/remotes/origin/main');
     // The source is a reflog expression, so field 1 differs from the remote ref: the printed fetch
-    // must name the remote ref (field 3), the only field with a guaranteed form.
+    // must name the remote ref (field 3), the only field with a guaranteed form. Keep them DIFFERENT:
+    // with `feat/x:feat/x` both fields were equal, and a fetch naming field 1 passed this test.
     const force = () => spawnSync('git', ['push', '--force', 'origin', 'HEAD@{0 seconds ago}:refs/heads/feat/x'], { cwd: c.work, encoding: 'utf8', env: c.env });
     const first = force();
     expect(first.status, first.stderr).not.toBe(0);

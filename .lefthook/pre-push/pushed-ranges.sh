@@ -8,10 +8,11 @@
 #   bash .lefthook/pre-push/pushed-ranges.sh <hook-name>      (the pre-push ref lines on stdin)
 #
 # The refs come from git on stdin (`<local ref> <local sha> <remote ref> <remote sha>` per line).
-# Only the BACK three fields have a guaranteed form, so a line is matched anchored from the RIGHT:
-# the first field is called "local ref" but holds the source exactly as the user typed it
-# (`HEAD@{1 second ago}`, with spaces and characters no ref name may carry). It is never put into
-# a command and never printed unquoted. A command a person is told to copy names only the remote
+# Only the BACK three fields have a guaranteed form, so a line is matched anchored from the RIGHT.
+# The first field is the push's source: a resolved ref (`git push origin main:w3` → `refs/heads/main`)
+# or, when the source is not a ref, the expression verbatim (`HEAD@{1 second ago}`, with spaces). It
+# CAN be a ref name and is not guaranteed to be one, so this code treats it as arbitrary text: it is
+# never put into a command and never printed unquoted. A command a person is told to copy names only the remote
 # ref (field 3), which git restricts to a real ref name.
 #   · a deleted ref (local sha all zeros) adds nothing and yields no line;
 #   · a ref whose remote sha this clone has is measured from it: exactly what this push adds;
