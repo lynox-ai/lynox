@@ -46,7 +46,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v15', () => {
+  it('creates the database and stamps the latest schema_version', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     expect(row.v).toBe(17); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (triggers.waiting_until — durable wait state) + v13 (bulk_runs + bulk_targets — the bulk-run ledger) + v14 (bulk apply/undo: atomic, kind, claimed_at) + v15 (bulk_targets.after_actual) + v16 (trigger run lease) + v17 (idx_bulk_runs_source)
@@ -695,10 +695,12 @@ describe('EngineDb v17 — the bulk run family lookup has an index', () => {
     try {
       const plan = (e.getDb().prepare(`EXPLAIN QUERY PLAN ${OPEN_IN_FAMILY_SQL}`).all('root', null) as { detail: string }[])
         .map((r) => r.detail);
-      // The recursive step joins on source_run_id: that is the lookup the index is for. Without
-      // it SQLite builds an AUTOMATIC index over bulk_runs on every call and scans the table.
-      expect(plan.some((d) => d.includes('USING INDEX idx_bulk_runs_source'))).toBe(true);
-      expect(plan.filter((d) => /AUTOMATIC|^SCAN (r|b|bulk_runs)\b/.test(d))).toEqual([]);
+      // The recursive step joins on source_run_id (`r`): that is the lookup the index is for.
+      // Without it SQLite builds an AUTOMATIC index over bulk_runs on every call. Only `r` is
+      // checked: how the outer join (`b`) is planned is not this index's business, and changes
+      // once ANALYZE statistics exist (nothing in src runs ANALYZE or `PRAGMA optimize` today).
+      const onR = plan.filter((d) => /^(SCAN|SEARCH) r\b/.test(d));
+      expect(onR).toEqual(['SEARCH r USING INDEX idx_bulk_runs_source (source_run_id=?)']);
     } finally {
       e.close();
       rmSync(dir, { recursive: true, force: true });
