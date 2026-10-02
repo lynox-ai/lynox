@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { candidateFiles, isPureMove, movedLineSets, check } from '../scripts/deleted-assertion-guard.mjs';
+import { candidateFiles, isPureMove, movedLineSets, check, lastMeaningfulLine } from '../scripts/deleted-assertion-guard.mjs';
 
 let repo: string;
 let cwd: string;
@@ -207,6 +207,26 @@ describe('deleted-assertion-guard', () => {
     // even if the content were restored from the index rather than from what was there.
     expect(execFileSync('cat', ['src/a.test.ts'], { cwd: repo, encoding: 'utf-8' })).toBe(headBody);
     expect(sh(['status', '--porcelain']).trim()).toBe('');
+  });
+
+  it('the reported reason is the ERROR, never a progress separator', () => {
+    // ⚠ Measured, not imagined: a real forced-deletion run reported `⎯⎯⎯[4/4]⎯` as its reason,
+    // because the first version took the last non-empty line. The `forced` branch exists so a human
+    // reads the reason — a separator there makes the branch useless while looking like it works.
+    const real = [
+      'RUN  v4.1.3',
+      '',
+      "src/core/a.test.ts > does a thing  Error: No \"getAudioDurationSec\" export is defined",
+      '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯',
+      '',
+      ' Test Files  1 failed (1)',
+      '      Tests  no tests',
+      '   Duration  812ms',
+      '',
+    ].join('\n');
+    const line = lastMeaningfulLine(real);
+    expect(line).toContain('No "getAudioDurationSec" export is defined');
+    expect(line).not.toMatch(/^[\u2500-\u257f\u23af\s[\]\d/]+$/);
   });
 
   it('a non-test file losing lines is not a candidate — the floor is test files only', () => {

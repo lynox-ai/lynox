@@ -238,13 +238,27 @@ function main() {
   process.exit(1);
 }
 
-/** The last line of a run that carries information — runners end with blank lines and timing. */
-function lastMeaningfulLine(out) {
-  const lines = out.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!/^(Duration|Start at|RUN|✓|Test Files|Tests)\b/.test(lines[i])) return lines[i].slice(0, 160);
-  }
-  return lines[lines.length - 1]?.slice(0, 160) ?? '(no output)';
+/**
+ * The line of a failing run that tells a human WHY.
+ *
+ * ⚠ The first version took the last non-empty line, and a real run reported `⎯⎯⎯[4/4]⎯` — a
+ * progress separator. Since the whole purpose of the `forced` branch is that somebody reads the
+ * reason, a separator there makes the branch useless while looking like it works. So: prefer a line
+ * that carries an error marker, and never return one that is only box-drawing or punctuation.
+ */
+export function lastMeaningfulLine(out) {
+  const lines = out
+    .split('\n')
+    .map((l) => l.replace(/\u001b\[[0-9;]*m/g, '').trim())
+    .filter((l) => l.length > 0)
+    // Drop progress bars, rules and timing furniture: anything with no letters and no digits.
+    .filter((l) => /[A-Za-z0-9]/.test(l.replace(/[\u2500-\u257f\u23af\u2014\u2013]/g, '')))
+    .filter((l) => !/^(Duration|Start at|RUN|Test Files|Tests)\b/.test(l));
+  const marked = lines.find((l) =>
+    /\b(error|Error|FAIL|failed|Cannot|cannot|is not|undefined|TS\d{4})\b/.test(l),
+  );
+  const pick = marked ?? lines[lines.length - 1];
+  return pick ? pick.slice(0, 160) : '(the run produced no readable output)';
 }
 
 if (process.argv[1] && process.argv[1].endsWith('deleted-assertion-guard.mjs')) main();
