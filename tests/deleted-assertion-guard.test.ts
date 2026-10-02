@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { removedFrom, isPureMove, addedMultiset, caseCount, reasonLine, mergeBase, check } from '../scripts/deleted-assertion-guard.mjs';
+import { removedFrom, isPureMove, addedMultiset, caseCount, reasonLine, mergeBase, check, filterMatches } from '../scripts/deleted-assertion-guard.mjs';
 
 let repo: string;
 let cwd: string;
@@ -280,6 +280,72 @@ describe('deleted-assertion-guard', () => {
       '   Duration  812ms',
     ].join('\n');
     expect(reasonLine(real)).toContain('No "getAudioDurationSec" export is defined');
+  });
+
+  it("the runner's own verdict outranks a console line that merely SOUNDS like a failure", () => {
+    // Measured on a real run: this exact console warning won over the FAIL line below it, so the
+    // skip was explained by a push-notification log that had nothing to do with the removal.
+    // ⛔ If the tiers are ever collapsed back into one alternation, this reads the console line.
+    const out = [
+      'stderr | src/server/http-api.test.ts',
+      '[http-api] push notifications unavailable: this.engine.getPushNotifier is not a function',
+      'FAIL  src/server/http-api.test.ts > boots',
+    ].join('\n');
+    expect(reasonLine(out)).toBe('FAIL  src/server/http-api.test.ts > boots');
+  });
+
+  it("a GLYPH verdict is a verdict — \\b after a non-word character never matched", () => {
+    // The two glyph markers were dead on arrival for exactly this reason, and a dead marker is
+    // invisible: the line still came back, just from the weakest tier and often the wrong line.
+    expect(reasonLine('\u00d7 src/a.test.ts > boots 3ms\nsomething undefined here')).toBe(
+      '\u00d7 src/a.test.ts > boots 3ms',
+    );
+  });
+
+  it('an AMBIGUOUS path filter is skipped, because the count would be a sum over two files', () => {
+    // The runner's path argument is a substring filter. Core's 569 test files collide for none of
+    // them today, so this is a precondition the guard measures rather than a bug it has — but the
+    // failure it prevents is silent in the worst direction: a deletion in one file masked by an
+    // addition in the other, reported as nothing.
+    const base = commit(
+      { 'src/a.ts': SRC, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\nit("c", () => {});\n' },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': 'it("a", () => {});\n' }, 'drop two cases');
+
+    const colliding = (): string[] => ['src/a.test.ts', 'pkg/src/a.test.ts'];
+    const r = check({ base, head, runFile: counting, listFiles: colliding, log: () => {} });
+
+    // ⛔ Without the precondition this is status 1 with a finding — the deletion IS real here. The
+    // point is that the guard must not put a NUMBER on it when the number would be a sum.
+    expect(r.status).toBe(0);
+    expect(r.findings).toEqual([]);
+    expect(r.skipped).toEqual([
+      ['src/a.test.ts', expect.stringContaining('pkg/src/a.test.ts')] as unknown as [string, string],
+    ]);
+    expect(r.skipped[0][1]).toContain('sum over several files');
+  });
+
+  it('a WHOLLY deleted file also has its filter measured — the second site, which the first test cannot reach', () => {
+    // ⚠ The head-side precondition is unreachable for a file that no longer exists at head, so
+    // without this witness the base-side copy could be deleted and every test would stay green.
+    const base = commit({ 'src/a.ts': SRC, 'src/gone.test.ts': 'it("a", () => {});\n' }, 'base');
+    const head = commit({ 'src/gone.test.ts': null }, 'delete the file');
+
+    const colliding = (): string[] => ['src/gone.test.ts', 'pkg/src/gone.test.ts'];
+    const r = check({ base, head, runFile: counting, listFiles: colliding, log: () => {} });
+
+    expect(r.status).toBe(0);
+    expect(r.findings).toEqual([]);
+    expect(r.skipped[0][1]).toContain('sum over several files');
+  });
+
+  it('filterMatches is the substring relation the runner uses, not equality', () => {
+    expect(filterMatches(['a/foo.test.ts', 'b/a/foo.test.ts', 'c.test.ts'], 'a/foo.test.ts')).toEqual([
+      'a/foo.test.ts',
+      'b/a/foo.test.ts',
+    ]);
+    expect(filterMatches(['a/foo.test.ts', 'c.test.ts'], 'a/foo.test.ts')).toEqual(['a/foo.test.ts']);
   });
 
   it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {

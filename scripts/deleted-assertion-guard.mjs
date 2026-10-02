@@ -154,6 +154,21 @@ export function caseCount(out) {
  *          listFiles: () => string[],
  *          log?: (s: string) => void}} opts
  */
+/**
+ * Every entry of the runner's file list that the runner's path FILTER would match for `file`.
+ *
+ * ⚠ The runner's path argument is a SUBSTRING filter, not a path. Measured against core's 569
+ * test files it collides for none of them, so `runFile(file)` today runs exactly the one file —
+ * but that is a property of the current NAMES, not of the construction, and the failure a new name
+ * would cause is silent in the worst direction: the case count becomes a SUM over several files,
+ * so a deletion in one is masked by an addition in another and the guard reports nothing. The
+ * precondition is therefore measured rather than assumed, and it costs no extra run because the
+ * list is already in hand.
+ */
+export function filterMatches(list, file) {
+  return list.filter((f) => f.includes(file));
+}
+
 export function check({ base, head, runFile, listFiles, log = () => {} }) {
   const dirty = tryRun('git', ['status', '--porcelain']);
   if (!dirty.ok) return { status: 2, reason: 'tree-unreadable' };
@@ -190,8 +205,14 @@ export function check({ base, head, runFile, listFiles, log = () => {} }) {
     let headCount = 0;
     const existedAtHead = existsSync(file);
     if (existedAtHead) {
-      if (!listFiles().includes(file)) {
+      const headList = listFiles();
+      if (!headList.includes(file)) {
         skipped.push([file, 'the runner does not run this file (it is not in the runner\'s own file list)']);
+        continue;
+      }
+      const alsoMatched = filterMatches(headList, file).filter((f) => f !== file);
+      if (alsoMatched.length > 0) {
+        skipped.push([file, `the runner's path filter is ambiguous — "${file}" also matches ${alsoMatched.join(', ')}, so the case count would be a sum over several files`]);
         continue;
       }
       const headRun = runFile(file);
@@ -208,8 +229,16 @@ export function check({ base, head, runFile, listFiles, log = () => {} }) {
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, baseSource, 'utf-8');
       // Asked here for a wholly deleted file: it cannot be in the runner's list before it is written back.
-      if (!listFiles().includes(file)) {
+      const baseList = listFiles();
+      if (!baseList.includes(file)) {
         skipped.push([file, 'the runner does not run this file (it is not in the runner\'s own file list)']);
+        continue;
+      }
+      // Asked again here, not only at head: a file the diff deletes WHOLLY never reached the head
+      // check above, so this is the only place its filter is ever measured.
+      const alsoMatchedAtBase = filterMatches(baseList, file).filter((f) => f !== file);
+      if (alsoMatchedAtBase.length > 0) {
+        skipped.push([file, `the runner's path filter is ambiguous \u2014 "${file}" also matches ${alsoMatchedAtBase.join(', ')}, so the case count would be a sum over several files`]);
         continue;
       }
       const baseRun = runFile(file);
@@ -249,9 +278,23 @@ export function reasonLine(out) {
     .filter((l) => l.length > 0)
     .filter((l) => /[A-Za-z0-9]/.test(l.replace(/[─-╿⎯—–]/g, '')))
     .filter((l) => !/^(Duration|Start at|RUN|Test Files|Tests)\b/.test(l));
-  const marked = lines.find((l) => /\b(error|Error|FAIL|failed|Cannot|cannot|is not|undefined|TS\d{4})\b/.test(l));
-  const pick = marked ?? lines[lines.length - 1];
-  return pick ? pick.slice(0, 150) : '(the run produced no readable output)';
+  // ⭐ TIERS, not one alternation — and a real run taught the difference. The weak markers in
+  // tier 3 also occur in output a test prints ON PURPOSE: a console warning reading
+  // "… is not a function" matched first and won over the runner's own FAIL line further down,
+  // so the skip was explained by a push-notification log that had nothing to do with it. A reason
+  // line naming the WRONG cause is worse than a vague one: it sends a reader after a bug that is
+  // not there, while the skip it was supposed to justify goes unexamined. The runner's own verdict
+  // outranks a thrown error, which outranks a line that merely sounds like one.
+  const tiers = [
+    /^FAIL\b|^(?:✖|×)\s|^Failed Tests\b/,
+    /^(?:Uncaught\s+)?(?:Assertion|Type|Reference|Syntax|Range|Eval)?Error\b|\bTS\d{4}\b/,
+    /\b(error|Error|FAIL|failed|Cannot|cannot|is not|undefined)\b/,
+  ];
+  for (const t of tiers) {
+    const hit = lines.find((l) => t.test(l));
+    if (hit) return hit.slice(0, 150);
+  }
+  return lines.length > 0 ? lines[lines.length - 1].slice(0, 150) : '(the run produced no readable output)';
 }
 
 function main() {
