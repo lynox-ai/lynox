@@ -826,7 +826,15 @@ function rowToAccount(row: AccountRow): MailAccountConfig {
 
 /** Multi-statement runner — bracket access avoids a noisy lint false-positive. */
 function runMultiStatement(db: Database.Database, sql: string): void {
-  db['exec'](sql);
+  try {
+    db['exec'](sql);
+  } catch (err) {
+    // A migration that opens its own transaction and fails inside it leaves that transaction
+    // open — better-sqlite3 does not roll back for us — holding the write lock on a connection
+    // the constructor is about to abandon.
+    if (db.inTransaction) db['exec']('ROLLBACK');
+    throw err;
+  }
 }
 
 /**
@@ -1369,20 +1377,25 @@ export class MailStateDb {
   failStaleScheduledSends(olderThan: Date, reason: string, when: Date = new Date()): number {
     const result = this.db
       .prepare<[number, string, number], unknown>(
-        `UPDATE mail_scheduled SET failed_at = ?, fail_reason = ?
+        `UPDATE mail_scheduled SET failed_at = ?, fail_reason = ?, sending_at = NULL
          WHERE sending_at IS NOT NULL AND sending_at < ? AND sent_at IS NULL AND failed_at IS NULL`,
       )
       .run(when.getTime(), reason, olderThan.getTime()) as { changes: number };
     return result.changes;
   }
 
-  /** Mark a scheduled send as delivered. Stamps sent_at + bumps attempts. */
+  /**
+   * Mark a scheduled send as delivered. Stamps sent_at + bumps attempts. Also over a row that
+   * was marked failed in the meantime: a send that outlived its claim is reported by another
+   * tick as "may have been sent", and when it then succeeds, that is the truth — leaving the
+   * failure would invite a re-queue, i.e. the duplicate the claim exists to prevent.
+   */
   markScheduledSent(id: string, when: Date = new Date()): boolean {
     const result = this.db
       .prepare<[number, string], unknown>(
         `UPDATE mail_scheduled
-         SET sent_at = ?, attempts = attempts + 1
-         WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL`,
+         SET sent_at = ?, attempts = attempts + 1, failed_at = NULL, fail_reason = NULL, sending_at = NULL
+         WHERE id = ? AND sent_at IS NULL`,
       )
       .run(when.getTime(), id) as { changes: number };
     return result.changes > 0;
@@ -1409,7 +1422,7 @@ export class MailStateDb {
     const result = this.db
       .prepare<[number, string, string], unknown>(
         `UPDATE mail_scheduled
-         SET failed_at = ?, fail_reason = ?
+         SET failed_at = ?, fail_reason = ?, sending_at = NULL
          WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL`,
       )
       .run(when.getTime(), reason, id) as { changes: number };

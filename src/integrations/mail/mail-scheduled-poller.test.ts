@@ -153,23 +153,72 @@ describe('mail-scheduled-poller', () => {
     expect(db.listScheduledForAccount('acct-1')[0]!.failReason?.startsWith(OUTCOME_UNKNOWN_PREFIX)).toBe(true);
   });
 
-  it('two pollers on one database send a due row once', async () => {
+  it('two pollers that both read a row as due send it once: the second loses the claim', async () => {
     queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'race' });
+    // The second poller's view of the due list is taken BEFORE the first claims — the
+    // interleaving two processes on one file can produce, forced here.
+    const snapshot = db.listDueScheduledSends(new Date(), 25);
+    expect(snapshot).toHaveLength(1);
+    const stateB = Object.create(db, { listDueScheduledSends: { value: () => snapshot } }) as MailStateDb;
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     sendImpl = async (input) => { sendCalls.push(input); await gate; return { messageId: '<m@x>', accepted: ['recipient@x'], rejected: [] }; };
     const a = startScheduledSendPoller({ state: db, registry });
-    const b = startScheduledSendPoller({ state: db, registry });
+    const b = startScheduledSendPoller({ state: stateB, registry });
     const first = a.tickNow();
-    // Let the first tick reach the provider and hold there, then start the second.
-    await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
-    const second = b.tickNow();
-    const secondResult = await second;
+    const secondResult = await b.tickNow();
     release();
     const firstResult = await first;
     a.stop(); b.stop();
     expect(sendCalls).toHaveLength(1);
-    expect(firstResult.fired + secondResult.fired).toBe(1);
+    expect([firstResult.fired, secondResult.fired]).toEqual([1, 0]);
+    expect(secondResult.failed).toBe(0);
+  });
+
+  it('a send that outlives its claim and then succeeds is recorded as sent, not as possibly sent', async () => {
+    const t0 = Date.now();
+    queue({ scheduledAt: new Date(t0 - 60_000), subject: 'slow-outlives-claim' });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    sendImpl = async (input) => { sendCalls.push(input); await gate; return { messageId: '<m@x>', accepted: ['recipient@x'], rejected: [] }; };
+    const a = startScheduledSendPoller({ state: db, registry, now: () => t0 });
+    const first = a.tickNow();
+    await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
+    // Another tick, past the stale limit, reports the row as possibly sent…
+    const later = startScheduledSendPoller({ state: db, registry, now: () => t0 + SCHEDULED_CLAIM_STALE_MS + 60_000 });
+    await later.tickNow();
+    expect(db.listScheduledForAccount('acct-1')[0]!.failReason?.startsWith(OUTCOME_UNKNOWN_PREFIX)).toBe(true);
+    // …and then the send comes back: it went out.
+    release();
+    await first;
+    a.stop(); later.stop();
+    const row = db.listScheduledForAccount('acct-1')[0]!;
+    expect(row.sentAt).toBeInstanceOf(Date);
+    expect(row.failedAt).toBeUndefined();
+    expect(row.failReason).toBeUndefined();
+    expect(sendCalls).toHaveLength(1);
+  });
+
+  it('a failed row can still be removed from the queue', async () => {
+    const id = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'remove-failed' });
+    sendImpl = async () => { throw new MailError('timeout', 'SMTP timeout'); };
+    const poller = startScheduledSendPoller({ state: db, registry });
+    await poller.tickNow();
+    poller.stop();
+    expect(db.listScheduledForAccount('acct-1')[0]!.failedAt).toBeInstanceOf(Date);
+    expect(db.cancelScheduledSend(id)).toBe(true);
+  });
+
+  it('keeps at most 200 characters of a provider message in the reason', async () => {
+    queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'long' });
+    sendImpl = async () => { throw new MailError('send_rejected', 'x'.repeat(5000)); };
+    const poller = startScheduledSendPoller({ state: db, registry });
+    await poller.tickNow();
+    poller.stop();
+    const reason = db.listScheduledForAccount('acct-1')[0]!.failReason!;
+    // The kept text is `send_rejected: xxx…` cut at 200 characters, then the ellipsis.
+    const kept = reason.slice(reason.indexOf('(') + 1, -1);
+    expect(kept).toBe(`provider_error: ${`send_rejected: ${'x'.repeat(5000)}`.slice(0, 200)}…`);
   });
 
   it('a row a stopped process left claimed is reported as possibly sent, not sent again', async () => {
@@ -301,5 +350,18 @@ describe('mail-scheduled-poller', () => {
     const id = queue({ scheduledAt: new Date(Date.now() - 5000) });
     db.markScheduledSent(id);
     expect(db.cancelScheduledSend(id)).toBe(false);
+  });
+});
+
+// The classification treats `send_rejected` as "may have been sent" because SMTP maps every
+// send error it cannot place — a connection lost in the middle of the transfer included — to
+// it. That premise lives in the provider; this holds it there.
+describe('wrapSmtpError — what a lost connection during a send becomes', () => {
+  it('a connection lost mid-send is send_rejected (outcome unknown), a timeout is timeout', async () => {
+    const { wrapSmtpError } = await import('./providers/imap-smtp.js');
+    expect(wrapSmtpError(new Error('Connection closed unexpectedly'), 'send').code).toBe('send_rejected');
+    expect(wrapSmtpError(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }), 'send').code).toBe('send_rejected');
+    expect(wrapSmtpError(Object.assign(new Error('Timeout'), { code: 'ETIMEDOUT', command: 'CONN' }), 'send').code).toBe('timeout');
+    expect(classifyScheduledFailure({ status: 'provider_error', errorCode: wrapSmtpError(new Error('Connection closed unexpectedly'), 'send').code })).toBe('unknown');
   });
 });

@@ -10,8 +10,8 @@
 // after `MAX_ATTEMPTS` the row is marked `failed_at` + `fail_reason`. A failure that may have
 // sent the mail — a timeout, a connection lost mid-send, a provider error without a code — is
 // never retried: the row is marked failed with a reason that says the mail may have gone out,
-// for a human to check the Sent folder before re-queueing. So is a row a crashed process left
-// claimed. A duplicate mail cannot be taken back; a missed one can be re-queued.
+// stored in `fail_reason` for a human to resolve. So is a row a crashed process left claimed.
+// A duplicate mail cannot be taken back; a missed one can be sent again.
 //
 // 60s cadence trades fire-resolution for SMTP cost: a row scheduled for
 // 09:00 fires within 60s of that wall-clock time. Per-tick limit prevents
@@ -25,17 +25,26 @@ import { sendMail, type SendCoreFailureStatus, type SendCoreInput } from './send
 /** Max retries before a row is marked permanently failed. */
 const MAX_ATTEMPTS = 3;
 
-/** A claim older than this belongs to a process that stopped mid-send. Well above the longest
- *  single send (SMTP stages time out at 60 s each, the Gmail API at 30 s). */
+/** A claim older than this belongs to a process that stopped mid-send. Well above a normal
+ *  send (SMTP aborts after 60 s of socket inactivity, the Gmail API after 30 s). A send that
+ *  does outlive it and then succeeds is still recorded as sent (`markScheduledSent`). */
 export const SCHEDULED_CLAIM_STALE_MS = 15 * 60_000;
 
-/** The reason a row gets when the mail may have been sent. Shown in the outbox. */
-export const OUTCOME_UNKNOWN_PREFIX = 'outcome unknown — the mail may have been sent; check the Sent folder before re-queueing';
+/** The start of `fail_reason` when the mail may have been sent. No screen shows it yet. The
+ *  Sent folder is no proof either way for an IMAP/SMTP account — the copy there is filed only
+ *  after a send succeeds — so the reason does not send the reader there. */
+export const OUTCOME_UNKNOWN_PREFIX = 'outcome unknown — the mail may have been sent; confirm with the recipient before sending it again';
+
+/** The longest provider or exception text kept in `fail_reason`. */
+const REASON_DETAIL_MAX = 200;
+const detail = (text: string): string => (text.length > REASON_DETAIL_MAX ? `${text.slice(0, REASON_DETAIL_MAX)}…` : text);
 
 /**
  * What a failed send means for its row: `retry` only when the failure proves nothing was sent,
- * `failed` when nothing was sent and a retry would fail the same way, `unknown` when the mail
- * may have gone out. Every status but `provider_error` is decided before the provider is
+ * `failed` when nothing was sent and a retry cannot help (a refusal decided before the
+ * provider, a missing scope or account), `unknown` when the mail may have gone out. An
+ * authentication failure is retried, up to MAX_ATTEMPTS: an expired token is often refreshed
+ * by the next attempt, and nothing was sent either way. Every status but `provider_error` is decided before the provider is
  * called. Of the provider's codes, only those raised before or instead of the transfer prove
  * nothing was sent: SMTP maps any other send error — a connection lost in the middle of the
  * transfer included — to `send_rejected`, and the Gmail API maps an HTTP 5xx to
@@ -145,10 +154,11 @@ async function fireOne(
   try {
     result = await sendMail(opts.registry, sendInput, { skipRateLimit: true });
   } catch (err) {
-    // sendMail throws on nothing it decided itself — a throw can come after the mail went out
-    // (writing the sent log, say), so it is not a reason to send again.
+    // sendMail returns its own refusals and catches the provider's errors, so a throw is
+    // unexpected and its place in the pipeline unknown — most likely before the send (resolving
+    // the account), but not provably. Not a reason to send again.
     const msg = err instanceof Error ? err.message : String(err);
-    opts.state.markScheduledFailed(row.id, `${OUTCOME_UNKNOWN_PREFIX} (${msg})`);
+    opts.state.markScheduledFailed(row.id, `${OUTCOME_UNKNOWN_PREFIX} (${detail(msg)})`);
     return 'failed';
   }
   if (result.ok) {
@@ -157,16 +167,16 @@ async function fireOne(
   }
   const verdict = classifyScheduledFailure(result);
   if (verdict === 'unknown') {
-    opts.state.markScheduledFailed(row.id, `${OUTCOME_UNKNOWN_PREFIX} (${result.status}: ${result.message})`);
+    opts.state.markScheduledFailed(row.id, `${OUTCOME_UNKNOWN_PREFIX} (${result.status}: ${detail(result.message)})`);
     return 'failed';
   }
   if (verdict === 'failed') {
-    opts.state.markScheduledFailed(row.id, `send failed, nothing was sent: ${result.status} — ${result.message}`);
+    opts.state.markScheduledFailed(row.id, `send failed, nothing was sent: ${result.status} — ${detail(result.message)}`);
     return 'failed';
   }
   const attempts = opts.state.bumpScheduledAttempt(row.id);
   if (attempts >= MAX_ATTEMPTS) {
-    opts.state.markScheduledFailed(row.id, `send failed after ${attempts} attempts: ${result.status} — ${result.message}`);
+    opts.state.markScheduledFailed(row.id, `send failed after ${attempts} attempts: ${result.status} — ${detail(result.message)}`);
     return 'failed';
   }
   return 'retry';

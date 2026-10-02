@@ -391,7 +391,7 @@ function isSmtpAuthThrottle(err: unknown): boolean {
  * `send_rejected`, while a verify that gets that far has nothing to reject —
  * anything left over is a connection problem.
  */
-function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
+export function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
   if (err instanceof MailError) return err;
   // Before isAuthError, which would otherwise swallow these — see above.
   if (isSmtpAuthThrottle(err)) {
