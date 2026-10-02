@@ -454,8 +454,14 @@ export function evaluate({ body, head, files, author }) {
   //
   // ⚠ Case-insensitive and a trailing full stop allowed, deliberately, like `head:` and
   // `closes: none` — a false red here is how a guard earns a bypass. The model slot is NOT an
-  // allowlist (it would date) but must be at least three characters, so `1 x round` cannot pass as
-  // evidence.
+  // allowlist (it would date) but must START WITH A LETTER and have at least two characters, so
+  // neither `1 x round` nor `1 ... round` passes as evidence.
+  //
+  // ⚠ Two characters, not three, and the floor was MEASURED rather than chosen: three refused `o3`
+  // and `r1`, which are real model names, and a gate that refuses a true answer earns a bypass. The
+  // two halves also do different work — punctuation satisfied the old class (`...` passed AS the
+  // model name), while a single letter still says nothing — so each half owes its own witness, and
+  // `1 x round` cannot witness the length while `[a-z]` already refuses it.
   //
   // Not demanded for the other gates: `delta` carries its verdict in `delta:`, `legal` in
   // `approved:`. ⚠ `security` has NO evidence line and wants the same treatment — left out so this
@@ -470,12 +476,13 @@ export function evaluate({ body, head, files, author }) {
         'The model is the one that RAN the round (your own, if you reviewed it yourself).',
       );
     } else {
-      const m = /^(\d+)\s+([a-z][a-z0-9.+-]{2,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
+      const m = /^(\d+)\s+([a-z][a-z0-9.+-]{1,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
       if (!m) {
         errors.push(
           `\`review: ${raw}\` is not \`<n> <model> round(s), <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
-          'The model name must start with a letter and be at least three characters, so neither `x` nor',
-        '`...` can pass as evidence — three characters alone was not enough, measured.',
+          'The model name must START WITH A LETTER and have at least two characters, so neither `1 x',
+          'round` nor `1 ... round` passes as evidence. ⚠ Two, not three: `o3` and `r1` are real model',
+          'names, and a floor of three REFUSED them — measured against the names actually in use.',
         );
       } else if (Number(m[1]) < 1) {
         errors.push(`\`review: ${raw}\` claims ${m[1]} rounds — a gate with no round is the omission this field exists for.`);

@@ -821,25 +821,55 @@ describe('gate-record — the `review:` evidence line', () => {
     expect(v.errors.join(' ')).toMatch(/is not `<n> <model> round\(s\), <result>`/);
   });
 
-  it('rejects a model that is not a name, so a placeholder cannot pass as evidence', () => {
-    // Strict where it counts: the first cut checked the result carefully and let `1 x round` through.
-    // ⚠ And "at least three characters" was not enough either — `1 ... round` and `1 --- rounds` were
-    // ACCEPTED, with `...` as the model name, because punctuation satisfies the character class. The
-    // name must now START with a letter, which is what a model name does.
-    expect(evaluate({ body: record({ review: '1 x round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+  it('rejects a model slot that does not START with a letter', () => {
+    // ⚠ "At least three characters" was not enough: `1 ... round` and `1 --- rounds` were ACCEPTED,
+    // with `...` as the model name, because punctuation satisfies the character class. The letter is
+    // what actually stops a placeholder.
     expect(evaluate({ body: record({ review: '1 ... round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
     expect(evaluate({ body: record({ review: '1 --- rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
     expect(evaluate({ body: record({ review: '1 4.6 rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
   });
 
-  it('refuses TRAILING JUNK after a result, which the end-anchors are there for', () => {
-    // ⛔ Two mutants survived the first round of this field: drop the `$` from `/^no\s+findings$/i`
-    // or from the breakdown part pattern, and every other test here stays green — while
-    // `no findings and 3 left open` and `2 fixed extra` start passing. A result that trails off into
-    // free text is exactly what the field replaces, so the anchors need witnesses of their own.
+  it('rejects a ONE-character model, which the letter rule alone would allow', () => {
+    // ⛔ Separate from the test above, because they witness different halves. `1 x round` starts with
+    // a letter, so only the length floor refuses it — and with both halves in one test the length
+    // mutant survived: `{2,}` → `{1,}` changed nothing for `x`, which is refused either way.
+    expect(evaluate({ body: record({ review: '1 x round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('ACCEPTS a two-character model, because `o3` and `r1` are real names', () => {
+    // ⚠ The floor is two, not three, and that is measured: three rejected `o3` and `r1`. A gate that
+    // refuses a real model name produces a false red, and a false red is how a guard earns a bypass.
+    //
+    // ⛔ The BOUND this buys, named rather than discovered later: `1 xy round` also passes, and the
+    // field cannot tell `xy` from `o3` without an allowlist — which would date, and dating is how
+    // this slot would start refusing next year's models. So the slot refuses a NON-NAME (`x`, `...`,
+    // `---`, a digit-initial token), not a FALSE name; what makes the claim true is the author, and
+    // the field exists so the claim is written down, not so CI can check it. No test of its own for
+    // `xy`: mutant `{1,}`→`{2,}` kills it together with the line below, and a second witness for one
+    // mutant preserves no more than the first.
+    expect(evaluate({ body: record({ review: '1 o3 round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+    expect(evaluate({ body: record({ review: '2 r1 rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  // ⛔ THREE end-anchors, THREE tests — deliberately not one. Vitest stops at the first failing
+  // assertion, so two anchors asserted in one `it()` means the second is only witnessed when the
+  // first already passes: a mutant that removes just the second is then killed by a test that never
+  // reached it. Measured — that is how one of these looked covered while it was not.
+  it('refuses trailing junk after `no findings`', () => {
     expect(evaluate({ body: record({ review: '1 opus round, no findings and 3 left open' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('refuses trailing junk after a breakdown count', () => {
     expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed extra' }), head: HEAD, files: CODE }).ok).toBe(false);
     expect(evaluate({ body: record({ review: '1 opus round, 2 findings, 2 fixed but also more' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('refuses trailing junk after `all fixed`, the third anchor', () => {
+    // The one the first pass left unwitnessed: without its `$`, `5 findings, all fixed extra` and
+    // `all fixed and 2 left` both pass, and the result trails off into free text again.
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed extra' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed and 2 left' }), head: HEAD, files: CODE }).ok).toBe(false);
   });
 
   it('rejects an unknown disposition', () => {
