@@ -97,8 +97,8 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
 }
 
 /** Plan an external run and, unless `start` is false, start its read as the owner does. */
-function planRun(rows: { target: string; after: unknown }[], start = true): string {
-  const targets = planExternal(rows, HOST, detectSecretInContent);
+function planRun(rows: { target: string; after: unknown }[], start = true, scan: (text: string) => string | null = detectSecretInContent): string {
+  const targets = planExternal(rows, HOST, scan);
   const keys = targets.filter((t) => !('invalid' in t)).map((t) => t.key);
   const out = ledger.recordExternalPlan({ createdBy: 't', host: HOST, targets, contract: contractFor(keys) });
   if (!out.ok) throw new Error(out.reason);
@@ -510,16 +510,18 @@ describe('the preview effect', () => {
     }
   });
 
-  it('halts the read of a target whose address looks like it carries a secret, and sends nothing', async () => {
+  it('a target whose address looks like it carries a secret is unplannable, and is never read', async () => {
     const s = shop();
     const restore = serve(s);
     try {
       // Built at run time so no pattern scan reads a key in this file.
       const keyed = url(['sk', 'ant', 'x'.repeat(24)].join('-'));
-      const run = planRun([{ target: keyed, after: { price: '1' } }]);
-      expect((await runBulkPreview(run, previewDeps(client({ keys: [keyed] })))).status).toBe('halted');
-      expect(ledger.getStatus(run)!.haltReason).toBe(BULK_HALT_REASONS.secret);
-      expect(s.requests).toEqual([]);
+      // A plan made without the scan: the read itself must refuse it.
+      const run = planRun([{ target: keyed, after: { price: '1' } }, { target: url(0), after: { price: '1' } }], true, () => null);
+      expect((await runBulkPreview(run, previewDeps(client({ keys: [keyed, url(0)] })))).status).toBe('done');
+      expect(ledger.getStatus(run)!.haltReason).toBeNull();
+      expect(ledger.getStatus(run)!.changes.invalid).toBe(1);
+      expect(s.requests.map((r) => new URL(r.url).pathname)).toEqual(['/products/0']);
     } finally {
       restore();
     }

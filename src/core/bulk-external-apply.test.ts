@@ -125,8 +125,11 @@ function seedProbe(method: BulkWriteMethod = 'PATCH', kind = '/products/'): void
     .run(HOST, method, kind, 'fixture', '2026-09-30T00:00:00.000Z');
 }
 
-async function previewedRun(rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH'): Promise<string> {
-  const targets = planExternal(rows, HOST, detectSecretInContent);
+async function previewedRun(
+  rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH',
+  planScan: (text: string) => string | null = detectSecretInContent,
+): Promise<string> {
+  const targets = planExternal(rows, HOST, planScan);
   const out = ledger.recordExternalPlan({
     createdBy: 't', host: HOST, targets, contract: mintBulkContract(HOST, targets.filter((t) => !('invalid' in t)).map((t) => t.key), method),
   });
@@ -138,12 +141,24 @@ async function previewedRun(rows: { target: string; after: unknown }[], c: Exter
 }
 
 /** Plan, preview and approve an external run with a confirmed probe for its verb. */
-async function approvedRun(rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH'): Promise<string> {
-  const runId = await previewedRun(rows, c, method);
+async function approvedRun(
+  rows: { target: string; after: unknown }[], c: ExternalClient = client(), method: BulkWriteMethod = 'PATCH',
+  planScan: (text: string) => string | null = detectSecretInContent,
+): Promise<string> {
+  const runId = await previewedRun(rows, c, method, planScan);
   seedProbe(method);
   const approved = ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! });
   if (!approved.ok) throw new Error(approved.reason);
   return runId;
+}
+
+// Built at run time so no pattern scan reads a key in this file.
+const LOOKS_LIKE_A_KEY = ['sk', 'ant', 'x'.repeat(24)].join('-');
+
+/** The error recorded on each failed target of a run, in target order. */
+function targetErrors(runId: string): string[] {
+  return (engineDb.getDb().prepare('SELECT error FROM bulk_targets WHERE run_id = ? AND error IS NOT NULL ORDER BY seq').all(runId) as { error: string }[])
+    .map((r) => r.error);
 }
 
 beforeEach(() => {
@@ -289,20 +304,24 @@ describe('applying an external run', () => {
     }
   });
 
-  // Built at run time so no pattern scan reads a key in this file.
-  const LOOKS_LIKE_A_KEY = ['sk', 'ant', 'x'.repeat(24)].join('-');
+
+  it('a plan refuses a target whose address looks like a secret: it is never requested', () => {
+    const [target] = planExternal([{ target: url(LOOKS_LIKE_A_KEY), after: { price: '1' } }], HOST, detectSecretInContent);
+    expect(target).toMatchObject({ invalid: 'secret_in_target' });
+  });
 
   it('sends nothing whose address or body looks like it carries a secret', async () => {
     const s = shop();
     const restore = serve(s);
     try {
-      const keyed = url(`${LOOKS_LIKE_A_KEY}`);
+      const keyed = url(LOOKS_LIKE_A_KEY);
       const c = client({ contract: mintBulkContract(HOST, [url(0), keyed]) });
       expect(await c.write(url(0), 'PATCH', { note: `token ${LOOKS_LIKE_A_KEY}` })).toEqual({ kind: 'secret' });
       expect(await c.get(keyed)).toEqual({ kind: 'secret' });
       // The same calls without the key go out: the refusal is the scan, not something else.
       expect((await c.write(url(0), 'PATCH', { note: 'plain' })).kind).not.toBe('secret');
-      expect(s.requests.map((r) => `${r.method} ${r.path}`)).toEqual(['PATCH /products/0']);
+      expect((await c.get(url(0))).kind).not.toBe('secret');
+      expect(s.requests.map((r) => `${r.method} ${r.path}`)).toEqual(['PATCH /products/0', 'GET /products/0']);
     } finally {
       restore();
     }
@@ -327,7 +346,7 @@ describe('applying an external run', () => {
     }
   });
 
-  it('an undo that would write back a value that looks like a secret halts, and sends nothing for it', async () => {
+  it('an undo that would write back a value that looks like a secret fails that target, and sends nothing for it', async () => {
     const s = shop();
     s.items.get('/products/0')!['note'] = `old ${LOOKS_LIKE_A_KEY}`;
     const restore = serve(s);
@@ -339,8 +358,10 @@ describe('applying an external run', () => {
       if (!undo.ok) throw new Error(undo.reason);
       expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
       s.requests.length = 0;
-      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('halted');
-      expect(ledger.getStatus(undo.status.id)!.haltReason).toBe(BULK_HALT_REASONS.secret);
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter });
+      // The target fails on its own; the run's failure rules decide what follows.
+      expect(ledger.getStatus(undo.status.id)!.failed).toBe(1);
+      expect(targetErrors(undo.status.id)).toEqual(['secret']);
       expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
       expect(s.items.get('/products/0')!['note']).toBe('clean');
     } finally {
@@ -595,15 +616,18 @@ describe('applying an external run', () => {
     }
   });
 
-  it('the worker\'s own client scans what it sends: a target whose address looks like a secret halts the run', async () => {
+  it('the worker\'s own client scans what it sends: a target whose address looks like a secret fails, nothing is sent', async () => {
     const s = shop();
-    const key = ['sk', 'ant', 'x'.repeat(24)].join('-');
+    const key = LOOKS_LIKE_A_KEY;
     s.items.set(`/products/${key}`, { id: 9, title: 'Keyed', price: '12.00' });
     const restore = serve(s);
     try {
-      // The preview runs on a client without the scan, so the run reaches approval; what the
-      // worker builds for the write is the client under test.
-      const runId = await approvedRun([{ target: url(key), after: { price: '15' } }], client({ scan: () => null, contract: mintBulkContract(HOST, [url(key)]) }));
+      // Plan and preview run without the scan, so the run reaches approval; what the worker
+      // builds for the write is the client under test.
+      const runId = await approvedRun(
+        [{ target: url(key), after: { price: '15' } }],
+        client({ scan: () => null, contract: mintBulkContract(HOST, [url(key)]) }), 'PATCH', () => null,
+      );
       const apiStore = new ApiStore();
       apiStore.register({
         id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
@@ -633,7 +657,7 @@ describe('applying an external run', () => {
       s.requests.length = 0;
       await loop.tick();
       await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
-      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.secret);
+      expect(targetErrors(runId)).toEqual(['secret']);
       expect(s.requests).toEqual([]);
       expect(s.items.get(`/products/${key}`)!['price']).toBe('12.00');
     } finally {

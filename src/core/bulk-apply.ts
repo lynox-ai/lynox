@@ -65,6 +65,18 @@ export class BulkRedirectError extends Error {
   }
 }
 
+/**
+ * Thrown by a writer for a target whose request would carry what looks like a secret. It
+ * belongs to the target, not the run: the same target fails the same way on every attempt,
+ * so a halt would stop the run for good at it, and the rest would never be written.
+ */
+export class BulkSecretError extends Error {
+  constructor() {
+    super('secret');
+    this.name = 'BulkSecretError';
+  }
+}
+
 /** The fields a target's write names, when its after-state is an object. */
 function fieldsOf(t: ApplyTarget): readonly string[] | null {
   const v = t.after.absent ? null : t.after.value;
@@ -223,6 +235,7 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
       if (err instanceof BulkRedirectError) return { kind: 'redirect' };
+      if (err instanceof BulkSecretError) return { kind: 'secret' };
       return { kind: 'write_failed' };
     }
   }

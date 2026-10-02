@@ -22,7 +22,7 @@ import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
-import { BulkRedirectError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
+import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
@@ -161,6 +161,7 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
   return keyed.map(({ row, key }): ExternalPlanned => {
     charge(JSON.stringify(key ?? row.target));
     if (key === null) return { key: row.target, invalid: 'bad_url' };
+    if (scan(key) !== null) return { key, invalid: 'secret_in_target' };
     const after = row.after;
     if (!isPlainObject(after) || Object.keys(after).length === 0) return { key, invalid: 'after_not_object' };
     if (!Object.values(after).every(isScalar)) return { key, invalid: 'field_not_scalar' };
@@ -270,8 +271,10 @@ export interface ExternalClientDeps {
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
   /**
-   * The egress secret scan `http_request` runs on what it sends: non-null when `text` looks
-   * like it carries a secret. Required, so no caller can build a client that sends unscanned.
+   * The secret-pattern scan `http_request` runs on what it sends (`detectSecretInContent`):
+   * non-null when `text` looks like it carries a secret. Required, so no caller can build a
+   * client that sends unscanned. `http_request`'s separate GET check is not run here: a bulk
+   * target has no query or fragment (`externalTargetKey`) and its host is the contract's.
    */
   scan: (text: string) => string | null;
   now?: () => number;
@@ -288,7 +291,8 @@ export interface ExternalClient {
 
 /**
  * GET for bulk runs. Every guard runs before anything is sent, in this order: the run's
- * contract, the network policy, the credential, the profile's rate limit. No redirect is
+ * contract, the network policy, the secret-pattern scan of the address and body, the
+ * credential, the profile's rate limit. No redirect is
  * followed (plan §4 F7): a 3xx is an answer, never a hop.
  */
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
@@ -415,7 +419,7 @@ export function externalWriter(client: ExternalClient, opts: {
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
       case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
-      case 'secret': throw new BulkWriterHalt(BULK_HALT_REASONS.secret);
+      case 'secret': throw new BulkSecretError();
       case 'redirect': throw new BulkRedirectError();
       default: return got;
     }
