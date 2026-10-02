@@ -841,13 +841,14 @@ describe('gate-record — the `review:` evidence line', () => {
     // ⚠ The floor is two, not three, and that is measured: three rejected `o3` and `r1`. A gate that
     // refuses a real model name produces a false red, and a false red is how a guard earns a bypass.
     //
-    // ⛔ The BOUND this buys, named rather than discovered later: `1 xy round` also passes, and the
-    // field cannot tell `xy` from `o3` without an allowlist — which would date, and dating is how
-    // this slot would start refusing next year's models. So the slot refuses a NON-NAME (`x`, `...`,
-    // `---`, a digit-initial token), not a FALSE name; what makes the claim true is the author, and
-    // the field exists so the claim is written down, not so CI can check it. No test of its own for
-    // `xy`: mutant `{1,}`→`{2,}` kills it together with the line below, and a second witness for one
-    // mutant preserves no more than the first.
+    // ⛔ The BOUND this buys, named rather than discovered later: `1 xy round` passes too, and so do
+    // `1 a. round` and `1 a- round` — measured, not assumed. So the slot refuses exactly the FORMS it
+    // names (one character, pure punctuation, a digit-initial token) and nothing beyond them; it is
+    // not a check that the model EXISTS. An allowlist would be that check and is the wrong
+    // instrument: it would date, and dating is how this slot would start refusing next year's
+    // models. What makes the line true is the author; the field exists so the claim is written down,
+    // not so CI can verify it. No test of its own for `xy`: mutant `{1,}`→`{2,}` kills it together
+    // with the line below, and a second witness for one mutant preserves no more than the first.
     expect(evaluate({ body: record({ review: '1 o3 round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
     expect(evaluate({ body: record({ review: '2 r1 rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
   });
