@@ -74,6 +74,21 @@ describe('one run per required check name', () => {
   });
 });
 
+describe('the detect job is wired to the PR as a whole', () => {
+  it('compares the pull request base with its head, and a push with what it replaced', () => {
+    type Step = { id?: string; env?: Record<string, string>; run?: string };
+    const detect = (load('ci.yml').jobs ?? {})['detect'] as Job & { outputs?: Record<string, string>; steps?: Step[] };
+    const check = (detect.steps ?? []).find((st) => st.id === 'check');
+    // `github.event.before` alone would compare only the LAST push of a pull request: a code
+    // commit followed by a docs-only push would then read as docs-only.
+    expect(check?.env?.['BASE_SHA']).toBe('${{ github.event.pull_request.base.sha || github.event.before }}');
+    expect(check?.env?.['HEAD_SHA']).toBe('${{ github.event.pull_request.head.sha || github.sha }}');
+    expect(detect.outputs?.['docs-only']).toBe('${{ steps.check.outputs.docs-only }}');
+    expect(check?.run).toContain('bash scripts/ci-docs-only.sh "$BASE_SHA" "$HEAD_SHA"');
+    expect(check?.run).toContain('>> "$GITHUB_OUTPUT"');
+  });
+});
+
 describe('ci-docs-only.sh', () => {
   const repo = () => {
     const dir = mkdtempSync(join(tmpdir(), 'ci-docs-only-'));
@@ -91,7 +106,7 @@ describe('ci-docs-only.sh', () => {
       return git('rev-parse', 'HEAD');
     };
     const run = (b: string, h: string) => spawnSync('bash', [join(process.cwd(), SCRIPT), b, h], { cwd: dir, encoding: 'utf8' });
-    return { base, commit, run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+    return { dir, git, base, commit, run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   };
 
   it('true only when every changed file is under docs/', () => {
@@ -100,8 +115,9 @@ describe('ci-docs-only.sh', () => {
       expect(r.run(r.base, r.commit({ 'docs/a.md': 'b\n', 'docs/sub/c.md': 'c\n' })).stdout.trim()).toBe('docs-only=true');
       expect(r.run(r.base, r.commit({ 'docs/a.md': 'b\n', 'src/x.ts': 'x\n' })).stdout.trim()).toBe('docs-only=false');
       expect(r.run(r.base, r.commit({ 'README.md': 'changed\n' })).stdout.trim()).toBe('docs-only=false');
-      // a path that merely STARTS with "docs" is not under docs/
+      // a path that merely STARTS with "docs" is not under docs/, nor one with docs/ in its middle
       expect(r.run(r.base, r.commit({ 'docs-site/x.md': 'x\n' })).stdout.trim()).toBe('docs-only=false');
+      expect(r.run(r.base, r.commit({ 'src/docs/x.md': 'x\n' })).stdout.trim()).toBe('docs-only=false');
     } finally { r.cleanup(); }
   });
 
@@ -113,6 +129,30 @@ describe('ci-docs-only.sh', () => {
       expect(r.run('', r.base).stdout.trim()).toBe('docs-only=false');
     } finally { r.cleanup(); }
   });
+
+  it('moving a code file INTO docs/ is not docs-only — the old path counts too', () => {
+    // By default `git diff --name-only` reports a rename by its new path only.
+    const r = repo();
+    try {
+      r.git('checkout', '-q', r.base);
+      r.git('mv', 'README.md', 'docs/README.md');
+      r.git('commit', '-qm', 'move');
+      const res = r.run(r.base, r.git('rev-parse', 'HEAD'));
+      expect(res.stdout.trim()).toBe('docs-only=false');
+    } finally { r.cleanup(); }
+  });
+
+  it('a change list larger than a pipe buffer with an early non-docs path is not docs-only', () => {
+    // Under pipefail, `printf … | grep -q` failed with SIGPIPE on such a list and fell into the
+    // docs-only branch. `.aaa/` sorts before `docs/`, like `.github/` or `CLAUDE.md` do.
+    const r = repo();
+    try {
+      const files: Record<string, string> = { '.aaa/code.ts': 'x\n' };
+      for (let i = 0; i < 3000; i++) files[`docs/bulk/page-with-a-long-enough-name-${String(i).padStart(5, '0')}.md`] = `${i}\n`;
+      const res = r.run(r.base, r.commit(files));
+      expect(res.stdout.trim()).toBe('docs-only=false');
+    } finally { r.cleanup(); }
+  }, 60_000);
 
   it('a base git cannot resolve fails the script, so detect fails and the gated jobs run', () => {
     const r = repo();
