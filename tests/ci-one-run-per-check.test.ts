@@ -154,6 +154,36 @@ describe('ci-docs-only.sh', () => {
     } finally { r.cleanup(); }
   }, 60_000);
 
+  it('a submodule pointer under docs/ is code, not docs', () => {
+    const r = repo();
+    try {
+      r.git('checkout', '-q', r.base);
+      r.git('update-index', '--add', '--cacheinfo', `160000,${r.base},docs/vendored`);
+      r.git('commit', '-qm', 'gitlink');
+      expect(r.run(r.base, r.git('rev-parse', 'HEAD')).stdout.trim()).toBe('docs-only=false');
+    } finally { r.cleanup(); }
+  });
+
+  it.each([
+    ['the submodule check', '160000'],
+    ['the docs/ check', '^docs/'],
+  ])('a grep that FAILS in %s aborts the script — it never reads as "no match"', (_where, trigger) => {
+    // A fake grep first on PATH exits 2 when it is handed the pattern of that check, and behaves
+    // like the real one otherwise. Under the old `if grep …` a failure counted as "no match" and,
+    // in the docs/ check, produced docs-only=true.
+    const r = repo();
+    const bin = mkdtempSync(join(tmpdir(), 'fake-grep-'));
+    try {
+      const head = r.commit({ 'docs/a.md': 'changed\n' });
+      const real = execFileSync('bash', ['-c', 'command -v grep'], { encoding: 'utf8' }).trim();
+      writeFileSync(join(bin, 'grep'), `#!/usr/bin/env bash\ncase "$*" in *'${trigger}'*) exit 2 ;; esac\nexec ${real} "$@"\n`, { mode: 0o755 });
+      const res = spawnSync('bash', [join(process.cwd(), SCRIPT), r.base, head], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` } });
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain('grep failed (exit 2)');
+      expect(res.stdout).not.toContain('docs-only=true');
+    } finally { r.cleanup(); rmSync(bin, { recursive: true, force: true }); }
+  });
+
   it('a base git cannot resolve fails the script, so detect fails and the gated jobs run', () => {
     const r = repo();
     try {

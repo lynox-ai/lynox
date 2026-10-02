@@ -16,6 +16,8 @@
 #   · the test reads the list from a here-string, not from `printf … | grep -q`: under `pipefail`,
 #     `grep -q` exits at its first match, `printf` dies of SIGPIPE on a list larger than the pipe
 #     buffer, and the failed pipeline sent an early non-docs path into the docs-only branch.
+# And two more, from the round after: a grep that FAILS (exit 2) is not "no match" — it aborts
+# here; and a submodule (gitlink, mode 160000) changed under docs/ is code, not docs.
 set -euo pipefail
 base=${1:-}
 head=${2:-}
@@ -32,7 +34,19 @@ if [ -z "$changed" ]; then
 fi
 echo "changed files:" >&2
 printf '%s\n' "$changed" | sed 's/^/  /' >&2
-if grep -qv '^docs/' <<<"$changed"; then
+# A gitlink is a submodule pointer: whatever it points at is code, wherever it is mounted.
+# grep's exit code is read, never just tested: 0 = a match, 1 = none, anything else = grep itself
+# failed — and a failure must not read as "no match", in either check.
+match() { local rc=0; grep "$@" || rc=$?; if [ "$rc" -gt 1 ]; then echo "verdict: grep failed (exit $rc) — refusing to classify" >&2; exit 2; fi; return "$rc"; }
+raw=$(git diff --no-renames --raw "$base...$head")
+if match -qE '^:(160000 [0-7]{6}|[0-7]{6} 160000) ' <<<"$raw"; then
+  echo "docs-only=false"
+  echo "verdict: a submodule pointer changed — running every check" >&2
+  exit 0
+fi
+rc=0
+match -qv '^docs/' <<<"$changed" || rc=$?
+if [ "$rc" -eq 0 ]; then
   echo "docs-only=false"
   echo "verdict: code touched — running every check" >&2
 else

@@ -62,8 +62,11 @@ jobs:
   # `test` is NOT gated on detect: it carries the dependency gate (osv), and
   # tests/osv-workflow-pin.test.ts forbids any condition on that job. It therefore runs on
   # docs-only changes too — stricter than the old stub, which reported `test` with an `echo`.
-  # Cost, measured 2026-10-02: a green `test` job takes 251 s median (163–303 s, n=39), and 2 of
-  # the last 200 pull requests were docs-only — about 8–9 runner minutes over five weeks.
+  # Cost, measured 2026-10-02: a green `test` job takes 251 s median (163–303 s; the 39 green
+  # `test` jobs among the 40 latest ci.yml runs). 2 of the last 200 pull requests (2026-08-20 to
+  # 2026-10-02, about six weeks) were docs-only; each now runs `test` at least twice — on the pull
+  # request and on its push to main — so at least about 17 runner minutes over that span, more with
+  # job-minute rounding or extra pushes.
   test:
     runs-on: ubuntu-latest
     # Scoped because this job downloads a third-party executable and runs it
