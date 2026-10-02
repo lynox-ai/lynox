@@ -162,7 +162,7 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
   return keyed.map(({ row, key }): ExternalPlanned => {
     charge(JSON.stringify(key ?? row.target));
     if (key === null) return { key: row.target, invalid: 'bad_url' };
-    if (scan(key) !== null) return { key, invalid: 'secret_in_target' };
+    if (urlScanForms(key).some((form) => scan(form) !== null)) return { key, invalid: 'secret_in_target' };
     const after = row.after;
     if (!isPlainObject(after) || Object.keys(after).length === 0) return { key, invalid: 'after_not_object' };
     if (!Object.values(after).every(isScalar)) return { key, invalid: 'field_not_scalar' };

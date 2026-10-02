@@ -353,6 +353,11 @@ describe('applying an external run', () => {
     }
   });
 
+  it('a plan refuses a target whose address decodes to something that looks like a secret', () => {
+    const [target] = planExternal([{ target: url(LOOKS_LIKE_A_KEY.replace(/-/g, '%2D')), after: { price: '1' } }], HOST, detectSecretInContent);
+    expect(target).toMatchObject({ invalid: 'secret_in_target' });
+  });
+
   it('scans the address in the form the host decodes it to', async () => {
     const s = shop();
     const restore = serve(s);
