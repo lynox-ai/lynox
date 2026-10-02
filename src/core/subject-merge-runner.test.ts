@@ -252,6 +252,8 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
       const res = rollbackMergeRun(store, ds, threadStore, forged);
       expect(res.ok).toBe(false);
       expect(res.reason).toMatch(/not a subject column/i);
+      // The partial-rollback fallback also carries the data store's refusal text, so it is this
+      // line and the engine assert below that tell the runner's own pre-check apart from it.
       expect(res.reason).not.toMatch(/partial/i);
       expect(store.getSubject(dup)?.merged_into).toBe(canon);                       // engine still merged
       const row = ds.queryRecords({ collection: 'invoices' }).rows[0]!;

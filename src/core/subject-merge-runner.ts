@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type { SubjectStore, MergeLedgerEntry } from './subject-store.js';
-import type { DataStore, SubjectRepointRecord } from './data-store.js';
+import { FOREIGN_REPOINT_RECORD_REASON, type DataStore, type SubjectRepointRecord } from './data-store.js';
 import type { ThreadStore } from './thread-store.js';
 
 /**
@@ -203,7 +203,7 @@ export function rollbackMergeRun(
   // The data-store half would refuse a ledger record that names no subject column, but only
   // after the engine side is already reversed. Ask first, so such a ledger changes nothing.
   if (dataStore && file.dataStore.some(rec => dataStore.repointRecordState(rec) === 'foreign')) {
-    return { ok: false, reason: 'the merge ledger names a column that is not a subject column of this data store — nothing was changed' };
+    return { ok: false, reason: FOREIGN_REPOINT_RECORD_REASON };
   }
   // Reverse the ENGINE side FIRST — it is the one that can legitimately fail (a
   // memory_subjects UNIQUE collision → {ok:false}). On failure, leave the other stores
