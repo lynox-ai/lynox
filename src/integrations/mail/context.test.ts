@@ -431,6 +431,22 @@ describe('MailContext — listAccounts (safe view)', () => {
   });
 });
 
+describe('MailContext — listAccounts carries the last polling error', () => {
+  it('shows the watcher\'s last error per account, code and time only', async () => {
+    await ctx.addAccount(INPUT_GMAIL);
+    await ctx.addAccount(INPUT_ICLOUD);
+    const spy = vi.spyOn(ctx.watcher, 'lastError').mockImplementation((id: string) =>
+      id === 'rafael-icloud' ? { code: 'starttls_unavailable', at: '2026-10-02T06:00:00.000Z' } : null);
+    try {
+      const view = ctx.listAccounts();
+      expect(view.find(a => a.id === 'rafael-icloud')?.lastError).toEqual({ code: 'starttls_unavailable', at: '2026-10-02T06:00:00.000Z' });
+      expect('lastError' in (view.find(a => a.id === 'rafael-gmail') ?? {}), 'absent, not null, while polling works').toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('MailContext — tools()', () => {
   it('returns the mail tools backed by the context registry (incl. mail_connect)', async () => {
     await ctx.addAccount(INPUT_GMAIL);

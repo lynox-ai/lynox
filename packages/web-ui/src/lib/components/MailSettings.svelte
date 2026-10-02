@@ -49,6 +49,8 @@
 		persona: string;
 		receiveOnly: boolean;
 		warning?: 'needs_mailbox_scope';
+		/** Last background polling error: a code only, turned into text here. */
+		lastError?: { code: string; at: string };
 	}
 	interface TestResult {
 		ok: boolean;
@@ -463,10 +465,20 @@
 								{#if account.warning === 'needs_mailbox_scope'}
 									<span class="rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">{t('mail.needs_mailbox_scope_badge')}</span>
 								{/if}
+								{#if account.lastError}
+									<span class="rounded bg-danger/10 px-1.5 py-0.5 text-[10px] font-medium text-danger">{t('mail.polling_error_badge')}</span>
+								{/if}
 							</div>
 							<div class="truncate text-xs text-text-muted">
 								{account.address} · {account.preset} · <strong>{account.type}</strong>{#if account.receiveOnly} <span class="ml-1 rounded bg-warning/20 px-1 text-[10px] font-medium text-warning">RECEIVE-ONLY</span>{/if}
 							</div>
+							{#if account.lastError}
+								<!-- Background polling failed. Without this the mailbox just goes
+								     quiet and nobody learns why. -->
+								<div class="mt-1 text-[11px] text-danger">
+									{friendlyMailError(account.lastError.code, undefined)}
+								</div>
+							{/if}
 							{#if account.warning === 'needs_mailbox_scope'}
 								<!-- Says what is wrong and what to do. Without the second half a
 								     user reads it as a lynox fault: the account is listed, it does

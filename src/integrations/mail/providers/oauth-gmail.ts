@@ -784,9 +784,7 @@ export class OAuthGmailProvider implements MailProvider {
           recentlyEmitted.delete(oldest);
         }
 
-        if (newOnly.length > 0) {
-          await handler({ type: 'new', envelopes: newOnly });
-        }
+        await handler(newOnly.length > 0 ? { type: 'new', envelopes: newOnly } : { type: 'ok' });
       } catch (err) {
         if (this.closed) return;
         // close() abort surfaces here as AbortError; suppress so the consumer
