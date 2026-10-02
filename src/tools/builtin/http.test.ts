@@ -1753,6 +1753,13 @@ describe('httpRequestTool', () => {
       );
       expect(httpTimeoutMessage(30_000, 'GET', false)).toBe('HTTP request timed out after 30000ms');
       expect(httpTimeoutMessage(30_000, 'head', true)).toBe('HTTP request timed out after 30000ms (wall clock)');
+      // Headers in, body stalled: the request reached the server, and the message says so.
+      expect(httpTimeoutMessage(30_000, 'POST', false, '201 Created')).toBe(
+        'HTTP request timed out after 30000ms while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
+      expect(httpTimeoutMessage(30_000, 'GET', false, '200 OK')).toBe(
+        'HTTP request timed out after 30000ms while reading the response; the server had already answered 200 OK',
+      );
     });
 
     /** A fetch that never answers but gives up when aborted, as the real one does. */
@@ -1784,6 +1791,22 @@ describe('httpRequestTool', () => {
       const msg = await timeoutOf('POST', vi.fn(() => new Promise<never>(() => { /* never, ignores abort */ })));
       expect(msg).toMatch(/\(wall clock\)/);
       expect(msg).toMatch(MAY_HAVE_LANDED);
+    }, 5000);
+
+    /** Headers arrive at once, then the body hangs; on abort it fails as the real transport's
+     *  does when it destroys the socket — a plain `aborted`, not an AbortError. */
+    const answersThenStalls = () => vi.fn((_url: unknown, opts: { signal?: AbortSignal } | undefined) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(c) { opts?.signal?.addEventListener('abort', () => c.error(new Error('aborted'))); },
+      });
+      return Promise.resolve(new Response(body, { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } }));
+    });
+
+    it('a POST whose response body stalls after the headers says it reached the server', async () => {
+      const msg = await timeoutOf('POST', answersThenStalls());
+      expect(msg).toBe(
+        'HTTP request timed out after 50ms while reading the response; the server had already answered 201 Created. The POST reached the server — check the result there before sending it again.',
+      );
     }, 5000);
 
     it('a GET that times out does not', async () => {
