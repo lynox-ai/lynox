@@ -25,7 +25,7 @@ below ships as a placeholder the check REJECTS** — filling one in has to be a
 deliberate act, because a template that pre-fills its own answers turns the whole
 thing into a ritual you satisfy by pasting a SHA.
 
-**CI cannot verify that `gates`, `delta` or `mutations` are TRUE** — it checks their
+**CI cannot verify that `gates`, `review`, `delta` or `mutations` are TRUE** — it checks their
 value, not that the work happened: an unknown gate name is always rejected, and a
 `delta` that is not `clean` or a surviving mutant are rejected wherever a delta round
 was owed (a markdown-only legal change owes none). They are your attestation and they
@@ -51,6 +51,16 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   open a trust boundary somewhere it does not name, and then the gate is still
   yours to run. It reaches wider than it strictly must, on purpose — too narrow
   fails open, too broad costs one gate run.
+- `review` — what the `code-review` round FOUND, which is the one thing `gates:` cannot
+  say. `<n> <model> round(s), <result>`, where the result is `no findings` or
+  `<N> findings, <breakdown>`; the breakdown is `all fixed` or counts that **sum to N**:
+  `3 fixed` · `2 fixed, 1 filed` · `3 fixed, 1 filed, 1 refuted`. A finding is fixed in
+  this diff, **filed** as a register row, or **refuted** on inspection — the third slot
+  exists because a format that cannot say "checked and rejected" forces a lie. The model
+  is the one that RAN the round (your own, if you reviewed it yourself). Why it is
+  mandatory: a PR once listed `code-review` with no round behind it, the check went green
+  because the line was there, and the review — run late — found five things, four with
+  code effect.
 - `delta` — the verdict of the delta round ON THE FIXES. `clean` or don't merge.
   `clean` does **not** mean the round found nothing — a round that found things and
   handled them is clean. It means: nothing it found is left unhandled (fixed here, or
@@ -70,6 +80,7 @@ fabricated line is worse than none.)
 ```gate-record
 head: <short SHA>
 gates: <which gates ran>
+review: <n> <model> round(s), <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived
 closes: <DEF-… ids this PR settles, or none>

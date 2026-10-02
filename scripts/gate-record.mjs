@@ -418,6 +418,130 @@ export function evaluate({ body, head, files, author }) {
   // `delta` and `mutations` describe a CODE round, so they are demanded only when one
   // was owed. A markdown-only legal change has neither, and forcing those fields would
   // buy a fabricated line — a record filled in to get past CI is worth less than none.
+  //
+  // ⚠ THE DUPLICATION WITH PRO IS DELIBERATE, and the same reasoning as the test-temp-root
+  // helper: the two repos are decoupled by design, each ships its own `gate-record.mjs`, and a
+  // CI record check is not a wire contract — so it does not belong in the vendored `contract/`
+  // either. Two copies beat a dependency that exists to share one branch. They may diverge, and
+  // nothing breaks if they do: each governs its own repo's records. pro's copy landed first
+  // (pro#1406); this is the same field with the same accepted shapes, so a record written for one
+  // repo is valid in the other.
+  //
+  // ⛔ WHY THIS FIELD EXISTS, and it is a measured reason rather than a tidiness one.
+  //
+  // `gates:` is a list of names. The check verifies that the names are KNOWN and that the ones this
+  // diff owes are present — nothing more, and nothing more is possible from a body. On 2026-10-02 a
+  // PR listed `code-review` with no round behind it, this check went green because the line was
+  // there, and it merged. The review was then run late and found FIVE things, four with code
+  // effect: a wiring test satisfiable from outside its own subject, a teardown no test covered, two
+  // opposite outcomes sharing one value, and a file in no typecheck project while the PR said
+  // "typecheck clean". The attestation-without-a-round is therefore not a paperwork failure; it let
+  // four defects through, counted.
+  //
+  // It CANNOT prove a round happened. What it does is make the omission impossible — the author has
+  // to write down what the round found, which turns forgetting into a deliberate lie. Same shape as
+  // `approved:` for binding texts, one step more general.
+  //
+  // ⛔ AND THE FORM HAD TO BE REBUILT ONCE, which is the part worth reading. The first cut accepted
+  // `all fixed` or `<n> fixed, <n> filed` and nothing else. A refuter measured what that does:
+  //   · a finding that the author CHECKED AND REJECTED (the refuter was wrong) has no slot, so the
+  //     honest author must write `filed` for a register row that does not exist, or quietly lower N;
+  //   · the first `review:` line anybody actually wrote — `2 findings, 2 fixed` on an open PR —
+  //     was REFUSED, because `all fixed` was the only accepted way to say "all of them".
+  // A mandatory format that cannot express a legitimate state forces a lie, and the first cut
+  // forced two. So the result is now a BREAKDOWN whose parts must sum to N, with a `refuted` slot,
+  // and `<N> fixed` for all of them needs no special word.
+  //
+  // ⚠ Case-insensitive and a trailing full stop allowed, deliberately, like `head:` and
+  // `closes: none` — a false red here is how a guard earns a bypass. The model slot is NOT an
+  // allowlist (it would date) but must be at least three characters, so `1 x round` cannot pass as
+  // evidence.
+  //
+  // Not demanded for the other gates: `delta` carries its verdict in `delta:`, `legal` in
+  // `approved:`. ⚠ `security` has NO evidence line and wants the same treatment — left out so this
+  // is one gate, one field, fully tested, and filed as a register row.
+  if (required.has('code-review')) {
+    const raw = (f.review ?? '').trim().replace(/\.$/, '');
+    if (!raw) {
+      errors.push(
+        'this diff owes the `code-review` gate, so the record needs a `review:` line saying what the round FOUND.',
+        'Format: `review: <n> <model> round(s), <result>` — e.g. `review: 1 opus round, no findings`,',
+        '`review: 1 opus round, 5 findings, all fixed`, or `review: 1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted`.',
+        'The model is the one that RAN the round (your own, if you reviewed it yourself).',
+      );
+    } else {
+      const m = /^(\d+)\s+([a-z][a-z0-9.+-]{2,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
+      if (!m) {
+        errors.push(
+          `\`review: ${raw}\` is not \`<n> <model> round(s), <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
+          'The model name must start with a letter and be at least three characters, so neither `x` nor',
+        '`...` can pass as evidence — three characters alone was not enough, measured.',
+        );
+      } else if (Number(m[1]) < 1) {
+        errors.push(`\`review: ${raw}\` claims ${m[1]} rounds — a gate with no round is the omission this field exists for.`);
+      } else {
+        const result = m[3].trim();
+        if (/^no\s+findings$/i.test(result)) {
+          // Nothing to reconcile.
+        } else if (/^0\s+findings\b/i.test(result)) {
+          // One canonical spelling, or a synonym list grows and the field stops being checkable.
+          errors.push('write `no findings` rather than `0 findings` — one spelling, so this stays checkable.');
+        } else {
+          const head = /^(\d+)\s+findings?\s*,\s*(.+)$/i.exec(result);
+          if (!head) {
+            errors.push(
+              `\`review: ${raw}\` — the result must read \`no findings\` or \`<N> findings, <breakdown>\`,`,
+              'where the breakdown is `all fixed` or counts that sum to N: `3 fixed`, `2 fixed, 1 filed`,',
+              '`3 fixed, 1 filed, 1 refuted`. A finding is fixed here, filed as a row, or refuted on inspection.',
+            );
+          } else {
+            const total = Number(head[1]);
+            const breakdown = head[2].trim();
+            // ⚠ No `total < 1` branch here, and that is measured rather than an oversight: the
+            // `0 findings` check above matches `0 findings, …` too, so every N = 0 shape is already
+            // answered with the one hint that is right for it ("write `no findings`"). A guard that
+            // cannot fire is a reader's false confidence — and worse here, because it would look
+            // like the arithmetic covered a case the spelling check already owns.
+            if (/^all\s+fixed$/i.test(breakdown)) {
+              // `all` needs no arithmetic; it means N.
+            } else {
+              // ⭐ The arithmetic is the point: a field that only has to LOOK right is a form, a
+              // field whose numbers must add up is a claim somebody can be wrong about. Both
+              // directions are errors — under-counting hides a finding nobody accounted for, and
+              // over-counting means the same finding was counted twice.
+              const KINDS = ['fixed', 'filed', 'refuted'];
+              const parts = breakdown.split(',').map((x) => x.trim()).filter(Boolean);
+              const seen = new Map();
+              let bad = null;
+              for (const part of parts) {
+                const pm = /^(\d+)\s+([a-z]+)$/i.exec(part);
+                if (!pm || !KINDS.includes(pm[2].toLowerCase())) { bad = part; break; }
+                const kind = pm[2].toLowerCase();
+                if (seen.has(kind)) { bad = part; break; }
+                seen.set(kind, Number(pm[1]));
+              }
+              if (bad !== null) {
+                errors.push(
+                  `\`review: ${raw}\` — \`${bad}\` is not \`<n> fixed|filed|refuted\`, or repeats a kind.`,
+                  'A finding is fixed in this diff, filed as a register row, or refuted on inspection.',
+                );
+              } else {
+                const sum = [...seen.values()].reduce((a, b) => a + b, 0);
+                if (sum !== total) {
+                  errors.push(
+                    `\`review: ${raw}\` does not add up — the breakdown sums to ${String(sum)}, not ${String(total)}.`,
+                    'Every finding is fixed here, filed as a register row, or refuted on inspection;',
+                    `${sum < total ? 'a missing one is a finding nobody accounted for' : 'an extra one means a finding was counted twice'}.`,
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   if (required.has('delta')) {
     // A delta round that did not come back clean is a reason not to merge, so
     // there is exactly one accepted value.
