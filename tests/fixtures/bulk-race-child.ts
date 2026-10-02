@@ -6,7 +6,9 @@
  *
  *   tsx tests/fixtures/bulk-race-child.ts <engine.db> <approve|resume> <runId> <gateDir> <pause|go>
  *
- * Prints one JSON line: the ledger's answer, or `{ "error": "<message>" }` if it threw.
+ * Prints one JSON line: the ledger's answer, or `{ "error": "<message>" }` if it threw, with
+ * `enteredAt`/`leftAt` — the wall clock right before and after the ledger call, which the
+ * test uses to show this process was inside its call while the other held the gate.
  */
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,14 +36,16 @@ if (mode === 'pause') {
 }
 
 writeFileSync(join(gateDir, `${action}-started`), '');
+const enteredAt = Date.now();
 try {
   const checksum = ledger.computeChecksum(runId)!;
   const out = action === 'approve'
     ? ledger.approve(runId, { checksum })
     : ledger.resume(runId, { checksum, maxTargets: 4 });
-  process.stdout.write(`${JSON.stringify(out.ok ? { ok: true } : { ok: false, reason: out.reason })}\n`);
+  const leftAt = Date.now();
+  process.stdout.write(`${JSON.stringify({ ...(out.ok ? { ok: true } : { ok: false, reason: out.reason }), enteredAt, leftAt })}\n`);
 } catch (err) {
-  process.stdout.write(`${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n`);
+  process.stdout.write(`${JSON.stringify({ error: err instanceof Error ? err.message : String(err), enteredAt, leftAt: Date.now() })}\n`);
 } finally {
   engineDb.close();
 }

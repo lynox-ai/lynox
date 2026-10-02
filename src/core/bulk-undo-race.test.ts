@@ -55,7 +55,7 @@ async function haltedRunWithUndo(): Promise<{ runId: string; undoId: string }> {
   return { runId, undoId: undo.status.id };
 }
 
-type Answer = { ok: true } | { ok: false; reason: string } | { error: string };
+type Answer = ({ ok: true } | { ok: false; reason: string } | { error: string }) & { enteredAt: number; leftAt: number };
 
 function child(action: 'approve' | 'resume', runId: string, gate: string, mode: 'pause' | 'go'): Promise<Answer> {
   return new Promise((resolve, reject) => {
@@ -106,16 +106,23 @@ describe('a run and its undo, raced from two engine processes', () => {
       // ample time to reach the lock or the write: if it reached neither before the gate opens,
       // the first commits first and the test proves nothing — it would pass for any code.
       await sleep(1500);
+      const openedAt = Date.now();
       writeFileSync(join(gate, 'go'), '');
       const [a, b] = await Promise.all([first, second]);
 
+
       // The invariant, read from the database both processes wrote.
       expect(armed(runId, undoId).length).toBeLessThanOrEqual(1);
+      // The witness that the race happened at all: the second entered its call before the gate
+      // opened and left it after — it waited on the first's lock. Without this, a slow machine
+      // that let the first commit before the second arrived would pass for any code.
+      expect(b.enteredAt).toBeLessThan(openedAt);
+      expect(b.leftAt).toBeGreaterThan(openedAt);
       // And both answered as the product does — a refusal, never a lock error.
       expect([a, b].filter((x) => 'error' in x)).toEqual([]);
       expect([a, b].filter((x) => 'ok' in x && x.ok).length).toBe(1);
-      expect(a).toEqual({ ok: true });
-      expect(b).toEqual({ ok: false, reason: other === 'resume' ? 'undo_open' : 'source_running' });
+      expect(a).toMatchObject({ ok: true });
+      expect(b).toMatchObject({ ok: false, reason: other === 'resume' ? 'undo_open' : 'source_running' });
     });
   }
 });
