@@ -255,7 +255,7 @@ function parseContractPaths(json: string | null): string[] {
 /** Why a run may not start writing because of an undo — see `BulkLedger.writeBlocked`. */
 export type UndoRefusal = 'undo_open' | 'source_running' | 'undo_stale';
 
-/** A run that is not writing and will not write unless a human resumes it. */
+/** A run whose own loop has stopped and is not started again unless a human resumes it. */
 function isStopped(r: { phase: BulkPhase; halt_reason: string | null }): boolean {
   return r.phase === 'done' || r.phase === 'aborted' || (r.phase === 'writing' && r.halt_reason !== null);
 }
@@ -752,11 +752,11 @@ export class BulkLedger {
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
-    let blocked: UndoRefusal | null = null;
-    const moved = db.transaction(() => {
-      // Inside the transaction: nothing may start the source between this check and the arming.
-      blocked = this.writeBlocked(run);
-      if (blocked !== null) return false;
+    const moved = db.transaction((): UndoRefusal | boolean => {
+      // In the same transaction as the arming, so no approve or resume of the other run
+      // slips in between the check and this one's trigger.
+      const blocked = this.writeBlocked(run);
+      if (blocked !== null) return blocked;
       const res = db.prepare(
         `UPDATE bulk_runs SET phase = 'approved', approved_by = ?, approved_at = ?, approval_checksum = ?,
            max_targets = ?, expires_at = ?, halt_reason = NULL
@@ -770,7 +770,7 @@ export class BulkLedger {
       triggerId = this.armTrigger(run, now);
       return true;
     })();
-    if (blocked !== null) return { ok: false, reason: blocked };
+    if (typeof moved === 'string') return { ok: false, reason: moved };
     if (!moved) return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
   }
@@ -802,10 +802,9 @@ export class BulkLedger {
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
-    let blocked: UndoRefusal | null = null;
-    const moved = db.transaction(() => {
-      blocked = this.writeBlocked(run);
-      if (blocked !== null) return false;
+    const moved = db.transaction((): UndoRefusal | boolean => {
+      const blocked = this.writeBlocked(run);
+      if (blocked !== null) return blocked;
       const res = db.prepare(
         `UPDATE bulk_runs SET halt_reason = NULL, expires_at = ?, targets_failed = 0, max_targets = ?
          WHERE id = ? AND phase IN ('approved','writing')`,
@@ -816,21 +815,34 @@ export class BulkLedger {
       triggerId = this.armTrigger(run, now);
       return true;
     })();
-    if (blocked !== null) return { ok: false, reason: blocked };
+    if (typeof moved === 'string') return { ok: false, reason: moved };
     if (!moved) return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
   }
 
   /**
-   * Why a run may not start writing now, or null. A run and an undo of it write the same
-   * targets in opposite directions, so at most one of them writes at a time:
-   *  - any run waits while an undo of it is approved or writing (`undo_open`);
-   *  - an undo waits while its source still writes (`source_running`) or another undo of
-   *    the same source is approved or writing (`undo_open`);
+   * Why a run may not be approved or resumed now, or null. A run and an undo of it write
+   * the same targets in opposite directions, so neither is started while the other may write:
+   *  - any run waits while an undo of it is open (`undo_open`);
+   *  - an undo waits while its source may write (`source_running`) or another undo of the
+   *    same source is open (`undo_open`);
    *  - an undo whose plan misses a target its source has applied since the planning would
    *    finish, report the source undone, and leave that target written (`undo_stale`).
-   * A previewed undo blocks nothing: it writes nothing until it is approved, and an undo
-   * that is never approved must not hold its source still.
+   *
+   * "Open" and "may write" mean approved or writing and NOT halted. Two states are left out
+   * on purpose, and each would look like a gap to a reader who does not know why:
+   *  - A previewed undo holds nothing. No route discards a previewed run and the prune takes
+   *    only apply runs, so an undo that is never approved would hold its source for good.
+   *    The window it leaves closes at its approval: this check runs there, and `undo_stale`
+   *    refuses a plan the source has written past.
+   *  - A halted undo holds nothing either, for the same reason: it may never be resumed (an
+   *    expired window, a checksum halt), and nothing withdraws it. When it is resumed, this
+   *    check runs again.
+   *
+   * What it does not cover: a second loop on the same run. The product runs one loop per run
+   * (one trigger, and a lease across engine processes); a second one exists only when two
+   * engines share one data directory, and a halt set by one loop does not stop the other's
+   * write in flight.
    */
   private writeBlocked(run: RunRow): UndoRefusal | null {
     if (this.openUndo(run.id, null)) return 'undo_open';
@@ -847,16 +859,18 @@ export class BulkLedger {
     return missing.n > 0 ? 'undo_stale' : null;
   }
 
-  /** Whether an undo of `sourceRunId`, other than `exceptRunId`, is approved or writing. */
+  /** Whether an undo of `sourceRunId`, other than `exceptRunId`, is approved or writing and not halted. */
   private openUndo(sourceRunId: string, exceptRunId: string | null): boolean {
     return this.engineDb.getDb().prepare(
-      `SELECT 1 FROM bulk_runs WHERE kind = 'undo' AND source_run_id = ? AND phase IN ('approved','writing') AND id IS NOT ? LIMIT 1`,
+      `SELECT 1 FROM bulk_runs WHERE kind = 'undo' AND source_run_id = ? AND phase IN ('approved','writing')
+         AND halt_reason IS NULL AND id IS NOT ? LIMIT 1`,
     ).get(sourceRunId, exceptRunId) !== undefined;
   }
 
   /**
    * Plan the undo of a run (PRD §3.5): a NEW run, previewed, over the targets the source
-   * applied and nobody took back since, in reverse order. Each undo target expects the
+   * applied and nobody took back since — for an external run also those whose write failed,
+   * see {@link undoEligible} — in reverse order. Each undo target expects the
    * state the source wrote and writes the source's before-image back — or removes what
    * the source created. It is approved like any run (a second approval), and its effect
    * finds a target someone else changed in between by that expectation: a conflict,
@@ -867,7 +881,7 @@ export class BulkLedger {
     const src = this.runRow(sourceRunId);
     if (!src) return { ok: false, reason: 'not_found' };
     if (!isStopped(src)) return { ok: false, reason: 'not_undoable' };
-    // A second undo beside one that will write, or is writing, would take the same targets back twice.
+    // A second undo beside an open one would take the same targets back twice.
     if (this.openUndo(sourceRunId, null)) return { ok: false, reason: 'undo_open' };
     const db = this.engineDb.getDb();
     if (src.atomic === 1) {
@@ -1207,9 +1221,13 @@ export class BulkLedger {
     db.transaction(() => {
       db.prepare(`UPDATE bulk_runs SET phase = 'done' WHERE id = ? AND phase = 'writing'`).run(run.id);
       if (run.kind !== 'undo' || run.sourceRunId === null) return;
+      const src = this.runRow(run.sourceRunId);
+      if (!src) return;
+      // Standing is what an undo takes back and has not: for an external source that includes
+      // a failed write the undo found changed but could not restore (a conflict) — it may hold
+      // what the source wrote, so the source is not reported undone.
       const standing = db.prepare(
-        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL AND undone_at IS NULL
-           AND change IN ${WRITING_CHANGES}`,
+        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}`,
       ).get(run.sourceRunId) as { n: number };
       if (standing.n === 0) {
         db.prepare(`UPDATE bulk_runs SET phase = 'undone' WHERE id = ? AND phase IN ('done','aborted','writing')`).run(run.sourceRunId);

@@ -687,8 +687,8 @@ describe('a run and an undo of it never write at the same time', () => {
     expect(approveUndo(undo.status.id)).toEqual({ ok: false, reason: 'source_running' });
   });
 
-  it('an undo planned before the run wrote more is refused as stale, and the targets stay as the run left them', async () => {
-    const { runId, state, writer } = await halfWritten();
+  it('an undo planned before the run wrote more is refused as stale', async () => {
+    const { runId, writer } = await halfWritten();
     const undo = ledger.planUndo(runId);
     if (!undo.ok) throw new Error(undo.reason);
     expect(undo.status.total).toBe(2);
@@ -696,7 +696,7 @@ describe('a run and an undo of it never write at the same time', () => {
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
     expect(approveUndo(undo.status.id)).toEqual({ ok: false, reason: 'undo_stale' });
     expect(ledger.getStatus(runId)!.phase).toBe('done');
-    expect([...state.values()]).toEqual(['w0', 'w1', 'w2', 'w3']);
+    expect(ledger.getStatus(undo.status.id)!.phase).toBe('previewed');
     // A fresh plan covers all four.
     const again = ledger.planUndo(runId);
     if (!again.ok) throw new Error(again.reason);
@@ -733,6 +733,31 @@ describe('a run and an undo of it never write at the same time', () => {
     expect(ledger.resume(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, maxTargets: 2 }).ok).toBe(true);
     expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
     expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+  });
+
+  it('an approved undo whose loop never ran resumes — its own approval does not hold it', async () => {
+    const { runId } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(approveUndo(undo.status.id).ok).toBe(true);
+    expect(ledger.getStatus(undo.status.id)).toMatchObject({ phase: 'approved', haltReason: null });
+    expect(ledger.resume(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+  });
+
+  it('a halted undo holds nothing: the run resumes, and the undo then waits for it and is stale after it', async () => {
+    const { runId, writer, state } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, maxTargets: 1 }).ok).toBe(true);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('halted');
+    // An undo that may never be resumed must not hold its source.
+    expect(resumeAll(runId).ok).toBe(true);
+    const resumeUndo = () => ledger.resume(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, maxTargets: 2 });
+    expect(resumeUndo()).toEqual({ ok: false, reason: 'source_running' });
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    expect(resumeUndo()).toEqual({ ok: false, reason: 'undo_stale' });
+    // k001 was taken back by the halted undo and stays so; the run did not write it again.
+    expect([...state.values()]).toEqual(['w0', 'v1', 'w2', 'w3']);
   });
 
   it('an undo of a run that is already undone is not told the run still writes', async () => {
