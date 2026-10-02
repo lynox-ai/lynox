@@ -92,4 +92,11 @@ describe('friendlyMailError — the IMAP branch is untouched', () => {
 		expect(friendlyMailError(undefined, undefined)).toBe('Unknown error');
 		expect(friendlyMailError('something_new', 'server said no', { stage: 'smtp' })).toContain('server said no');
 	});
+
+	it('explains a refused connection to a server without STARTTLS, without blaming the network', () => {
+		const text = friendlyMailError('starttls_unavailable', 'IMAP connect: the server does not offer STARTTLS');
+		expect(text).toMatch(/STARTTLS/);
+		expect(text).toMatch(/refused/);
+		expect(text).not.toMatch(/Couldn't reach/);
+	});
 });
