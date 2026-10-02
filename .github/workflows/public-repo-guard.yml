@@ -23,5 +23,43 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit scan below walks base..head, so it needs the history.
+          fetch-depth: 0
       - name: Scan tracked tree for internal-infra leaks
         run: bash scripts/public-repo-guard.sh
+      # The lines each commit ADDS, not only what survives at HEAD: a line one commit
+      # adds and a later one removes still ships. This step prevents the MERGE; the
+      # pre-push hook is what prevents the publication. Any non-zero exit fails it,
+      # 2 ("could not check") included.
+      #
+      # The script is read from the pull request's BASE commit (the tip of main it
+      # targets), not from the branch, when the base has one: a pull request cannot
+      # swap the script unnoticed. It CAN edit this step, because a pull_request run
+      # takes the workflow from the pull request — a reviewer has to see that. The
+      # script imports nothing, so the one file is enough.
+      - name: Scan the lines each commit adds
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$(git merge-base "$PR_BASE" "$PR_HEAD")"
+            head="$PR_HEAD"
+            source="$PR_BASE"
+          else
+            base="$PUSH_BEFORE"
+            head="$PUSH_AFTER"
+            source="$PUSH_BEFORE"
+          fi
+          guard="$RUNNER_TEMP/added-lines-guard.mjs"
+          if git cat-file -e "$source:scripts/added-lines-guard.mjs" 2>/dev/null; then
+            git show "$source:scripts/added-lines-guard.mjs" > "$guard"
+          else
+            cp scripts/added-lines-guard.mjs "$guard"
+          fi
+          node "$guard" "$base" "$head"

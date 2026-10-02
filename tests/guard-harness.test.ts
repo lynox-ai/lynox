@@ -301,6 +301,18 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'takes its commit range as arguments and enumerates no tree; a call that does not supply both refs is refused. NOT exempt from the class: the range door is covered in tests/public-repo-guard.test.ts, where an unresolvable range exits 1 and an empty one announces that it scanned nothing rather than reporting clean',
     expectStrippedExit: 2,
   },
+  // The commit scan: the range arrives as arguments (from the hook, the pushed refs; from CI,
+  // the event's shas), so there is no tree to starve. What it enumerates — the commits and their
+  // added lines — it reads through git, whose failure is NOT swallowed: an unresolvable range and
+  // an empty one both exit 2, covered in tests/added-lines-guard.test.ts. The probe gives half a
+  // range, which is refused before git is asked, so it answers the same on every machine.
+  'public-repo-guard-commits': {
+    kind: 'exempt',
+    reason:
+      'takes its commit range as arguments and enumerates no tree; a call without both refs is refused. NOT exempt from the class: an unresolvable or empty range exits 2 instead of reporting clean, covered in tests/added-lines-guard.test.ts',
+    expectStrippedExit: 2,
+    expectStrippedStderr: /usage: public-repo-guard\.sh check-commits/,
+  },
   // Same correction as security-scan above. The probe invokes this script with NO
   // arguments, so what it proved was the `usage` path — and the old reason
   // described only the `strip` verb, which takes a file. The `check` verb takes a
@@ -400,6 +412,10 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   'public-repo-guard-files': {
     cmd: 'bash',
     args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-files', 'HEAD'],
+  },
+  'public-repo-guard-commits': {
+    cmd: 'bash',
+    args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-commits', 'HEAD'],
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
