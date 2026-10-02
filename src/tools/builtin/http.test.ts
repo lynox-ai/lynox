@@ -1221,6 +1221,14 @@ describe('httpRequestTool', () => {
       expect(result).toContain('query string');
     });
 
+    it('checks a run in the query as sent without the base64-shape condition (no promptUser)', async () => {
+      mockDnsPublic();
+      // 64 characters as sent, no upper case: not base64-shaped, still a match in the raw form.
+      const result = await visible({ url: `http://example.com/api?data=${'ab12'.repeat(16)}` }, makeAgent());
+      expect(result).toContain('Blocked');
+      expect(result).toContain('base64');
+    });
+
     it('allows GET exfil when user approves', async () => {
       mockDnsPublic();
       const mockResp = createMockResponse({ body: 'ok' });
