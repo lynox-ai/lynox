@@ -449,6 +449,10 @@ export class ImapSmtpProvider implements MailProvider {
           host: this.account.imap.host,
           port: this.account.imap.port,
           secure: this.account.imap.secure,
+          // Without implicit TLS, require STARTTLS — the same rule SMTP follows
+          // with `requireTLS: !secure`. Set only when `secure` is false: imapflow
+          // rejects `secure: true` together with `doSTARTTLS: true`.
+          ...(this.account.imap.secure ? {} : { doSTARTTLS: true }),
           auth: { user: creds.user, pass: creds.pass },
           logger: false,
           connectionTimeout: CONNECT_TIMEOUT_MS,

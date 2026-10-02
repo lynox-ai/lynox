@@ -164,6 +164,31 @@ describe('ImapSmtpProvider — connection', () => {
     expect(probe.connect).toHaveBeenCalledTimes(1);
   });
 
+  it('requires STARTTLS for IMAP when implicit TLS is off, like SMTP', async () => {
+    probe.search.mockResolvedValue([]);
+    const provider = new ImapSmtpProvider(
+      { ...ACCOUNT, imap: { host: 'imap.example.com', port: 143, secure: false } },
+      credResolver,
+    );
+    await provider.list();
+
+    const opts = lastClientOptions as { port: number; secure: boolean; doSTARTTLS?: boolean; tls: { rejectUnauthorized: boolean } };
+    expect(opts.port).toBe(143);
+    expect(opts.secure).toBe(false);
+    expect(opts.doSTARTTLS).toBe(true);
+    expect(opts.tls.rejectUnauthorized).toBe(true);
+  });
+
+  it('does not set doSTARTTLS with implicit TLS (imapflow rejects the combination)', async () => {
+    probe.search.mockResolvedValue([]);
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.list();
+
+    const opts = lastClientOptions as { secure: boolean };
+    expect(opts.secure).toBe(true);
+    expect('doSTARTTLS' in opts, 'the key is absent, not set to false').toBe(false);
+  });
+
   it('throws auth_failed without retrying on AuthenticationFailure', async () => {
     const fakeFetch = (await import('imapflow')) as unknown as { AuthenticationFailure: new (m: string) => Error };
     probe.connect.mockRejectedValue(new fakeFetch.AuthenticationFailure('LOGIN failed'));
