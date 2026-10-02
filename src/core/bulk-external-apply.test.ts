@@ -308,6 +308,25 @@ describe('applying an external run', () => {
     }
   });
 
+  it('the credential the engine attaches is not what is scanned: a stored token that looks like a key still goes out', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = externalClient({
+        contract: mintBulkContract(HOST, [url(0)]),
+        hostPolicy: createToolContext({}),
+        ackHosts: undefined,
+        attach: async (_u, headers) => { headers['authorization'] = `Bearer ${LOOKS_LIKE_A_KEY}`; return true; },
+        rateLimit: () => null,
+        scan: detectSecretInContent,
+      });
+      expect((await c.write(url(0), 'PATCH', { note: 'plain' })).kind).not.toBe('secret');
+      expect(s.requests.map((r) => [r.method, r.auth])).toEqual([['PATCH', `Bearer ${LOOKS_LIKE_A_KEY}`]]);
+    } finally {
+      restore();
+    }
+  });
+
   it('an undo that would write back a value that looks like a secret halts, and sends nothing for it', async () => {
     const s = shop();
     s.items.get('/products/0')!['note'] = `old ${LOOKS_LIKE_A_KEY}`;
