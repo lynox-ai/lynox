@@ -65,28 +65,47 @@ function commit(files: Record<string, string | null>, message: string): string {
 }
 
 type Measurement = { ok: boolean; out: string; json: unknown };
-type Case = { fullName: string; status: string };
+type Case = { title: string; fullName: string; status: string };
 
-function casesOf(src: string): Case[] {
-  const gated = /describe\.skip\(|describe\.skipIf\(\s*true\s*\)/.test(src);
+/**
+ * ⛔ THE FAKE MUST COMPOSE `fullName` FROM THE DESCRIBE CHAIN, because real vitest does and the whole
+ * identity question turns on it. Measured: the same case under `describe('module A')` and
+ * `describe('module B')` has `title` `"shared leaf"` in both and `fullName` `"module A shared leaf"`
+ * vs `"module B shared leaf"`. An earlier fake used the bare `it()` title as `fullName`, which is the
+ * one shape where it agrees with reality — and that is why a `fullName` key reported every
+ * cross-module move as a loss for four rounds without a single test noticing.
+ */
+function casesOf(src: string, failing: Set<string>): Case[] {
   const out: Case[] = [];
-  for (const m of src.matchAll(/\b(?:it|test)(\.\w+)?\(\s*['"]([^'"]+)['"]/g)) {
-    const mod = m[1] ?? '';
-    const status = gated || mod === '.skip' ? 'skipped' : mod === '.todo' ? 'todo' : 'passed';
-    out.push({ fullName: m[2], status });
+  const stack: Array<{ title: string; gated: boolean; depth: number }> = [];
+  let depth = 0;
+  for (const line of src.split('\n')) {
+    while (stack.length > 0 && depth <= stack[stack.length - 1].depth) stack.pop();
+    const d = /\bdescribe(\.\w+(?:\([^)]*\))?)?\(\s*['"]([^'"]+)['"]/.exec(line);
+    if (d) stack.push({ title: d[2], gated: /\.skip\b|\.skipIf\(\s*true\s*\)/.test(d[1] ?? ''), depth });
+    const t = /\b(?:it|test)(\.\w+)?\(\s*['"]([^'"]+)['"]/.exec(line);
+    if (t) {
+      const mod = t[1] ?? '';
+      const gated = stack.some((x) => x.gated);
+      const status = gated || mod === '.skip' ? 'skipped' : mod === '.todo' ? 'todo' : failing.has(t[2]) ? 'failed' : 'passed';
+      out.push({ title: t[2], fullName: [...stack.map((x) => x.title), t[2]].join(' '), status });
+    }
+    depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
   }
   return out;
 }
 
-function entryFor(file: string): { name: string; assertionResults: Case[] } {
-  return { name: resolve(file), assertionResults: casesOf(readFileSync(file, 'utf-8')) };
+function entryFor(file: string, failing: Set<string>): { name: string; assertionResults: Case[] } {
+  return { name: resolve(file), assertionResults: casesOf(readFileSync(file, 'utf-8'), failing) };
 }
 
-const measuring = (files: string[]): Measurement => ({
+/** `failing` names leaf titles the runner reports as `failed` — the status the old fake could not emit. */
+const makeMeasure = (failing: Set<string> = new Set()) => (files: string[]): Measurement => ({
   ok: true,
   out: '',
-  json: { testResults: files.filter((f) => existsSync(f)).map(entryFor) },
+  json: { testResults: files.filter((f) => existsSync(f)).map((f) => entryFor(f, failing)) },
 });
+const measuring = makeMeasure();
 
 /**
  * A runner that cannot COLLECT one given body — the shape real vitest produces for a broken import or
@@ -100,7 +119,7 @@ const collectFailureFor = (body: string) => (files: string[]): Measurement => ({
   ok: false,
   out: 'FAIL  src/a.test.ts\nError: Failed to resolve import "./f.js"\n',
   json: {
-    testResults: files.filter((f) => existsSync(f)).map((f) => (readFileSync(f, 'utf-8') === body ? { name: resolve(f), assertionResults: [] } : entryFor(f))),
+    testResults: files.filter((f) => existsSync(f)).map((f) => (readFileSync(f, 'utf-8') === body ? { name: resolve(f), assertionResults: [] } : entryFor(f, new Set()))),
   },
 });
 
@@ -128,6 +147,7 @@ afterEach(() => {
   rmSync(repo, { recursive: true, force: true });
 });
 
+const NL = '\n';
 const SRC = 'export const f = (n: number) => n + 1;\n';
 const CONTROL = { 'src/control.test.ts': 'it("control holds", () => {});\n' };
 const HEAD_AT = (): string => sh(['rev-parse', 'HEAD']).trim();
@@ -289,7 +309,8 @@ describe('deleted-assertion-guard', () => {
     const r = run(base, head, wedged);
     expect(r.status).toBe(2);
     expect(r.reason).toBe('runner-unhealthy');
-    expect(r.canary).toBe('src/control.test.ts');
+    expect(r.canary).toContain('src/control.test.ts');
+    expect(r.canary).toContain('head'); // which of the two runs was dead is part of the diagnosis
   });
 
   it('an EMPTY runner file list is ill health, not a clean repository', () => {
@@ -356,9 +377,12 @@ describe('deleted-assertion-guard', () => {
     expect(seen).toEqual([]);
   });
 
-  it('TWO runner invocations, whatever the number of candidates', () => {
-    // ⛔ A per-candidate pair of runs put 30 candidates at 61 invocations and ~13 minutes against a
-    // 20-minute timeout — and a timeout is a red job outside the documented exit contract.
+  it('ONE head run plus one base run PER candidate — and every run carries a control', () => {
+    // ⚠ The cost shape is a decision, not an accident. 1 + 2N (a pair of runs per candidate) put 30
+    // candidates at 61 invocations and ~13 minutes against a 20-minute timeout, and a timeout is a red
+    // job outside the documented exit contract. 1 + N is the compromise: the head side is measured
+    // once for everything, and the base side stays per-candidate because batching it made candidates
+    // observable to each other (see the contamination test below).
     const files: Record<string, string | null> = { 'src/a.ts': SRC, ...CONTROL };
     for (let i = 0; i < 6; i += 1) files[`src/t${String(i)}.test.ts`] = 'it("x", () => {});\nit("y", () => {});\n';
     const base = commit(files, 'base');
@@ -368,8 +392,40 @@ describe('deleted-assertion-guard', () => {
 
     const r = check({ base, head, measure: recording, listFiles: listsEverything, log: () => {} });
     expect(r.findings.length).toBe(6);
-    expect(seen.length).toBe(2);
-    expect(seen[0]).toContain('src/control.test.ts'); // the head run carries the control
+    expect(seen.length).toBe(1 + 6);
+    expect(seen[0]).toContain('src/control.test.ts'); // the head run
+    for (const call of seen.slice(1)) {
+      expect(call).toContain('src/control.test.ts'); // ⛔ the base run needs a control too: it is the
+      expect(call.length).toBe(2); // run that executes rewritten files, so it is the likelier to die
+    }
+  });
+
+  it('a candidate cannot see another candidate\'s reverted content', () => {
+    // ⛔ Measured on the real runner before this was changed: with every base version written at once,
+    // a test that reads sibling test files from disk — this repo has six, `tests/no-fixed-test-ports`
+    // among them — saw another candidate's reverted content, failed, left the base's passing set, and
+    // a real deletion was reported as "nothing to report". The per-candidate base run cannot do it.
+    const base = commit(
+      {
+        'src/a.ts': SRC, ...CONTROL,
+        'src/scan.test.ts': 'it("no banned token anywhere", () => {});\nit("ordinary", () => {});\n',
+        'src/data.test.ts': 'it("d1", () => {});\nit("d2", () => {});\n',
+      },
+      'base',
+    );
+    const head = commit(
+      { 'src/scan.test.ts': 'it("no banned token anywhere", () => {});\n', 'src/data.test.ts': 'it("d1", () => {});\n' },
+      'drop one case from each',
+    );
+    // The scanning case fails whenever data.test.ts carries its base content — exactly the coupling.
+    const coupled = (f: string[]): Measurement => {
+      const dataIsReverted = existsSync('src/data.test.ts') && readFileSync('src/data.test.ts', 'utf-8').includes('d2');
+      return makeMeasure(dataIsReverted ? new Set(['no banned token anywhere']) : new Set())(f);
+    };
+
+    const r = check({ base, head, measure: coupled, listFiles: listsEverything, log: () => {} });
+    // Both deletions must be reported. Under the batched run, `scan` was silenced.
+    expect(r.findings.map((f) => f.file).sort()).toEqual(['src/data.test.ts', 'src/scan.test.ts']);
   });
 
   it('puts every file back byte-identically and leaves no recreated DIRECTORY behind', () => {
@@ -410,12 +466,12 @@ describe('deleted-assertion-guard', () => {
     };
     const r = fileResults(json);
     const a = r.get(resolve('src/a.test.ts'));
-    expect([a?.declared, a?.ran.size, a?.passed.size]).toEqual([3, 2, 1]);
+    expect([a?.declared, a?.ran.length, a?.passed.length]).toEqual([3, 2, 1]);
     // ⛔ By PATH, not by position: the runner's file argument is a substring filter, so a run can
     // carry files nobody asked about. An earlier version took the first entry.
-    expect(r.get(resolve('pkg/src/a.test.ts'))?.passed.has('other')).toBe(true);
+    expect(r.get(resolve('pkg/src/a.test.ts'))?.passed.map((c) => c.fullName)).toEqual(['other']);
     // declared 0 with ran 0 is the shape of a file the runner could not collect, or one with no cases
-    expect(r.get(resolve('src/empty.test.ts'))).toEqual({ ran: new Set(), passed: new Set(), declared: 0 });
+    expect(r.get(resolve('src/empty.test.ts'))).toEqual({ ran: [], passed: [], declared: 0 });
     expect(r.get(resolve('src/never.test.ts'))).toBe(undefined);
   });
 
@@ -487,25 +543,27 @@ describe('deleted-assertion-guard', () => {
     expect(render({ status: 2, reason: 'something-new' }).lines[0]).toContain('unknown reason');
   });
 
-  it('the REPORT sentence branches: a clean attribution reads differently from one with a retitle in it', () => {
-    // ⚠ Two shapes, and one sentence cannot carry both. Measured on real history: a diff that
-    // retitled two cases and deleted one made the single-sentence version read "3 of 8 run nowhere
-    // now", which invites the reader to hunt three deletions. The count drop is the number that is
-    // true; the names are only where to look.
-    const clean = render({
-      status: 1, reason: 'checked', skipped: [], candidates: ['src/a.test.ts'],
-      findings: [{ file: 'src/a.test.ts', lost: ['b', 'c'], basePassing: 3, headRunning: 1 }],
-    }).lines.join('\n');
-    expect(clean).toContain('2 case(s) gone');
-    expect(clean).not.toContain('renamed rather than removed');
+  it('the REPORT states its two measures and INFERS no rename from their difference', () => {
+    // ⛔ An earlier version branched on `lost.length` against `basePassing - headRunning` and announced
+    // a RENAME from the difference. The inference is invalid: the two numbers measure different things
+    // (passed in the base, ran at head), so a base case that fails against the new source deflates the
+    // difference and two deletions read as one deletion plus one rename. It also printed "at least -1
+    // of them were renamed" for the shape it had not enumerated.
+    const say = (lost: string[], basePassing: number, headRunning: number): string =>
+      render({ status: 1, reason: 'checked', skipped: [], candidates: ['src/a.test.ts'],
+        findings: [{ file: 'src/a.test.ts', lost, basePassing, headRunning }] }).lines.join('\n');
 
-    const mixed = render({
-      status: 1, reason: 'checked', skipped: [], candidates: ['src/a.test.ts'],
-      findings: [{ file: 'src/a.test.ts', lost: ['old one', 'old two', 'deleted'], basePassing: 8, headRunning: 7 }],
-    }).lines.join('\n');
-    expect(mixed).toContain('count dropped by 1');
-    expect(mixed).toContain('at least 2 of them were renamed rather than removed');
-    expect(mixed).not.toContain('3 case(s) gone');
+    for (const [lost, bp, hr] of [[['b', 'c'], 3, 1], [['x', 'y', 'z'], 8, 7], [['deleted'], 3, 1]] as Array<[string[], number, number]>) {
+      const out = say(lost, bp, hr);
+      expect(out).toContain(`${String(bp)} case(s) passed before, ${String(hr)} run now`);
+      expect(out).toContain(`${String(lost.length)} of them run nowhere this diff touches`);
+      // ⛔ No claim either way, and never a negative number.
+      expect(out).not.toMatch(/were RENAMED rather than removed/);
+      expect(out).not.toContain('-1');
+      for (const n of lost) expect(out).toContain(`· ${n}`);
+    }
+    // and the limit it cannot resolve is named rather than computed
+    expect(say(['b'], 2, 1)).toContain('does not guess');
   });
 
   it('the `no-candidates` line says what it READ, not that nothing was lost', () => {
@@ -532,10 +590,16 @@ describe('deleted-assertion-guard', () => {
       const byFile = fileResults(m.json);
       const r = byFile.get(resolve(target));
       expect(r, 'the real runner must produce an entry for the file it was given').toBeDefined();
-      expect(r?.ran.size).toBeGreaterThan(0);
-      expect(r?.declared).toBe(r?.ran.size);
+      expect(r?.ran.length).toBeGreaterThan(0);
+      expect(r?.declared).toBe(r?.ran.length);
+      // ⛔ The shape the whole identity argument rests on, asserted against the REAL runner: the full
+      // name carries the describe chain, the title does not. Four rounds of a fake that conflated
+      // them is why this line exists.
+      const withDescribe = r?.passed.find((c) => c.fullName !== c.title);
+      expect(withDescribe, 'this file wraps its cases in a describe, so a full name must differ from its title').toBeDefined();
+      expect(withDescribe?.fullName.endsWith(withDescribe.title)).toBe(true);
       // and the names are real case names, not placeholders
-      expect([...(r?.passed ?? [])].every((n) => n.length > 0)).toBe(true);
+      expect((r?.passed ?? []).every((c) => c.title.length > 0 && c.fullName.length > 0)).toBe(true);
     } finally {
       process.chdir(repo);
     }
@@ -600,6 +664,146 @@ describe('deleted-assertion-guard', () => {
     // was that the runner could not be asked. A message that names the wrong cause sends the next
     // person to look for a missing glob instead of a broken toolchain.
     expect(() => vitestRoster({ PATH: '/nonexistent-on-purpose' })()).toThrow(/could not enumerate/);
+  });
+
+  it('a move ACROSS a describe boundary is absolved — the identity is the leaf title', () => {
+    // ⛔ THE HEADLINE FINDING OF THE FOURTH GATE ROUND. The runner's `fullName` is the ancestor chain
+    // joined with the leaf, so the identical case moved from `describe('module A')` into
+    // `describe('module B')` arrives under a different name — and 557 of this repo's 563 test files
+    // wrap their cases in a describe. Keyed on `fullName`, this reported a loss AND printed "so they
+    // did not move" about a case that had.
+    const base = commit(
+      { 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': "describe('module A', () => {\n  it('keeps', () => {});\n  it('moves away', () => {});\n});\n" },
+      'base',
+    );
+    const head = commit(
+      {
+        'src/a.test.ts': "describe('module A', () => {\n  it('keeps', () => {});\n});\n",
+        'src/b.test.ts': "describe('module B', () => {\n  it('moves away', () => {});\n});\n",
+      },
+      'move a case into another module',
+    );
+
+    const r = run(base, head);
+    expect(r.findings).toEqual([]);
+    expect(r.status).toBe(0);
+  });
+
+  it('a case deleted from a describe block is still reported, with its FULL name', () => {
+    // The positive twin of the test above: absolving on the leaf title must not blind the thing.
+    const base = commit(
+      { 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': "describe('module A', () => {\n  it('keeps', () => {});\n  it('goes', () => {});\n});\n" },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': "describe('module A', () => {\n  it('keeps', () => {});\n});\n" }, 'delete one');
+
+    const r = run(base, head);
+    // The identity is the title; the REPORT names the module, because that is what a reader needs.
+    expect(r.findings).toEqual([{ file: 'src/a.test.ts', lost: ['module A goes'], basePassing: 2, headRunning: 1 }]);
+  });
+
+  it('the CONTROL file does not absolve, whatever its name sorts like', () => {
+    // ⛔ `ranAtHead` used to be built from every entry in the head run, control included — and the
+    // control is chosen precisely because the diff does NOT touch it. A case in it sharing a title
+    // with a deleted one silenced the deletion and logged "every case that passed before runs
+    // somewhere at head". The test that claimed otherwise passed only because its control file sorted
+    // after the candidate; this one sorts BEFORE it on purpose.
+    const base = commit(
+      {
+        'src/a.ts': SRC,
+        'src/aaa-control.test.ts': "it('collides', () => {});\nit('control holds', () => {});\n",
+        'src/zzz-candidate.test.ts': "it('collides', () => {});\nit('stays', () => {});\n",
+      },
+      'base',
+    );
+    const head = commit({ 'src/zzz-candidate.test.ts': "it('stays', () => {});\n" }, 'delete the colliding case');
+
+    const r = run(base, head);
+    expect(r.findings).toEqual([{ file: 'src/zzz-candidate.test.ts', lost: ['collides'], basePassing: 2, headRunning: 1 }]);
+  });
+
+  it('a base version that partly FAILS against the new source does not invent a rename', () => {
+    // ⛔ `basePassing` counts what PASSED, `headRunning` counts what RAN — different measures, so their
+    // difference is not "how many cases are gone". Measured consequence before the sentence was fixed:
+    // two deletions plus one base case failing against the new source printed "count dropped by 1 …
+    // so at least 1 of them was renamed", naming a rename that did not exist. The fake could not emit
+    // a `failed` status at all, which is why nothing caught it.
+    const base = commit(
+      { 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': "it('a', () => {});\nit('b', () => {});\nit('c', () => {});\nit('d', () => {});\nit('e', () => {});\n" },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': "it('a', () => {});\nit('b', () => {});\nit('e', () => {});\n" }, 'delete c and d');
+
+    const r = check({ base, head, measure: makeMeasure(new Set(['e'])), listFiles: listsEverything, log: () => {} });
+    expect(r.findings.length).toBe(1);
+    expect(r.findings[0].lost.sort()).toEqual(['c', 'd']);
+    // basePassing excludes the failing `e`; headRunning counts it. The report must not read that
+    // difference as a rename — the third shape of the sentence covers it.
+    const said = render(r).lines.join('\n');
+    // The caveat line legitimately uses the word; what must be absent is the INFERENCE
+    // that the arithmetic can tell a rename from a deletion.
+    expect(said).not.toMatch(/some of these were RENAMED/);
+    expect(said).toContain('4 case(s) passed before, 3 run now');
+    expect(said).toContain('does not guess');
+  });
+
+  it('a head version the runner could not COLLECT is not an emptied file', () => {
+    // ⛔ `declared === 0` has a third cause the comment used to deny: a broken import, a syntax error,
+    // or a suite with no case in it all report zero cases with a failed status. An emptied file is a
+    // real loss; a collection failure is not a statement about what the diff removed.
+    const base = commit({ 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': "it('a', () => {});\nit('b', () => {});\n" }, 'base');
+    const head = commit({ 'src/a.test.ts': "import { gone } from './nope.js';\nit('a', () => { gone(); });\n" }, 'break the import');
+    const cannotCollect = (files: string[]): Measurement => {
+      const m = measuring(files);
+      const j = m.json as { testResults: Array<{ name: string; assertionResults: Case[] }> };
+      return {
+        ok: false,
+        out: 'FAIL  src/a.test.ts\nError: Failed to resolve import "./nope.js"',
+        json: { testResults: j.testResults.map((e) => (e.name === resolve('src/a.test.ts') && readFileSync('src/a.test.ts', 'utf-8').includes('nope') ? { ...e, assertionResults: [] } : e)) },
+      };
+    };
+
+    const r = check({ base, head, measure: cannotCollect, listFiles: listsEverything, log: () => {} });
+    expect(r.findings).toEqual([]);
+    expect(r.skipped.find(([f]) => f === 'src/a.test.ts')?.[1]).toContain('collection failure');
+  });
+
+  it('the whole recreated directory CHAIN is removed, not just the last one', () => {
+    // ⚠ Recording only the immediate parent left `deep/` and `deep/er/` behind for a deleted
+    // `deep/er/still/gone.test.ts` — invisible to `git status`, so the test that claimed the property
+    // used a path whose first level already existed and could not have seen it.
+    const base = commit({ 'src/a.ts': SRC, ...CONTROL, 'deep/er/still/gone.test.ts': "it('a', () => {});\nit('b', () => {});\n" }, 'base');
+    const head = commit({ 'deep/er/still/gone.test.ts': null }, 'delete it');
+    rmSync(join(repo, 'deep'), { recursive: true, force: true });
+
+    const r = run(base, head);
+    expect(r.findings.length).toBe(1);
+    for (const d of ['deep', 'deep/er', 'deep/er/still']) expect(existsSync(join(repo, d))).toBe(false);
+  });
+
+  it('restoreInFlight puts a file back when one IS in flight, and removes what it created', () => {
+    // ⚠ The earlier test called it with nothing in flight and asserted an empty list — so deleting the
+    // entire restore loop left it green. And the first draft of THIS fixture added a case between base
+    // and head, so the diff removed no line, there was no candidate, and `measure` was never called:
+    // a fixture that produces no candidate cannot test the candidate loop.
+    const base = commit({ 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': `it('original', () => {});${NL}it('second', () => {});${NL}` }, 'base');
+    const head = commit({ 'src/a.test.ts': `it('original', () => {});${NL}` }, 'drop one');
+    const headBody = readFileSync(join(repo, 'src/a.test.ts'), 'utf-8');
+    const restored: string[][] = [];
+    const interrupting = (files: string[]): Measurement => {
+      // Only the base run has a file in flight; the head run has none, which is worth pinning too.
+      const put = restoreInFlight();
+      if (put.length > 0) {
+        restored.push(put);
+        // ⛔ The signal path must put the HEAD version back, not leave the merge-base one on disk.
+        expect(readFileSync(join(repo, 'src/a.test.ts'), 'utf-8')).toBe(headBody);
+      }
+      return measuring(files);
+    };
+
+    check({ base, head, measure: interrupting, listFiles: listsEverything, log: () => {} });
+    expect(restored).toEqual([['src/a.test.ts']]);
+    expect(readFileSync(join(repo, 'src/a.test.ts'), 'utf-8')).toBe(headBody);
   });
 
   it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {

@@ -26,7 +26,20 @@
  *     request that deletes from A and moves the identical lines out of B attributed the move and the
  *     finding by git's file ORDER, so swapping two filenames swapped who was accused. For a reporter
  *     that is the most expensive failure there is: it sends a reader to a file that lost nothing.
- *     A case carries its own name. If it runs anywhere at head, it moved; that is a measurement.
+ *
+ * ⭐⭐⭐ SO IT NEEDS A DEFINITION OF "THE SAME CASE", AND FOUR ROUNDS OF GATES WERE SPENT GUESSING AT
+ * ONE. It is written down here: **the same case means the same leaf `title`**, compared only within
+ * the files this diff touches. The obvious choice — the runner's `fullName` — is WRONG, and measured
+ * so: `fullName` is the chain of ancestor titles joined with the leaf, so the identical case moved
+ * from `describe('module A')` into `describe('module B')` arrives under a different name. 557 of this
+ * repo's 563 test files wrap their cases in a `describe`, so that is not an edge: a `fullName` key
+ * reported every cross-module move as a loss — the file's own stated worst outcome, "a guard that
+ * reports every rename is switched off in days", reached one level up from where it was first fixed.
+ *   · The leaf title is file-independent, which is exactly the property the comparison needs.
+ *   · Its failure mode is COLLISION — two files may each hold a case called `returns null` — and that
+ *     direction is the safe one: a colliding title absolves, so the guard stays SILENT rather than
+ *     accusing a file that lost nothing. It is reported with the full name, so a reader sees the
+ *     module it came from even though the module is not part of the identity.
  *   · A count cannot say WHICH cases went missing. A list of names can, and it is what the reader
  *     actually needs.
  * The whole move apparatus is gone. So is the per-candidate pair of runner starts: 30 candidates used
@@ -58,8 +71,12 @@
  * ⭐⭐ AND "RAN NOTHING" IS NOT A JUDGEMENT ABOUT THE DIFF. This distinction cost two rounds to find
  * and the data carries it exactly: a file emptied of every case reports **0 assertions**, while a
  * file whose cases exist but did not run reports **assertions with status `skipped`**. The second
- * shape is ordinary here — 24 files gate their whole suite, 21 of them `tests/online/*` behind
- * `describe.skipIf(!hasApiKey())`, and CI has no key — and a `beforeAll` that throws produces it too.
+ * shape is ordinary here — 21 files gate their whole suite at the `describe` level, 16 of them under
+ * `tests/online/`, and CI supplies no API key — and a `beforeAll` that throws produces it too. (An
+ * earlier version of this sentence said "24 files, 21 of them `tests/online/*` behind
+ * `describe.skipIf(!hasApiKey())`". Both numbers were wrong: the count came from a grep that also
+ * matched files merely CONTAINING the string — including this guard's own test fixtures — and only
+ * three of the online files use `!hasApiKey()`. A number in a comment needs the set it counts.)
  * Treated as a count, both shapes read as zero: a gated suite then reported "nothing was lost" while
  * cases were deleted from it, and a pull request that merely ADDED a precondition reported every case
  * in the file as lost, in a sentence that contradicted itself. So: cases that exist and did not run
@@ -185,14 +202,19 @@ export function addedTo(base, head) {
 export function fileResults(json) {
   const byFile = new Map();
   for (const entry of json?.testResults ?? []) {
-    const ran = new Set();
-    const passed = new Set();
+    const ran = [];
+    const passed = [];
     let declared = 0;
     for (const a of entry.assertionResults ?? []) {
       declared += 1;
-      const name = String(a.fullName ?? a.title ?? '');
-      if (a.status === 'passed' || a.status === 'failed') ran.add(name);
-      if (a.status === 'passed') passed.add(name);
+      // ⚠ ARRAYS, not Sets. `it.each` without a placeholder in its title produces several cases with
+      // the IDENTICAL full name, which a Set collapses — so a count taken from one is a count of
+      // distinct names presented as a count of cases, and deleting two of three rows would not move
+      // it. Measured: three rows, one name. (All 132 `it.each` call sites here carry a placeholder,
+      // so this is the instrument being right rather than a bug being fixed.)
+      const c = { title: String(a.title ?? a.fullName ?? ''), fullName: String(a.fullName ?? a.title ?? '') };
+      if (a.status === 'passed' || a.status === 'failed') ran.push(c);
+      if (a.status === 'passed') passed.push(c);
     }
     byFile.set(resolve(String(entry.name)), { ran, passed, declared });
   }
@@ -200,6 +222,40 @@ export function fileResults(json) {
 }
 
 const TEST_FILE = /\.(test|spec)\.tsx?$/;
+
+/**
+ * Did the runner actually COUNT something in a file this diff does not touch?
+ *
+ * Returns `null` when the instrument looks healthy, or a status-2 result when it does not. Used for
+ * BOTH runs: the base run is the one that executes rewritten files, so it is the likelier of the two
+ * to collapse, and for two rounds it had no control at all.
+ *
+ * ⭐ `ran.length >= 1`, not "an entry exists" — a gate finding, and the nastiest shape there is: a
+ * control that does not cover the hole it was built for. A file the runner cannot collect still gets
+ * an entry, with no cases in it, so the weaker predicate called a dead toolchain healthy AND printed
+ * a line claiming it had counted.
+ *
+ * ⭐ A control whose cases EXIST and did not run is a GATED file, not a broken runner. Calling that
+ * ill health is the permanently-red failure this guard must not have, so it is reported as a note and
+ * the run proceeds unverified rather than falsely condemned.
+ */
+export function checkControls(controls, byFile, which, log) {
+  if (controls.length === 0) {
+    log('  note      every file the runner knows is a candidate or a destination; no positive control was possible');
+    return null;
+  }
+  const seen = controls.map((f) => ({ f, r: byFile.get(resolve(f)) }));
+  const ok = seen.find(({ r }) => r && r.ran.length >= 1);
+  if (ok) {
+    log(`  control   ${ok.f} — the ${which} run counted ${String(ok.r.ran.length)} case(s) in a file this diff does not touch`);
+    return null;
+  }
+  if (seen.every(({ r }) => (r?.declared ?? 0) > 0)) {
+    log(`  note      every control file is gated (${controls.join(', ')}); the ${which} run has no positive control`);
+    return null;
+  }
+  return { status: 2, reason: 'runner-unhealthy', canary: `${which}: ${controls.join(', ')}` };
+}
 
 /**
  * The files this process has replaced on disk, so a SIGNAL can put them back.
@@ -213,10 +269,14 @@ let inFlight = [];
 export function restoreInFlight() {
   const put = inFlight;
   inFlight = [];
-  for (const { file, backup, madeDir } of put) {
+  for (const { file, backup, madeDirs } of put) {
     if (backup === null) rmSync(file, { force: true });
     else writeFileSync(file, backup, 'utf-8');
-    if (madeDir) { try { rmdirSync(madeDir); } catch { /* not empty — someone else's */ } }
+    // ⚠ The whole CHAIN, deepest first. Recording only the immediate parent left `deep/` and
+    // `deep/er/` behind for a deleted `deep/er/still/gone.test.ts` — invisible to `git status`,
+    // because git cannot represent an empty directory, so the test that claimed the property could
+    // not have seen it either.
+    for (const d of [...(madeDirs ?? [])].reverse()) { try { rmdirSync(d); } catch { /* not empty — someone else's */ } }
   }
   return put.map((p) => p.file);
 }
@@ -270,42 +330,38 @@ export function check({ base, head, measure, listFiles, headCommit = null, log =
 
   const rosterSet = new Set(roster);
   const destinations = addedTo(mb, head).filter((f) => rosterSet.has(f) && !candidates.includes(f));
-  // ⭐ ONE file this diff does not touch, measured in the same run as the positive control. It costs
-  // no extra invocation, and it is the only thing standing between a wedged toolchain and a green
+  // ⭐ THREE files this diff does not touch, measured in the same invocation as everything else, as
+  // the positive control. They are the only thing standing between a wedged toolchain and a green
   // "nothing to report": a collect error yields an entry with ZERO cases, which an earlier version
   // accepted as healthy because it only asked whether an entry existed.
-  const control = roster.find((f) => !candidates.includes(f) && !destinations.includes(f));
+  //
+  // ⚠ Three, not one, and the reason is a failure in the permanently-red direction. 21 files here
+  // gate their whole suite, so a single control picked blindly off the top of the roster could be a
+  // gated one — it would run no case, read as a broken instrument, and turn the job red on every pull
+  // request forever, blaming the toolchain. Today those files sit at roster position 323 and beyond
+  // and the first entry is `src/index.test.ts`, so this is latent rather than live, which is exactly
+  // when it is cheap to remove.
+  const controls = roster.filter((f) => !candidates.includes(f) && !destinations.includes(f)).slice(0, 3);
 
-  const headFiles = [...candidates.filter((f) => existsSync(f)), ...destinations];
-  if (control) headFiles.push(control);
+  const headFiles = [...candidates.filter((f) => existsSync(f)), ...destinations, ...controls];
   const headRun = headFiles.length > 0 ? measure(headFiles) : { ok: true, out: '', json: { testResults: [] } };
   const headByFile = fileResults(headRun.json);
+  const healthy = checkControls(controls, headByFile, 'head', log);
+  if (healthy) return { ...healthy, detail: reasonLine(headRun.out) };
 
-  if (control) {
-    const c = headByFile.get(resolve(control));
-    // ⭐ `ran.size >= 1`, not "an entry exists". That predicate is the finding of a second gate round:
-    // a file the runner failed to collect still gets an entry, with no cases in it, so "an entry
-    // exists" called a dead toolchain healthy and printed a control line that had counted nothing.
-    if (!c || c.ran.size === 0) {
-      return { status: 2, reason: 'runner-unhealthy', canary: control, detail: reasonLine(headRun.out) };
-    }
-    log(`  control   ${control} — the runner ran ${String(c.ran.size)} case(s) in a file this diff does not touch`);
-  } else {
-    log('  note      every file the runner knows is a candidate or a destination; no positive control was possible');
+  // ⭐ The absolution set: leaf TITLES that run at head in the files THIS DIFF TOUCHES.
+  //
+  // ⚠ Not every file in the repository, and — a gate round caught this — not the control files
+  // either. The control is chosen precisely because the diff does not touch it, so a case in it that
+  // happens to share a title with a deleted one would absolve a real deletion and the run would log
+  // "every case that passed before runs somewhere at head". Absolution means "the diff put it
+  // somewhere", and the control is not part of the diff. Nor is a same-titled case in an untouched
+  // file: that is a DIFFERENT test, and deleting this one is still a loss of this file's coverage.
+  const ranTitlesAtHead = new Set();
+  for (const f of [...candidates, ...destinations]) {
+    for (const c of headByFile.get(resolve(f))?.ran ?? []) ranTitlesAtHead.add(c.title);
   }
 
-  // Every case that runs anywhere in the MEASURED set — the candidates plus the files this diff adds
-  // lines to. A case that moved between files is in here under its own name, which is why no
-  // line-level move detection is needed, or wanted.
-  //
-  // ⚠ Deliberately NOT every file in the repository. A case with the same name in a file the pull
-  // request never touches is a DIFFERENT test, and deleting this one is still a loss of this file's
-  // coverage. Absolution means "the diff put it somewhere", not "the name exists somewhere".
-  const ranAtHead = new Set();
-  for (const r of headByFile.values()) for (const n of r.ran) ranAtHead.add(n);
-
-  // Write every candidate's base version at once and measure them in ONE run. Verified: a file the
-  // runner cannot collect does not suppress the others in the same invocation.
   const sources = new Map();
   for (const file of candidates) {
     try {
@@ -314,25 +370,36 @@ export function check({ base, head, measure, listFiles, headCommit = null, log =
       skipped.push([file, 'the merge base has no such file']);
     }
   }
+
   const findings = [];
-  inFlight = [];
-  try {
-    for (const [file, body] of sources) {
-      const madeDir = existsSync(dirname(file)) ? null : dirname(file);
-      inFlight.push({ file, backup: existsSync(file) ? readFileSync(file, 'utf-8') : null, madeDir });
+  for (const [file, body] of sources) {
+    // ⛔ ONE CANDIDATE AT A TIME, and a gate round is why. Writing every base version into the tree
+    // and measuring them in a single run made the candidates observable to EACH OTHER: a test that
+    // reads sibling test files from disk — this repo has six, `tests/no-fixed-test-ports.test.ts`
+    // among them — then saw another candidate's reverted content and failed, which removed it from
+    // the base's passing set and silenced a real deletion. The batched run cost one invocation
+    // instead of N and bought that with a coupling the per-candidate form cannot have. The cost is
+    // bounded either way: 1 + N runs, not the 1 + 2N an earlier version paid, because the head side
+    // is still measured once for everything.
+    const madeDirs = [];
+    for (let d = dirname(file); d && d !== '.' && !existsSync(d); d = dirname(d)) madeDirs.unshift(d);
+    inFlight = [{ file, backup: existsSync(file) ? readFileSync(file, 'utf-8') : null, madeDirs }];
+    try {
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, body, 'utf-8');
-    }
-    const baseRun = sources.size > 0 ? measure([...sources.keys()]) : { ok: true, out: '', json: { testResults: [] } };
-    const baseByFile = fileResults(baseRun.json);
+      // The controls ride along in the same invocation: the BASE run is the one that executes
+      // rewritten files, so it is the likelier of the two to collapse — and it had no control at all.
+      const baseRun = measure([file, ...controls]);
+      const baseByFile = fileResults(baseRun.json);
+      const illBase = checkControls(controls, baseByFile, 'base', () => {});
+      if (illBase) return { ...illBase, detail: reasonLine(baseRun.out) };
 
-    for (const file of sources.keys()) {
       const b = baseByFile.get(resolve(file));
       if (!b) {
         skipped.push([file, `the runner produced no result for the base version: ${reasonLine(baseRun.out)}`]);
         continue;
       }
-      if (b.passed.size === 0) {
+      if (b.passed.length === 0) {
         // Nothing held, so nothing can have been lost. Both causes land here and neither needs
         // telling apart for the verdict — but the reason says which, because they read differently.
         skipped.push([file, b.declared === 0
@@ -341,7 +408,7 @@ export function check({ base, head, measure, listFiles, headCommit = null, log =
         continue;
       }
       const h = headByFile.get(resolve(file));
-      if (h && h.ran.size === 0 && h.declared > 0) {
+      if (h && h.ran.length === 0 && h.declared > 0) {
         // ⭐ The head version still DECLARES cases and ran none of them: gated, or a precondition
         // failed. Reporting that as a loss produced a self-contradicting sentence — "the missing ones
         // still pass" about cases that are right there in the file — for pull requests that only
@@ -349,29 +416,36 @@ export function check({ base, head, measure, listFiles, headCommit = null, log =
         skipped.push([file, `the head version declares ${String(h.declared)} case(s) and ran none of them, so this file cannot be judged (gated, or a precondition failed)`]);
         continue;
       }
-      // ⭐⭐ THE COUNT IS THE TRIGGER, THE NAMES ARE THE ATTRIBUTION — and the first draft of this
-      // rebuild had only the names, which brought the very first false alarm back one level up. A
-      // pure RETITLE changes every name while losing nothing: `it('does X')` becoming
-      // `it('does X correctly')` leaves the base name running nowhere, so names alone reported a
-      // loss for exactly the change that made the line-based version unusable. The case COUNT is
-      // retitle-immune, so it decides WHETHER to speak; the names decide WHAT to say.
+      if (h && h.declared === 0 && !headRun.ok && existsSync(file)) {
+        // ⚠ `declared === 0` has a THIRD cause the earlier comment denied: the runner could not
+        // COLLECT the file — a broken import, a syntax error, or a file that declares a suite with no
+        // case in it, all of which report zero cases with a failed status. An emptied file is a real
+        // loss; a file that failed to collect is not a statement about what the diff removed.
+        skipped.push([file, `the head version declares no cases and the run failed, so this is a collection failure rather than an emptied file: ${reasonLine(headRun.out)}`]);
+        continue;
+      }
+      // ⭐⭐ THE COUNT IS THE TRIGGER, THE TITLES ARE THE ATTRIBUTION — and the first draft of the
+      // name-based rebuild had only the names, which brought the very first false alarm back one
+      // level up. A pure RETITLE changes every name while losing nothing: `it('does X')` becoming
+      // `it('does X correctly')` leaves the old name running nowhere, so names alone reported a loss
+      // for exactly the change that made the line-based version unusable. The case COUNT is
+      // retitle-immune, so it decides WHETHER to speak; the titles decide WHAT to say.
       //
       // ⭐ And the second conjunct falls out of the first rather than being added to it: a case that
-      // MOVED lowers this file's count, so the count alone would report every move. Its name runs in
+      // MOVED lowers this file's count, so the count alone would report every move. Its title runs in
       // the destination, so the attribution comes back empty — and an empty attribution is silence.
-      // Both conditions together are what no single one of the three earlier designs managed.
-      const unmatched = [...b.passed].filter((n) => !ranAtHead.has(n));
-      const headRunning = h ? h.ran.size : 0;
-      if (b.passed.size > headRunning && unmatched.length > 0) {
-        findings.push({ file, lost: unmatched, basePassing: b.passed.size, headRunning });
-      } else if (b.passed.size <= headRunning) {
-        log(`  same      ${file} — ${String(b.passed.size)} case(s) passed before, ${String(headRunning)} run now; the count did not drop`);
+      const unmatched = b.passed.filter((c) => !ranTitlesAtHead.has(c.title));
+      const headRunning = h ? h.ran.length : 0;
+      if (b.passed.length > headRunning && unmatched.length > 0) {
+        findings.push({ file, lost: unmatched.map((c) => c.fullName), basePassing: b.passed.length, headRunning });
+      } else if (b.passed.length <= headRunning) {
+        log(`  same      ${file} — ${String(b.passed.length)} case(s) passed before, ${String(headRunning)} run now; the count did not drop`);
       } else {
-        log(`  move      ${file} — the count dropped, but every case that passed before runs somewhere at head`);
+        log(`  move      ${file} — the count dropped, but every case that passed before runs somewhere this diff touches`);
       }
+    } finally {
+      restoreInFlight();
     }
-  } finally {
-    restoreInFlight();
   }
   return { status: findings.length > 0 ? 1 : 0, reason: 'checked', findings, skipped, candidates, touched };
 }
@@ -459,27 +533,32 @@ export function render(r) {
   }
   lines.push('');
   for (const { file, lost, basePassing, headRunning } of r.findings) {
-    // ⭐ TWO SHAPES, and the sentence has to branch — the earlier single sentence read "3 of 8 run
-    // nowhere now" for a diff that lost ONE case and retitled two, which invites the reader to look
-    // for three deletions. The count drop is the number that is true; the names are where to look.
-    const dropped = basePassing - headRunning;
-    if (lost.length === dropped) {
-      lines.push(`  REPORT  ${file}: ${String(dropped)} case(s) gone — passed before, run nowhere now (${String(headRunning)} of ${String(basePassing)} still run):`);
-    } else {
-      lines.push(`  REPORT  ${file}: the case count dropped by ${String(dropped)} (${String(basePassing)} passed before, ${String(headRunning)} run now). ${String(lost.length)} name(s) no longer run, so at least ${String(lost.length - dropped)} of them ${lost.length - dropped === 1 ? 'was' : 'were'} renamed rather than removed — look at all of them:`);
-    }
+    // ⛔ NO INFERENCE FROM THE ARITHMETIC. An earlier version branched on whether the name list was
+    // longer or shorter than `basePassing - headRunning` and announced a RENAME from the difference.
+    // That inference is invalid, and a test caught it producing a rename that did not exist: the two
+    // numbers are DIFFERENT MEASURES — `basePassing` counts cases that PASSED in the base version
+    // against the new source, `headRunning` counts cases that RAN at head, passed or failed. A base
+    // case that fails against the new source leaves the first and its head twin stays in the second,
+    // so the difference deflates by one per such case. Two deletions then read as one deletion plus
+    // one rename. (The same version also printed "at least -1 of them were renamed" for the shape it
+    // had not enumerated — the first sign that the sentence was computing something it could not
+    // know.) So the report states the two measurements, lists what it found, and names the one thing
+    // it cannot distinguish instead of guessing which side of it we are on.
+    lines.push(`  REPORT  ${file}: ${String(basePassing)} case(s) passed before, ${String(headRunning)} run now.`);
+    lines.push(`            ${String(lost.length)} of them run nowhere this diff touches, under the same title:`);
     for (const n of lost.slice(0, 20)) lines.push(`            · ${n}`);
     if (lost.length > 20) lines.push(`            … and ${String(lost.length - 20)} more`);
   }
   lines.push('');
-  lines.push('  What this knows: the case COUNT in this file dropped, and these cases passed against');
-  lines.push('  the NEW source while running nowhere at head — not here and not in any file this diff');
-  lines.push('  adds lines to, so they did not move. The count is what decides to speak: a pure retitle');
-  lines.push('  keeps it and is silent.');
-  lines.push('  What it does NOT know: a case that was BOTH retitled and kept appears in the list above,');
-  lines.push('  because its old name stopped running. The count says how many are genuinely gone; the');
-  lines.push('  names say which to look at. And a case deleted while another is added keeps the count up');
-  lines.push('  and does not appear at all.');
+  lines.push('  What this knows: the case count in this file fell, and the cases listed passed against');
+  lines.push('  the NEW source while no case of the same TITLE runs in any file this diff touches.');
+  lines.push('  "The same case" means the same leaf title here — not the runner\'s full name, which');
+  lines.push('  carries the describe block and therefore changes when a case moves between modules.');
+  lines.push('  What it does NOT know, and does not guess: whether a case was RENAMED rather than');
+  lines.push('  removed. A renamed one appears in the list above, and nothing in these numbers can');
+  lines.push('  tell it apart from a deletion. Nor can a differently titled case that now covers the');
+  lines.push('  same ground be seen, and a deletion paired with an addition keeps the count up and');
+  lines.push('  does not appear at all.');
   lines.push('  Nothing is blocked. If the removal was deliberate, the commit message is where to say so.');
   lines.push(`deleted-assertion-guard: ${VERDICT.report}`);
   return { lines, code: 1 };
