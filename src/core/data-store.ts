@@ -714,12 +714,32 @@ export class DataStore {
     return changed;
   }
 
+  /**
+   * Whether a record a merge ledger names can be moved back. `ok`: it names a `subject`
+   * column of a collection this store holds. `gone`: no collection by that name — dropped
+   * since the merge, and its cells went with it, so there is nothing to move back. `foreign`:
+   * anything else. The names are read back from a ledger file, unlike in
+   * {@link repointSubjectId}, so this check is what holds them to the stored schema.
+   */
+  repointRecordState(rec: { collection: unknown; column: unknown }): 'ok' | 'gone' | 'foreign' {
+    if (typeof rec.collection !== 'string' || typeof rec.column !== 'string') return 'foreign';
+    const meta = this._getCollectionMeta(rec.collection);
+    if (!meta) return 'gone';
+    const columns = JSON.parse(meta.schema_json) as DataStoreColumnDef[];
+    return columns.some(col => col.type === 'subject' && col.name === rec.column) ? 'ok' : 'foreign';
+  }
+
   /** Reverse a {@link repointSubjectId} (merge rollback): move each captured cell back to `oldId`. */
   rollbackRepoint(oldId: string, newId: string, records: readonly SubjectRepointRecord[]): void {
+    const states = records.map(rec => this.repointRecordState(rec));
+    if (states.includes('foreign')) {
+      throw new Error('the merge ledger names a column that is not a subject column of this data store — nothing was changed');
+    }
     this.db.transaction(() => {
-      for (const rec of records) {
+      for (const [i, rec] of records.entries()) {
+        if (states[i] === 'gone') continue;
         const tableName = `ds_${rec.collection}`;
-        // Same validated-identifier / bound-value split as repointSubjectId.
+        // Identifiers checked by repointRecordState above; values are bound.
         const updateSql = `UPDATE "${tableName}" SET "${rec.column}" = ? WHERE _id = ? AND "${rec.column}" = ?`;
         const stmt = this.db.prepare(updateSql);
         for (const id of rec.ids) stmt.run(oldId, id, newId);

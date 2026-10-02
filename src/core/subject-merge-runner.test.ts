@@ -230,6 +230,60 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
     }
   });
 
+  // The ledger's data-store records name a collection and a column, and the rollback builds
+  // its statements from those names. One that is not a subject column is refused before the
+  // ENGINE side moves — the data store's own refusal would come only after it.
+  it('rollback REFUSES a ledger naming a non-subject data-store column, and changes nothing', () => {
+    const { dir, store, threadStore } = setup();
+    const dup = store.createSubject({ kind: 'organization', name: 'Iota GmbH' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Iota' });
+    const ds = new DataStore(join(dir, 'datastore.db'));
+    try {
+      ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: [
+        { name: 'client', type: 'subject', subjectKind: 'organization' },
+        { name: 'note', type: 'string' },
+      ] });
+      // `note` holds the canonical's id as plain text: a reversal that wrote it would change it.
+      ds.insertRecords({ collection: 'invoices', records: [{ client: dup, note: canon }] });
+      expect(runMerge(store, ds, threadStore, dir, dup, canon).ok).toBe(true);
+      const led = readLedger(dir);
+      const forged: MergeLedgerFile = { ...led, dataStore: [...led.dataStore, { collection: 'invoices', column: 'note', ids: [1] }] };
+
+      const res = rollbackMergeRun(store, ds, threadStore, forged);
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/not a subject column/i);
+      expect(res.reason).not.toMatch(/partial/i);
+      expect(store.getSubject(dup)?.merged_into).toBe(canon);                       // engine still merged
+      const row = ds.queryRecords({ collection: 'invoices' }).rows[0]!;
+      expect(row['client']).toBe(canon);
+      expect(row['note']).toBe(canon);
+    } finally {
+      ds.close();
+    }
+  });
+
+  it('rollback skips a data-store record whose collection was dropped since, and reverses the rest', () => {
+    const { dir, store, threadStore } = setup();
+    const dup = store.createSubject({ kind: 'organization', name: 'Kappa GmbH' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Kappa' });
+    const ds = new DataStore(join(dir, 'datastore.db'));
+    try {
+      const subjectCol = [{ name: 'client', type: 'subject' as const, subjectKind: 'organization' }];
+      ds.createCollection({ name: 'invoices', scope: { type: 'global', id: 'g' }, columns: subjectCol });
+      ds.createCollection({ name: 'quotes', scope: { type: 'global', id: 'g' }, columns: subjectCol });
+      ds.insertRecords({ collection: 'invoices', records: [{ client: dup }] });
+      ds.insertRecords({ collection: 'quotes', records: [{ client: dup }] });
+      expect(runMerge(store, ds, threadStore, dir, dup, canon).ok).toBe(true);
+      expect(readLedger(dir).dataStore.map(r => r.collection).sort()).toEqual(['invoices', 'quotes']);
+      ds.dropCollection('quotes');
+
+      expect(rollbackMergeRun(store, ds, threadStore, readLedger(dir))).toEqual({ ok: true });
+      expect(ds.queryRecords({ collection: 'invoices' }).rows[0]!['client']).toBe(dup);
+    } finally {
+      ds.close();
+    }
+  });
+
   it('rollback aborts engine-first: an engine failure leaves the datastore + thread untouched', () => {
     const { dir, store, threadStore } = setup();
     const dup = store.createSubject({ kind: 'organization', name: 'Zeta AG' });

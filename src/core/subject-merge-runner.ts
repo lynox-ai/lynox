@@ -200,6 +200,11 @@ export function rollbackMergeRun(
   if (file.applied === false) {
     return { ok: false, reason: 'merge ledger is not marked applied (incomplete/crashed merge) — nothing to reverse' };
   }
+  // The data-store half would refuse a ledger record that names no subject column, but only
+  // after the engine side is already reversed. Ask first, so such a ledger changes nothing.
+  if (dataStore && file.dataStore.some(rec => dataStore.repointRecordState(rec) === 'foreign')) {
+    return { ok: false, reason: 'the merge ledger names a column that is not a subject column of this data store — nothing was changed' };
+  }
   // Reverse the ENGINE side FIRST — it is the one that can legitimately fail (a
   // memory_subjects UNIQUE collision → {ok:false}). On failure, leave the other stores
   // untouched rather than un-repointing them under a still-merged engine.
