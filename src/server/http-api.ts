@@ -6346,6 +6346,9 @@ export class LynoxHTTPApi {
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
       probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
+      undo_open: [409, 'An undo of this bulk run is approved or still writing. Let it finish before resuming the run or planning another undo.'],
+      source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
+      undo_stale: [409, 'The bulk run this undo takes back has written more targets since the undo was planned. Plan the undo again.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.

@@ -657,6 +657,108 @@ describe('undo — a second approval, its own run (§7 d)', () => {
   });
 });
 
+describe('a run and an undo of it never write at the same time', () => {
+  /** Four targets, halted after two at the approved maximum. */
+  async function halfWritten(): Promise<{ runId: string; state: Map<string, string>; writer: TargetWriter }> {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const { writer, state } = memory(initial);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('halted');
+    return { runId, state, writer };
+  }
+  const resumeAll = (runId: string) => ledger.resume(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 4 });
+  const approveUndo = (undoId: string) => ledger.approve(undoId, { checksum: ledger.computeChecksum(undoId)! });
+
+  it('a run is not resumed while an undo of it is approved', async () => {
+    const { runId } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(approveUndo(undo.status.id).ok).toBe(true);
+    expect(resumeAll(runId)).toEqual({ ok: false, reason: 'undo_open' });
+    // Refused before anything moved: the run is still halted where it stopped.
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'writing', haltReason: BULK_HALT_REASONS.maxTargets, applied: 2 });
+  });
+
+  it('a previewed undo holds nothing: the run resumes, and the undo is then refused while it writes', async () => {
+    const { runId } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(resumeAll(runId).ok).toBe(true);
+    expect(approveUndo(undo.status.id)).toEqual({ ok: false, reason: 'source_running' });
+  });
+
+  it('an undo planned before the run wrote more is refused as stale, and the targets stay as the run left them', async () => {
+    const { runId, state, writer } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(undo.status.total).toBe(2);
+    expect(resumeAll(runId).ok).toBe(true);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    expect(approveUndo(undo.status.id)).toEqual({ ok: false, reason: 'undo_stale' });
+    expect(ledger.getStatus(runId)!.phase).toBe('done');
+    expect([...state.values()]).toEqual(['w0', 'w1', 'w2', 'w3']);
+    // A fresh plan covers all four.
+    const again = ledger.planUndo(runId);
+    if (!again.ok) throw new Error(again.reason);
+    expect(again.status.total).toBe(4);
+  });
+
+  it('a second undo is refused while the first is approved — planned or approved', async () => {
+    const { runId } = await halfWritten();
+    const first = ledger.planUndo(runId);
+    const second = ledger.planUndo(runId);
+    if (!first.ok || !second.ok) throw new Error('plan refused');
+    expect(approveUndo(first.status.id).ok).toBe(true);
+    expect(ledger.planUndo(runId)).toEqual({ ok: false, reason: 'undo_open' });
+    expect(approveUndo(second.status.id)).toEqual({ ok: false, reason: 'undo_open' });
+  });
+
+  it('once the undo is done, the run is undone and stays that way', async () => {
+    const { runId, state, writer } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(approveUndo(undo.status.id).ok).toBe(true);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+    expect(resumeAll(runId)).toEqual({ ok: false, reason: 'wrong_phase' });
+  });
+
+  it('a halted undo resumes — it does not hold itself', async () => {
+    const { runId, writer, state } = await halfWritten();
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, maxTargets: 1 }).ok).toBe(true);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('halted');
+    expect(ledger.resume(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)!, maxTargets: 2 }).ok).toBe(true);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(writer))).status).toBe('done');
+    expect([...state.values()]).toEqual(['v0', 'v1', 'v2', 'v3']);
+  });
+
+  it('an undo of a run that is already undone is not told the run still writes', async () => {
+    const { runId, writer } = await halfWritten();
+    const first = ledger.planUndo(runId);
+    const second = ledger.planUndo(runId);
+    if (!first.ok || !second.ok) throw new Error('plan refused');
+    expect(approveUndo(first.status.id).ok).toBe(true);
+    await runBulkEffect(first.status.id, 'bulk_undo', effectDeps(writer));
+    expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    expect(approveUndo(second.status.id)).toMatchObject({ ok: true });
+  });
+
+  it('a local target whose write failed is not part of the undo: nothing reached it', async () => {
+    // One failure in a hundred stays under the halt thresholds: 99 applied, 1 failed.
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    const { writer } = memory(initial, new Set(['k010']));
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 99, failed: 1 });
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(undo.status.total).toBe(99);
+  });
+});
+
 describe('conflicts — shown, not overwritten (§7 h)', () => {
   it('an undo leaves a file someone changed after the run and restores the rest', async () => {
     const rows = seedFiles();

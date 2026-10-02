@@ -252,6 +252,14 @@ function parseContractPaths(json: string | null): string[] {
   }
 }
 
+/** Why a run may not start writing because of an undo — see `BulkLedger.writeBlocked`. */
+export type UndoRefusal = 'undo_open' | 'source_running' | 'undo_stale';
+
+/** A run that is not writing and will not write unless a human resumes it. */
+function isStopped(r: { phase: BulkPhase; halt_reason: string | null }): boolean {
+  return r.phase === 'done' || r.phase === 'aborted' || (r.phase === 'writing' && r.halt_reason !== null);
+}
+
 /** An external run's target system, `http:<host>`. */
 export function externalHostOf(targetSystem: string): string | null {
   return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
@@ -290,6 +298,16 @@ export interface ApplyTarget {
 
 /** Changes that write. `unchanged` and `invalid` targets are never touched. */
 const WRITING_CHANGES = "('update','create','delete')";
+
+/**
+ * The source targets an undo takes back: applied and not taken back since — and, for an
+ * external run, a target whose write failed. A request to a host can land although its
+ * answer never came back (a timeout after it went out), so such a target may hold what the
+ * source wrote. The undo reads it before writing, like every target, and finds out.
+ */
+function undoEligible(external: boolean): string {
+  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND (applied_at IS NOT NULL${external ? " OR error = 'write_failed'" : ''})`;
+}
 
 /** Per-target undo class, derived from what is there: creating is compensatable,
  *  overwriting needs the before-image. */
@@ -719,7 +737,7 @@ export class BulkLedger {
     maxTargets?: number | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
@@ -734,7 +752,11 @@ export class BulkLedger {
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
+    let blocked: UndoRefusal | null = null;
     const moved = db.transaction(() => {
+      // Inside the transaction: nothing may start the source between this check and the arming.
+      blocked = this.writeBlocked(run);
+      if (blocked !== null) return false;
       const res = db.prepare(
         `UPDATE bulk_runs SET phase = 'approved', approved_by = ?, approved_at = ?, approval_checksum = ?,
            max_targets = ?, expires_at = ?, halt_reason = NULL
@@ -748,6 +770,7 @@ export class BulkLedger {
       triggerId = this.armTrigger(run, now);
       return true;
     })();
+    if (blocked !== null) return { ok: false, reason: blocked };
     if (!moved) return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
   }
@@ -760,7 +783,7 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
@@ -779,7 +802,10 @@ export class BulkLedger {
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
+    let blocked: UndoRefusal | null = null;
     const moved = db.transaction(() => {
+      blocked = this.writeBlocked(run);
+      if (blocked !== null) return false;
       const res = db.prepare(
         `UPDATE bulk_runs SET halt_reason = NULL, expires_at = ?, targets_failed = 0, max_targets = ?
          WHERE id = ? AND phase IN ('approved','writing')`,
@@ -790,8 +816,42 @@ export class BulkLedger {
       triggerId = this.armTrigger(run, now);
       return true;
     })();
+    if (blocked !== null) return { ok: false, reason: blocked };
     if (!moved) return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
+  }
+
+  /**
+   * Why a run may not start writing now, or null. A run and an undo of it write the same
+   * targets in opposite directions, so at most one of them writes at a time:
+   *  - any run waits while an undo of it is approved or writing (`undo_open`);
+   *  - an undo waits while its source still writes (`source_running`) or another undo of
+   *    the same source is approved or writing (`undo_open`);
+   *  - an undo whose plan misses a target its source has applied since the planning would
+   *    finish, report the source undone, and leave that target written (`undo_stale`).
+   * A previewed undo blocks nothing: it writes nothing until it is approved, and an undo
+   * that is never approved must not hold its source still.
+   */
+  private writeBlocked(run: RunRow): UndoRefusal | null {
+    if (this.openUndo(run.id, null)) return 'undo_open';
+    if (run.kind !== 'undo' || run.source_run_id === null) return null;
+    const src = this.runRow(run.source_run_id);
+    if (!src) return null;
+    // `undone`: everything the source wrote is taken back, and it writes nothing more.
+    if (!isStopped(src) && src.phase !== 'undone') return 'source_running';
+    if (this.openUndo(src.id, run.id)) return 'undo_open';
+    const missing = this.engineDb.getDb().prepare(
+      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
+         AND seq NOT IN (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND source_seq IS NOT NULL)`,
+    ).get(src.id, run.id) as { n: number };
+    return missing.n > 0 ? 'undo_stale' : null;
+  }
+
+  /** Whether an undo of `sourceRunId`, other than `exceptRunId`, is approved or writing. */
+  private openUndo(sourceRunId: string, exceptRunId: string | null): boolean {
+    return this.engineDb.getDb().prepare(
+      `SELECT 1 FROM bulk_runs WHERE kind = 'undo' AND source_run_id = ? AND phase IN ('approved','writing') AND id IS NOT ? LIMIT 1`,
+    ).get(sourceRunId, exceptRunId) !== undefined;
   }
 
   /**
@@ -803,11 +863,12 @@ export class BulkLedger {
    * shown, not overwritten. An undo of an undo is the same mechanism.
    */
   planUndo(sourceRunId: string, params: { createdBy?: string | undefined } = {}):
-    { ok: true; status: BulkRunStatus } | { ok: false; reason: 'not_found' | 'not_undoable' | 'nothing_to_undo' | 'atomic_partial' } {
+    { ok: true; status: BulkRunStatus } | { ok: false; reason: 'not_found' | 'not_undoable' | 'nothing_to_undo' | 'atomic_partial' | 'undo_open' } {
     const src = this.runRow(sourceRunId);
     if (!src) return { ok: false, reason: 'not_found' };
-    const stopped = src.phase === 'done' || src.phase === 'aborted' || (src.phase === 'writing' && src.halt_reason !== null);
-    if (!stopped) return { ok: false, reason: 'not_undoable' };
+    if (!isStopped(src)) return { ok: false, reason: 'not_undoable' };
+    // A second undo beside one that will write, or is writing, would take the same targets back twice.
+    if (this.openUndo(sourceRunId, null)) return { ok: false, reason: 'undo_open' };
     const db = this.engineDb.getDb();
     if (src.atomic === 1) {
       // Form B's rule (PRD §2.2): an atomic run is taken back whole or not at all.
@@ -819,7 +880,7 @@ export class BulkLedger {
     }
     const rows = db.prepare(
       `SELECT seq, target_key, change, before, after_planned, after_actual FROM bulk_targets
-       WHERE run_id = ? AND applied_at IS NOT NULL AND undone_at IS NULL AND change IN ${WRITING_CHANGES}
+       WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
        ORDER BY seq DESC`,
     ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null }[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };

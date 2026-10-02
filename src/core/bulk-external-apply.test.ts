@@ -48,6 +48,8 @@ interface Shop {
   special: Map<string, { status: number; headers?: Record<string, string> }>;
   /** A PUT that replaces the resource with the body — the failure the probe is for. */
   replacingPut?: boolean;
+  /** Paths whose write is applied and then answered 502: it landed, the answer says it failed. */
+  landThenFail?: Set<string>;
 }
 
 /** A price as the shop stores it: always two decimals. */
@@ -79,6 +81,7 @@ function serve(s: Shop): () => void {
     if (input.method === 'PATCH' || input.method === 'PUT' || input.method === 'POST') {
       for (const [k, v] of Object.entries(body as Record<string, unknown>)) item[k] = normalise(v);
       item['updated_at'] = `t${String(++clock)}`;
+      if (s.landThenFail?.has(path)) return new Response(null, { status: 502 });
       return new Response(null, { status: 204 });
     }
     if (input.method !== 'GET') return new Response(null, { status: 405 });
@@ -207,6 +210,52 @@ describe('applying an external run', () => {
       expect(s.items.get('/products/1')!['price']).toBe('21.00');
       expect(ledger.getStatus(undo.status.id)).toMatchObject({ applied: 1, conflicts: 1 });
       expect(s.items.get('/products/0')!['title']).toBe('Item 0');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write that landed although its answer said it failed is part of the undo, and is taken back', async () => {
+    const s = shop();
+    s.landThenFail = new Set(['/products/1']);
+    const restore = serve(s);
+    try {
+      // Values the shop keeps as sent, so what the host holds is exactly what was planned.
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, failed: 1 });
+      expect(s.items.get('/products/1')!['price']).toBe('20.00');
+
+      s.landThenFail.clear();
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status.total).toBe(2);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('done');
+      expect(s.items.get('/products/0')!['price']).toBe('12.00');
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
+      expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a failed write that never landed is found unchanged by the undo and left alone', async () => {
+    const s = shop();
+    s.special.set('PATCH /products/1', { status: 502 });
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20.00' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      s.special.clear();
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      s.requests.length = 0;
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter })).status).toBe('done');
+      // Target 1 already holds its before-state: read, not written.
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
     } finally {
       restore();
     }
