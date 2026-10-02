@@ -466,18 +466,14 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
 
 /** The whole trigger block, filters included. Presence of a key proves nothing. */
 const PINNED_TRIGGERS: Readonly<Record<string, unknown>> = {
+  // 2026-10-02: `paths-ignore` removed on both events (the docs-only stub workflow is gone and
+  // ci.yml decides docs-only itself in a `detect` job). That WIDENS when this gate runs: it now
+  // runs on docs-only changes too; nothing narrows it.
   "ci.yml": {
-    "pull_request": {
-      "paths-ignore": [
-        "docs/**"
-      ]
-    },
+    "pull_request": null,
     "push": {
       "branches": [
         "main"
-      ],
-      "paths-ignore": [
-        "docs/**"
       ]
     }
   },

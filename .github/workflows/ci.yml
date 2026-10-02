@@ -3,9 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ['docs/**']
   pull_request:
-    paths-ignore: ['docs/**']
+# No `paths-ignore` here, on purpose. It used to skip this whole workflow for docs-only changes,
+# and a separate stub workflow (also named `CI`) re-emitted the required job names for them. On a
+# MIXED pull request both workflows started, so every required name was reported twice — once for
+# real, once as a stub job skipped by its condition, which GitHub counts as success — in no
+# guaranteed order. One workflow now decides once, in `detect`, and every required name has
+# exactly one run per head.
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -15,6 +19,33 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
+  # Decides ONCE whether this change is docs-only; the required jobs below read its answer.
+  # Not a required check itself.
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      docs-only: ${{ steps.check.outputs.docs-only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+      - id: check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # ONE call; its answer goes to the output and, with the verdict, to the log and summary —
+          # a skipped required job carries no log of its own, so this is where "docs-only, core
+          # step not run" is readable.
+          bash scripts/ci-docs-only.sh "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/docs-only.out" 2> "$RUNNER_TEMP/docs-only.why"
+          cat "$RUNNER_TEMP/docs-only.out" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/docs-only.out" "$RUNNER_TEMP/docs-only.why"
+          { echo "### detect"; cat "$RUNNER_TEMP/docs-only.out" "$RUNNER_TEMP/docs-only.why"; } >> "$GITHUB_STEP_SUMMARY"
+
+  # gitleaks runs on EVERY change, docs-only included: a secret pasted into a .md file is one of
+  # the likelier ways this public repo would leak one.
   gitleaks:
     runs-on: ubuntu-latest
     steps:
@@ -28,6 +59,8 @@ jobs:
       - name: Run gitleaks
         run: gitleaks detect --source . --verbose --redact
 
+  # `test` runs on docs-only changes too; it carries the osv gate, which may not be conditional
+  # (tests/osv-workflow-pin.test.ts). Do not gate it on detect.
   test:
     runs-on: ubuntu-latest
     # Scoped because this job downloads a third-party executable and runs it
@@ -88,6 +121,11 @@ jobs:
         run: node --input-type=module -e "import{readFileSync}from'node:fs';const r=JSON.parse(readFileSync('./coverage/coverage-summary.json','utf8')).total;const p=r.lines.pct;console.log('Line coverage '+p+'%');if(p<65)process.exit(1)"
 
   docker-scan:
+    needs: detect
+    # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
+    # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
+    # `needs` would turn a broken `detect` into three green required checks.
+    if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,6 +150,11 @@ jobs:
   # `test` so coverage data stays single-source and a flaky mail-server boot
   # doesn't taint the main coverage gate.
   greenmail:
+    needs: detect
+    # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
+    # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
+    # `needs` would turn a broken `detect` into three green required checks.
+    if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -155,6 +198,11 @@ jobs:
   # scripts/smoke-local.sh (which happened in May 2026: the inbox-phase2
   # APIRequestContext cookie regression silently shipped via PR #283).
   smoke:
+    needs: detect
+    # Skipped only on a docs-only change. If `detect` itself fails, this still runs: GitHub reports
+    # a job that is skipped because a job it needs FAILED as not blocking the merge, so a plain
+    # `needs` would turn a broken `detect` into three green required checks.
+    if: ${{ !cancelled() && (needs.detect.result != 'success' || needs.detect.outputs.docs-only != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
