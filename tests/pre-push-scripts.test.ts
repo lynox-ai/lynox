@@ -147,7 +147,12 @@ describe('the customer-name class runs where lefthook skips commands', () => {
  * and -files hooks used to take `merge-base origin/main HEAD`..HEAD, so a push of a branch you are
  * not standing on scanned nothing of it — and that form let a clone without origin/main through on
  * an empty range. Each case below is reachable by exactly ONE hook (a name in a message, a name in a
- * file, an id in an added line), so removing the shared range from any one hook fails its own case.
+ * file, an id in an added line), so replacing the shared range in any one hook fails its own case.
+ *
+ * That shows each hook SCANS the pushed ref. It cannot show that each hook passes a REFUSAL on: a
+ * push is refused when ANY hook refuses, so a push-level test is met by the other two hooks too. A
+ * claim about every hook needs one assertion per hook — the per-hook block further down runs each
+ * hook on its own.
  */
 describe('every range hook scans the pushed ref, not the checked-out HEAD', () => {
   const hits: Record<(typeof RANGE_HOOKS)[number], { make: (c: ReturnType<typeof setup>) => void; says: RegExp }> = {
@@ -202,6 +207,106 @@ describe('every range hook scans the pushed ref, not the checked-out HEAD', () =
       expect(code, hook).not.toMatch(/merge-base/);
     }
   });
+});
+
+/**
+ * Each hook run ON ITS OWN, with the stdin git would hand it. One assertion per hook, because "the
+ * push is refused" holds as long as any one of them refuses (see the block above).
+ */
+describe('every range hook passes each refusal of pushed-ranges.sh on, by itself', () => {
+  const ZERO = '0'.repeat(40);
+  const runHook = (c: ReturnType<typeof setup>, hook: string, input: string | null) => {
+    const path = join('.lefthook/pre-push', hook);
+    // input null = stdin that opens but cannot be READ (a directory: EISDIR), the read error the
+    // refusal exists for. Not a closed fd 0: the hook's own command-substitution pipe would take
+    // fd 0 and `cat` would wait on it forever. An empty input reads /dev/null — spawnSync leaves a
+    // pipe open for `input: ''`, and the hook would wait on that too.
+    const r = input === null
+      ? spawnSync('bash', ['-c', 'exec bash "$0" < /', path], { cwd: c.work, encoding: 'utf8', env: c.env, timeout: T })
+      : input === ''
+        ? spawnSync('bash', [path], { cwd: c.work, encoding: 'utf8', env: c.env, stdio: ['ignore', 'pipe', 'pipe'] })
+        : spawnSync('bash', [path], { cwd: c.work, encoding: 'utf8', env: c.env, input });
+    return { status: r.status, err: r.stderr };
+  };
+  const label = (hook: string) => hook.replace(/\.sh$/, '');
+
+  for (const hook of RANGE_HOOKS) {
+    it(`${hook}: a new ref with no origin/main → exit 2, naming the fetch`, () => {
+      const c = setup();
+      c.git('update-ref', '-d', 'refs/remotes/origin/main');
+      const tip = c.git('rev-parse', 'HEAD').stdout.trim();
+      const r = runHook(c, hook, `refs/heads/feat/x ${tip} refs/heads/feat/x ${ZERO}\n`);
+      expect(r.status, r.err).toBe(2);
+      expect(r.err).toContain(`${label(hook)}: there is no origin/main`);
+      expect(r.err).toContain(FETCH);
+    }, T);
+
+    it(`${hook}: stdin that cannot be read → exit 2`, () => {
+      const c = setup();
+      const r = runHook(c, hook, null);
+      expect(r.status, r.err).toBe(2);
+      expect(r.err).toContain(`${label(hook)}: could not read the refs`);
+    }, T);
+
+    it(`${hook}: a line that is not a ref line → exit 2`, () => {
+      const c = setup();
+      const r = runHook(c, hook, 'refs/heads/feat/x not-a-sha\n');
+      expect(r.status, r.err).toBe(2);
+      expect(r.err).toContain(`${label(hook)}: not a pre-push ref line`);
+    }, T);
+
+    it(`${hook}: POSITIVE CONTROL: stdin read and empty (nothing to push) → exit 0, says nothing scanned`, () => {
+      const c = setup();
+      c.git('update-ref', '-d', 'refs/remotes/origin/main');
+      const r = runHook(c, hook, '');
+      expect(r.status, r.err).toBe(0);
+      expect(r.err).toContain(`${label(hook)}: no ref is pushed`);
+    }, T);
+  }
+});
+
+describe('a push with nothing to do scans nothing, even without origin/main', () => {
+  it('an up-to-date push of main lands while the checked-out branch carries an unpushed hit', () => {
+    const c = setup();
+    writeFileSync(join(c.work, 'notes.md'), `call ${NAME} back, see ${ID}\n`);
+    c.git('add', 'notes.md');
+    c.git('commit', '-q', '-m', `Note for ${NAME}`);
+    c.git('remote', 'set-head', 'origin', '--delete');
+    c.git('update-ref', '-d', 'refs/remotes/origin/main');
+    const r = spawnSync('git', ['push', 'origin', 'main'], { cwd: c.work, encoding: 'utf8', env: c.env });
+    expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+    expect(r.stderr).toMatch(/Everything up-to-date/);
+  }, T);
+});
+
+describe('a ref the remote has at a sha this clone lacks, with no origin/main', () => {
+  it('is refused naming the fetch of THAT ref → run exactly that command → the same force-push lands', () => {
+    const c = setup();
+    // Someone else pushes feat/x; this clone never fetches it.
+    const other = join(c.work, '..', 'other');
+    spawnSync('git', ['clone', '-q', join(c.work, '..', 'remote.git'), other], { encoding: 'utf8', env: c.env });
+    spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'theirs'], { cwd: other, env: c.env });
+    // `other` never ran `lefthook install`, so it has no hooks to run.
+    expect(existsSync(join(other, '.git/hooks/pre-push'))).toBe(false);
+    const theirs = spawnSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/feat/x'], { cwd: other, encoding: 'utf8', env: c.env });
+    expect(theirs.status, theirs.stderr).toBe(0);
+    writeFileSync(join(c.work, 'notes.md'), 'call back\n');
+    c.git('add', 'notes.md');
+    c.git('commit', '-q', '-m', 'Add notes');
+    c.git('remote', 'set-head', 'origin', '--delete');
+    c.git('update-ref', '-d', 'refs/remotes/origin/main');
+    const force = () => spawnSync('git', ['push', '--force', 'origin', 'feat/x'], { cwd: c.work, encoding: 'utf8', env: c.env });
+    const first = force();
+    expect(first.status, first.stderr).not.toBe(0);
+    expect(first.stderr).toContain('the remote has refs/heads/feat/x at');
+    expect(first.stderr).not.toContain('measure a new branch');
+    const named = /Fetch it, then push again:\s+(git fetch [^\n]+)/.exec(first.stderr)?.[1]?.trim();
+    expect(named).toBe('git fetch origin refs/heads/feat/x');
+    const fetched = spawnSync(named!.split(' ')[0]!, named!.split(' ').slice(1), { cwd: c.work, encoding: 'utf8', env: c.env });
+    expect(fetched.status, fetched.stderr).toBe(0);
+    const second = force();
+    expect(second.status, second.stderr).toBe(0);
+  }, T);
 });
 
 describe('a push that only deletes a ref transfers nothing, so it scans nothing', () => {
