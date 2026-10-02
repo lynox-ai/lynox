@@ -99,7 +99,15 @@ function entryFor(file: string, failing: Set<string>): { name: string; assertion
   return { name: resolve(file), assertionResults: casesOf(readFileSync(file, 'utf-8'), failing) };
 }
 
-/** `failing` names leaf titles the runner reports as `failed` — the status the old fake could not emit. */
+/**
+ * `failing` names leaf titles the runner reports as `failed` — the status the old fake could not emit.
+ *
+ * ⛔ `ok: true` IS A LIE FOR ONE INPUT, and it is the lie that hid a defect through five rounds.
+ * Real vitest exits NON-ZERO whenever a file declares no cases at all, so a measurement with
+ * `declared: 0` and `ok: true` does not exist outside this file. Every fixture that relies on it is
+ * testing a third state — see the marked test below. A fake may be wrong in harmless ways; it must
+ * not be wrong where the subject is wrong, and this one was, in every round.
+ */
 const makeMeasure = (failing: Set<string> = new Set()) => (files: string[]): Measurement => ({
   ok: true,
   out: '',
@@ -250,6 +258,23 @@ describe('deleted-assertion-guard', () => {
     expect(r.findings[0].headRunning).toBe(1);
   });
 
+  // ⛔⛔ THIS TEST CERTIFIES A STATE THE REAL RUNNER DOES NOT PRODUCE. DO NOT READ IT AS COVERAGE.
+  //
+  // In production this case is NOT reported. `check` reaches the collection-failure skip at the
+  // `declared === 0 && !headRun.ok` branch, and that conjunct is VACUOUS: measured against real
+  // vitest, a test file emptied of every case (`export {}`, `export const x = 1`, or a `describe`
+  // with no `it`) gives **exit 1, parsable JSON, one entry, `declared: 0`, `status: "failed"`** in
+  // all three shapes. So `declared === 0` always implies `!ok`, the branch always wins, and the
+  // report path below is dead code — the guard goes silent precisely as the deletion becomes total:
+  // deleting the FILE is reported, emptying it is not.
+  //
+  // This test passes only because `makeMeasure` hardcodes `ok: true`, and `ok: true` with
+  // `declared: 0` is a combination reality never hands over. The fixture is a third state.
+  //
+  // ⚠ The repair is NOT to weaken the branch: the JSON carries the per-file `status` and `message`
+  // that tell an emptied file from a collection failure, so the discriminator should read those
+  // instead of a WHOLE-RUN exit code. Until it does, this test's title is a promise the code does
+  // not keep. The parked state and the named repairs are recorded in the project's internal backlog.
   it('a file emptied of ALL its cases is reported — 0 declared is a statement about the diff', () => {
     const base = commit({ 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': 'it("a", () => {});\nit("b", () => {});\n' }, 'base');
     const head = commit({ 'src/a.test.ts': 'export const nothing = 1;\n' }, 'remove every case, keep the file');

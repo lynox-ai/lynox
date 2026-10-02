@@ -416,6 +416,20 @@ export function check({ base, head, measure, listFiles, headCommit = null, log =
         skipped.push([file, `the head version declares ${String(h.declared)} case(s) and ran none of them, so this file cannot be judged (gated, or a precondition failed)`]);
         continue;
       }
+      // ⛔⛔ THIS CONJUNCT IS VACUOUS AND IT MAKES THE REPORT PATH BELOW DEAD CODE. Measured against
+      // real vitest: a file emptied of every case gives exit 1 with parsable JSON, one entry,
+      // `declared: 0` and `status: "failed"` — in all three shapes (`export {}`, a value export, a
+      // `describe` with no `it`). So `declared === 0` always implies `!headRun.ok`, this branch always
+      // wins, and the guard is SILENT exactly when the deletion is total: deleting the file is
+      // reported, emptying it is not. The test that claims otherwise passes only on a fixture whose
+      // `ok: true` reality never produces.
+      //
+      // ⚠ The repair is to read the per-file `status`/`message` the JSON already carries instead of a
+      // WHOLE-RUN exit code — which also removes a coupling, since a candidate's verdict currently
+      // depends on every other file in the same invocation. Registered as
+      // Left standing rather than half-fixed, because this branch is parked: the repair is written
+      // down with the rest of them in the project's internal backlog, which is where the decision to
+      // park lives.
       if (h && h.declared === 0 && !headRun.ok && existsSync(file)) {
         // ⚠ `declared === 0` has a THIRD cause the earlier comment denied: the runner could not
         // COLLECT the file — a broken import, a syntax error, or a file that declares a suite with no
