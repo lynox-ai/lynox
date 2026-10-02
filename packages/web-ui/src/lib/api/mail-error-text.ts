@@ -60,6 +60,8 @@ export function friendlyMailError(
 			return 'Login failed — check your email address and app-password. If you enabled 2FA, make sure you generated a provider-specific app-password (not your account password).';
 		case 'tls_failed':
 			return "The server's certificate couldn't be verified. If this is a custom server with self-signed TLS, contact your admin.";
+		case 'starttls_unavailable':
+			return "The mail server doesn't offer STARTTLS, so the connection was refused rather than sending your login unencrypted. Turn on TLS for this account (usually port 993) if the server supports it, or ask your mail provider.";
 		case 'connection_failed':
 			return "Couldn't reach the mail server. Check the hostname and that the IMAP port is open on your network.";
 		case 'timeout':

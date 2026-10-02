@@ -434,6 +434,7 @@ export type MailErrorCode =
   | 'auth_failed'
   | 'connection_failed'
   | 'tls_failed'
+  | 'starttls_unavailable'
   | 'not_found'
   | 'send_rejected'
   | 'rate_limited'
