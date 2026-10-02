@@ -243,6 +243,95 @@ export function requiredGates(files) {
 }
 
 /**
+ * roundResultErrors — the RESULT half of a round field, as a pure function.
+ *
+ * WHY IT IS ITS OWN FUNCTION. `review:` was the first field to demand what a round FOUND, and
+ * the `security` gate is getting the same demand. The two differ in their HEAD —
+ * `<n> <model> round(s)` against an origin vocabulary — and agree completely on their TAIL:
+ * `no findings`, or `<N> findings` followed by `all fixed` or counts that sum to N. Copying
+ * that tail would produce two grammars that drift, and the copy nobody tests is the one that
+ * drifts first. Naming it once means the mutants that witness it keep witnessing it for every
+ * caller, instead of witnessing one caller's copy of it.
+ *
+ * `quoted` is what a message should cite — e.g. `review: 1 opus round, 2 findings` — so the
+ * error names the field the author actually wrote rather than this function's idea of it.
+ *
+ * ⚠ PURE on purpose: strings in, messages out, nothing touched. That is what makes it testable
+ * DIRECTLY instead of through a caller, and the difference is not cosmetic — a test that drives
+ * it through `evaluate` witnesses one caller's WIRING, not the grammar. Both assertions are
+ * worth having and they are not the same one, so the tests carry both.
+ */
+export function roundResultErrors(result, quoted) {
+  // ⛔ Loud about a missing `quoted`, and that is the point of the check rather than a formality:
+  // without it the three interpolating messages read `\`undefined\` — the result must read …`,
+  // which is plausible enough to ship and names no field at all. The whole reason this function
+  // takes the citation as an argument is that a SECOND caller is coming; the failure mode of
+  // forgetting it is a message that looks right, so it has to be the failure mode that shouts.
+  if (typeof quoted !== 'string' || quoted === '') {
+    throw new TypeError('roundResultErrors needs `quoted`: the field text a message should cite.');
+  }
+  const errors = [];
+  if (/^no\s+findings$/i.test(result)) {
+    // Nothing to reconcile.
+  } else if (/^0\s+findings\b/i.test(result)) {
+    // One canonical spelling, or a synonym list grows and the field stops being checkable.
+    errors.push('write `no findings` rather than `0 findings` — one spelling, so this stays checkable.');
+  } else {
+    const head = /^(\d+)\s+findings?\s*,\s*(.+)$/i.exec(result);
+    if (!head) {
+      errors.push(
+        `\`${quoted}\` — the result must read \`no findings\` or \`<N> findings, <breakdown>\`,`,
+        'where the breakdown is `all fixed` or counts that sum to N: `3 fixed`, `2 fixed, 1 filed`,',
+        '`3 fixed, 1 filed, 1 refuted`. A finding is fixed here, filed as a row, or refuted on inspection.',
+      );
+    } else {
+      const total = Number(head[1]);
+      const breakdown = head[2].trim();
+      // ⚠ No `total < 1` branch here, and that is measured rather than an oversight: the
+      // `0 findings` check above matches `0 findings, …` too, so every N = 0 shape is already
+      // answered with the one hint that is right for it ("write `no findings`"). A guard that
+      // cannot fire is a reader's false confidence — and worse here, because it would look
+      // like the arithmetic covered a case the spelling check already owns.
+      if (/^all\s+fixed$/i.test(breakdown)) {
+        // `all` needs no arithmetic; it means N.
+      } else {
+        // ⭐ The arithmetic is the point: a field that only has to LOOK right is a form, a
+        // field whose numbers must add up is a claim somebody can be wrong about. Both
+        // directions are errors — under-counting hides a finding nobody accounted for, and
+        // over-counting means the same finding was counted twice.
+        const KINDS = ['fixed', 'filed', 'refuted'];
+        const parts = breakdown.split(',').map((x) => x.trim()).filter(Boolean);
+        const seen = new Map();
+        let bad = null;
+        for (const part of parts) {
+          const pm = /^(\d+)\s+([a-z]+)$/i.exec(part);
+          if (!pm || !KINDS.includes(pm[2].toLowerCase())) { bad = part; break; }
+          const kind = pm[2].toLowerCase();
+          if (seen.has(kind)) { bad = part; break; }
+          seen.set(kind, Number(pm[1]));
+        }
+        if (bad !== null) {
+          errors.push(
+            `\`${quoted}\` — \`${bad}\` is not \`<n> fixed|filed|refuted\`, or repeats a kind.`,
+            'A finding is fixed in this diff, filed as a register row, or refuted on inspection.',
+          );
+        } else {
+          const sum = [...seen.values()].reduce((a, b) => a + b, 0);
+          if (sum !== total) {
+            errors.push(
+              `\`${quoted}\` does not add up — the breakdown sums to ${String(sum)}, not ${String(total)}.`,
+              'Every finding is fixed here, filed as a register row, or refuted on inspection;',
+              `${sum < total ? 'a missing one is a finding nobody accounted for' : 'an extra one means a finding was counted twice'}.`,
+            );
+          }
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+/**
  * The whole verdict, as data. Kept pure so the tests drive THIS rather than a
  * shell wrapper around it — a guard whose logic is only reachable through
  * `process.exit` is a guard nobody can characterise.
@@ -496,63 +585,7 @@ export function evaluate({ body, head, files, author }) {
         errors.push(`\`review: ${raw}\` claims ${m[1]} rounds — a gate with no round is the omission this field exists for.`);
       } else {
         const result = m[3].trim();
-        if (/^no\s+findings$/i.test(result)) {
-          // Nothing to reconcile.
-        } else if (/^0\s+findings\b/i.test(result)) {
-          // One canonical spelling, or a synonym list grows and the field stops being checkable.
-          errors.push('write `no findings` rather than `0 findings` — one spelling, so this stays checkable.');
-        } else {
-          const head = /^(\d+)\s+findings?\s*,\s*(.+)$/i.exec(result);
-          if (!head) {
-            errors.push(
-              `\`review: ${raw}\` — the result must read \`no findings\` or \`<N> findings, <breakdown>\`,`,
-              'where the breakdown is `all fixed` or counts that sum to N: `3 fixed`, `2 fixed, 1 filed`,',
-              '`3 fixed, 1 filed, 1 refuted`. A finding is fixed here, filed as a row, or refuted on inspection.',
-            );
-          } else {
-            const total = Number(head[1]);
-            const breakdown = head[2].trim();
-            // ⚠ No `total < 1` branch here, and that is measured rather than an oversight: the
-            // `0 findings` check above matches `0 findings, …` too, so every N = 0 shape is already
-            // answered with the one hint that is right for it ("write `no findings`"). A guard that
-            // cannot fire is a reader's false confidence — and worse here, because it would look
-            // like the arithmetic covered a case the spelling check already owns.
-            if (/^all\s+fixed$/i.test(breakdown)) {
-              // `all` needs no arithmetic; it means N.
-            } else {
-              // ⭐ The arithmetic is the point: a field that only has to LOOK right is a form, a
-              // field whose numbers must add up is a claim somebody can be wrong about. Both
-              // directions are errors — under-counting hides a finding nobody accounted for, and
-              // over-counting means the same finding was counted twice.
-              const KINDS = ['fixed', 'filed', 'refuted'];
-              const parts = breakdown.split(',').map((x) => x.trim()).filter(Boolean);
-              const seen = new Map();
-              let bad = null;
-              for (const part of parts) {
-                const pm = /^(\d+)\s+([a-z]+)$/i.exec(part);
-                if (!pm || !KINDS.includes(pm[2].toLowerCase())) { bad = part; break; }
-                const kind = pm[2].toLowerCase();
-                if (seen.has(kind)) { bad = part; break; }
-                seen.set(kind, Number(pm[1]));
-              }
-              if (bad !== null) {
-                errors.push(
-                  `\`review: ${raw}\` — \`${bad}\` is not \`<n> fixed|filed|refuted\`, or repeats a kind.`,
-                  'A finding is fixed in this diff, filed as a register row, or refuted on inspection.',
-                );
-              } else {
-                const sum = [...seen.values()].reduce((a, b) => a + b, 0);
-                if (sum !== total) {
-                  errors.push(
-                    `\`review: ${raw}\` does not add up — the breakdown sums to ${String(sum)}, not ${String(total)}.`,
-                    'Every finding is fixed here, filed as a register row, or refuted on inspection;',
-                    `${sum < total ? 'a missing one is a finding nobody accounted for' : 'an extra one means a finding was counted twice'}.`,
-                  );
-                }
-              }
-            }
-          }
-        }
+        errors.push(...roundResultErrors(result, `review: ${raw}`));
       }
     }
   }
