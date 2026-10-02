@@ -43,6 +43,13 @@
     // Only these two files, not the whole directory — the rest of `tests/eval` was never in
     // a project and dragging it in is a different job.
     "tests/eval/probe-freshness.test.ts",
-    "tests/eval/probe-freshness-members.test.ts"],
+    "tests/eval/probe-freshness-members.test.ts",
+    // The suite's temp-root redirect, which `vitest.config.ts` loads as `globalSetup`. It was in
+    // no tsc project at all: the main config pins `rootDir: "src"`, so a file under `scripts/`
+    // cannot be added there, and the PR that introduced it said "typecheck clean" — true, and
+    // covering everything except this file. A type error in it fails the whole suite at startup,
+    // which is the worst place to find one. Its TEST stays out, per the rule that assertions in
+    // `*.test.ts` are not typecheck surface.
+    "scripts/test-run-tmpdir.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

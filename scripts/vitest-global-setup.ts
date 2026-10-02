@@ -17,13 +17,23 @@ export default function setup(): () => void {
   const runRoot = redirectTmpdirForRun();
 
   return () => {
-    const { entries, removed } = summariseRunRoot(runRoot);
+    const outcome = summariseRunRoot(runRoot);
     // Printed, because a number nobody sees is not a measurement: this is how many directories
     // the suite left behind, and it is meant to go DOWN as fixtures are fixed at the source.
-    // `removed: false` is the case worth seeing — the root outlived the run.
     console.error(
-      `test temp root: ${String(entries)} entr${entries === 1 ? 'y' : 'ies'} left behind` +
-        (removed ? '' : ` — AND THE ROOT SURVIVED at ${runRoot}`),
+      `test temp root (${outcome.state}): ${String(outcome.entries)} ` +
+        `entr${outcome.entries === 1 ? 'y' : 'ies'} left behind`,
     );
+    // ⛔ And `failed` THROWS, which fails the run — measured: a throw here does reach the exit
+    // code. The first version only PRINTED "AND THE ROOT SURVIVED", which made this file a claim
+    // rather than a mechanism: the one state in which the redirect has not stopped the leak would
+    // be the one state nothing acts on. `absent` deliberately does not throw — a root that is
+    // already gone leaks nothing.
+    if (outcome.state === 'failed') {
+      throw new Error(
+        `test temp root survived at ${runRoot} — it could not be removed (${outcome.reason}). ` +
+          `Every entry under it is now leaked into the shared temp directory.`,
+      );
+    }
   };
 }
