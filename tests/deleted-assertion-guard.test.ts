@@ -806,6 +806,72 @@ describe('deleted-assertion-guard', () => {
     expect(readFileSync(join(repo, 'src/a.test.ts'), 'utf-8')).toBe(headBody);
   });
 
+  it('a GATED control is a note, not a broken instrument — the permanently-red direction', () => {
+    // ⛔ 21 files here gate their whole suite. A control picked off the roster could be one of them: it
+    // runs no case, and treating that as ill health would turn the job red on EVERY pull request,
+    // forever, blaming the toolchain. A control whose cases exist and did not run is a gated file.
+    const base = commit(
+      {
+        'src/a.ts': SRC,
+        'src/gatedcontrol.test.ts': "describe.skip('gated suite', () => {\n  it('never runs', () => {});\n});\n",
+        'src/a.test.ts': "it('a', () => {});\nit('b', () => {});\n",
+      },
+      'base',
+    );
+    const head = commit({ 'src/a.test.ts': "it('a', () => {});\n" }, 'drop one');
+
+    const r = run(base, head);
+    // The verdict still lands; it is simply unverified, and the log says so rather than condemning.
+    expect(r.status).toBe(1);
+    expect(r.reason).toBe('checked');
+    expect(r.findings[0].lost).toEqual(['b']);
+  });
+
+  it('the base run carries a control too — it is the run that executes rewritten files', () => {
+    const base = commit({ 'src/a.ts': SRC, ...CONTROL, 'src/a.test.ts': "it('a', () => {});\nit('b', () => {});\n" }, 'base');
+    const head = commit({ 'src/a.test.ts': "it('a', () => {});\n" }, 'drop one');
+    // A runner that is healthy for the HEAD run and dead for the BASE run must be caught: for two
+    // rounds only the head side had a control, and the base side is the likelier one to collapse.
+    let call = 0;
+    const deadOnBase = (files: string[]): Measurement => {
+      call += 1;
+      if (call === 1) return measuring(files);
+      return { ok: false, out: 'Error: Failed to load PostCSS config', json: { testResults: files.filter((f) => existsSync(f)).map((f) => ({ name: resolve(f), assertionResults: [] })) } };
+    };
+
+    const r = check({ base, head, measure: deadOnBase, listFiles: listsEverything, log: () => {} });
+    expect(r.status).toBe(2);
+    expect(r.reason).toBe('runner-unhealthy');
+    expect(r.canary).toContain('base');
+  });
+
+  it('a gated FIRST control does not cost the run its verification — a later one is used', () => {
+    // ⚠ What the widening to three controls actually buys, and a mutation round is why this test
+    // exists: with one control the mutant `slice(0, 1)` survived, because no fixture had a second
+    // non-candidate. The widening is NOT what prevents the permanently-red failure — the
+    // "gated is a note" branch does that, and either alone suffices for safety. What three controls
+    // buy is a VERIFIED run where one control happens to be gated, which is the common case here:
+    // 21 files gate their whole suite.
+    const base = commit(
+      {
+        'src/a.ts': SRC,
+        'src/aaa-gated.test.ts': "describe.skip('gated', () => {\n  it('never runs', () => {});\n});\n",
+        'src/bbb-healthy.test.ts': "it('control holds', () => {});\n",
+        'src/zzz-candidate.test.ts': "it('a', () => {});\nit('b', () => {});\n",
+      },
+      'base',
+    );
+    const head = commit({ 'src/zzz-candidate.test.ts': "it('a', () => {});\n" }, 'drop one');
+    const said: string[] = [];
+
+    const r = check({ base, head, measure: measuring, listFiles: listsEverything, log: (l) => said.push(l) });
+    expect(r.findings[0].lost).toEqual(['b']);
+    // ⛔ With only the gated control in hand the run proceeds UNVERIFIED and says so. With the later
+    // healthy one it is verified, and that difference is the whole point of looking past the first.
+    expect(said.join('\n')).toContain('src/bbb-healthy.test.ts');
+    expect(said.join('\n')).not.toContain('every control file is gated');
+  });
+
   it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {
     commit({ 'src/a.ts': SRC }, 'base');
     expect(() => mergeBase('deadbeefdeadbeef', 'cafebabecafebabe')).toThrow();
