@@ -1346,6 +1346,15 @@ describe('isDangerous', () => {
       expect(result).toContain('write operation');
     });
 
+    it('BLOCKS an http_request verb the guard does not list, in autonomous mode', () => {
+      // The reads are enumerated in this branch, so a verb nobody listed is warned rather
+      // than waved through. Unreachable through the validated dispatch today — this pins
+      // the DIRECTION, not a product path, and it is the witness for that one line.
+      const result = isDangerous('http_request', { method: 'MOVE', url: 'https://api.example.com/x' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('write operation');
+    });
+
     it('BLOCKS http_request PATCH in autonomous mode (write operation)', () => {
       const result = isDangerous('http_request', { method: 'PATCH', url: 'https://api.example.com/item/1' }, 'autonomous');
       expect(result).not.toBeNull();

@@ -31,8 +31,9 @@ export interface ParamConstraint {
 /**
  * Capability contract for a saved workflow — the explicit, human-confirmed grant
  * that authorises a headless (`autonomous`) run to perform the outbound writes
- * the default autonomous posture otherwise denies (http POST/PUT/PATCH; see
- * `permission-guard.ts`). Stored on the `PlannedPipeline` JSON blob (PRD §8.1),
+ * the default autonomous posture otherwise denies (http writes — the guard denies
+ * every method but GET and HEAD; see `permission-guard.ts`). Stored on the
+ * `PlannedPipeline` JSON blob (PRD §8.1),
  * declared at save, confirmed once by a human at promote-to-cron (Slice B2).
  *
  * **Additive grant, never a lift of a `[BLOCKED]` critical.** A present contract
