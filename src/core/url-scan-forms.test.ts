@@ -6,6 +6,10 @@ describe('urlScanForms', () => {
     expect(urlScanForms('https://h.example/a/b?q=1')).toEqual(['https://h.example/a/b?q=1']);
   });
 
+  it('decodes a run as UTF-8 when it is valid UTF-8', () => {
+    expect(urlScanForms('https://h.example/caf%C3%A9')).toEqual(['https://h.example/caf%C3%A9', 'https://h.example/caf\u00e9']);
+  });
+
   it('adds the decoded form when the URL carries percent-encoding', () => {
     expect(urlScanForms('https://h.example/a%2Db?q=%41')).toEqual(['https://h.example/a%2Db?q=%41', 'https://h.example/a-b?q=A']);
   });

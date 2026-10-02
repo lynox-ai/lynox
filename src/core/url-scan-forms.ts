@@ -4,8 +4,9 @@
  *
  * - One round, by decision: a receiving server typically decodes once. A value encoded twice
  *   (`%252D`) is read here as its once-decoded form (`%2D`) and not further.
- * - Decoded leniently: each run of well-formed `%XX` is decoded on its own, and anything else —
- *   a stray `%`, a sequence that is not valid UTF-8 — stays as written. A strict decode of the
+ * - Decoded leniently: each run of well-formed `%XX` is decoded on its own — as UTF-8, or byte
+ *   by byte when the run is not valid UTF-8, so its ASCII still comes out — and a stray `%`
+ *   stays as written. A strict decode of the
  *   whole string gives up at the first such spot and would leave every other encoded value in
  *   the URL undecoded, while a lenient receiver still decodes them.
  *
