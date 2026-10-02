@@ -824,7 +824,8 @@ describe('gate-record — the `review:` evidence line', () => {
   it('rejects a model slot that does not START with a letter', () => {
     // ⚠ "At least three characters" was not enough: `1 ... round` and `1 --- rounds` were ACCEPTED,
     // with `...` as the model name, because punctuation satisfies the character class. The letter is
-    // what actually stops a placeholder.
+    // what stops a PURE-PUNCTUATION placeholder — and only that one: `a.` and `a-` pass, as the
+    // accepting test below says out loud.
     expect(evaluate({ body: record({ review: '1 ... round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
     expect(evaluate({ body: record({ review: '1 --- rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
     expect(evaluate({ body: record({ review: '1 4.6 rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
@@ -834,6 +835,10 @@ describe('gate-record — the `review:` evidence line', () => {
     // ⛔ Separate from the test above, because they witness different halves. `1 x round` starts with
     // a letter, so only the length floor refuses it — and with both halves in one test the length
     // mutant survived: `{2,}` → `{1,}` changed nothing for `x`, which is refused either way.
+    //
+    // ⚠ That mutant is HISTORY, not something you can run here: the floor IS `{1,}` now. The mutant
+    // this test kills today is `{1,}` → `{0,}`; the one that raises the floor again is killed by the
+    // accepting test below, not by this one.
     expect(evaluate({ body: record({ review: '1 x round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
   });
 
@@ -843,14 +848,27 @@ describe('gate-record — the `review:` evidence line', () => {
     //
     // ⛔ The BOUND this buys, named rather than discovered later: `1 xy round` passes too, and so do
     // `1 a. round` and `1 a- round` — measured, not assumed. So the slot refuses exactly the FORMS it
-    // names (one character, pure punctuation, a digit-initial token) and nothing beyond them; it is
-    // not a check that the model EXISTS. An allowlist would be that check and is the wrong
+    // names (one character, pure punctuation, a digit-initial token) — plus, less obviously,
+    // anything carrying a character outside `[a-z0-9.+-]`: `gpt_4o`, `deepseek/r1` and `llama3:8b`
+    // are all refused, which is why the slot takes a short HANDLE rather than a provider id, and why
+    // the error message now says so. A space cannot occur at all, because the format reads the slot
+    // as one token. What this is NOT is a check that the model EXISTS. An allowlist would be that check and is the wrong
     // instrument: it would date, and dating is how this slot would start refusing next year's
     // models. What makes the line true is the author; the field exists so the claim is written down,
     // not so CI can verify it. No test of its own for `xy`: mutant `{1,}`→`{2,}` kills it together
     // with the line below, and a second witness for one mutant preserves no more than the first.
     expect(evaluate({ body: record({ review: '1 o3 round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
     expect(evaluate({ body: record({ review: '2 r1 rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('refuses junk BEFORE the count, which the start-anchor is there for', () => {
+    // ⛔ The `^` had no witness at all — pre-existing, not introduced here, and found by refuting
+    // this diff rather than by reading it. Drop the `^` from the review pattern and every other test
+    // in this file stays green, while `garbage 1 opus round, no findings` is ACCEPTED: the record
+    // would take free text in front of the claim. A field whose whole job is to be read literally
+    // cannot have a loose left edge.
+    expect(evaluate({ body: record({ review: 'garbage 1 opus round, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ review: 'no round at all 2 opus rounds, no findings' }), head: HEAD, files: CODE }).ok).toBe(false);
   });
 
   // ⛔ THREE end-anchors, THREE tests — deliberately not one. Vitest stops at the first failing
