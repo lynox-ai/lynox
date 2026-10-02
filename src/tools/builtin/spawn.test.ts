@@ -3751,7 +3751,8 @@ describe('spawn_agent tool', () => {
 
   // The child runs its inherited task and memory tools against the same stores as its parent.
   // Each pair below drives the real tool handler with the context spawn built for the child:
-  // the parent's own scopes still reach (the normal case), another scope does not.
+  // the parent's own scopes still reach (the normal case), another scope does not. The Agent is
+  // mocked here, so the constructor's copy of `activeScopes` onto the instance is not covered.
   describe('inherited session context', () => {
     let dir: string;
     let history: import('../../core/run-history.js').RunHistory;
@@ -3833,6 +3834,14 @@ describe('spawn_agent tool', () => {
 
     it('a child lists memory in its parent\'s scope', async () => {
       const call = await spawnChild([GLOBAL, A]);
+      expect(await call('memory_list', { scope: 'context:ctx-a' })).toContain('note in context:ctx-a');
+    });
+
+    it('a child of a parent without scopes keeps none, so a named scope still lists', async () => {
+      // The single-user default: no scopes means no filter. An empty list would refuse every scope.
+      const call = await spawnChild(undefined);
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      expect((vi.mocked(MockAgent).mock.calls[0]![0] as { activeScopes?: unknown }).activeScopes).toBeUndefined();
       expect(await call('memory_list', { scope: 'context:ctx-a' })).toContain('note in context:ctx-a');
     });
 

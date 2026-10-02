@@ -862,8 +862,8 @@ async function executeThinker(
     // the legacy end-of-turn extraction (the child shares the parent's Memory; without this it
     // would keep extracting into the minting channel the substrate decouples from).
     durableMemoryEnabled: parentAgent.durableMemoryEnabled,
-    // Inherit the parent's memory scopes: the tools a child inherits filter tasks and memory
-    // by `agent.activeScopes`, so a child without them would see more than its parent.
+    // Inherit the parent's memory scopes: task and memory tools the child inherits check
+    // `agent.activeScopes`, and a child should check against the same scopes as its parent.
     activeScopes: parentAgent.activeScopes,
     onStream: parentOnStream ?? undefined,
     spawnDepth: childDepth,
