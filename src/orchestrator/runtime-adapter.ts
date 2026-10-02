@@ -894,6 +894,7 @@ export async function spawnInline(
   recordToolCall?: StepToolRecorder | undefined,
   secretStore?: SecretStoreLike | undefined,
   runTaint?: RunTaint | undefined,
+  parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1067,6 +1068,9 @@ export async function spawnInline(
     // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
     currentRunId: stepRunId,
     toolContext: parentToolContext,
+    // The step runs the parent's task and memory tools, which filter by `agent.activeScopes`:
+    // inherit the calling session's scopes so a step sees no more than its caller.
+    activeScopes: parentActiveScopes,
     // Share the parent agent's SecretStore so this inline step's tools resolve
     // `secret:NAME` refs AND the fail-loud unresolved-secret guard (agent.ts)
     // fires — instead of silently sending the literal `secret:NAME` to the
@@ -1185,6 +1189,7 @@ export async function spawnPipeline(
   secretStore?: SecretStoreLike | undefined,
   parentRunId?: string | undefined,
   runTaint?: RunTaint | undefined,
+  parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1250,6 +1255,8 @@ export async function spawnPipeline(
     userTimezone,
     parentSessionCounters,
     parentMemory,
+    // The nested run's inline steps inherit the same session scopes as the outer ones.
+    parentActiveScopes,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.

@@ -30,6 +30,12 @@ export interface RunManifestOptions {
   mockResponses?: Map<string, string> | undefined;
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
+  /**
+   * The calling session's memory scopes. Inline steps run the parent's task and memory tools,
+   * which filter by `agent.activeScopes`, so each step agent inherits these. Absent for headless
+   * runs, which have no calling session.
+   */
+  parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
   cachedOutputs?: Map<string, AgentOutput> | undefined;
   depth?: number | undefined;
   runHistory?: RunHistory | undefined;
@@ -143,6 +149,7 @@ export interface RunCtxInput {
   autonomy: import('../types/index.js').AutonomyLevel | undefined;
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
+  parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
   parentMemory?: IMemory | null | undefined;
   userTimezone?: string | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
@@ -175,6 +182,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     autonomy: input.autonomy,
     parentTools: input.parentTools,
     parentToolContext: input.parentToolContext,
+    parentActiveScopes: input.parentActiveScopes,
     parentMemory: input.parentMemory ?? null,
     userTimezone: input.userTimezone,
     parentPrompt: input.parentPrompt,
@@ -763,7 +771,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -789,7 +797,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
