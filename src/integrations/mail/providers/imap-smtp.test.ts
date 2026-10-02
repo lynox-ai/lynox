@@ -481,6 +481,20 @@ describe('ImapSmtpProvider — search', () => {
     expect(arg.flagged).toBe(true);
   });
 
+  it('treats a search that resolves to undefined or false as "no messages", in list and search', async () => {
+    // imapflow's search resolves to `undefined` when no mailbox is selected any
+    // more (e.g. the connection dropped between the lock and the search) and to
+    // `false` when the command fails. Neither may throw on `.length`.
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    for (const result of [undefined, false]) {
+      probe.search.mockResolvedValue(result);
+      probe.fetch.mockClear();
+      await expect(provider.list({ limit: 10 }), `list with search → ${String(result)}`).resolves.toEqual([]);
+      await expect(provider.search({ from: 'alice' }), `search with search → ${String(result)}`).resolves.toEqual([]);
+      expect(probe.fetch, 'nothing is fetched').not.toHaveBeenCalled();
+    }
+  });
+
   it('filters hasAttachment client-side using BODYSTRUCTURE', async () => {
     probe.search.mockResolvedValue([1, 2]);
     probe.fetch.mockImplementation(() => asyncIterFrom([
