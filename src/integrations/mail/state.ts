@@ -1377,7 +1377,7 @@ export class MailStateDb {
   failStaleScheduledSends(olderThan: Date, reason: string, when: Date = new Date()): number {
     const result = this.db
       .prepare<[number, string, number], unknown>(
-        `UPDATE mail_scheduled SET failed_at = ?, fail_reason = ?, sending_at = NULL
+        `UPDATE mail_scheduled SET failed_at = ?, fail_reason = ?
          WHERE sending_at IS NOT NULL AND sending_at < ? AND sent_at IS NULL AND failed_at IS NULL`,
       )
       .run(when.getTime(), reason, olderThan.getTime()) as { changes: number };
@@ -1422,7 +1422,7 @@ export class MailStateDb {
     const result = this.db
       .prepare<[number, string, string], unknown>(
         `UPDATE mail_scheduled
-         SET failed_at = ?, fail_reason = ?, sending_at = NULL
+         SET failed_at = ?, fail_reason = ?
          WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL`,
       )
       .run(when.getTime(), reason, id) as { changes: number };
@@ -1440,12 +1440,17 @@ export class MailStateDb {
     return rows.map(rowToScheduledSend);
   }
 
-  /** Cancel a not-yet-sent row — UI delete-from-outbox path. A row being sent right now is
-   *  not cancelled: the send may already be on its way. */
+  /**
+   * Cancel a send that is still pending — not sent, not failed, not being sent. A row being
+   * sent may already be on its way, and a failed row is not pending: if its reason says the
+   * mail may have gone out, the row is the only record of that, and a send that outlived its
+   * claim may still complete. Cancelling either would tell the user something stopped that
+   * did not.
+   */
   cancelScheduledSend(id: string): boolean {
     const result = this.db
       .prepare<[string], unknown>(
-        `DELETE FROM mail_scheduled WHERE id = ? AND sent_at IS NULL AND sending_at IS NULL`,
+        `DELETE FROM mail_scheduled WHERE id = ? AND sent_at IS NULL AND failed_at IS NULL AND sending_at IS NULL`,
       )
       .run(id) as { changes: number };
     return result.changes > 0;

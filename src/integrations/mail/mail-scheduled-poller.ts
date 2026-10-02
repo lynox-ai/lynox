@@ -93,7 +93,7 @@ export function startScheduledSendPoller(opts: ScheduledSendPollerOptions): Sche
   const tick = async (): Promise<{ fired: number; failed: number }> => {
     opts.state.failStaleScheduledSends(
       new Date(now() - SCHEDULED_CLAIM_STALE_MS),
-      `${OUTCOME_UNKNOWN_PREFIX} (the engine stopped while sending it)`,
+      `${OUTCOME_UNKNOWN_PREFIX} (the send did not finish within 15 minutes; the engine may have stopped)`,
       new Date(now()),
     );
     const due = opts.state.listDueScheduledSends(new Date(now()), limit);

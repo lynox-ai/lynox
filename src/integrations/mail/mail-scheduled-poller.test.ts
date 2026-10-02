@@ -199,14 +199,31 @@ describe('mail-scheduled-poller', () => {
     expect(sendCalls).toHaveLength(1);
   });
 
-  it('a failed row can still be removed from the queue', async () => {
-    const id = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'remove-failed' });
+  it('cancel stops only a pending send: not a failed row, which may record a mail that went out', async () => {
+    const pending = queue({ scheduledAt: new Date(Date.now() + 60_000), subject: 'pending' });
+    const failed = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'possibly-sent' });
     sendImpl = async () => { throw new MailError('timeout', 'SMTP timeout'); };
     const poller = startScheduledSendPoller({ state: db, registry });
     await poller.tickNow();
     poller.stop();
-    expect(db.listScheduledForAccount('acct-1')[0]!.failedAt).toBeInstanceOf(Date);
-    expect(db.cancelScheduledSend(id)).toBe(true);
+    expect(db.cancelScheduledSend(failed)).toBe(false);
+    expect(db.cancelScheduledSend(pending)).toBe(true);
+    expect(db.listScheduledForAccount('acct-1').map((r) => r.subject)).toEqual(['possibly-sent']);
+  });
+
+  it('a row that failed before claims existed (no sending_at) is not cancelled either', () => {
+    // A row failed by a pre-v17 engine carries no claim; only failed_at says it is not pending.
+    const id = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'failed-before-v17' });
+    expect(db.markScheduledFailed(id, 'send failed after 3 attempts: provider_error — x')).toBe(true);
+    expect(db.cancelScheduledSend(id)).toBe(false);
+  });
+
+  it('a row reported as stuck is not cancelled: its send may still be running', () => {
+    const t0 = Date.now();
+    const id = queue({ scheduledAt: new Date(t0 - 60_000), subject: 'stuck' });
+    expect(db.claimScheduledSend(id, new Date(t0 - SCHEDULED_CLAIM_STALE_MS - 1000))).toBe(true);
+    db.failStaleScheduledSends(new Date(t0 - SCHEDULED_CLAIM_STALE_MS), 'stuck');
+    expect(db.cancelScheduledSend(id)).toBe(false);
   });
 
   it('keeps at most 200 characters of a provider message in the reason', async () => {
@@ -230,7 +247,7 @@ describe('mail-scheduled-poller', () => {
     poller.stop();
     expect(sendCalls).toHaveLength(0);
     const row = db.listScheduledForAccount('acct-1')[0]!;
-    expect(row.failReason).toBe(`${OUTCOME_UNKNOWN_PREFIX} (the engine stopped while sending it)`);
+    expect(row.failReason).toBe(`${OUTCOME_UNKNOWN_PREFIX} (the send did not finish within 15 minutes; the engine may have stopped)`);
   });
 
   it('a row claimed a moment ago is left alone: its send may still be running', async () => {

@@ -547,7 +547,9 @@ describe('MailStateDb — migration v17 (claim a scheduled send)', () => {
     raw.exec('ALTER TABLE mail_scheduled ADD COLUMN sending_at INTEGER;');
     raw.close();
     expect(() => new MailStateDb({ path })).toThrow(/duplicate column/i);
-    // Rolled back: still v16, and the file is writable — no open transaction holds it.
+    // Rolled back, and the file is writable — no open transaction holds it. The write is the
+    // witness: under WAL another connection never sees an uncommitted version insert, so the
+    // version check alone would pass without the rollback.
     const after = new BetterSqlite3(path, { timeout: 200 });
     try {
       expect((after.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(16);
