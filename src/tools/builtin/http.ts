@@ -503,7 +503,9 @@ function detectGetExfiltration(url: string): string | null {
     // `urlScanForms` decodes it to (one round of percent-decoding). A run found only in a decoded
     // form must also mix upper case, lower case and digits: decoding joins the segments of an
     // encoded path (`%2F`) into one long run, and a path that lacks one of the three classes is
-    // not flagged for that. A path that has all three is flagged, as it already is unencoded.
+    // not flagged for that. A path that has all three is flagged: the same false-positive class
+    // as the same path sent unencoded, but over a larger set of inputs, since it now also hits
+    // when the path is encoded. Measured on sample queries in `http.test.ts` (GET_QUERY_SAMPLES).
     const [asSent, ...decoded] = urlScanForms(parsed.search);
     if (BASE64_RUN.test(asSent!) || decoded.some(hasBase64ShapedRun)) {
       return 'base64-like data in URL parameters (possible data exfiltration)';

@@ -1205,6 +1205,39 @@ describe('httpRequestTool', () => {
       expect(result).toContain('base64');
     });
 
+    // False-positive measurement: hand-written queries of the kind an API call carries, each with
+    // the check's outcome. `before` is the check as it was (plain base64 pattern on the query as
+    // sent); the decoded form adds exactly one match, the encoded base64 cursor.
+    const GET_QUERY_SAMPLES: [name: string, query: string, blocked: boolean][] = [
+      ['search, spaces', '?q=best%20coffee%20shops%20in%20zurich%20open%20on%20sunday%20mornings&limit=20', false],
+      ['search, plus', '?q=best+coffee+shops+in+zurich&page=2', false],
+      ['oauth redirect_uri', '?client_id=abc123&redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback&response_type=code&scope=openid%20email', false],
+      ['return_to short path', '?return_to=%2Fsettings%2Fbilling%2Finvoices', false],
+      ['return_to long path', '?return_to=%2Fusers%2Fjohndoe%2Frepositories%2Fmyproject%2Fsettings%2Fwebhooks%2Fdeliveries%2Frecent', false],
+      ['next = encoded full url', '?next=https%3A%2F%2Fshop.example.com%2Fcollections%2Fsummer%2Fproducts%2Flinen%2Dshirt%3Fvariant%3D42', false],
+      ['json filter', '?filter=%7B%22status%22%3A%22open%22%2C%22assignee%22%3A%22me%22%7D', false],
+      ['google fields', '?fields=items(id%2Csnippet%2Ftitle%2Csnippet%2FpublishedAt)&maxResults=50', false],
+      ['short base64 page token', '?page_token=CAESBggDEJmPAhoGCAEQmY8CIgUIARCZjwI&limit=100', false],
+      ['long base64 cursor', '?cursor=eyJpZCI6MTIzNDU2Nzg5LCJjcmVhdGVkX2F0IjoiMjAyNi0xMC0wMlQxMjowMDowMFoifQ', true],
+      ['encoded base64 cursor', '?cursor=eyJpZCI6MTIzNDU2Nzg5%2BLCJjcmVhdGVkX2F0IjoiMjAyNi0xMC0wMlQxMjowMDowMFoifQ%3D%3D', true],
+      ['dates', '?from=2026-10-01T00%3A00%3A00Z&to=2026-10-02T00%3A00%3A00Z', false],
+      ['encoded docs path', '?path=%2Fdocs%2Fgetting-started%2Finstall%2Fmacos', false],
+      ['s3 key', '?key=uploads%2F2026%2F10%2F02%2Finvoice%2D12345.pdf', false],
+    ];
+
+    it.each(GET_QUERY_SAMPLES)('sample query "%s" (%s): blocked = %s', async (_name, query, blocked) => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const result = await visible({ url: `https://api.example.com/v1/items${query}` }, makeAgent());
+      expect(result.includes('Blocked')).toBe(blocked);
+    });
+
+    it('the decoded form adds exactly one match over the samples: the encoded base64 cursor', () => {
+      const before = (query: string): boolean => /[A-Za-z0-9+/=]{64,}/.test(new URL(`https://api.example.com/v1/items${query}`).search);
+      const added = GET_QUERY_SAMPLES.filter(([, query, blocked]) => blocked && !before(query)).map(([name]) => name);
+      expect(added).toEqual(['encoded base64 cursor']);
+    });
+
     // The parameter name's tail (`to=`) joins the decoded run, so the third row uses an
     // upper-case name to keep lower case out of it.
     it.each([
