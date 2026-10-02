@@ -794,6 +794,21 @@ describe('ImapSmtpProvider — close', () => {
 });
 
 describe('ImapSmtpProvider — watch', () => {
+  it('reports an empty successful poll as ok, so an error state can clear without new mail', async () => {
+    vi.useFakeTimers();
+    try {
+      probe.search.mockResolvedValue([]);
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      const types: string[] = [];
+      const handle = await provider.watch({ intervalMs: 60_000 }, async (event) => { types.push(event.type); });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await handle.stop();
+      expect(types).toEqual(['ok']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('polls list() on the requested interval and emits new envelopes', async () => {
     vi.useFakeTimers();
     try {

@@ -895,8 +895,7 @@ export class ImapSmtpProvider implements MailProvider {
         const since = new Date(lastPolledAt.getTime() - 60_000); // 1-minute overlap to ride IMAP date granularity
         lastPolledAt = new Date();
         const envelopes = await this.list({ folder, since, limit: maxPerTick });
-        if (envelopes.length === 0) return;
-        const event: MailWatchEvent = { type: 'new', envelopes };
+        const event: MailWatchEvent = envelopes.length === 0 ? { type: 'ok' } : { type: 'new', envelopes };
         await handler(event);
       } catch (err) {
         const event: MailWatchEvent = { type: 'error', error: err instanceof Error ? err : new Error(String(err)) };

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailWatcher } from './watch.js';
 import { MailStateDb } from './state.js';
+import { MailError } from './provider.js';
 import type {
   MailEnvelope,
   MailProvider,
@@ -321,5 +322,67 @@ describe('MailWatcher — ack ordering (mark seen after handoff)', () => {
     });
     expect(received.at(-1)?.uids).toEqual([2]);
     expect(state.countForAccount('acct-a')).toBe(2);
+  });
+});
+
+describe('MailWatcher — last polling error per account', () => {
+  const fail = (code: ConstructorParameters<typeof MailError>[0]) => ({ type: 'error' as const, error: new MailError(code, `poll failed: ${code}`) });
+
+  it('records a polling error by code, without the raw message', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    expect(watcher.lastError('acct-a'), 'no error before any poll').toBeNull();
+    await provider.emit(fail('starttls_unavailable'));
+    const e = watcher.lastError('acct-a');
+    expect(e?.code).toBe('starttls_unavailable');
+    expect(Object.keys(e ?? {}).sort()).toEqual(['at', 'code']);
+  });
+
+  it('keeps the first timestamp when the same error repeats (a change, not every poll)', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    await provider.emit(fail('auth_failed'));
+    const first = watcher.lastError('acct-a')?.at;
+    await new Promise(r => setTimeout(r, 5));
+    await provider.emit(fail('auth_failed'));
+    expect(watcher.lastError('acct-a')?.at).toBe(first);
+  });
+
+  it('a DIFFERENT error after the first one replaces it (the first never hides a later one)', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    await provider.emit(fail('starttls_unavailable'));
+    await provider.emit(fail('auth_failed'));
+    expect(watcher.lastError('acct-a')?.code).toBe('auth_failed');
+  });
+
+  it('a successful poll clears it, with or without new mail', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    await provider.emit(fail('connection_failed'));
+    await provider.emit({ type: 'ok' });
+    expect(watcher.lastError('acct-a'), 'cleared by an empty successful poll').toBeNull();
+    await provider.emit(fail('connection_failed'));
+    await provider.emit({ type: 'new', envelopes: [envelope(1, { messageId: '<m1@x>' })] });
+    expect(watcher.lastError('acct-a'), 'cleared by a poll that found mail').toBeNull();
+    expect(received.length, 'and the new mail still reaches the handler').toBe(1);
+  });
+
+  it('an error that is not a MailError is recorded as unknown, and detach forgets it', async () => {
+    const provider = new FakeProvider('acct-a');
+    await watcher.attach(provider);
+    await provider.emit({ type: 'error', error: new Error('boom') });
+    expect(watcher.lastError('acct-a')?.code).toBe('unknown');
+    await watcher.detach('acct-a');
+    expect(watcher.lastError('acct-a')).toBeNull();
+  });
+
+  it('keeps accounts apart', async () => {
+    const a = new FakeProvider('acct-a');
+    const b = new FakeProvider('acct-b');
+    await watcher.attach(a);
+    await watcher.attach(b);
+    await a.emit(fail('auth_failed'));
+    expect(watcher.lastError('acct-b')).toBeNull();
   });
 });

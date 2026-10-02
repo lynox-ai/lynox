@@ -1710,6 +1710,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// their mailbox stops working, and a dead end in the wrong language is worse
 	// than an English label on a working control.
 	'mail.needs_mailbox_scope_badge': { de: 'KEIN POSTFACH-ZUGRIFF', en: 'NO MAILBOX ACCESS' },
+	'mail.polling_error_badge': { de: 'ABRUF GESTÖRT', en: 'NOT RECEIVING' },
 	'mail.needs_mailbox_scope_hint': { de: 'Die Google-Verbindung erlaubt kein Lesen von Gmail, dieses Postfach bleibt daher leer. Verbinde es stattdessen per IMAP:', en: 'The Google connection does not permit reading Gmail, so this mailbox stays empty. Connect it over IMAP instead:' },
 	'mail.needs_mailbox_scope_link': { de: 'App-Passwort einrichten', en: 'set up an app password' },
 

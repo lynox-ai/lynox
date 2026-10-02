@@ -201,6 +201,8 @@ export interface MailWatchOptions {
 
 export type MailWatchEvent =
   | { type: 'new'; envelopes: ReadonlyArray<MailEnvelope> }
+  /** A poll succeeded and found nothing new. Lets a consumer clear an error state. */
+  | { type: 'ok' }
   | { type: 'error'; error: Error };
 
 export type MailWatchHandler = (event: MailWatchEvent) => void | Promise<void>;

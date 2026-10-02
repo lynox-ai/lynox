@@ -32,6 +32,7 @@ import {
   type MailAccountType,
   type MailAuthType,
   type MailEnvelope,
+  type MailErrorCode,
   type MailProvider,
   type MailSendInput,
   type MailSendResult,
@@ -65,6 +66,10 @@ export interface TestAccountResult {
 }
 
 /** Safe projection used by the HTTP layer — no secrets. */
+function lastErrorField(e: { code: MailErrorCode; at: string } | null): { lastError?: { code: MailErrorCode; at: string } } {
+  return e ? { lastError: e } : {};
+}
+
 export interface MailAccountView {
   id: string;
   displayName: string;
@@ -93,6 +98,11 @@ export interface MailAccountView {
    * permission the connection never asked for.
    */
   warning?: 'needs_mailbox_scope' | undefined;
+  /**
+   * The last background polling error, while it lasts: only the code and when it
+   * started, never the provider's raw message. The UI turns the code into text.
+   */
+  lastError?: { code: MailErrorCode; at: string } | undefined;
 }
 
 /**
@@ -752,6 +762,7 @@ export class MailContext {
       ...(account.authType === 'oauth_google' && !this.hasMailboxScope()
         ? { warning: 'needs_mailbox_scope' as const }
         : {}),
+      ...lastErrorField(this.watcher.lastError(account.id)),
     }));
   }
 
