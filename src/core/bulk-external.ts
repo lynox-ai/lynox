@@ -22,6 +22,7 @@ import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
+import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
@@ -161,7 +162,7 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
   return keyed.map(({ row, key }): ExternalPlanned => {
     charge(JSON.stringify(key ?? row.target));
     if (key === null) return { key: row.target, invalid: 'bad_url' };
-    if (scan(key) !== null) return { key, invalid: 'secret_in_target' };
+    if (urlScanForms(key).some((form) => scan(form) !== null)) return { key, invalid: 'secret_in_target' };
     const after = row.after;
     if (!isPlainObject(after) || Object.keys(after).length === 0) return { key, invalid: 'after_not_object' };
     if (!Object.values(after).every(isScalar)) return { key, invalid: 'field_not_scalar' };
@@ -311,7 +312,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // saw (an undo writes back what the host held). Before the credential is attached: the
     // header it adds carries a secret by design and is the profile's, not the request's.
     const payload = method !== 'GET' ? JSON.stringify(body) : undefined;
-    if (deps.scan(url) !== null || (payload !== undefined && deps.scan(payload) !== null)) return { kind: 'secret' };
+    if (urlScanForms(url).some((form) => deps.scan(form) !== null) || (payload !== undefined && deps.scan(payload) !== null)) {
+      return { kind: 'secret' };
+    }
     const headers: Record<string, string> = { accept: 'application/json' };
     if (method !== 'GET') headers['content-type'] = 'application/json';
     if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };

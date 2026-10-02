@@ -353,6 +353,25 @@ describe('applying an external run', () => {
     }
   });
 
+  it('a plan refuses a target whose address decodes to something that looks like a secret', () => {
+    const [target] = planExternal([{ target: url(LOOKS_LIKE_A_KEY.replace(/-/g, '%2D')), after: { price: '1' } }], HOST, detectSecretInContent);
+    expect(target).toMatchObject({ invalid: 'secret_in_target' });
+  });
+
+  it('scans the address in the form the host decodes it to', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const encoded = url(LOOKS_LIKE_A_KEY.replace(/-/g, '%2D'));
+      const c = client({ contract: mintBulkContract(HOST, [encoded, url(0)]) });
+      expect(await c.get(encoded)).toEqual({ kind: 'secret' });
+      expect((await c.get(url(0))).kind).not.toBe('secret');
+      expect(s.requests.map((r) => r.path)).toEqual(['/products/0']);
+    } finally {
+      restore();
+    }
+  });
+
   it('the credential the engine attaches is not what is scanned: a stored token that looks like a key still goes out', async () => {
     const s = shop();
     const restore = serve(s);
