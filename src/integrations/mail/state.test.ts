@@ -308,7 +308,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(16);
+    expect(row.v).toBe(17);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -537,6 +537,8 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       );
       INSERT INTO inbox_items (id, draft_id) VALUES ('itm-1', 'drf-1'), ('itm-2', NULL);
       INSERT INTO inbox_drafts (id, item_id, superseded_by) VALUES ('drf-1', 'itm-1', NULL);
+      -- Every real v15 database has mail_scheduled (v14); the migrations after v16 alter it.
+      CREATE TABLE mail_scheduled (id TEXT PRIMARY KEY, sent_at INTEGER, failed_at INTEGER);
     `);
     raw.close();
   });
@@ -551,7 +553,7 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       const raw = (migrated as unknown as { db: BetterSqlite3.Database }).db;
       // Migration ran to the new head.
       const version = raw.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-      expect(version.v).toBe(16);
+      expect(version.v).toBe(17);
       // The table is gone.
       const drafts = raw
         .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'inbox_drafts'`)
