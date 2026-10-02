@@ -73,6 +73,9 @@ function invalidFor(read: ExternalRead): BulkInvalidReason | null {
     // A 4xx answers for the target. A 5xx or a network error may be the host's: the
     // first leaves the target unread for a later tick (`BulkLedger.recordReadFailure`).
     case 'refused': return 'read_failed';
+    // The address carries what looks like a secret: a property of the target, the same on
+    // every read, so the target is unplannable rather than the run stopped.
+    case 'secret': return 'secret_in_target';
     default: return null;
   }
 }

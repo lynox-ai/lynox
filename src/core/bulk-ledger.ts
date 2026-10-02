@@ -80,7 +80,9 @@ export type BulkInvalidReason =
   /** the host refused to serve the target, or failed to */
   | 'read_failed'
   /** the after-state holds something shaped like a credential */
-  | 'secret_in_after';
+  | 'secret_in_after'
+  /** The target's address looks like it carries a secret; it is never requested. */
+  | 'secret_in_target';
 
 export interface BulkRunStatus {
   id: string;
@@ -153,7 +155,7 @@ export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_R
 
 /** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}.
  *  `redirect`: an external target answered a write with a redirect, which is never followed. */
-export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect';
+export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret';
 
 /** What an external target held right after the run wrote it, over the fields it wrote.
  *  `estimated`: the read-back failed and this is what was sent — an undo then finds a
@@ -822,7 +824,10 @@ export class BulkLedger {
          WHERE id = ? AND phase IN ('approved','writing')`,
       ).run(this.approvalWindow(this.countWriting(runId), now), maxTargets, runId);
       if (res.changes !== 1) return false;
-      db.prepare('UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL')
+      // Not a target that failed on what it would send (`secret`): that fails the same way every
+      // time, so retrying it first would halt a small run again at the same place and the rest
+      // would never be written. It stays failed; the resume carries on with the others.
+      db.prepare(`UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL AND error != 'secret'`)
         .run(runId);
       triggerId = this.armTrigger(run, now);
       return true;

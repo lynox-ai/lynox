@@ -22,7 +22,7 @@ import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
-import { BulkRedirectError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
+import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
@@ -53,6 +53,8 @@ export type ExternalRead =
   | { kind: 'blocked' }
   /** The run's contract does not grant this call; nothing was sent. */
   | { kind: 'not_granted' }
+  /** The address or the body looked like it carries a secret; nothing was sent. */
+  | { kind: 'secret' }
   /** The profile's own rate limit is spent; nothing was sent. */
   | { kind: 'rate_limited' }
   /** 429: wait this long (capped) before the next request to the host. */
@@ -159,6 +161,7 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
   return keyed.map(({ row, key }): ExternalPlanned => {
     charge(JSON.stringify(key ?? row.target));
     if (key === null) return { key: row.target, invalid: 'bad_url' };
+    if (scan(key) !== null) return { key, invalid: 'secret_in_target' };
     const after = row.after;
     if (!isPlainObject(after) || Object.keys(after).length === 0) return { key, invalid: 'after_not_object' };
     if (!Object.values(after).every(isScalar)) return { key, invalid: 'field_not_scalar' };
@@ -267,6 +270,13 @@ export interface ExternalClientDeps {
   attach: (url: string, headers: Record<string, string>) => Promise<boolean>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
+  /**
+   * The secret-pattern scan `http_request` runs on what it sends (`detectSecretInContent`):
+   * non-null when `text` looks like it carries a secret. Required, so no caller can build a
+   * client that sends unscanned. `http_request`'s separate GET check is not run here: a bulk
+   * target has no query or fragment (`externalTargetKey`) and its host is the contract's.
+   */
+  scan: (text: string) => string | null;
   now?: () => number;
 }
 
@@ -281,7 +291,8 @@ export interface ExternalClient {
 
 /**
  * GET for bulk runs. Every guard runs before anything is sent, in this order: the run's
- * contract, the network policy, the credential, the profile's rate limit. No redirect is
+ * contract, the network policy, the secret-pattern scan of the address and body, the
+ * credential, the profile's rate limit. No redirect is
  * followed (plan §4 F7): a 3xx is an answer, never a hop.
  */
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
@@ -295,6 +306,12 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     } catch {
       return { kind: 'blocked' };
     }
+    // The one place every bulk request leaves the engine, reads and writes alike. The plan scans
+    // the after-image when it is made; this also covers the address, and a body the plan never
+    // saw (an undo writes back what the host held). Before the credential is attached: the
+    // header it adds carries a secret by design and is the profile's, not the request's.
+    const payload = method !== 'GET' ? JSON.stringify(body) : undefined;
+    if (deps.scan(url) !== null || (payload !== undefined && deps.scan(payload) !== null)) return { kind: 'secret' };
     const headers: Record<string, string> = { accept: 'application/json' };
     if (method !== 'GET') headers['content-type'] = 'application/json';
     if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
@@ -305,7 +322,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     try {
       res = await fetchPinned(url, {
         method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-        ...(method !== 'GET' ? { body: JSON.stringify(body) } : {}),
+        ...(payload !== undefined ? { body: payload } : {}),
       });
     } catch (err: unknown) {
       if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
@@ -379,7 +396,8 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
  * kept is what an undo must expect. Never a DELETE: an external target this run did not create is not removed.
  *
  * A missing credential, a refused one, a blocked host or a call outside the contract halts
- * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`). One wait
+ * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`), and so does a
+ * request that looks like it carries a secret (`BulkSecretError`). One wait
  * per request: a 429 for its `Retry-After` (capped), a spent profile rate limit for a
  * second. Anything else that is not a success fails the target.
  */
@@ -402,6 +420,7 @@ export function externalWriter(client: ExternalClient, opts: {
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
       case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
+      case 'secret': throw new BulkSecretError();
       case 'redirect': throw new BulkRedirectError();
       default: return got;
     }

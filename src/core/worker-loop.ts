@@ -821,7 +821,7 @@ export class WorkerLoop {
    */
   private async bulkClientFactory(): Promise<(contractJson: string | null) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
-    const { attachStoredCredential } = await import('../tools/builtin/http.js');
+    const { attachStoredCredential, detectSecretInContent } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
@@ -835,6 +835,7 @@ export class WorkerLoop {
         ackHosts: resolveGuardedAckHosts(toolContext),
         attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore }),
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
+        scan: detectSecretInContent,
       });
     };
   }
