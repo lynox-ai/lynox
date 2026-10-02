@@ -201,6 +201,44 @@ describe('ImapSmtpProvider — connection', () => {
   });
 });
 
+describe('ImapSmtpProvider — server without STARTTLS', () => {
+  it('reports starttls_unavailable and does not retry', async () => {
+    // What imapflow throws when `doSTARTTLS` is set and the server offers none.
+    const err0 = Object.assign(new Error('Server does not support STARTTLS'), { tlsFailed: true });
+    probe.connect.mockRejectedValue(err0);
+    const provider = new ImapSmtpProvider(
+      { ...ACCOUNT, imap: { host: 'imap.example.com', port: 143, secure: false } },
+      credResolver,
+    );
+    vi.useFakeTimers();
+    try {
+      const pending = provider.list().catch(e => e as MailError);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const err = await pending;
+      expect(err).toBeInstanceOf(MailError);
+      expect(err.code).toBe('starttls_unavailable');
+      expect(probe.connect, 'a server without STARTTLS does not change on retry').toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: a plain connection error is still connection_failed (and retried)', async () => {
+    vi.useFakeTimers();
+    try {
+      probe.connect.mockRejectedValue(new Error('ECONNREFUSED'));
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      const pending = provider.list().catch(e => e as MailError);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const err = await pending;
+      expect(err.code).toBe('connection_failed');
+      expect(probe.connect.mock.calls.length, 'the same machinery DOES retry an ordinary failure').toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('ImapSmtpProvider — LYNOX_MAIL_INSECURE_TLS opt-in', () => {
   const ENV = 'LYNOX_MAIL_INSECURE_TLS';
   let prior: string | undefined;

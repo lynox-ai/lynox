@@ -330,8 +330,23 @@ function isAuthError(err: unknown): boolean {
   return msg.includes('authentication') || msg.includes('invalid credentials') || msg.includes('login failed') || msg.includes('login');
 }
 
+/**
+ * The server offers no STARTTLS while the account requires it (`doSTARTTLS`, set
+ * whenever implicit TLS is off). imapflow marks that error with `tlsFailed`. It is
+ * permanent for the account, so it is not retried, and it gets its own code: a
+ * generic connection failure would hide that the refusal was deliberate.
+ */
+function isStarttlsUnavailable(err: unknown): boolean {
+  return err instanceof Error
+    && (err as unknown as Record<string, unknown>)['tlsFailed'] === true
+    && /starttls/i.test(err.message);
+}
+
 function wrapImapError(err: unknown, fallback: string): MailError {
   if (err instanceof MailError) return err;
+  if (isStarttlsUnavailable(err)) {
+    return new MailError('starttls_unavailable', `${fallback}: the server does not offer STARTTLS`, { cause: err });
+  }
   if (isAuthError(err)) return new MailError('auth_failed', 'IMAP authentication failed', { cause: err });
   if (err instanceof Error && err.message.toLowerCase().includes('timeout')) {
     return new MailError('timeout', `${fallback}: timeout`, { cause: err });
@@ -475,8 +490,8 @@ export class ImapSmtpProvider implements MailProvider {
         return client;
       } catch (err) {
         lastErr = err;
-        if (isAuthError(err)) {
-          // No point retrying auth failures.
+        if (isAuthError(err) || isStarttlsUnavailable(err)) {
+          // No point retrying: neither a wrong login nor a server without STARTTLS changes on retry.
           throw wrapImapError(err, 'IMAP connect');
         }
         if (attempt >= RECONNECT_MAX_ATTEMPTS) break;
