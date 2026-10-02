@@ -97,7 +97,7 @@ const MAX_FILENAME_LENGTH = 200;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function toAddresses(input: ReadonlyArray<{ name?: string; address?: string }> | undefined): MailAddress[] {
+function toAddresses(input: ReadonlyArray<{ name?: string | undefined; address?: string | undefined }> | undefined): MailAddress[] {
   if (!input) return [];
   const out: MailAddress[] = [];
   for (const a of input) {
@@ -562,7 +562,10 @@ export class ImapSmtpProvider implements MailProvider {
       if (Object.keys(search).length === 0) search.all = true;
 
       const uids = await client.search(search, { uid: true });
-      if (uids === false || uids.length === 0) return [];
+      // `search` resolves to `false` on a failed command and to `undefined` when no
+      // mailbox is selected any more (the connection can drop between the lock and
+      // the search). Both mean "nothing to list", not a crash on `.length`.
+      if (!uids || uids.length === 0) return [];
 
       // Take the most recent N (search returns ascending)
       const slice = uids.slice(-limit);
@@ -671,8 +674,8 @@ export class ImapSmtpProvider implements MailProvider {
     // also requests BODY[<part>.MIME] which fails on single-part messages because
     // there is no per-part MIME header section to read.
     //
-    // imapflow normalizes bodyParts keys to lowercase internally (see imap-flow.js
-    // ~line 3018), so the Map is keyed by the lowercased identifier.
+    // imapflow normalizes bodyParts keys to lowercase internally (in its fetch
+    // handling of body parts), so the Map is keyed by the lowercased identifier.
     //
     // We cap via maxLength at the fetch-request level to keep memory bounded
     // on pathological HTML bombs. The cap is silent — callers get a trimmed
@@ -721,7 +724,10 @@ export class ImapSmtpProvider implements MailProvider {
       if (Object.keys(search).length === 0) search.all = true;
 
       const uids = await client.search(search, { uid: true });
-      if (uids === false || uids.length === 0) return [];
+      // `search` resolves to `false` on a failed command and to `undefined` when no
+      // mailbox is selected any more (the connection can drop between the lock and
+      // the search). Both mean "nothing to list", not a crash on `.length`.
+      if (!uids || uids.length === 0) return [];
 
       const slice = uids.slice(-limit);
 
