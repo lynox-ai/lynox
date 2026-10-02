@@ -821,15 +821,17 @@ export class BulkLedger {
   }
 
   /**
-   * Why a run may not be approved or resumed now, or null. A run and an undo of it write
-   * the same targets in opposite directions, so neither is started while the other may write:
-   *  - any run waits while an undo of it is open (`undo_open`);
-   *  - an undo waits while its source may write (`source_running`) or another undo of the
-   *    same source is open (`undo_open`);
+   * Why a run may not be approved or resumed now, or null. A run, its undos, their undos and
+   * so on — one family, linked by `source_run_id` — write the same targets in opposite
+   * directions, so no run is started while another of its family may write:
+   *  - an undo waits while its source may write (`source_running`), any run while another
+   *    run of its family may (`undo_open`);
    *  - an undo whose plan misses a target its source has applied since the planning would
-   *    finish, report the source undone, and leave that target written (`undo_stale`).
+   *    finish, report the source undone, and leave that target written (`undo_stale`); so does
+   *    an undo of a source already undone — another undo took it back, and an undo of that one
+   *    may have written it again since, which the source's own rows do not show.
    *
-   * "Open" and "may write" mean approved or writing and NOT halted. Two states are left out
+   * "May write" means approved or writing and NOT halted. Two states are left out
    * on purpose, and each would look like a gap to a reader who does not know why:
    *  - A previewed undo holds nothing. No route discards a previewed run and the prune takes
    *    only apply runs, so an undo that is never approved would hold its source for good.
@@ -845,13 +847,12 @@ export class BulkLedger {
    * write in flight.
    */
   private writeBlocked(run: RunRow): UndoRefusal | null {
-    if (this.openUndo(run.id, null)) return 'undo_open';
+    const open = this.openInFamily(run.id, run.id);
+    if (open !== null) return open === run.source_run_id ? 'source_running' : 'undo_open';
     if (run.kind !== 'undo' || run.source_run_id === null) return null;
     const src = this.runRow(run.source_run_id);
     if (!src) return null;
-    // `undone`: everything the source wrote is taken back, and it writes nothing more.
-    if (!isStopped(src) && src.phase !== 'undone') return 'source_running';
-    if (this.openUndo(src.id, run.id)) return 'undo_open';
+    if (src.phase === 'undone') return 'undo_stale';
     const missing = this.engineDb.getDb().prepare(
       `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
          AND seq NOT IN (SELECT source_seq FROM bulk_targets WHERE run_id = ? AND source_seq IS NOT NULL)`,
@@ -859,12 +860,26 @@ export class BulkLedger {
     return missing.n > 0 ? 'undo_stale' : null;
   }
 
-  /** Whether an undo of `sourceRunId`, other than `exceptRunId`, is approved or writing and not halted. */
-  private openUndo(sourceRunId: string, exceptRunId: string | null): boolean {
-    return this.engineDb.getDb().prepare(
-      `SELECT 1 FROM bulk_runs WHERE kind = 'undo' AND source_run_id = ? AND phase IN ('approved','writing')
-         AND halt_reason IS NULL AND id IS NOT ? LIMIT 1`,
-    ).get(sourceRunId, exceptRunId) !== undefined;
+  /**
+   * A run of `runId`'s family, other than `exceptRunId`, that is approved or writing and not
+   * halted — its id, or null. The family is every run reached from the first one of the chain
+   * (followed up by `source_run_id`) by following `source_run_id` down.
+   */
+  private openInFamily(runId: string, exceptRunId: string | null): string | null {
+    let root = runId;
+    const seen = new Set<string>();
+    for (;;) {
+      seen.add(root);
+      const up = this.runRow(root)?.source_run_id ?? null;
+      if (up === null || seen.has(up)) break;
+      root = up;
+    }
+    const row = this.engineDb.getDb().prepare(
+      `WITH RECURSIVE fam(id) AS (SELECT ? UNION SELECT r.id FROM bulk_runs r JOIN fam ON r.source_run_id = fam.id)
+       SELECT b.id FROM bulk_runs b JOIN fam ON b.id = fam.id
+       WHERE b.phase IN ('approved','writing') AND b.halt_reason IS NULL AND b.id IS NOT ? LIMIT 1`,
+    ).get(root, exceptRunId) as { id: string } | undefined;
+    return row?.id ?? null;
   }
 
   /**
@@ -881,8 +896,8 @@ export class BulkLedger {
     const src = this.runRow(sourceRunId);
     if (!src) return { ok: false, reason: 'not_found' };
     if (!isStopped(src)) return { ok: false, reason: 'not_undoable' };
-    // A second undo beside an open one would take the same targets back twice.
-    if (this.openUndo(sourceRunId, null)) return { ok: false, reason: 'undo_open' };
+    // An undo beside another run of the family that may write would write the same targets.
+    if (this.openInFamily(sourceRunId, null) !== null) return { ok: false, reason: 'undo_open' };
     const db = this.engineDb.getDb();
     if (src.atomic === 1) {
       // Form B's rule (PRD §2.2): an atomic run is taken back whole or not at all.
@@ -1214,7 +1229,8 @@ export class BulkLedger {
 
   /**
    * Close a run whose loop found nothing left to write: `done`. For an undo run, the
-   * source becomes `undone` once none of its applied targets is left standing.
+   * source becomes `undone` once none of what an undo takes back ({@link undoEligible}) is
+   * left standing.
    */
   finish(run: Pick<BulkRunForApply, 'id' | 'kind' | 'sourceRunId'>): void {
     const db = this.engineDb.getDb();
@@ -1224,8 +1240,8 @@ export class BulkLedger {
       const src = this.runRow(run.sourceRunId);
       if (!src) return;
       // Standing is what an undo takes back and has not: for an external source that includes
-      // a failed write the undo found changed but could not restore (a conflict) — it may hold
-      // what the source wrote, so the source is not reported undone.
+      // a failed write the undo could not restore (a conflict, or a failed write of its own) —
+      // it may hold what the source wrote, so the source is not reported undone.
       const standing = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}`,
       ).get(run.sourceRunId) as { n: number };

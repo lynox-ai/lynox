@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
  * repeat from a new request. Before a caller sets `maxRetries`, decide how a retried run
  * avoids repeating those writes.
  *
- * This test holds every line in the source that names the field, in either spelling, with
+ * This test holds every line under `src/` and `packages/web-ui/src/` that names the field, in either spelling, with
  * how often it occurs. A new one — a route, a tool, a default, a shorthand `{ maxRetries }`,
  * a SQL column list — fails it, and so does a moved or reworded one: updating the list is the
  * decision this test asks for. What it cannot see: a value carried by spreading an object that
