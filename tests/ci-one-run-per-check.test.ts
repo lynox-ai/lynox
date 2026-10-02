@@ -164,6 +164,23 @@ describe('ci-docs-only.sh', () => {
     } finally { r.cleanup(); }
   });
 
+  it('a submodule pointer under docs/ is code even when git is told to ignore submodules', () => {
+    // `ignore = all` in .gitmodules (or diff.ignoreSubmodules=all) drops the gitlink from both
+    // `--raw` and `--name-only` unless the diff says --ignore-submodules=none.
+    const r = repo();
+    try {
+      r.git('checkout', '-q', r.base);
+      writeFileSync(join(r.dir, '.gitmodules'), '[submodule "vendored"]\n\tpath = docs/vendored\n\turl = ./x\n\tignore = all\n');
+      r.git('add', '.gitmodules'); r.git('commit', '-qm', 'gitmodules');
+      const base2 = r.git('rev-parse', 'HEAD');
+      writeFileSync(join(r.dir, 'docs/a.md'), 'changed\n');
+      r.git('add', 'docs/a.md');
+      r.git('update-index', '--add', '--cacheinfo', `160000,${r.base},docs/vendored`);
+      r.git('-c', 'diff.ignoreSubmodules=all', 'commit', '-qm', 'gitlink ignored');
+      expect(r.run(base2, r.git('rev-parse', 'HEAD')).stdout.trim()).toBe('docs-only=false');
+    } finally { r.cleanup(); }
+  });
+
   it.each([
     ['the submodule check', '160000'],
     ['the docs/ check', '^docs/'],
