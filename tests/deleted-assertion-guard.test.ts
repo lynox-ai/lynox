@@ -15,9 +15,10 @@
  * rename. If that test ever goes green again, the guard has gone back to blocking renames.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { removedFrom, isPureMove, addedMultiset, caseCount, reasonLine, mergeBase, check, filterMatches } from '../scripts/deleted-assertion-guard.mjs';
 
@@ -346,6 +347,59 @@ describe('deleted-assertion-guard', () => {
       'b/a/foo.test.ts',
     ]);
     expect(filterMatches(['a/foo.test.ts', 'c.test.ts'], 'a/foo.test.ts')).toEqual(['a/foo.test.ts']);
+  });
+
+  it("the WORKFLOW's exit mapping is executed, not read \u2014 a finding must leave the step green", () => {
+    // \u26d4 This test exists because the mapping was BROKEN and every text-level check passed.
+    // GitHub invokes a `run:` block as `bash -e {0}`, so `-e` is on before the block's own `set`
+    // runs. With a bare call followed by `CODE=$?` the step aborted the instant the guard exited
+    // non-zero: the `case` never ran, no warning was printed, and the job went RED on a finding \u2014
+    // the one polarity this design forbids. Nothing short of RUNNING the block sees that.
+    const ymlPath = fileURLToPath(new URL('../.github/workflows/deleted-assertion-guard.yml', import.meta.url));
+    const yml = readFileSync(ymlPath, 'utf-8').split('\n');
+    const starts = yml.flatMap((l, i) => (l.trim() === 'run: |' ? [i] : []));
+    const last = starts[starts.length - 1];
+    const body: string[] = [];
+    let indent: number | null = null;
+    for (const l of yml.slice(last + 1)) {
+      if (l.trim() === '') { body.push(''); continue; }
+      const ind = l.length - l.trimStart().length;
+      if (indent === null) indent = ind;
+      if (ind < indent) break;
+      body.push(l.slice(indent));
+    }
+    const block = body.join('\n');
+    // Positive control on the EXTRACTION. Without it a silently empty block would pass every
+    // assertion below: `bash -e` on nothing exits 0, which reads exactly like "nothing to report".
+    expect(block).toContain('case "$CODE" in');
+    expect(body.some((l) => l.startsWith('env:') || l.startsWith('- name:'))).toBe(false);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ghstep-'));
+    for (const [code, wantStatus, wantMarker] of [
+      [0, 0, 'nothing to report'],
+      [1, 0, '::warning::'],
+      [2, 1, '::error::'],
+      [127, 1, '::error::'],
+    ] as Array<[number, number, string]>) {
+      const sh = join(dir, `step-${String(code)}.sh`);
+      // \u26a0 `[^|\n]*`, not `.*`. With `.*$` this substitution swallowed the trailing
+      // `|| CODE=$?` as well \u2014 so the probe rebuilt the very broken form it was written to
+      // detect, and reported a failure that was its own doing. A transformation that removes
+      // the mechanism under test cannot test it.
+      const replaced = block.replace(
+        /node scripts\/deleted-assertion-guard\.mjs [^|\n]*/m,
+        `( exit ${String(code)} ) `,
+      );
+      expect(replaced).not.toBe(block); // the invocation must have been found
+      expect(replaced).toContain('|| CODE=$?'); // \u2026 and the mechanism must still be there
+      writeFileSync(sh, replaced, 'utf-8');
+      const r = spawnSync('bash', ['-e', sh], { encoding: 'utf-8' });
+      expect({ code, status: r.status, out: (r.stdout + r.stderr).slice(0, 120) }).toMatchObject({
+        status: wantStatus,
+      });
+      expect(r.stdout + r.stderr).toContain(wantMarker);
+    }
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('a bad ref THROWS rather than returning a verdict — main turns that into exit 2', () => {

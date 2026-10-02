@@ -83,9 +83,16 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # ⛔ `|| CODE=$?`, and NOT a bare call followed by `CODE=$?`. GitHub invokes a `run:`
+          # block as `bash -e {0}`, so `-e` is already on before the first line of this script
+          # executes and `set -uo pipefail` does not turn it off. Measured: with a bare call the
+          # step ABORTS the moment the script exits non-zero — the `case` below never runs, no
+          # warning is printed, and the job goes RED on a finding. That is the exact polarity this
+          # design forbids, dressed in a mapping that looks like it governs the step and does not.
+          # A command on the left of `||` is exempt from `-e` regardless of who set it.
           set -uo pipefail
-          node scripts/deleted-assertion-guard.mjs "$BASE_SHA" "$HEAD_SHA"
-          CODE=$?
+          CODE=0
+          node scripts/deleted-assertion-guard.mjs "$BASE_SHA" "$HEAD_SHA" || CODE=$?
           # 0 = nothing to report or every deletion was forced · 1 = proven unnecessary · 2 = could
           # not check. Only 1 is a failure, and the mapping is spelled out here so that a future
           # edit has to decide deliberately rather than inherit `set -e`.
