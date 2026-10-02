@@ -770,7 +770,7 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
   });
 
-  it('threads options.parentActiveScopes into the inline spawner, also through a nested pipeline', async () => {
+  it('threads options.parentActiveScopes into the inline spawner', async () => {
     // Inline steps run the caller's task and memory tools, which filter by `agent.activeScopes`.
     // spawnInline's parentActiveScopes is the 16th positional argument (index 15).
     const scopes = [{ type: 'global', id: 'global' }, { type: 'context', id: 'ctx-a' }] as const;
@@ -780,7 +780,11 @@ describe('runManifest — inline runtime', () => {
     await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
       CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
     expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
+  });
 
+  it('threads options.parentActiveScopes through a nested pipeline into its inline steps', async () => {
+    const scopes = [{ type: 'global', id: 'global' }, { type: 'context', id: 'ctx-a' }] as const;
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
       CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
