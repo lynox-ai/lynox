@@ -459,7 +459,15 @@ export function render(r) {
   }
   lines.push('');
   for (const { file, lost, basePassing, headRunning } of r.findings) {
-    lines.push(`  REPORT  ${file}: ${String(lost.length)} of ${String(basePassing)} case(s) that passed before run nowhere now (${String(headRunning)} still run in this file):`);
+    // ⭐ TWO SHAPES, and the sentence has to branch — the earlier single sentence read "3 of 8 run
+    // nowhere now" for a diff that lost ONE case and retitled two, which invites the reader to look
+    // for three deletions. The count drop is the number that is true; the names are where to look.
+    const dropped = basePassing - headRunning;
+    if (lost.length === dropped) {
+      lines.push(`  REPORT  ${file}: ${String(dropped)} case(s) gone — passed before, run nowhere now (${String(headRunning)} of ${String(basePassing)} still run):`);
+    } else {
+      lines.push(`  REPORT  ${file}: the case count dropped by ${String(dropped)} (${String(basePassing)} passed before, ${String(headRunning)} run now). ${String(lost.length)} name(s) no longer run, so at least ${String(lost.length - dropped)} of them was renamed rather than removed — look at all of them:`);
+    }
     for (const n of lost.slice(0, 20)) lines.push(`            · ${n}`);
     if (lost.length > 20) lines.push(`            … and ${String(lost.length - 20)} more`);
   }

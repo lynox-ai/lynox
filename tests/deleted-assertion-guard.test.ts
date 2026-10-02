@@ -486,6 +486,27 @@ describe('deleted-assertion-guard', () => {
     expect(render({ status: 2, reason: 'something-new' }).lines[0]).toContain('unknown reason');
   });
 
+  it('the REPORT sentence branches: a clean attribution reads differently from one with a retitle in it', () => {
+    // ⚠ Two shapes, and one sentence cannot carry both. Measured on real history: a diff that
+    // retitled two cases and deleted one made the single-sentence version read "3 of 8 run nowhere
+    // now", which invites the reader to hunt three deletions. The count drop is the number that is
+    // true; the names are only where to look.
+    const clean = render({
+      status: 1, reason: 'checked', skipped: [], candidates: ['src/a.test.ts'],
+      findings: [{ file: 'src/a.test.ts', lost: ['b', 'c'], basePassing: 3, headRunning: 1 }],
+    }).lines.join('\n');
+    expect(clean).toContain('2 case(s) gone');
+    expect(clean).not.toContain('renamed rather than removed');
+
+    const mixed = render({
+      status: 1, reason: 'checked', skipped: [], candidates: ['src/a.test.ts'],
+      findings: [{ file: 'src/a.test.ts', lost: ['old one', 'old two', 'deleted'], basePassing: 8, headRunning: 7 }],
+    }).lines.join('\n');
+    expect(mixed).toContain('count dropped by 1');
+    expect(mixed).toContain('at least 2 of them was renamed rather than removed');
+    expect(mixed).not.toContain('3 case(s) gone');
+  });
+
   it('the `no-candidates` line says what it READ, not that nothing was lost', () => {
     // ⛔ It used to claim "this diff removes no lines from any tracked file", which a rename that
     // dropped four cases makes false: git calls the pair `R`, `--diff-filter=MD` excludes it, and the
