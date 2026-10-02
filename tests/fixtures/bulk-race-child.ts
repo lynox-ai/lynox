@@ -24,7 +24,7 @@ if (mode === 'pause') {
   proto.writeBlocked = function (this: unknown, run: unknown): unknown {
     const verdict = original.call(this, run);
     writeFileSync(join(gateDir, 'checked'), '');
-    const until = Date.now() + 20_000;
+    const until = Date.now() + 60_000;
     while (!existsSync(join(gateDir, 'go'))) {
       if (Date.now() > until) throw new Error('gate never opened');
       Atomics.wait(tick, 0, 0, 10);

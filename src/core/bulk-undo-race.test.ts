@@ -102,8 +102,10 @@ describe('a run and its undo, raced from two engine processes', () => {
       await until(join(gate, 'checked'));
       const second = child(other, idOf(other), gate, 'go');
       await until(join(gate, `${other}-started`));
-      // The second is now inside its own call; give it time to reach the lock or the write.
-      await sleep(500);
+      // The second is now inside its own call (it writes the file right before it). Give it
+      // ample time to reach the lock or the write: if it reached neither before the gate opens,
+      // the first commits first and the test proves nothing — it would pass for any code.
+      await sleep(1500);
       writeFileSync(join(gate, 'go'), '');
       const [a, b] = await Promise.all([first, second]);
 

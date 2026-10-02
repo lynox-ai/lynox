@@ -756,8 +756,8 @@ export class BulkLedger {
       // In the same transaction as the arming, and an IMMEDIATE one: it takes the write lock
       // before the check, so an approve or resume of another run of the family in another
       // process waits for this one and then sees it, instead of checking a state this one is
-      // about to change. (A deferred transaction would let both check, and fail the second at
-      // its write with SQLITE_BUSY_SNAPSHOT instead of a refusal.)
+      // about to change. (A deferred transaction would let both check, and fail the one that
+      // checked first and writes last with SQLITE_BUSY_SNAPSHOT instead of a refusal.)
       const blocked = this.writeBlocked(run);
       if (blocked !== null) return blocked;
       const res = db.prepare(
