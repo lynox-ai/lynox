@@ -77,6 +77,22 @@ pre-push:
       skip:
         - merge
         - rebase
+    "public-repo-guard-commits.sh":
+      # The lines each commit this push ADDS, for an internal register id or wording that marks a
+      # security finding as open. The tree scan in `commands` sees only HEAD; an id one commit adds
+      # and a later one removes is not there and still ships. THIS hook is what prevents the
+      # publication — once pushed, the commit is readable on the pull request. Its CI twin (the
+      # required public-repo-guard job) only prevents the merge. A script, not a command, for the
+      # reason at the top of this block. Unlike the two above it reads the pushed refs from stdin,
+      # so pushing a branch you are not standing on checks that branch, and a ref the remote already
+      # has is checked from the remote's sha. A new branch with no origin/main to compare against is
+      # refused with the fetch that fixes it, rather than passed as an empty range.
+      # The invocation lives in .lefthook/pre-push/public-repo-guard-commits.sh.
+      runner: bash
+      use_stdin: true
+      skip:
+        - merge
+        - rebase
   commands:
     security-scan:
       run: sh scripts/security-scan.sh

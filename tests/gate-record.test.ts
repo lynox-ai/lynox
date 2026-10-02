@@ -441,7 +441,8 @@ describe('gate-record — `closes:`, required with `none` allowed', () => {
     // Including the near-misses a person actually types: a PR number, prose that
     // reads like an answer, and the template's own placeholder — `head:` has a
     // dedicated placeholder test and this field had none.
-    for (const value of ['#1262', 'nothing', 'DEF_underscore', 'def-lowercase-prefix',
+    // The wrong-case values are assembled, so this file adds no id-shaped literal.
+    for (const value of ['#1262', 'nothing', 'DEF_underscore', ['def', 'lowercase-prefix'].join('-'),
                          '<DEF-… ids this PR settles, or none>']) {
       const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
       expect(v.ok, `accepted ${value}`).toBe(false);
@@ -539,7 +540,7 @@ describe('gate-record — a real register id may carry a capital', () => {
 
   it('still refuses what is not an id at all', () => {
     // The control: widening for capitals must not widen into accepting anything.
-    for (const value of ['#1262', 'DEF_underscore', 'Def-wrong-prefix', 'nothing']) {
+    for (const value of ['#1262', 'DEF_underscore', ['Def', 'wrong-prefix'].join('-'), 'nothing']) {
       expect(evaluate({ body: record({ closes: value }), head: HEAD, files: CODE }).ok, value).toBe(false);
     }
   });

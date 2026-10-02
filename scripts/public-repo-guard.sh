@@ -26,6 +26,8 @@
 #   scripts/public-repo-guard.sh                    # whole tracked tree
 #   scripts/public-repo-guard.sh --staged           # staged files only — MANUAL
 #   scripts/public-repo-guard.sh check-meta A B     # commit messages in A..B
+#   scripts/public-repo-guard.sh check-commits A B [--allow-empty]
+#                                                   # lines each commit in A..B adds
 #
 # Exit 0 = clean, exit 1 = a leak marker was found, exit 2 = the guard reached no
 # verdict — its file listing failed, or it was invoked with arguments it cannot
@@ -44,6 +46,19 @@
 #      HARD markers are never exempt.
 
 set -euo pipefail
+
+# check-commits — the lines every commit in a range ADDS, for an internal register
+# id and for wording that marks a security finding as open or known. The tree scan
+# below sees HEAD, i.e. what survives the branch; an id one commit adds and a later
+# one removes is not there, and still ships with the push. The check lives in
+# scripts/added-lines-guard.mjs (its header says what it covers and what not); this
+# is its one entry point, called by the pre-push hook and by the required CI job.
+# Dispatched before anything else here runs, so a broken private-name list — which
+# this class never reads — cannot block it.
+if [ "${1:-}" = "check-commits" ]; then
+  shift
+  exec node "$(dirname "${BASH_SOURCE[0]}")/added-lines-guard.mjs" "$@"
+fi
 
 GUARD_NAME='public-repo-guard'
 # shellcheck source=scripts/lib/guard-file-list.sh
@@ -309,7 +324,7 @@ INTERNAL_REF="\\[\\[${REF_SLUG_BODY}\\]\\]"
 # tidying the quoting; the split-line test caught it, which is the point of having it.
 REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 # Fifth class — the SAME internal cross-reference, in the bare form without the
-# brackets: `// (DEF-0073)`, `describe('… (DEF-0083)')`. Same defect as the linked
+# brackets: a row id in a code comment or a test name. Same defect as the linked
 # form at lower severity — an opaque id a reader of THIS repo cannot resolve — and
 # it was deliberately left ungated in core#1092 because 68 live hits would have
 # painted the guard permanently red.
@@ -318,7 +333,7 @@ REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 # this pattern existed: `git grep -cIE` over `src/**/*.ts` → 0 files, with 727 .ts
 # files in the path as the positive control that the query reached something. Over
 # the WHOLE tracked tree there are 4 hits, all in `tests/gate-record.test.ts`, and
-# all of them fabricated ids (`DEF-a-row`) that are INPUT to the `closes:` parser
+# all of them fabricated ids that are INPUT to the `closes:` parser
 # rather than references. Those four carry the inline pragma rather than a path
 # carve-out, deliberately: a scope drawn around a DIRECTORY is blind to the next
 # file outside it, while the pragma states the reason at the one place it is true.
@@ -358,6 +373,7 @@ usage() {
   echo "usage: public-repo-guard.sh [--staged]" >&2
   echo "       public-repo-guard.sh check-meta  <base-ref> <head-ref>" >&2
   echo "       public-repo-guard.sh check-files <base-ref> <head-ref>" >&2
+  echo "       public-repo-guard.sh check-commits <base-ref> <head-ref> [--allow-empty]" >&2
   exit 2
 }
 
