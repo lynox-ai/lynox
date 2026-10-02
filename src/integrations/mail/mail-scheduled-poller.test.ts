@@ -197,6 +197,25 @@ describe('mail-scheduled-poller', () => {
     expect(row.sentAt).toBeUndefined();
   });
 
+  it('a claimed row does not take a due row\'s place in the tick', async () => {
+    const t0 = Date.now();
+    const busy = queue({ scheduledAt: new Date(t0 - 120_000), subject: 'busy-first' });
+    queue({ scheduledAt: new Date(t0 - 60_000), subject: 'due-second' });
+    expect(db.claimScheduledSend(busy, new Date(t0 - 1000))).toBe(true);
+    const poller = startScheduledSendPoller({ state: db, registry, now: () => t0, perTickLimit: 1 });
+    expect((await poller.tickNow()).fired).toBe(1);
+    poller.stop();
+    expect(sendCalls.map((c) => c.subject)).toEqual(['due-second']);
+  });
+
+  it('a row is claimed once: a second claim, from anywhere, is refused', () => {
+    const id = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'claim' });
+    expect(db.claimScheduledSend(id)).toBe(true);
+    expect(db.claimScheduledSend(id)).toBe(false);
+    db.markScheduledSent(id);
+    expect(db.claimScheduledSend(id)).toBe(false);
+  });
+
   it('a row being sent cannot be cancelled', () => {
     const id = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'cancel' });
     expect(db.claimScheduledSend(id)).toBe(true);
