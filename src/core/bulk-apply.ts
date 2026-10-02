@@ -68,7 +68,8 @@ export class BulkRedirectError extends Error {
 /**
  * Thrown by a writer for a target whose request would carry what looks like a secret. It
  * belongs to the target, not the run: the same target fails the same way on every attempt,
- * so a halt would stop the run for good at it, and the rest would never be written.
+ * so a halt at it would come back on every resume. As a failed target it counts toward the
+ * run's failure rules like any other, and a resume does not retry it.
  */
 export class BulkSecretError extends Error {
   constructor() {

@@ -327,6 +327,32 @@ describe('applying an external run', () => {
     }
   });
 
+  it('a small run halted by one such target writes the rest on resume, and leaves that one failed', async () => {
+    const s = shop();
+    s.items.set(`/products/${LOOKS_LIKE_A_KEY}`, { id: 9, title: 'Keyed', price: '12.00' });
+    const restore = serve(s);
+    try {
+      // Planned without the scan so the keyed target gets as far as the write.
+      const keyed = url(LOOKS_LIKE_A_KEY);
+      const c = client({ contract: mintBulkContract(HOST, [keyed, url(1), url(2)]) });
+      const runId = await approvedRun(
+        [{ target: keyed, after: { price: '15.00' } }, { target: url(1), after: { price: '15.00' } }, { target: url(2), after: { price: '15.00' } }],
+        client({ scan: () => null, contract: mintBulkContract(HOST, [keyed, url(1), url(2)]) }), 'PATCH', () => null,
+      );
+      const writer = (run: BulkRunForApply) => bulkWriterFor(run, null, () => externalWriter(c, { sleep: noSleep }));
+      s.requests.length = 0;
+      // One failure in three is over the failure-rate rule: the run halts at once.
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writer })).status).toBe('halted');
+      expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writer })).status).toBe('done');
+      expect([s.items.get('/products/1')!['price'], s.items.get('/products/2')!['price']]).toEqual(['15.00', '15.00']);
+      expect(targetErrors(runId)).toEqual(['secret']);
+      expect(s.requests.filter((r) => r.path.includes(LOOKS_LIKE_A_KEY))).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it('the credential the engine attaches is not what is scanned: a stored token that looks like a key still goes out', async () => {
     const s = shop();
     const restore = serve(s);

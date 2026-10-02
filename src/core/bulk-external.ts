@@ -396,7 +396,8 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
  * kept is what an undo must expect. Never a DELETE: an external target this run did not create is not removed.
  *
  * A missing credential, a refused one, a blocked host or a call outside the contract halts
- * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`). One wait
+ * the run (`BulkWriterHalt`); a redirect fails the target (`BulkRedirectError`), and so does a
+ * request that looks like it carries a secret (`BulkSecretError`). One wait
  * per request: a 429 for its `Retry-After` (capped), a spent profile rate limit for a
  * second. Anything else that is not a success fails the target.
  */

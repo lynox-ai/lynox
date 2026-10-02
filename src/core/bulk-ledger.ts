@@ -824,7 +824,10 @@ export class BulkLedger {
          WHERE id = ? AND phase IN ('approved','writing')`,
       ).run(this.approvalWindow(this.countWriting(runId), now), maxTargets, runId);
       if (res.changes !== 1) return false;
-      db.prepare('UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL')
+      // Not a target that failed on what it would send (`secret`): that fails the same way every
+      // time, so retrying it first would halt a small run again at the same place and the rest
+      // would never be written. It stays failed; the resume carries on with the others.
+      db.prepare(`UPDATE bulk_targets SET error = NULL, claimed_at = NULL WHERE run_id = ? AND applied_at IS NULL AND error IS NOT NULL AND error != 'secret'`)
         .run(runId);
       triggerId = this.armTrigger(run, now);
       return true;

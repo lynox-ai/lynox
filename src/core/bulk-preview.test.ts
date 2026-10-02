@@ -521,6 +521,7 @@ describe('the preview effect', () => {
       expect((await runBulkPreview(run, previewDeps(client({ keys: [keyed, url(0)] })))).status).toBe('done');
       expect(ledger.getStatus(run)!.haltReason).toBeNull();
       expect(ledger.getStatus(run)!.changes.invalid).toBe(1);
+      expect(ledger.getStatus(run)!.invalidReasons).toEqual({ secret_in_target: 1 });
       expect(s.requests.map((r) => new URL(r.url).pathname)).toEqual(['/products/0']);
     } finally {
       restore();
