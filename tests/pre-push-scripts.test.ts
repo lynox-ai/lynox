@@ -32,8 +32,10 @@ const ID = ['DE', 'F-', 'example-invented-row'].join('');
 const RANGE_HOOKS = ['public-repo-guard-meta.sh', 'public-repo-guard-files.sh', 'public-repo-guard-commits.sh'] as const;
 const RANGES = 'pushed-ranges.sh';
 const FETCH = 'git fetch origin main:refs/remotes/origin/main';
-/** These tests start git, lefthook and bash; the default 5 s is too tight under load. */
-const T = 30_000;
+/** These tests start git, lefthook and bash, and each builds its own clone; the default 5 s is too
+ *  tight under load, and 30 s was too tight in a full parallel suite on a loaded machine (one case
+ *  timed out there and passed alone). */
+const T = 60_000;
 
 let tmp: string;
 beforeAll(() => { tmp = mkdtempSync(join(tmpdir(), 'pre-push-scripts-')); });
