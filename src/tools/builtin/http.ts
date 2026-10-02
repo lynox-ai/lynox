@@ -332,7 +332,8 @@ const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
  * time ran out, and "timed out" alone reads as "did not happen". For a POST or PATCH, sending it
  * again can do it twice; PUT and DELETE are meant to be safe to repeat, but only if the server
  * keeps to that, so they are warned the same way. When the response headers had already arrived
- * (`answeredStatus`) and only the body stalled, the request certainly reached the server.
+ * (`answeredStatus`, from the final hop after any redirect) and only the body stalled, the
+ * request certainly reached a server — a redirect is itself an answer to it.
  */
 export function httpTimeoutMessage(timeoutMs: number, method: string, wallClock: boolean, answeredStatus?: string): string {
   const base = `HTTP request timed out after ${timeoutMs}ms${wallClock ? ' (wall clock)' : ''}`;
@@ -2192,9 +2193,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const readLimit = isJson && explicitLimit === undefined
         ? JSON_SHAPE_READ_CEILING
         : responseLimit;
-      // Race the body read against the same wall-clock — Node fetch's response
-      // body stream doesn't honour signal aborts after headers arrive, so a
-      // chunked-transfer stall here would otherwise hang the run.
+      // Race the body read against the same wall-clock. The abort timer normally ends a
+      // stalled body (the transport destroys the socket, and the read fails with a plain
+      // `aborted`); the wall clock is the backstop for a stream that ignores even that.
       const { text, truncated } = await Promise.race([
         readBodyLimited(response, readLimit),
         wallTimeout,

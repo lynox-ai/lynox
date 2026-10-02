@@ -1809,6 +1809,26 @@ describe('httpRequestTool', () => {
       );
     }, 5000);
 
+    it('a POST that outlives even the abort while reading the body says so with the wall clock', async () => {
+      const ignoresAbort = vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ start() { /* never enqueues, never errors */ } }),
+        { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } },
+      )));
+      const msg = await timeoutOf('POST', ignoresAbort);
+      expect(msg).toMatch(/^HTTP request timed out after 50ms \(wall clock\) while reading the response; the server had already answered 201 Created\. The POST reached the server/);
+    }, 5000);
+
+    it('a body that fails on its own before the limit is not reported as a timeout', async () => {
+      // Same shape as the stall — headers in, then a plain `aborted` from the body — but before
+      // our limit fires. Only our own limit makes it a timeout, not the message or the headers.
+      const failsEarly = vi.fn(() => Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({ start(c) { setTimeout(() => c.error(new Error('aborted')), 5); } }),
+        { status: 201, statusText: 'Created', headers: { 'content-type': 'application/json' } },
+      )));
+      const msg = await timeoutOf('POST', failsEarly);
+      expect(msg).toBe('aborted');
+    }, 5000);
+
     it('a GET that times out does not', async () => {
       const msg = await timeoutOf('GET', abortableHang());
       expect(msg).toBe('HTTP request timed out after 50ms');
