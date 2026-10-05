@@ -15,6 +15,7 @@
  * that touches targets is `bulk-apply.ts`, run by the worker off the trigger the
  * approval arms.
  */
+import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
@@ -82,7 +83,9 @@ export type BulkInvalidReason =
   /** the after-state holds something shaped like a credential */
   | 'secret_in_after'
   /** The target's address looks like it carries a secret; it is never requested. */
-  | 'secret_in_target';
+  | 'secret_in_target'
+  /** The target is a mail provider's API (`isMailProviderTarget`); a bulk run never writes one. */
+  | 'mail_api';
 
 export interface BulkRunStatus {
   id: string;
@@ -274,6 +277,17 @@ function isStopped(r: { phase: BulkPhase; halt_reason: string | null }): boolean
 /** An external run's target system, `http:<host>`. */
 export function externalHostOf(targetSystem: string): string | null {
   return targetSystem.startsWith('http:') ? targetSystem.slice('http:'.length) : null;
+}
+
+/**
+ * Whether an external run's stored contract grants a write to a mail provider's API. Read
+ * from the contract — its host and every target path, in clear — so it holds for a run
+ * planned before mail targets were refused at planning, too.
+ */
+export function contractWritesMail(targetSystem: string, contractJson: string | null): boolean {
+  const host = externalHostOf(targetSystem);
+  if (host === null) return false;
+  return parseContractPaths(contractJson).some((path) => isMailProviderTarget(`https://${host}${path}`));
 }
 
 /** A run as the effect loop reads it. Not model-facing. */
@@ -748,10 +762,11 @@ export class BulkLedger {
     maxTargets?: number | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
+    if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
     const writing = this.countWriting(runId);
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
@@ -797,10 +812,11 @@ export class BulkLedger {
    */
   resume(runId: string, params: { checksum: string; maxTargets?: number | undefined; now?: number | undefined }):
     { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'approved' && run.phase !== 'writing') return { ok: false, reason: 'wrong_phase' };
+    if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== run.approval_checksum || params.checksum !== this.computeChecksum(runId)) {
       return { ok: false, reason: 'checksum' };
     }
