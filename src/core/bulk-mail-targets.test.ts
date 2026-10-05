@@ -49,6 +49,13 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget(url)).toBe(true);
   });
 
+  it('refuses every path on a host that is Gmail\'s own, not only the /gmail ones', () => {
+    expect(isMailProviderTarget('https://gmail.googleapis.com/v2/users/me/settings/vacation')).toBe(true);
+    expect(isMailProviderTarget('https://content-gmail.googleapis.com/users/me/settings/vacation')).toBe(true);
+    // The /gmail prefix alone decides on a shared host: the same path there is not Gmail.
+    expect(isMailProviderTarget('https://www.googleapis.com/v2/users/me/settings/vacation')).toBe(false);
+  });
+
   it('reads a spelling of the same resource as that resource', () => {
     expect(isMailProviderTarget('https://GMAIL.googleapis.com./gmail/v1/users/me/settings/vacation')).toBe(true);
     expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me/MailboxSettings')).toBe(true);
