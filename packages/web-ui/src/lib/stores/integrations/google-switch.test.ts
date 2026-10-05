@@ -104,3 +104,19 @@ describe('revokeNotice — the page reports a revocation only when Google confir
 		expect(revokeNotice(null).type).toBe('info');
 	});
 });
+
+describe('revokeGoogle reports through revokeNotice', () => {
+	// A source guard, because the store is not injectable. It pins only that the
+	// call is there — the behaviour of the decision is pinned above, on the pure
+	// function. Without the call, the page would report a revocation whatever
+	// the engine answered.
+	it('builds its message from revokeNotice', async () => {
+		const { readFileSync } = await import('node:fs');
+		const { fileURLToPath } = await import('node:url');
+		const source = readFileSync(fileURLToPath(new URL('./google.svelte.ts', import.meta.url)), 'utf-8');
+		const start = source.indexOf('export async function revokeGoogle(');
+		expect(start, 'revokeGoogle not found — this guard is pinned to a name that moved').toBeGreaterThan(-1);
+		const body = source.slice(start, source.indexOf('\n}\n', start));
+		expect(body.replace(/\/\/.*$/gm, '')).toMatch(/revokeNotice\(/);
+	});
+});
