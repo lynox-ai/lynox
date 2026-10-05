@@ -733,6 +733,14 @@ export class GoogleAuth {
   }
 
   /**
+   * True when the stored token carries the control plane's sealed refresh handle, i.e. it can be
+   * refreshed without a client pair of this instance's own.
+   */
+  hasBrokerRefreshHandle(): boolean {
+    return !!this.tokenData?.refresh_handle;
+  }
+
+  /**
    * Set tokens directly from an external OAuth broker (e.g. managed control plane).
    * Validates token structure and saves to vault.
    */
