@@ -1406,6 +1406,7 @@ async function attachEngineManagedAuth(
             ? shapedForLog(refreshKey, VAULT_NAME_SHAPE, 80)
             : shapedForLog(refreshKey, DERIVED_NAME_SHAPE, 80),
           shapedForLog(profile.oauth_grant?.revoked_at, ISO_TIMESTAMP_SHAPE, 30),
+          !!profile.auth?.oauth?.preset_id,
         ) };
       }
     }

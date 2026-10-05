@@ -59,10 +59,20 @@ describe('tokenFingerprint', () => {
 
 describe('revokedGrantMessage', () => {
   it('names the profile, the slot to refill, and that fetching again cannot help', () => {
-    const text = revokedGrantMessage('crm-api', 'CRM_API_REFRESH_TOKEN', '2026-09-22T00:00:00.000Z');
+    const text = revokedGrantMessage('crm-api', 'CRM_API_REFRESH_TOKEN', '2026-09-22T00:00:00.000Z', false);
     expect(text).toContain('api_profile "crm-api"');
     expect(text).toContain('(recorded 2026-09-22T00:00:00.000Z)');
     expect(text).toContain('"CRM_API_REFRESH_TOKEN" with ask_secret');
+    expect(text).toContain('fetch_token will not resend it');
+  });
+
+  it('sends a profile connected through a preset back to connect, never to a pasted token', () => {
+    // Such a profile was authorized by redirect: no provider UI shows the user a
+    // refresh token to paste, so the paste instruction would be a dead end.
+    const text = revokedGrantMessage('bexio-api', 'BEXIO_API_REFRESH_TOKEN', undefined, true);
+    expect(text).toContain('api_profile "bexio-api"');
+    expect(text).toContain('action "connect"');
+    expect(text).not.toContain('ask_secret');
     expect(text).toContain('fetch_token will not resend it');
   });
 });

@@ -20,7 +20,7 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { derivePresetEndpoints, presetIds, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
@@ -301,6 +301,15 @@ function validateProfile(profile: ApiProfile): string | null {
           if (new RegExp(SECRET_REF_PATTERN.source).test(value)) {
             return `Invalid auth.oauth.preset_params.${name}: a vault reference cannot be a provider parameter. This value becomes part of the address the user's browser is sent to — pass the plain value (a shop name, a region), never a credential.`;
           }
+        }
+      }
+      // Checked at save as well as at connect: a profile that stores a scope its preset does
+      // not allow would only fail later, at the link, far from whoever wrote it.
+      const savedPreset = typeof o.preset_id === 'string' ? OAUTH_PRESETS.get(o.preset_id) : undefined;
+      if (savedPreset) {
+        const requested = presetScopeRequest(savedPreset, typeof o.scope === 'string' ? o.scope : undefined);
+        if ('refused' in requested) {
+          return `Invalid auth.oauth.scope: the provider "${savedPreset.id}" does not allow ${requested.refused.join(', ')}. Allowed in addition to ${savedPreset.requiredScopes.join(' ') || 'nothing'}: ${savedPreset.allowedScopes.join(' ') || 'nothing'}.`;
         }
       }
     }
@@ -1951,7 +1960,7 @@ Next steps before calling create:
       const grant = profile.oauth_grant;
       if (presentedRefresh !== null && grant?.state === 'revoked'
           && grant.revoked_fp === tokenFingerprint(presentedRefresh)) {
-        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at);
+        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at, !!oauth.preset_id);
       }
       // Where the access token will go, checked BEFORE the POST: a refusal after it
       // would throw away a freshly minted token, and with a provider that rotates,
@@ -2028,7 +2037,19 @@ Next steps before calling create:
         client_id: clientId!,
         client_secret: clientSecret!,
       };
-      if (oauth.scope) params['scope'] = oauth.scope;
+      // A profile that connects through a preset asks for the same set the authorize link
+      // asked for — the preset's required scopes included — so a refresh cannot narrow away
+      // the scope the provider needs to keep issuing refresh tokens.
+      const preset = oauth.preset_id ? OAUTH_PRESETS.get(oauth.preset_id) : undefined;
+      if (preset) {
+        const requested = presetScopeRequest(preset, oauth.scope);
+        if ('refused' in requested) {
+          return `Error: profile "${input.id}" asks for scopes its provider preset does not allow: ${requested.refused.join(', ')}. Remove them with api_setup update.`;
+        }
+        if (requested.scopes.length > 0) params['scope'] = requested.scopes.join(' ');
+      } else if (oauth.scope) {
+        params['scope'] = oauth.scope;
+      }
       if (oauth.audience) params['audience'] = oauth.audience;
       if (presentedRefresh !== null) params['refresh_token'] = presentedRefresh;
       // The POST itself lives in `core/oauth-token-exchange.ts` because the
@@ -2113,7 +2134,7 @@ Next steps before calling create:
             revoked_fp: presentedFp,
             revoked_at: new Date().toISOString(),
           }));
-          return `${revokedGrantMessage(input.id, refreshKey, undefined)}\n\n${responseBody}`;
+          return `${revokedGrantMessage(input.id, refreshKey, undefined, !!oauth.preset_id)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;

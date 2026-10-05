@@ -192,11 +192,19 @@ describe('the preset fields are checked at the door, not at the derivation', () 
     // a reference needs a colon and an uppercase letter and the grammar allows
     // neither. Loosen the grammar and this goes red, which is the point.
     ['a vault reference as the provider id', { preset_id: 'secret:LYNOX_ADMIN_TOKEN' }, 'auth.oauth.preset_id'],
+    // Checked at save as well as at connect: stored, it would fail only at the
+    // link. A write scope is not in bexio's allowed set.
+    ['a scope the provider preset does not allow', { preset_id: 'bexio', scope: 'contact_show contact_edit' }, 'auth.oauth.scope'],
   ])('refuses %s', async (_label, oauth, field) => {
     const result = await createWith(oauth);
 
     expect(result).toContain('Validation error');
     expect(result).toContain(field);
+  });
+
+  it('lets a scope from the preset\'s allowed set through', async () => {
+    const result = await createWith({ preset_id: 'bexio', scope: 'contact_show kb_invoice_show' });
+    expect(result).not.toContain('auth.oauth.scope');
   });
 
   it.each([

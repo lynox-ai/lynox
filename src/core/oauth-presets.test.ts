@@ -4,6 +4,7 @@ import {
   derivePresetEndpoints,
   presetIds,
   presetRegisterOf,
+  presetScopeRequest,
   type OAuthPreset,
   PRESET_ID_PATTERN,
 } from './oauth-presets.js';
@@ -18,6 +19,8 @@ const CONSTANT: OAuthPreset = {
   authorizePath: '/oauth/authorize',
   tokenPath: '/oauth/token',
   params: [],
+  requiredScopes: [],
+  allowedScopes: [],
 };
 
 const TEMPLATED: OAuthPreset = {
@@ -27,28 +30,24 @@ const TEMPLATED: OAuthPreset = {
   authorizePath: '/admin/oauth/authorize',
   tokenPath: '/admin/oauth/access_token',
   params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
+  requiredScopes: [],
+  allowedScopes: [],
 };
 
 const REGISTER = presetRegisterOf([CONSTANT, TEMPLATED]);
 
 describe('the preset register is frozen, and the freeze is the boundary', () => {
-  it('ships empty until a provider is decided', () => {
-    // An empty register refuses every connect, which is the honest state while
-    // nobody has vouched for a provider. If this ever fails, someone added a
-    // preset — that is a decision, and it belongs in the register of decisions,
-    // not in a passing test.
-    //
-    // It is also the alarm for work that was deliberately left out of the first
-    // wave, which is why the obligation is in the assertion message rather than
-    // here: a comment is read by whoever is already in this file, and the one
-    // who needs it is whoever makes this test red.
+  it('ships exactly the providers that were decided', () => {
+    // A preset decides which site a user is sent to. If this fails, a provider
+    // was added or removed — that is a decision, and it belongs in the register
+    // of decisions, not in a passing test. The obligation is in the assertion
+    // message because the one who needs it is whoever makes this test red.
     expect(
       presetIds(),
-      'A provider was added to the register, so the redirect flow becomes reachable. '
-      + 'Before that ships: `revokedGrantMessage` (src/core/oauth-refresh-failure.ts) still sends the model down the '
-      + 'paste-a-token path after a revocation and says nothing about connecting again, which is unreachable today '
-      + 'only because this list is empty. That wording was left to the follow-up wave on purpose; this is its alarm.',
-    ).toEqual([]);
+      'The set of providers changed. Adding one makes the redirect flow reach a new site: decide it first, give the '
+      + 'entry its source, enumerate its allowed scopes (never "everything but"), and check that every model-visible '
+      + 'message about a revoked grant still sends a preset profile to `api_setup connect`, not to a pasted token.',
+    ).toEqual(['bexio']);
   });
 
   it('hands out no map, so no cast can add a provider at runtime', () => {
@@ -68,7 +67,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     expect(() => {
       (OAUTH_PRESETS as unknown as Record<string, unknown>)['evil'] = { id: 'evil' };
     }).toThrow();
-    expect(presetIds()).toEqual([]);
+    expect(presetIds()).toEqual(['bexio']);
   });
 
   it('exports no way to register a preset at runtime', async () => {
@@ -80,7 +79,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // copy in a test claiming to bind them.
     const module = await import('./oauth-presets.js');
     expect(Object.keys(module).sort()).toEqual(
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf'].sort(),
+      // `presetScopeRequest` is a pure derivation, like `derivePresetEndpoints`: it reads a preset, it adds none.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf', 'presetScopeRequest'].sort(),
     );
   });
 
@@ -88,7 +88,56 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // The seam is a parameter. Passing one must not reach the shipped register
     // — otherwise a test would widen production.
     expect(presetIds(REGISTER)).toEqual(['example-constant', 'example-shop']);
-    expect(presetIds()).toEqual([]);
+    expect(presetIds()).toEqual(['bexio']);
+  });
+});
+
+describe('the scopes an authorization asks for', () => {
+  const SCOPED: OAuthPreset = { ...CONSTANT, requiredScopes: ['openid', 'offline_access'], allowedScopes: ['contact_show', 'email'] };
+
+  it('always asks for the required scopes, also when the profile names none', () => {
+    expect(presetScopeRequest(SCOPED, undefined)).toEqual({ scopes: ['openid', 'offline_access'] });
+    expect(presetScopeRequest(SCOPED, '  ')).toEqual({ scopes: ['openid', 'offline_access'] });
+  });
+
+  it('adds what the profile names from the allowed set, once each', () => {
+    expect(presetScopeRequest(SCOPED, 'contact_show email contact_show offline_access'))
+      .toEqual({ scopes: ['openid', 'offline_access', 'contact_show', 'email'] });
+  });
+
+  it('refuses a scope that is in neither list, instead of dropping it', () => {
+    // The allowlist is enumerated: a scope nobody listed is refused, whether it
+    // is dangerous or merely new. A check written as "everything but a deny
+    // list" would let this one through.
+    expect(presetScopeRequest(SCOPED, 'contact_show brand_new_scope')).toEqual({ refused: ['brand_new_scope'] });
+  });
+});
+
+describe('the bexio preset', () => {
+  const bexio = OAUTH_PRESETS.get('bexio');
+
+  it('sends the user to bexio\'s own identity provider, with the paths of its discovery document', () => {
+    expect(derivePresetEndpoints('bexio', undefined)).toEqual({
+      host: 'auth.bexio.com',
+      authorizeUrl: 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/auth',
+      tokenUrl: 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/token',
+    });
+  });
+
+  it('always asks for offline_access, without which bexio issues no refresh token', () => {
+    expect(bexio?.requiredScopes).toContain('offline_access');
+  });
+
+  it('allows read scopes only, and no payroll records', () => {
+    for (const scope of bexio?.allowedScopes ?? []) {
+      expect(scope, `${scope} is a write scope`).not.toMatch(/_edit$/);
+      expect(scope, `${scope} reaches payroll records`).not.toMatch(/^payroll/);
+    }
+    expect(bexio?.allowedScopes.length).toBeGreaterThan(0);
+  });
+
+  it('refuses an administrative scope a profile might name', () => {
+    expect(presetScopeRequest(bexio!, 'contact_show superadmin')).toEqual({ refused: ['superadmin'] });
   });
 });
 

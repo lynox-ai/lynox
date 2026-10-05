@@ -4130,6 +4130,27 @@ describe('httpRequestTool', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    it('sends a revoked grant of a preset profile back to connect, not to a pasted token', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const { tokenFingerprint } = await import('../../core/oauth-refresh-failure.js');
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const store = new ApiStore();
+      store.register({
+        id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { preset_id: 'bexio', token_url: 'https://api.example.com/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
+        custom_endpoint_ack: ack,
+        oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
+      });
+      const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live', CRM_API_REFRESH_TOKEN: 'rt-rejected' });
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      expect(refused).toContain('as revoked or expired');
+      expect(refused).toContain('action "connect"');
+      expect(refused).not.toContain('ask_secret');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('refuses a revoked oauth2 grant before the request goes out — and attaches a live one', async () => {
       const { ApiStore } = await import('../../core/api-store.js');
       const oauth = (grant: import('../../core/api-store.js').OAuthGrantRecord | undefined): import('../../core/api-store.js').ApiProfile => ({
