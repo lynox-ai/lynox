@@ -1510,7 +1510,11 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'limits', 'secretStore', 'runTaint', 'parentActiveScopes',
+  // ⛔ `abortScope` belongs here, and its absence is why a call site could drop it
+  // silently — which is the exact defect class this list exists to catch, and it did not,
+  // because the key was never added. The scoped abort shipped inert for workflows: the
+  // step executors register conditionally, and no producer set the field.
+  'limits', 'secretStore', 'runTaint', 'parentActiveScopes', 'abortScope',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1857,6 +1861,47 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
       mockRetryManifest.mockResolvedValueOnce(makeRunState());
       await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
       expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['parentActiveScopes']).toBe(scopes);
+    });
+  });
+
+  // ⛔ THE SAME SHAPE, FOR THE ABORT SCOPE, and it is the gap that let the whole step half
+  // ship inert: `buildRunCtx` emits the key either way, so only a VALUE assertion per
+  // entrypoint says a scope ever arrives. Three mutants survived the entire suite without
+  // these — `buildRunCtx` dropping the field, all three executor hand-offs passing
+  // `undefined`, and the nested pipeline forwarding nothing — while two tests that call the
+  // executors DIRECTLY with a scope stayed green, because they bypass the wiring and prove
+  // only that the leaves behave given one.
+  describe('the calling session\'s abort scope reaches the run', () => {
+    function agentWithScope(): { agent: IAgent; scope: unknown } {
+      const agent = makeAutonomyAgent(undefined);
+      const scope = { members: new Set<{ abort: () => void }>() };
+      (agent as unknown as { abortScope: unknown }).abortScope = scope;
+      return { agent, scope };
+    }
+
+    it('inline run', async () => {
+      const { agent, scope } = agentWithScope();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ name: 'inline', steps: [makeStep('s1', 'do thing')] }, agent);
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['abortScope']).toBe(scope);
+    });
+
+    it('stored run', async () => {
+      const { agent, scope } = agentWithScope();
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id }, agent);
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['abortScope']).toBe(scope);
+    });
+
+    it('retry', async () => {
+      const { agent, scope } = agentWithScope();
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+      await runWorkflowTool.handler({ workflow_id: id }, agent);
+      mockRetryManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+      expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['abortScope']).toBe(scope);
     });
   });
 

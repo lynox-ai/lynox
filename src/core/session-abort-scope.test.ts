@@ -1,7 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Agent } from './agent.js';
+import { Engine } from './engine.js';
+import { reloadConfig } from './config.js';
 import { Session } from './session.js';
-import type { AbortScope } from '../types/config.js';
+import type { AbortScope, LynoxConfig } from '../types/config.js';
 
 /**
  * A session's abort reaches ITS OWN chain and nothing else.
@@ -21,9 +26,15 @@ import type { AbortScope } from '../types/config.js';
  * grandchild lands in the session's set). A test here that registered members by hand
  * would prove `abort()` iterates a set — true of the broken version too.
  *
- * ⚠ And why the sessions are built with `Object.create`: constructing a real `Session`
- * needs an engine, a config and a store, and `abort()` reads exactly one field. No test
- * in this repo constructs one, so the alternative was not "a better test" but "no test".
+ * ⚠ The unit cases below build their sessions with `Object.create`, because `abort()` reads
+ * exactly one field and that is all they are about. An earlier version of this note
+ * justified it with "no test in this repo constructs a real Session", which is FALSE —
+ * `datastore-tools-boot.test.ts` and `google-visibility-boot.test.ts` both do, through a
+ * real `Engine` and with the real `Agent`. That false premise is why the headline property
+ * went unpinned: a mutant that gives every parentless agent ONE SHARED module-level scope
+ * — i.e. restores the exact defect this change removes — survived the whole suite, because
+ * hand-made agents with hand-made scopes only ever prove that `abort()` iterates the scope
+ * it is handed. The real-Engine case at the bottom of this file is the one that kills it.
  */
 function makeMember(): { abort: () => void; aborted: () => boolean } {
   let hit = false;
@@ -93,5 +104,101 @@ describe('Session.abort() is scoped to its own chain', () => {
     const shared: AbortScope = { members: new Set() };
     const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', abortScope: shared });
     expect(child.abortScope).toBe(shared);
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // The property the whole change exists for, against a real Engine.
+  // ────────────────────────────────────────────────────────────────────────────
+  describe('two real sessions do not share a scope', () => {
+    const dirs: string[] = [];
+    const engines: Engine[] = [];
+    const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
+      'GOOGLE_SERVICE_ACCOUNT_KEY', 'LYNOX_MANAGED_INSTANCE_ID'] as const;
+    const saved = new Map<string, string | undefined>();
+
+    function setEnv(key: string, value: string | undefined): void {
+      if (!saved.has(key)) saved.set(key, process.env[key]);
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+
+    afterEach(async () => {
+      for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
+      engines.length = 0;
+      for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      saved.clear();
+      for (const d of dirs) rmSync(d, { recursive: true, force: true });
+      dirs.length = 0;
+      reloadConfig();
+    });
+
+    async function boot(): Promise<Engine> {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-abortscope-'));
+      dirs.push(dir);
+      for (const k of ENV_KEYS) setEnv(k, undefined);
+      setEnv('LYNOX_DATA_DIR', dir);
+      reloadConfig(); // loadConfig() caches, and an earlier boot in this file filled it
+      const engine = new Engine({} as LynoxConfig);
+      engines.push(engine);
+      await engine.init();
+      return engine;
+    }
+
+    it('each session gets its own, and an abort in one leaves the other alone', async () => {
+      // ⛔ THE MUTANT THIS KILLS, and nothing else in the suite did: give `Agent`'s
+      // constructor a module-level shared default instead of a fresh Set, which is the
+      // process-wide behaviour this change removes, and every test stayed green. Two
+      // hand-made agents cannot see it — they carry hand-made scopes. Two REAL sessions
+      // from a real Engine can, because the scope they get is the one the constructor
+      // chose.
+      const engine = await boot();
+      const a = engine.createSession();
+      const b = engine.createSession();
+      const agentA = a.getAgent();
+      const agentB = b.getAgent();
+      expect(agentA, 'the probe needs a real agent, not a pass').not.toBeNull();
+      expect(agentB).not.toBeNull();
+
+      expect(agentA!.abortScope, 'separate objects, not one shared default').not.toBe(agentB!.abortScope);
+
+      // And the behaviour, not only the identity: a member in each, one abort.
+      const mine = makeMember();
+      const theirs = makeMember();
+      agentA!.abortScope.members.add(mine);
+      agentB!.abortScope.members.add(theirs);
+      a.abort();
+      expect(mine.aborted(), 'the aborting session\'s own chain').toBe(true);
+      expect(theirs.aborted(), 'the other session\'s chain').toBe(false);
+    });
+
+    it('an agent REBUILD keeps the session\'s scope, so a stop still reaches what is registered', async () => {
+      // ⛔ The scope became a session-lifetime identity field the moment it moved onto the
+      // agent — and the agent is rebuilt by seven call sites, four of them public API
+      // (`setModel`, `setEffort`, `setThinking`, `addTool`, `reloadUserConfig`, plus
+      // `_recreateAgent` and the constructor), none of which checks for an in-flight run.
+      // Without carrying it across, every rebuild mints an empty Set and ORPHANS whatever
+      // is registered: a later `abort()` reaches nothing, silently. The module-level set
+      // this replaced was immune by construction, so this is a cost the change introduced
+      // and has to pay for.
+      //
+      // `setEffort` is the cheapest of the four to drive — no model resolution, no registry
+      // reload — and the claim is about the rebuild, not about which knob caused it.
+      const engine = await boot();
+      const session = engine.createSession();
+      const before = session.getAgent();
+      expect(before, 'the probe needs a real agent').not.toBeNull();
+      const scope = before!.abortScope;
+      const member = makeMember();
+      scope.members.add(member);
+
+      session.setEffort('high');
+
+      const after = session.getAgent();
+      expect(after, 'still an agent after the rebuild').not.toBeNull();
+      expect(after!.abortScope, 'the SAME scope object, not a fresh one').toBe(scope);
+      expect(after!.abortScope.members.has(member), 'and what was registered is still in it').toBe(true);
+      // The consequence, not only the identity: the stop still reaches it.
+      session.abort();
+      expect(member.aborted()).toBe(true);
+    });
   });
 });

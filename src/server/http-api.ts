@@ -1126,11 +1126,12 @@ export class LynoxHTTPApi {
    * Best-effort by design, mirroring RunExecutor.abort: a teardown must not turn
    * into a 500 for the caller who asked for it. Two consequences that are real
    * and are NOT closed here:
-   *   - `takeover` ends with `session.abort()`, and `Session.abort` still calls
-   *     the PROCESS-WIDE `abortSpawnedAgents()`/`abortPipelineAgents()`
-   *     (`spawn.ts`, `runtime-adapter.ts` keep module-level Sets). So this also
-   *     aborts sub-agents belonging to OTHER threads. That is pre-existing — the
-   *     stop button has always done it — but every caller added here inherits it.
+   *   - `takeover` ends with `session.abort()`, which NO LONGER reaches other threads:
+   *     the two module-level Sets are gone, and an abort now reaches the agents of its
+   *     own session's chain only (`AbortScope`). What a caller added here inherits is
+   *     therefore its own chain — which is the point, and the reason this bullet is
+   *     kept rather than deleted: it used to say the opposite, and it is the sentence
+   *     the next person adding a caller reads.
    *   - if the swallowed throw came from `expirePrompt`, the run is unwound but
    *     the prompt row stays `pending` until its 24 h TTL, and the next
    *     `insertAskUser` on this session hits the unique index. Strictly better

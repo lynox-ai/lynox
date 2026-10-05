@@ -1504,7 +1504,12 @@ export class Session {
    */
   abort(): void {
     this.agent?.abort();
-    for (const member of this.agent?.abortScope.members ?? []) {
+    // `?.members`, not `.members`: the chain guards the agent and the scope is only
+    // guaranteed for `Agent` itself. This method runs inside a bare `setTimeout` callback
+    // on the orphan-run watchdog, where a throw has nothing to catch it — and `IAgent` is
+    // in the published barrel, so a duck-typed consumer implementation is the one way a
+    // scope-less agent gets here.
+    for (const member of this.agent?.abortScope?.members ?? []) {
       // One throwing member must not keep the rest running: `abort()` reaches into an
       // agent, and this loop is the only thing that ends the others.
       try { member.abort(); } catch { /* the next one still gets its abort */ }
@@ -2388,6 +2393,16 @@ export class Session {
     }
 
     this.agent = new Agent({
+      // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
+      // empty scope and orphans whatever is registered — a later `abort()` then reaches
+      // nothing. There are seven rebuild sites (`setModel`, `setEffort`, `setThinking`,
+      // `addTool`, `reloadUserConfig`, `_recreateAgent`, the ctor) and four are public
+      // API, none of which checks for an in-flight run. The module-level set this
+      // replaced was immune by construction, so the scope only became a thing a rebuild
+      // can lose when it started living on the agent — which is what `_recreateAgent`'s
+      // own comment is about: a rebuild is infrastructural and must not make the session
+      // forget who it is.
+      ...(this.agent ? { abortScope: this.agent.abortScope } : {}),
       name: 'lynox',
       model,
       systemPrompt,

@@ -853,7 +853,6 @@ async function executeThinker(
     // its own children land there too — so a session's abort reaches the whole chain.
     // Without it a grandchild is reachable by nothing, which is the one failure the
     // module-wide set it replaces could not have had.
-    abortScope: parentAgent.abortScope,
     tools,
     thinking,
     effort,
@@ -888,6 +887,15 @@ async function executeThinker(
     // above so the runs row records the same provider. Rationale in
     // `resolveSpawnChildProviderConfig`.
     ...childProviderCfg,
+    // ⛔ AFTER the spread, deliberately. `abortScope` used to sit above it, where a key
+    // added to `ChildProviderConfig` later would silently rebind the child's scope — and
+    // a child in the wrong scope is a child a stop cannot reach. The interface is closed
+    // today; the ordering is what keeps that from mattering.
+    //
+    // Inherited, which is the transitive half of the scoping: the child registers in the
+    // PARENT's scope below, and by carrying that same scope it makes its own children
+    // land there too. Without it a grandchild is reachable by nothing.
+    abortScope: parentAgent.abortScope,
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
@@ -1084,8 +1092,9 @@ async function executeThinker(
     // Mark the child run failed/aborted so the cost cap and history UI don't
     // show it as still-running. Fires for BOTH ctor failures (childAgent
     // undefined, no spend yet) and send failures (childAgent constructed,
-    // partial spend possible — CostGuard tracks per-turn). An abort (parent
-    // stopped → abortSpawnedAgents) now THROWS RunAbortedError instead of
+    // partial spend possible — CostGuard tracks per-turn). An abort (the parent's own
+    // stop reaching this child through its session's abort scope) now THROWS
+    // RunAbortedError instead of
     // returning '' (which mis-recorded the child 'completed'); mark it 'aborted'
     // — an intentional interruption, not a failure.
     const childAborted = err instanceof RunAbortedError;
@@ -1128,7 +1137,13 @@ async function executeThinker(
     }
     throw err;
   } finally {
-    if (childAgent) parentAgent.abortScope.members.delete(childAgent);
+    // `?.` here and NOT at the register site above, deliberately. This runs in a
+    // `finally`: a throw replaces whatever the catch was rethrowing, so the child's real
+    // failure is lost and the message points at bookkeeping. The register site keeps its
+    // hard dereference — it is one of exactly two expressions that make
+    // `IAgent.abortScope` REQUIRED at compile time, and softening both would leave that
+    // required-ness pinned by nothing.
+    if (childAgent) parentAgent.abortScope?.members.delete(childAgent);
     // One place for all three exits. The success and failure branches above
     // each read the same snapshot for their own bookkeeping; reporting it here
     // means an abort — which takes neither branch's `return` — is still counted.

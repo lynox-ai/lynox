@@ -909,6 +909,23 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
   });
 
+  it('threads options.abortScope through a nested pipeline into its inline steps', async () => {
+    // ⛔ The nested forward was pinned by NOTHING: deleting it survived the whole suite,
+    // while the comment at the forwarding line claimed "without this line a nested
+    // pipeline's agents are reachable by nothing". A nested step belongs to the same
+    // session as the outer run, so a stop has to reach it too — and this is the sibling
+    // of the `parentActiveScopes` case directly above, which is where the shape comes
+    // from. Identity, not equality: a `{...scope}` copy would leave every other test
+    // green while the inner step registered into an object nobody aborts.
+    const scope = { members: new Set<{ abort: () => void }>() };
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    mockSpawnInline.mockClear();
+    await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
+      CONFIG, { parentTools: tools, abortScope: scope });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    expect(mockSpawnInline.mock.calls[0]![16]).toBe(scope);
+  });
+
   it('a nested pipeline receives the SAME accumulator object (identity across nesting)', async () => {
     // Pins two lines at once: the spawnPipeline dispatch in the runner, and
     // spawnPipeline forwarding the object (not a copy) into the nested

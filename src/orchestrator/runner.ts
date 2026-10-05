@@ -134,11 +134,19 @@ export interface RunManifestOptions {
    * nested sub-pipeline shares the same object so taint crosses nesting levels.
    * Absent (ad-hoc tests, legacy callers) = pre-fix behaviour: steps start clean.
    */
-  /** The session whose abort may reach this run's step agents, if any. Absent for a
-   *  headless or worker-driven run: then nothing aborts them, which is the filed gap
-   *  rather than a reason to fall back on a process-wide set. See `AbortScope`. */
-  abortScope?: import('../types/config.js').AbortScope | undefined;
   runTaint?: RunTaint | undefined;
+  /**
+   * The session whose abort may reach this run's step agents.
+   *
+   * ⚠ Absent for the HEADLESS saved-workflow path only — cron, a trigger, the HTTP
+   * re-target — where there is no calling agent to source it from; then nothing aborts
+   * those steps, which is the filed gap rather than a reason to fall back on a
+   * process-wide set. An earlier version of this comment said "headless or worker-driven",
+   * which was wrong twice over: the worker loop creates a real Session whose agent has a
+   * scope, and the interactive `run_workflow` path has one too — and for a while neither
+   * supplied it, which made the whole step half dead code. See `AbortScope`.
+   */
+  abortScope?: import('../types/config.js').AbortScope | undefined;
 }
 
 /**
@@ -164,11 +172,19 @@ export interface RunCtxInput {
   limits?: WorkflowLimits | undefined;
   secretStore?: SecretStoreLike | undefined;
   workflowId?: string | undefined;
-  /** The session whose abort may reach this run's step agents, if any. Absent for a
-   *  headless or worker-driven run: then nothing aborts them, which is the filed gap
-   *  rather than a reason to fall back on a process-wide set. See `AbortScope`. */
-  abortScope?: import('../types/config.js').AbortScope | undefined;
   runTaint?: RunTaint | undefined;
+  /**
+   * The session whose abort may reach this run's step agents.
+   *
+   * ⚠ Absent for the HEADLESS saved-workflow path only — cron, a trigger, the HTTP
+   * re-target — where there is no calling agent to source it from; then nothing aborts
+   * those steps, which is the filed gap rather than a reason to fall back on a
+   * process-wide set. An earlier version of this comment said "headless or worker-driven",
+   * which was wrong twice over: the worker loop creates a real Session whose agent has a
+   * scope, and the interactive `run_workflow` path has one too — and for a while neither
+   * supplied it, which made the whole step half dead code. See `AbortScope`.
+   */
+  abortScope?: import('../types/config.js').AbortScope | undefined;
 }
 
 /**

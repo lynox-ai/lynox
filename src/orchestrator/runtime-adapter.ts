@@ -816,7 +816,6 @@ export async function spawnViaAgent(
     }),
   });
 
-  abortScope?.members.add(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run (the spawn-time seed below covers only taint that
   // existed BEFORE this step spawned).
@@ -838,6 +837,11 @@ export async function spawnViaAgent(
     agent.abort();
   }, timeoutMs);
   try {
+    // ⛔ INSIDE the try, paired with the `finally` that removes it. Outside it, a throw
+    // in the lines between add and try left a dead agent in a set that lives as long as
+    // the SESSION — nothing bulk-clears it, so it would be aborted again at every later
+    // stop. No-op while no producer supplied a scope; live now that they do.
+    abortScope?.members.add(agent);
     // Sub-agent gets the same per-turn time anchor as top-level chat,
     // so a pipeline step that schedules "in 5 min" via run_at lands at
     // wallclock + 5 min, not session-start + 5 min.
@@ -918,9 +922,12 @@ export async function spawnInline(
    * The session whose abort may reach this step, if any — see `AbortScope`.
    *
    * ⛔ LAST in the list, and that is not cosmetic: these are POSITIONAL parameters, so a
-   * new one inserted between two existing ones silently re-binds every caller that stops
-   * short of it. Measured — putting it before `parentActiveScopes` made three tests fail
-   * with a scope list arriving as an abort scope.
+   * new one inserted between two existing ones re-binds every caller that stops short of
+   * it. Measured — putting it before `parentActiveScopes` made three tests fail with a
+   * scope list arriving as an abort scope, AND `tsc` refuse it with two errors. ⚠ Not
+   * "silently": an earlier version of this sentence said so, which was a measured number
+   * carrying an unmeasured generalisation. The type system catches the shape; what it
+   * cannot catch is a caller that stops short on purpose.
    */
   abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
@@ -1127,7 +1134,6 @@ export async function spawnInline(
     }),
   });
 
-  abortScope?.members.add(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run — see spawnViaAgent.
   taintWiring.register(agent);
@@ -1162,6 +1168,8 @@ export async function spawnInline(
     : step.task;
 
   try {
+    // See `spawnViaAgent`: inside the try that releases it, so add and delete are paired.
+    abortScope?.members.add(agent);
     const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task, context: stepContext }), userTimezone));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
@@ -1224,9 +1232,12 @@ export async function spawnPipeline(
    * The session whose abort may reach this step, if any — see `AbortScope`.
    *
    * ⛔ LAST in the list, and that is not cosmetic: these are POSITIONAL parameters, so a
-   * new one inserted between two existing ones silently re-binds every caller that stops
-   * short of it. Measured — putting it before `parentActiveScopes` made three tests fail
-   * with a scope list arriving as an abort scope.
+   * new one inserted between two existing ones re-binds every caller that stops short of
+   * it. Measured — putting it before `parentActiveScopes` made three tests fail with a
+   * scope list arriving as an abort scope, AND `tsc` refuse it with two errors. ⚠ Not
+   * "silently": an earlier version of this sentence said so, which was a measured number
+   * carrying an unmeasured generalisation. The type system catches the shape; what it
+   * cannot catch is a caller that stops short on purpose.
    */
   abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {

@@ -432,6 +432,13 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       parentActiveScopes: deps.parentAgent?.activeScopes,
+      // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
+      // abort is dead code for workflows: registration is conditional on a scope, and nothing
+      // produced one, so every step agent became reachable by nothing. That is worse than the
+      // process-wide set it replaced, which at least ended them. Read off the parent agent,
+      // exactly like the line above — which is also the positive control for this class: a
+      // sibling field already threaded correctly, one line up.
+      abortScope: deps.parentAgent?.abortScope,
       hooks,
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
@@ -818,6 +825,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
         parentActiveScopes: deps.parentAgent?.activeScopes,
+        // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
+        // abort is dead code for workflows: registration is conditional on a scope, and nothing
+        // produced one, so every step agent became reachable by nothing. That is worse than the
+        // process-wide set it replaced, which at least ended them. Read off the parent agent,
+        // exactly like the line above — which is also the positive control for this class: a
+        // sibling field already threaded correctly, one line up.
+        abortScope: deps.parentAgent?.abortScope,
         hooks,
         runHistory: deps.runHistory ?? undefined,
         parentPrompt: deps.parentPrompt,
@@ -900,6 +914,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
       parentActiveScopes: deps.parentAgent?.activeScopes,
+      // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
+      // abort is dead code for workflows: registration is conditional on a scope, and nothing
+      // produced one, so every step agent became reachable by nothing. That is worse than the
+      // process-wide set it replaced, which at least ended them. Read off the parent agent,
+      // exactly like the line above — which is also the positive control for this class: a
+      // sibling field already threaded correctly, one line up.
+      abortScope: deps.parentAgent?.abortScope,
       hooks,
       runHistory: deps.runHistory ?? undefined,
       parentPrompt: deps.parentPrompt,
