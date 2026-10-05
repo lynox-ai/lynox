@@ -157,6 +157,30 @@ describe('connect refuses a scope the preset does not allow', () => {
     expect(result).toContain('write_orders');
     expect(result).not.toContain('/api/oauth/connect/');
   });
+
+  it('hands out the link when every scope the profile names is allowed', async () => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders' } } });
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toContain('/api/oauth/connect/shop-api');
+  });
+
+  it('fetch_token refuses a preset profile whose token endpoint cannot be derived', async () => {
+    // The preset decides the endpoint; when the profile lacks what the preset
+    // needs to build it, nothing is posted anywhere — not to the stored token_url.
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_params: {}, token_url: 'https://tokens.unrelated.example/token' } } });
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shop-api' }, agentWith(store)) as string;
+
+    expect(result).toContain('cannot be derived');
+    expect(spy).not.toHaveBeenCalled();
+  });
 });
 
 describe('a preset profile discloses the host it will authorize at', () => {
@@ -182,6 +206,28 @@ describe('a preset profile discloses the host it will authorize at', () => {
     } }, agent);
 
     expect(asked.join(' ')).toContain('acme.shops.example.com');
+  });
+
+  it('does not ask about the token_url of a profile whose preset decides the token endpoint', async () => {
+    // That host never receives anything: a preset profile's tokens go to the
+    // preset's own endpoint. An acceptance asked for it would be one the user
+    // gives for nothing — and would stay on the profile.
+    const store = new ApiStore();
+    const asked: string[] = [];
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async (q: unknown) => {
+      asked.push(typeof q === 'string' ? q : JSON.stringify(q));
+      return 'no';
+    };
+    const base = shopProfile();
+    await apiSetupTool.handler({ action: 'create', profile: {
+      ...base, base_url: 'https://api.acme-cdn.example/v1', custom_endpoint_ack: undefined,
+      auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, token_url: 'https://tokens.unrelated.example/token' } },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent);
+
+    expect(asked.join(' ')).toContain('acme.shops.example.com');
+    expect(asked.join(' ')).not.toContain('tokens.unrelated.example');
   });
 });
 

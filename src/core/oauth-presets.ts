@@ -160,9 +160,9 @@ export interface PresetEndpoints {
  *
  * A profile can enter the store without passing a save (the boot load, a JSON
  * dropped into the apis directory, a migration), so a check that only runs on
- * save is not a boundary. What the REDIRECT flow uses is derived here every
- * time; the stored `token_url` is still read by `fetch_token`'s own exchange,
- * which is the pre-existing path and not one of these.
+ * save is not a boundary. The redirect flow and `fetch_token` both derive the
+ * token endpoint here for a preset profile; its stored `token_url` is display
+ * only.
  */
 export function derivePresetEndpoints(
   presetId: string,

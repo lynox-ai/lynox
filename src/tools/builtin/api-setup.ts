@@ -1468,7 +1468,10 @@ Next steps before calling create:
       // oauth2 profiles) token_url parse as URLs, so isVettedEgressHost()
       // returns false here only for genuinely non-vetted hosts.
       const egressUrls: string[] = [profile.base_url];
-      if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
+      // Not for a preset this engine knows: its tokens go to the preset's own endpoint, which
+      // the block below discloses, and the profile's `token_url` never receives anything.
+      if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url
+        && OAUTH_PRESETS.get(profile.auth.oauth.preset_id ?? '') === undefined) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
       // A preset profile authorizes at a host nobody typed into it — the register
@@ -2071,7 +2074,8 @@ Next steps before calling create:
       } else if (oauth.scope) {
         params['scope'] = oauth.scope;
       }
-      // Not for a preset profile: every value that reaches the provider there comes from the preset.
+      // Not for a preset profile: its token endpoint and scopes come from the preset, and an
+      // audience would be one more profile value reaching that provider.
       if (oauth.audience && !tokenPreset) params['audience'] = oauth.audience;
       if (presentedRefresh !== null) params['refresh_token'] = presentedRefresh;
       // The POST itself lives in `core/oauth-token-exchange.ts` because the

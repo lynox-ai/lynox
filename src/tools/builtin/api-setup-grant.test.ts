@@ -444,6 +444,19 @@ describe('fetch_token — a profile connected through a provider preset', () => 
     expect(new URLSearchParams(String(init.body)).has('audience')).toBe(false);
   });
 
+  it('still sends the audience of a profile that names no preset', async () => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, audience: 'https://api.crm.example' } } });
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    const init = spy.mock.calls[0]![1] as RequestInit;
+    expect(new URLSearchParams(String(init.body)).get('audience')).toBe('https://api.crm.example');
+  });
+
   it('treats a preset id this engine does not know as no preset, and keeps the paste path', async () => {
     const store = new ApiStore();
     const base = crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), state: 'revoked', revoked_fp: tokenFingerprint('rt-1'), revoked_at: '2026-09-22T00:00:00.000Z' } });
