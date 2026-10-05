@@ -102,20 +102,16 @@ function resourceAfterOwner(segments: readonly Segment[], i: number): string | n
 }
 
 /**
- * Whether a Graph path addresses a mailbox or calendar resource. Two readings, and either
- * one refuses: the owner where Graph puts it (first, or after the version), and the first
- * owner found anywhere — so a segment before the owner does not hide it. The second
- * reading can mistake a drive folder called `me` for an owner; that refuses a write it need
- * not, never the reverse.
+ * Whether a Graph path addresses a mailbox or calendar resource: the resource after the
+ * first owner in the path. Graph puts the owner first, or right after the version; reading
+ * the first one wherever it stands also catches a segment placed before it. It can mistake
+ * a drive folder called `me` for an owner; that refuses a write it need not, never the reverse.
  */
 function graphMailResource(segments: readonly Segment[]): boolean {
-  const at = segments[0]?.name === 'v1.0' || segments[0]?.name === 'beta' ? 1 : 0;
   const first = segments.findIndex((x) => x.name === 'me' || x.name === 'users' || x.name === 'groups');
-  return [at, first].some((i) => {
-    if (i < 0) return false;
-    const resource = resourceAfterOwner(segments, i);
-    return resource !== null && GRAPH_MAIL_RESOURCES.has(resource);
-  });
+  if (first < 0) return false;
+  const resource = resourceAfterOwner(segments, first);
+  return resource !== null && GRAPH_MAIL_RESOURCES.has(resource);
 }
 
 /**
