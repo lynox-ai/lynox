@@ -913,6 +913,33 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
     expect(agentConfig['activeScopes']).toEqual(scopes);
   });
 
+  it('a STEP agent registers in the scope its caller supplied, and inherits it', async () => {
+    // ⛔ THE THIRD REGISTRATION SITE, and the one no other test reaches. `Session.abort()`
+    // aborts the members of its own agent's scope; a workflow step lands there only if
+    // this function puts it there. It used to land in a MODULE-LEVEL set instead, so any
+    // session's abort killed every step agent in the process — including other
+    // background runs', whose triggers then re-fire through the backoff.
+    //
+    // Two assertions, because either alone passes a wrong implementation: not registering
+    // leaves the set empty (a stop reaches nothing), and registering without passing the
+    // scope on leaves anything the STEP spawns unreachable.
+    const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'inline', task: 'tidy up tasks' };
+    const scope = { members: new Set<{ abort: () => void }>() };
+    let sizeDuringRun = -1;
+    mockSend.mockImplementationOnce(async () => { sizeDuringRun = scope.members.size; return 'done'; });
+
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, scope,
+    );
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(sizeDuringRun, 'the step is in the caller\'s scope while it runs').toBe(1);
+    expect(agentConfig['abortScope'], 'and the agent carries it, so its own children land there').toBe(scope);
+    expect(scope.members.size, 'and is released when the step ends').toBe(0);
+  });
+
   it('spawnInline leaves secretStore and scopes undefined when none supplied (backward-compat)', async () => {
     const step: ManifestStep = { id: 'no-creds', agent: 'no-creds', runtime: 'inline', task: 'no secret' };
     await spawnInline(step, {}, mockConfig, mockParentTools);

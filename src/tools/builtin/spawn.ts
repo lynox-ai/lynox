@@ -45,15 +45,10 @@ export function resetSessionSpawnCost(counters: import('../../types/index.js').S
   counters.costUSD = 0;
 }
 
-/** Active child agents — aborted when parent is interrupted. */
-const activeChildAgents = new Set<Agent>();
-
-/** Abort all running child agents (called from orchestrator abort). */
-export function abortSpawnedAgents(): void {
-  for (const child of activeChildAgents) {
-    child.abort();
-  }
-}
+// The module-level `activeChildAgents` set and `abortSpawnedAgents()` are GONE. They made
+// one session's abort reach every child in the process; a child now registers in the
+// scope it inherited from its parent, and `Session.abort()` reaches exactly that. See
+// `AbortScope` in `types/config.ts` for why the scope rides on the agent.
 
 /**
  * Map the child's `send()` outcome onto the `runs.stop_reason` column. Until
@@ -853,6 +848,12 @@ async function executeThinker(
     name: spec.name,
     model,
     systemPrompt,
+    // ⛔ INHERITED, and this line is the transitive half of the scoping: the child
+    // registers in the PARENT's scope below, and by carrying that same scope it makes
+    // its own children land there too — so a session's abort reaches the whole chain.
+    // Without it a grandchild is reachable by nothing, which is the one failure the
+    // module-wide set it replaces could not have had.
+    abortScope: parentAgent.abortScope,
     tools,
     thinking,
     effort,
@@ -969,8 +970,9 @@ async function executeThinker(
   try {
     childAgent = new Agent(agentConfig);
     // Track child for abort propagation (added inside try so a ctor throw
-    // doesn't leave a half-constructed agent in the active set).
-    activeChildAgents.add(childAgent);
+    // doesn't leave a half-constructed agent in the active set). The PARENT's scope —
+    // which the child's config inherited above, so its own children land here too.
+    parentAgent.abortScope.members.add(childAgent);
 
     // DK.1 F5/S8: a child spawned from a tainted parent inherits the taint for durable writes.
     // A prompt-injected parent's `spec.task`/`context` can carry an injected `remember(pin:true)`;
@@ -1126,7 +1128,7 @@ async function executeThinker(
     }
     throw err;
   } finally {
-    if (childAgent) activeChildAgents.delete(childAgent);
+    if (childAgent) parentAgent.abortScope.members.delete(childAgent);
     // One place for all three exits. The success and failure branches above
     // each read the same snapshot for their own bookkeeping; reporting it here
     // means an abort — which takes neither branch's `return` — is still counted.

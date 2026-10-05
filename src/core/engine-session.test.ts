@@ -92,6 +92,11 @@ vi.mock('./agent.js', () => {
     this.reset = mockReset;
     // @ts-expect-error mock constructor
     this.abort = mockAbort;
+    // Required on `IAgent`: `Session.abort()` iterates its own agent's scope, so a mock
+    // without one makes the method throw rather than silently abort nothing. Required
+    // rather than optional for exactly that reason — a stub that may omit it registers
+    // its children nowhere and reads as "this session has none".
+    this.abortScope = { members: new Set() };
     // @ts-expect-error mock constructor
     this.getMessages = mockGetMessages;
     // @ts-expect-error mock constructor — identity-based persist seam. The mock

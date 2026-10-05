@@ -1,5 +1,6 @@
 // === 4.4 IAgent Interface ===
 
+import type { AbortScope } from './config.js';
 import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
@@ -252,6 +253,13 @@ export interface ProviderConfigSnapshot {
 
 export interface IAgent {
   readonly name:   string;
+  /**
+   * The agents this one's chain may abort — inherited by every sub-agent it builds, and
+   * the only thing a session's abort reaches. REQUIRED rather than optional on purpose:
+   * an implementation without it would register its children nowhere and read as "this
+   * session has no children", which is the silent half of the defect this replaced.
+   */
+  readonly abortScope: AbortScope;
   readonly model:  string;
   readonly memory: IMemory | null;
   readonly tools:  ToolEntry[];
