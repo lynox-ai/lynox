@@ -10,10 +10,14 @@ import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
 
 let sharedTaskManager: TaskManager | null = null;
+let sharedHistory: RunHistory | null = null;
 
 function makeAgent(scopes?: MemoryScopeRef[]): IAgent {
   const ctx = createToolContext({});
   ctx.taskManager = sharedTaskManager;
+  // The workflow lookup `task_create` performs reads engine.db through the run
+  // history, the way the WorkerLoop does.
+  ctx.runHistory = sharedHistory;
   return {
     name: 'test',
     model: 'claude-haiku-4-5-20251001',
@@ -38,10 +42,12 @@ describe('Task Tools', () => {
     history.setVerbGraph(engine);
     tm = new TaskManager(history);
     sharedTaskManager = tm;
+    sharedHistory = history;
   });
 
   afterEach(() => {
     sharedTaskManager = null;
+    sharedHistory = null;
     try { engine.close(); } catch { /* already closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
@@ -113,6 +119,7 @@ describe('Task Tools', () => {
 
     it('should return error when manager not set', async () => {
       sharedTaskManager = null;
+      sharedHistory = null;
       const result = await taskCreateTool.handler({ title: 'No mgr' }, makeAgent());
       expect(result).toContain('Error');
     });
@@ -343,6 +350,7 @@ describe('Task Tools', () => {
         id: 'wf-abc123', name: 'Weekly report', goal: 'report', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
       });
+      history.setWorkflowConfirmedAt('wf-abc123', '2026-07-01T00:00:00.000Z');
       const result = await taskCreateTool.handler(
         { title: 'Weekly report', assignee: 'lynox', workflow_id: 'wf-abc123', schedule: '0 9 * * 1' },
         makeAgent(),
@@ -356,6 +364,70 @@ describe('Task Tools', () => {
       expect(created?.schedule_cron).toBe('0 9 * * 1');
     });
 
+    it('refuses a workflow the human has not confirmed — a task for it would be disabled at its first run', async () => {
+      // Saved from the chat: no `confirmedAt`. The WorkerLoop's first-run-confirm
+      // gate disables such a task and records a failure the model never sees;
+      // until this check the tool answered "next run: …" for it.
+      history.insertPlannedPipeline({
+        id: 'wf-unconfirmed', name: 'Nightly digest', goal: 'digest', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      });
+      const result = await taskCreateTool.handler(
+        { title: 'Nightly digest', assignee: 'lynox', workflow_id: 'wf-unconfirmed', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('has not been confirmed for unattended runs');
+      expect(result).toContain('workflow library');
+      // The library's schedule route creates the task while confirming; a second
+      // task_create afterwards would schedule the workflow twice.
+      expect(result).toContain('Do not create it again here');
+      // The stored name is free text this tool does not scan; only the id is echoed.
+      expect(result).not.toContain('Nightly digest"');
+      expect(result).not.toContain('next run');
+      expect(tm.listTriggers().find((t) => t.title === 'Nightly digest')).toBeUndefined();
+    });
+
+    it('refuses an interactive workflow before it ever reaches the confirmation advice', async () => {
+      // The worker only runs autonomous workflows, and the library route refuses
+      // to schedule an interactive one — so "confirm it in the library" would be
+      // advice the reader cannot follow. Same order as both gates.
+      history.insertPlannedPipeline({
+        id: 'wf-interactive', name: 'Ask then act', goal: 'ask', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        mode: 'interactive',
+      } as Parameters<typeof history.insertPlannedPipeline>[0]);
+      const result = await taskCreateTool.handler(
+        { title: 'Ask then act', assignee: 'lynox', workflow_id: 'wf-interactive', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain("only an 'autonomous' workflow runs unattended");
+      expect(result).not.toContain('workflow library');
+      expect(tm.listTriggers().find((t) => t.title === 'Ask then act')).toBeUndefined();
+    });
+
+    it('refuses a workflow that is not in the library, naming the save step', async () => {
+      history.insertPlannedPipeline({
+        id: 'wf-notemplate', name: 'Scratch run', goal: 'scratch', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: false,
+      });
+      const result = await taskCreateTool.handler(
+        { title: 'Scratch run', assignee: 'lynox', workflow_id: 'wf-notemplate', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('is not a saved workflow');
+      expect(tm.listTriggers().find((t) => t.title === 'Scratch run')).toBeUndefined();
+    });
+
+    it('leaves a workflow the lookup cannot find to the manager and the worker, as before', async () => {
+      // No row inserted: the manager stores the task and the worker reports the
+      // missing target at its tick — unchanged by the confirmation check.
+      const result = await taskCreateTool.handler(
+        { title: 'Ghost', assignee: 'lynox', workflow_id: 'wf-missing', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('Workflow task created');
+    });
+
     it('carries `params` onto pipeline_params so one workflow can run per batch', async () => {
       // The whole point of the field: the column, the TaskManager and the
       // WorkerLoop read (`task.pipeline_params` → bindWorkflowParameters) all
@@ -365,6 +437,7 @@ describe('Task Tools', () => {
         id: 'wf-batch', name: 'Contact triage', goal: 'triage', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-08-18T00:00:00.000Z', template: true,
       });
+      history.setWorkflowConfirmedAt('wf-batch', '2026-07-01T00:00:00.000Z');
       await taskCreateTool.handler(
         { title: 'Batch 2', assignee: 'lynox', workflow_id: 'wf-batch', params: { from: 91, to: 180 } },
         makeAgent(),
@@ -385,6 +458,7 @@ describe('Task Tools', () => {
         id: 'wf-plain', name: 'Plain', goal: 'plain', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-08-18T00:00:00.000Z', template: true,
       });
+      history.setWorkflowConfirmedAt('wf-plain', '2026-07-01T00:00:00.000Z');
       await taskCreateTool.handler(
         { title: 'No params', assignee: 'lynox', workflow_id: 'wf-plain', params: {} },
         makeAgent(),
@@ -425,6 +499,7 @@ describe('Task Tools', () => {
         id: 'wf-ok', name: 'Contacts', goal: 'contacts', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-08-18T00:00:00.000Z', template: true,
       });
+      history.setWorkflowConfirmedAt('wf-ok', '2026-07-01T00:00:00.000Z');
       const result = await taskCreateTool.handler(
         {
           title: 'Batch 2',
@@ -1042,6 +1117,7 @@ describe('a failure that will not be retried says so', () => {
     engine.close();
     rmSync(dir, { recursive: true, force: true });
     sharedTaskManager = null;
+    sharedHistory = null;
   });
 
   const CONFIRMED = '2026-07-02T00:00:00.000Z';

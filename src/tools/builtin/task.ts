@@ -373,6 +373,38 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // guard here for that case survived its own mutation test — it changed
         // nothing — so it is not written.
         const pipelineParams = input.params !== undefined ? JSON.stringify(input.params) : undefined;
+        // A workflow saved from the chat carries no `confirmedAt` — the model must
+        // not confirm a workflow for itself — and the WorkerLoop disables a task
+        // for such a workflow at its first due tick (`executePipeline`'s
+        // first-run-confirm gate). This branch used to answer "next run: …"
+        // without ever reading the workflow, so the model relayed a run that was
+        // never going to happen. Read it the way the worker does and refuse,
+        // naming the step that makes the task possible. Not a caveat: "it runs
+        // once confirmed" is false whenever the first tick precedes the
+        // confirmation, because the disabled task does not come back by itself.
+        //
+        // Same order as the worker's gate and the library's schedule route: an
+        // interactive workflow cannot run unattended at all, a workflow that is
+        // not in the library cannot be confirmed there, and only then is the
+        // confirmation the missing piece — otherwise the advice points at a
+        // step the reader cannot take. The library route creates the task as
+        // part of confirming, so the refusal says not to create it here again.
+        // Only the id is echoed: this tool's result is not scanned, and the
+        // stored name is free text written by someone else. A workflow this
+        // cannot find is left to the manager and the worker, which already
+        // report a missing target.
+        const { getPipeline } = await import('./pipeline.js');
+        const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
+        if (planned) {
+          const unschedulable = planned.mode !== 'autonomous'
+            ? `is '${planned.mode}'; only an 'autonomous' workflow runs unattended. Convert it (remove its ask_user / ask_secret steps) before scheduling it.`
+            : planned.template !== true
+              ? 'is not a saved workflow. Save it to the workflow library first; scheduling it from there confirms it and creates the task.'
+              : !planned.confirmedAt
+                ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
+                : null;
+          if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;
+        }
         const task = managerRef.createPipelineTask({
           ...baseParams,
           pipelineId: input.workflow_id,
