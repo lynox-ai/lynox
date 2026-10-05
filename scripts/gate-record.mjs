@@ -23,7 +23,11 @@
  *
  * Usage:
  *   node scripts/gate-record.mjs --body-file <path> --head <sha> \
- *        --files-file <path> [--author <login>]
+ *        --files-file <path> [--author <login>] [--repo-visibility public|private]
+ *
+ * ⚠ Without `--repo-visibility`, a LOCAL run resolves to `unknown` and is therefore judged as
+ * PUBLIC — the strict case. In THIS repo that is also the right answer, so the flag only matters
+ * to a preflight run against the private repo's copy of this check. The refusal says so.
  *
  * Exits 0 when the record is acceptable (or the PR is exempt), 1 otherwise.
  */
@@ -271,7 +275,13 @@ export function roundResultErrors(result, quoted) {
     throw new TypeError('roundResultErrors needs `quoted`: the field text a message should cite.');
   }
   const errors = [];
-  if (/^no\s+findings$/i.test(result)) {
+  // ⭐ A form with NO count, because THIS repo is public: how many findings are still open is a
+  // fact that lives in the private register row, not in a body anyone can read. Accepted
+  // everywhere — it says less, and saying less is never the failure this record guards against —
+  // but it is only REQUIRED where `repoVisibility` says the record becomes public.
+  if (/^findings\s+filed\s+privately$/i.test(result)) {
+    // Nothing to reconcile, and deliberately nothing to count.
+  } else if (/^no\s+findings$/i.test(result)) {
     // Nothing to reconcile.
   } else if (/^0\s+findings\b/i.test(result)) {
     // One canonical spelling, or a synonym list grows and the field stops being checkable.
@@ -336,7 +346,113 @@ export function roundResultErrors(result, quoted) {
  * shell wrapper around it — a guard whose logic is only reachable through
  * `process.exit` is a guard nobody can characterise.
  */
-export function evaluate({ body, head, files, author }) {
+/**
+ * repoVisibility — is the repo this record gets PUBLISHED in public?
+ *
+ * WHY THIS EXISTS, and it is not a refinement of the fields: the `review:` and `security:`
+ * evidence lines were designed in the PRIVATE repo, where `2 findings, 0 fixed, 2 filed` is a
+ * useful, checkable sentence. **Nobody asked what that sentence means HERE.** This repo is
+ * public, and the standing rule is that a security finding which is not yet closed must not be
+ * named in public text — NOT EVEN ITS EXISTENCE. A `filed` count in a public body is that
+ * existence,
+ * stated in a number, and `gate-record` was the thing REQUIRING it. The grammar is innocent; the
+ * SCOPE was the gap. rafael decided the number stays out of the public body and lives in the
+ * private register row.
+ *
+ * ⚠ AND NO OTHER GUARD IN THIS REPO READS A PR BODY — measured, not assumed. `public-repo-guard.sh`
+ * is here and does a lot: it scans the tracked TREE for internal infra, hostnames and
+ * doubled-bracket cross-references, and COMMIT MESSAGES for third-party names. Its `check-meta`
+ * header used to claim "plus the PR title/body when the caller exports them", which was a surface
+ * it does not have: `PR_BODY=<a private register id> check-meta base HEAD` comes back clean, while
+ * the same id in a commit subject is what gets scanned. (That header is corrected in this change.)
+ * `public-text-check.mjs`, whose whole job is to keep an open finding — including its existence —
+ * out of public text, lives only in the PRIVATE repo, i.e. the one place it is least needed. So
+ * for the PR body in the public repo, this file is the only mechanism there is.
+ *
+ * ⚠ THE PROPERTY, NOT A PROXY. A repo NAME is a proxy — rename the repo and the guard is wrong
+ * without a symptom. GitHub puts the property itself in the event payload
+ * (`pull_request.base.repo.private`), so the workflow passes that: no network call, no rate
+ * limit, no token, and the value comes from GitHub rather than from the author. Measured:
+ * `lynox-ai/lynox` is `private=false`, `lynox-ai/lynox-pro` is `private=true`, and a real PR
+ * payload carries `base.repo.private`.
+ *
+ * The slug is kept as a SECOND, independent source — not to decide, but to CONTRADICT. If the
+ * two disagree, something is wrong in a way neither value can explain, and the answer is
+ * `unknown`.
+ *
+ * ⚠ FAIL-CLOSED: `unknown` is treated as PUBLIC by the callers, because the failure directions
+ * are not symmetric. Wrongly strict is a false red on a `filed` count; wrongly lax publishes the
+ * existence of an open finding, and a merged PR body cannot be taken back by anyone but rafael
+ * through the UI. ⛔ And the false red must SAY that the property was undeterminable — otherwise
+ * the author looks for the mistake in their own body, and a false red without a diagnosis is
+ * what teaches people to go around a check.
+ */
+export function repoVisibility({ privateFlag, repoSlug, explicit } = {}) {
+  // ⚠ An explicit value that is neither word answers `unknown` rather than falling through to the
+  // environment: `--repo-visibility pubic` is a typo, and silently using the env instead would make
+  // the strictness depend on which mistake you made. Fail-closed includes the flag.
+  if (explicit !== undefined && explicit !== null && explicit !== '') {
+    return explicit === 'public' || explicit === 'private' ? explicit : 'unknown';
+  }
+  const v = String(privateFlag ?? '').trim().toLowerCase();
+  const fromProperty = v === 'true' ? 'private' : v === 'false' ? 'public' : null;
+  const slug = String(repoSlug ?? '').trim().toLowerCase();
+  const fromSlug = slug === 'lynox-ai/lynox' ? 'public'
+    : slug === 'lynox-ai/lynox-pro' ? 'private'
+      : null;
+  if (fromProperty && fromSlug && fromProperty !== fromSlug) return 'unknown';
+  return fromProperty ?? fromSlug ?? 'unknown';
+}
+
+/**
+ * How many findings a result reports as still OPEN — `filed`, i.e. carried into a register row.
+ *
+ * Only `filed` counts: `fixed` is closed in this diff and `refuted` was no finding. `all fixed`
+ * is 0 by definition, and `findings filed privately` carries no number at all, which is the whole
+ * point of that form.
+ */
+export function openFiledCount(result) {
+  // ⛔ `all fixed` and `findings filed privately` had an early `return 0` here, and it was DEAD
+  // CODE: neither string can match `<digits> filed`, so removing the line changed no answer on any
+  // input — a surviving mutant whose repair is to delete the redundancy rather than to write a
+  // test that keeps the extra half alive. What the two forms need is this comment, not a branch.
+  // ⛔ No `\b` after `filed`, deliberately, and the mutation round is the argument: nothing drove
+  // the word boundary, and its two failure directions are not symmetric. WITH it, `2 filedx` is
+  // not counted — fail-OPEN, the direction that publishes a number. WITHOUT it, a string like
+  // `2 filedump` would be counted — a false red on text nobody writes. An unwitnessed element
+  // whose removal is strictly the safer direction gets removed, not a test that preserves it.
+  // The `i` flag and the `+` DO have witnesses: the result grammar accepts `1 Filed`, and a
+  // two-digit count must read as itself rather than as its first digit.
+  const m = /(\d+)\s+filed/i.exec(String(result ?? '').trim());
+  return m ? Number(m[1]) : 0;
+}
+
+/** The message a public record gets when it counts open findings. One place, two callers. */
+function openCountRefusal(field, visibility) {
+  const out = [
+    // ⛔ The FIELD NAME, never the value. This message is printed in an Actions log, which on the
+    // public repo anyone can read, and the value is the count being refused — echoing it back
+    // would publish the number in the course of refusing it. The repo's own precedent is explicit:
+    // public-repo-guard names a commit by its short SHA alone, "never by its subject line". The
+    // author has their own body in front of them and needs the field, not a quotation.
+    `the \`${field}:\` line counts OPEN findings, and this record goes into a PUBLIC repo.`,
+    'A security finding that is not yet closed must not be named in public text — not even its',
+    'existence, which is what that number states. It belongs in the private register row instead.',
+    'Write `findings filed privately` (no count), or, if nothing is unresolved, `no findings` /',
+    '`<N> findings, all fixed`.',
+  ];
+  if (visibility === 'unknown') {
+    out.push(
+      '⚠ AND THE REPO COULD NOT BE DETERMINED: no `pull_request.base.repo.private` in the event payload',
+      'and no known repo slug, so this record is treated as PUBLIC — the strict case. If it is the',
+      'private repo, the mistake is NOT in your body: pass `--repo-visibility private`, or set',
+      '`REPO_PRIVATE` — the workflow fills it from that payload field.',
+    );
+  }
+  return out;
+}
+
+export function evaluate({ body, head, files, author, visibility = 'unknown' }) {
   const errors = [];
   const notes = [];
 
@@ -656,9 +772,11 @@ export function evaluate({ body, head, files, author }) {
         'this diff owes the `security` gate, so the record needs a `security:` line saying WHERE the',
         'round came from and what it found. Format: `security: <origin>, <result>`, where origin is',
         '`own round`, `leaning on <what>`, or `origin unclear` — e.g. `security: own round, no findings`,',
-        '`security: leaning on the parity run, no findings`, `security: origin unclear, 1 finding, 1 filed`.',
+        '`security: leaning on the parity run, no findings`, `security: origin unclear, findings filed privately`.',
         '⚠ `origin unclear` is a FULL answer, not an admission: if you cannot tell whether the round was',
         'its own, saying so is the true line, and writing `own round` instead is the lie this field exists for.',
+        '⚠ And THIS REPO IS PUBLIC, so the result half carries no count of open findings: write',
+        '`findings filed privately`, and the number lives in the private register row.',
       );
     } else {
       const m = /^(own\s+round|origin\s+unclear|leaning\s+on\s+[^,]*?)\s*,\s*(.+)$/i.exec(raw);
@@ -747,6 +865,38 @@ export function evaluate({ body, head, files, author }) {
   // An attestation, like most lines here. It cannot prove the sign-off
   // happened; it makes FORGETTING impossible — the failure that actually recurs — and
   // turns the alternative into a deliberate lie rather than an oversight.
+  // ⛔ THE PUBLIC RESTRICTION BELONGS TO THE FIELD, NOT TO THE BRANCH — and the first cut of this
+  // got that wrong in two ways at once, both found by refuting it:
+  //
+  //   1. The `security:` branch runs only when the diff OWES the gate, so a record that merely
+  //      NAMES it — or carries the line on a diff with no security path — was never read.
+  //      Measured: a `2 filed` security line on a plain code diff came back GREEN. A rule hung on
+  //      `required` is a rule about the DIFF; this one is about the TEXT.
+  //   2. The count was read from the result half only, so the origin's free text carried it
+  //      instead: `security: leaning on the 2 findings 2 filed round, no findings` was GREEN.
+  //
+  // Reading the WHOLE field value fixes both, and it is the honest scope: what must not become
+  // public is the NUMBER anywhere in the line, not the number in one slot of it.
+  //
+  // ⚠ What this still does not see, filed rather than claimed: a count in the body's prose outside
+  // the record, and one smuggled into an UNKNOWN record field (`open: 3`), which nothing rejects
+  // today. Refusing unknown fields is a separate claim about the record's shape.
+  if (visibility !== 'private') {
+    const securityInPlay = required.has('security') || claimed.has('security') || !!f.security;
+    for (const [field, raw] of [['security', f.security], ['review', f.review]]) {
+      const value = (raw ?? '').trim();
+      if (!value) continue;
+      // `review:` only where security is in play: a review finding is not a security finding, and
+      // two filed CODE defects counted in public break no rule — forbidding those would cost
+      // measurability for nothing. The overlap is where the same findings are both, which a
+      // record says in its own words: "the `2 filed` in `review:` and the `2 filed` in
+      // `security:` are the same two findings, not four." ⚠ Residue, named not solved: a diff that
+      // does not owe the gate whose round files a security finding anyway still counts it.
+      if (field === 'review' && !securityInPlay) continue;
+      if (openFiledCount(value) > 0) errors.push(...openCountRefusal(field, visibility));
+    }
+  }
+
   if (required.has('legal')) {
     const approved = (f.approved ?? '').trim();
     if (!approved) {
@@ -769,7 +919,16 @@ function main() {
   const files = args['files-file']
     ? readFileSync(args['files-file'], 'utf-8').split('\n').map((s) => s.trim()).filter(Boolean)
     : [];
-  const verdict = evaluate({ body, head: args.head ?? '', files, author: args.author ?? '' });
+  // The visibility of the repo this record will be published in. The property comes from the
+  // event payload via the workflow (`REPO_PRIVATE`), the slug from Actions' own env as a second,
+  // independent source, and `--repo-visibility` is the local override for a preflight run — where
+  // neither exists and the answer would otherwise be `unknown`, i.e. the strict case.
+  const visibility = repoVisibility({
+    privateFlag: process.env.REPO_PRIVATE,
+    repoSlug: process.env.GITHUB_REPOSITORY,
+    explicit: args['repo-visibility'],
+  });
+  const verdict = evaluate({ body, head: args.head ?? '', files, author: args.author ?? '', visibility });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
   if (verdict.ok) {
