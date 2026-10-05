@@ -6767,11 +6767,13 @@ export class LynoxHTTPApi {
     //
     // ⛔ AND IT NEVER ANSWERS `stopped: true`. A stop is delivered, not completed: what
     // ends the run is an abort unwinding somewhere else, so 202 is the true code and
-    // `via` says what the abort reached. Four of the seven effects — `run_workflow`,
-    // `bulk_apply`, `bulk_undo`, `backup`, `notify` — have nothing that reads an abort,
-    // and for them this route answers 409 and changes nothing. That is the whole point:
-    // a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets is
-    // fail-open with ceremony, and the owner's reaction to it is to stop watching.
+    // `via` says what the abort reached. FIVE of the seven effects have nothing that
+    // reads an abort — `run_workflow`, `bulk_apply`, `bulk_undo`, `backup`, `notify` —
+    // and for them this route answers 409 and changes nothing. (The number used to read
+    // "four" beside the same five-item list: a count of the test cases, one of which
+    // covers two effects, written where a count of effects belongs.) That is the whole
+    // point: a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets
+    // is fail-open with ceremony, and the owner's reaction to it is to stop watching.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/stop', async (_req, res, params) => {
       const loop = engine.getWorkerLoop();
       if (!loop) { errorResponse(res, 409, 'The worker loop is not running, so neither is this task'); return; }
@@ -6797,11 +6799,15 @@ export class LynoxHTTPApi {
         return;
       }
       if (outcome.kind === 'unstoppable') {
-        // ⚠ The effect is CAPPED on the way out. It is read from a TEXT column, and the
-        // dispatch switch says in its own comment that a value the union does not know is
-        // possible at runtime — a newer schema, a synced or corrupt row. Naming it helps
-        // the owner; echoing an unbounded stored string into an error body does not.
-        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted (effect '${outcome.effect.slice(0, 40)}'). It will finish on its own; pause the schedule with PATCH {enabled:false} so it does not start again.`);
+        // ⚠ "through this route", and the qualifier is load-bearing rather than
+        // cautious: `Session.abort()` is process-wide, so ANOTHER task's stop does abort
+        // this workflow's step agents. An earlier draft of this sentence ended "It will
+        // finish on its own", which is the opposite of true for the one class that most
+        // often reaches it. The effect is named because the owner needs to know which
+        // run they are being refused; it is not re-capped here, because `errorResponse`
+        // already masks secrets and caps the body — a second cap read as closing an
+        // unbounded echo that was never open.
+        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted through this route (effect '${outcome.effect}'). Pause the schedule with PATCH {enabled:false} so it does not start again.`);
         return;
       }
       jsonResponse(res, 202, {

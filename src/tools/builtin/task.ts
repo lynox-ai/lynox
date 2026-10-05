@@ -112,9 +112,13 @@ export function triggerDetailLine(t: {
   // happened: `'stopped'` is not a failure, and rendering it as one told the model that
   // a task the owner halted on purpose was broken. The branch is unchanged — anything
   // that is not `success` is a run the reader needs to see — and only the LABEL is
-  // chosen below. Taking the branch away for `'stopped'` would have been worse than the
-  // wrong word: it also silences the "no next run" note, whose reason holds for a
-  // stopped one-shot exactly as it does for a failed one.
+  // chosen below.
+  //
+  // ⚠ The reason for keeping the branch is the LABEL, not the note below it. An earlier
+  // version of this comment argued that dropping the branch would also silence the "no
+  // next run" note "whose reason holds for a stopped one-shot" — which is false here: a
+  // stopped one-shot is written `completed`, which that note excludes by name, so it is
+  // unreachable for every stopped row either way.
   const ended = t.last_run_status !== undefined && t.last_run_status !== 'success';
   if (ended) {
     const when = t.last_run_at ? ` (${clean(t.last_run_at).slice(0, 16)})` : '';

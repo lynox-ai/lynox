@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkerLoop } from './worker-loop.js';
+import { RunAbortedError } from './agent.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { PromptStore } from './prompt-store.js';
@@ -111,6 +112,9 @@ interface Harness {
   parked: Promise<void>;
   tick: Promise<void> | undefined;
   abortCalls: () => number;
+  /** Ends the in-flight turn with a chosen error — for the causes that are NOT an
+   *  abort, which is the distinction the recorded word now rests on. */
+  failTurn: (err: Error) => void;
   /** Resolves once the watch run is INSIDE its fetch — `watch: true` only. */
   fetching: Promise<void>;
   /** Lets the gated fetch return — `watch: true` only. */
@@ -118,10 +122,10 @@ interface Harness {
   /** True once a parked turn has come back from its question. */
   resumed: () => boolean;
   /** What the notification router was asked to send — `withChannels` only. */
-  notifications: () => Array<{ title: string; body: string }>;
+  notifications: () => Array<{ title: string; body: string; priority?: string; followUps?: Array<{ label: string }> }>;
 }
 
-function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean; withChannels?: boolean; watch?: boolean }): Harness {
+function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean; withChannels?: boolean; watch?: boolean; abortMisses?: boolean }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -185,7 +189,20 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
     // point of the test that uses it: a parked run must still come back.
     abort: vi.fn(() => {
       if (opts?.abortThrows === true) throw new Error('abort exploded inside the agent');
-      rejectTurn?.(new Error('run aborted by its owner'));
+      // ⛔ `abortMisses` is the REAL no-op, not a convenience: `Session.abort()` reaches
+      // `Agent.send`'s controller, and that controller is null whenever no send is in
+      // flight — before the first one, between them, and after the last. The call
+      // happens and nothing is cancelled, which is the only way to model the window the
+      // route's 202 warns about. Without it this fixture cannot express a stop that was
+      // delivered and landed nowhere.
+      if (opts?.abortMisses === true) return;
+      // ⛔ `RunAbortedError`, not a plain `Error`, because that is what the real chain
+      // produces: `Agent.send` throws it from its catch exactly when its controller was
+      // aborted. The fake used a plain Error, and that divergence pointed the wrong way
+      // — the loop now requires the abort SHAPE before it calls a run the owner's stop,
+      // and a fake that cannot produce the shape would have made every one of these
+      // tests fail for a reason that is the fake's, not the code's.
+      rejectTurn?.(new RunAbortedError());
     }),
     run: vi.fn(async () => {
       // A PARKED run: it asks its question through the loop's own `promptUser` wiring,
@@ -217,10 +234,13 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
   // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
   // harness without channels cannot see the suppression bug: the run ends silently
   // either way. The test that needs it turns them on.
-  const sent: Array<{ title: string; body: string }> = [];
+  const sent: Array<{ title: string; body: string; priority?: string; followUps?: Array<{ label: string }> }> = [];
   const router = {
     hasChannels: () => opts?.withChannels === true,
-    notify: vi.fn((payload: { title: string; body: string }) => { sent.push(payload); return Promise.resolve(undefined); }),
+    notify: vi.fn((payload: { title: string; body: string; priority?: string; followUps?: Array<{ label: string }> }) => {
+      sent.push(payload);
+      return Promise.resolve(undefined);
+    }),
   } as unknown as NotificationRouter;
 
   releases.push(() => { rejectTurn?.(new Error('released by teardown')); });
@@ -240,6 +260,7 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
   return {
     loop, history, running, parked, tick,
     abortCalls: () => session.abort.mock.calls.length,
+    failTurn: (err: Error) => { rejectTurn?.(err); },
     fetching,
     finishFetch: () => openFetch(),
     resumed: () => resumed,
@@ -456,7 +477,45 @@ describe('stopping a running background task', () => {
     expect(note.body).toContain('Stopped on your instruction');
     expect(note.body).not.toContain('Task failed');
     expect(note.title).not.toContain('\u2717');
+    // The shape too, because it is chosen and was pinned by nothing: a stop is not
+    // high-priority news for the person who just asked for it, and "Explain why this
+    // failed" is the wrong offer for a run that did what it was told.
+    expect(note.priority).toBe('normal');
+    expect(note.followUps?.map(f => f.label)).toEqual(['Run again']);
     expect((h.history.getTrigger('trg-stop')?.retry_count ?? 0)).toBe(0);
+  });
+
+  it('a stop that MISSED has no effect — a later provider failure stays the run\'s own', async () => {
+    // ⛔ THE CASE THE FLAG ALONE GOT WRONG, and it is not a corner: `Session.abort()`
+    // reaches `Agent.send`'s controller, which exists only while a send is in flight, so
+    // a stop between sends lands nowhere. Nothing clears the flag afterwards. The run
+    // then failed twenty minutes later on a provider error and was recorded as the
+    // owner's stop: the model was told "STOPPED BY ITS OWNER: <provider error>", and the
+    // retry it was owed was suppressed.
+    //
+    // The fixture: the harness's fake rejects with the ERROR SHAPE of the thing that
+    // actually happened — a provider failure, not an abort — while `stopRequested` is
+    // set. A stop request that never arrived has no effect, which is exactly what the
+    // route's 202 says it is.
+    const h = makeHarness({ retriable: true, withChannels: true, abortMisses: true });
+    await h.running;
+
+    h.loop.stopTask('trg-stop');
+    // The abort was delivered and reached nothing; the run carries on and dies of its
+    // own cause. The ERROR SHAPE is what tells the two apart.
+    h.failTurn(new Error('Overloaded: the provider is at capacity'));
+    await h.tick;
+
+    await waitUntil('the run to be recorded', () => (h.history.getTrigger('trg-stop')?.last_run_status ?? null) !== null);
+    const after = h.history.getTrigger('trg-stop')!;
+    expect(after.last_run_status).toBe('failed');
+    // …and the retry it was owed really happens: this is the half that silently went
+    // missing, because `willRetry` keys on the status word.
+    expect(after.retry_count ?? 0).toBe(1);
+    expect(after.next_run_at ?? '').not.toBe('');
+    // No notification: a run that will try again does not report a final failure, and
+    // calling it a stop would have reported one in the owner's name.
+    expect(h.notifications()).toHaveLength(0);
   });
 
   it('a PARKED run is stopped through its WAIT — the one handle that certainly ends', async () => {
@@ -471,6 +530,16 @@ describe('stopping a running background task', () => {
     // ⛔ THE ASSERTION: the park is over. Remove the `controller.abort()` from
     // `stopTask` and the turn waits for its answer until the 24-hour TTL.
     await waitUntil('the parked turn to come back', () => h.resumed());
+
+    // …and it is RECORDED as the owner's stop, which is the standard this file's header
+    // sets and these two tests did not meet. A parked run's stop throws NO error — the
+    // question is dismissed and the turn finishes — so it is recorded on a different
+    // path from the one the catch takes, and that path had to learn the word separately.
+    // Without it a stopped parked run read `failed` and was re-fired by the backoff.
+    await h.tick;
+    await waitUntil('the stop to be recorded',
+      () => (h.history.getTrigger('trg-stop')?.last_run_status ?? null) !== null);
+    expect(h.history.getTrigger('trg-stop')?.last_run_status).toBe('stopped');
   });
 
   it('a session whose abort THROWS still has its controller aborted, and still answers', async () => {
@@ -500,6 +569,14 @@ interface ClassHarness {
   tick: Promise<void>;
   /** How many sessions the run created. The no-handle claim is false if this is > 0. */
   sessionCreations: () => number;
+  /** Lets the paused handler continue, so its real OUTCOME can be observed. */
+  release: () => void;
+  /** Every `recordTaskRun` the run made, as [id, result, status]. */
+  records: () => Array<[string, string, string]>;
+  /** Every halt reason written to the bulk ledger. */
+  halts: () => string[];
+  /** Every `updateTrigger` the handler made — a re-arm is what must NOT happen. */
+  reArms: () => unknown[];
 }
 
 /**
@@ -523,12 +600,22 @@ function makeClassHarness(opts: {
   source?: string;
   pauseAt: 'notify' | 'backup' | 'bulkClient' | 'workflow';
   record?: Partial<TriggerRecord>;
+  /** A ledger whose run really is previewable, so `runBulkPreview` is entered. */
+  previewReady?: boolean;
+  /** The paused collaborator throws after release — for the run that ends on its OWN
+   *  cause while a stop is outstanding. */
+  failAfterRelease?: boolean;
 }): ClassHarness {
   const g = gate();
   releases.push(g.open);
   let signalRunning: () => void;
   const running = new Promise<void>(resolve => { signalRunning = resolve; });
-  const hold = async <T>(value: T): Promise<T> => { signalRunning(); await g.wait; return value; };
+  const hold = async <T>(value: T): Promise<T> => {
+    signalRunning();
+    await g.wait;
+    if (opts.failAfterRelease === true) throw new Error('the handler failed on its own');
+    return value;
+  };
 
   const task = {
     id: 'trg-class', title: 'A run of its own kind', description: '',
@@ -541,6 +628,7 @@ function makeClassHarness(opts: {
     ...opts.record,
   } as unknown as TriggerRecord;
 
+  const records: Array<[string, string, string]> = [];
   const manager = {
     getDueTriggers: () => [task],
     getExpiredWaitingTriggers: () => [],
@@ -549,7 +637,9 @@ function makeClassHarness(opts: {
     renewLease: () => true,
     releaseLease: () => { /* no lease store in this harness */ },
     getTrigger: (id: string) => (task.id === id || task.id.startsWith(id) ? task : undefined),
-    recordTaskRun: () => { /* the recorded outcome is the heavy harness's subject */ },
+    // Recorded, not discarded: for the effects whose handler ENDS inside this harness
+    // (a stopped preview, a run that fails on its own) the status word is the subject.
+    recordTaskRun: (id: string, result: string, status: string) => { records.push([id, result, status]); },
     setEnabled: () => true,
   } as unknown as TaskManager;
 
@@ -571,14 +661,27 @@ function makeClassHarness(opts: {
     // nothing to do with a stop handle. Both bulk handlers await it before their own
     // work, which makes it the pause point that leaves the most of them real.
     const proto = WorkerLoop.prototype as unknown as { bulkClientFactory: () => Promise<unknown> };
-    const spy = vi.spyOn(proto, 'bulkClientFactory').mockImplementation(() => hold(() => null));
+    // A truthy client when the preview must really run: `runBulkPreview` halts on a null
+    // one before it ever reaches its signal check, which would have made the test pass
+    // against a handler that still snoozed.
+    const spy = vi.spyOn(proto, 'bulkClientFactory')
+      .mockImplementation(() => hold(opts.previewReady === true ? () => ({}) : () => null));
     releases.push(() => { spy.mockRestore(); });
   }
 
+  const halts: string[] = [];
+  const reArms: unknown[] = [];
+  const previewRun = {
+    targetSystem: 'http://example.test/orders', kind: 'apply', phase: 'planned',
+    haltReason: null, contractJson: null,
+  };
   const sessions: number[] = [];
   const engine = {
     getTaskManager: () => manager,
-    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* noop */ } }),
+    getRunHistory: () => ({
+      getTrigger: () => task,
+      updateTrigger: (_id: string, patch: unknown) => { reArms.push(patch); },
+    }),
     getUserConfig: () => ({}),
     escalateToUser: () => null,
     getPromptStore: () => null,
@@ -592,9 +695,12 @@ function makeClassHarness(opts: {
     getBulkLedger: () => (opts.pauseAt === 'bulkClient'
       ? {
         getRunForApply: () => ({ targetSystem: 'http://example.test' }),
-        getRunForPreview: () => undefined,
+        // `undefined` keeps `runBulkPreview` out (it refuses an unknown run); the ready
+        // variant is what carries a test INTO it, which is where the stop is decided.
+        getRunForPreview: () => (opts.previewReady === true ? previewRun : undefined),
+        listUnread: () => [1],
         getStatus: () => undefined,
-        haltPreview: () => { /* noop */ },
+        haltPreview: (_id: string, reason: string) => { halts.push(reason); },
       }
       : null),
     // A WITNESS, not a stub: every effect in this harness is claimed to create no
@@ -612,7 +718,14 @@ function makeClassHarness(opts: {
 
   const loop = new WorkerLoop(engine, router, 60_000);
   loops.push(loop);
-  return { loop, running, tick: loop.tick(), sessionCreations: () => sessions.length };
+  return {
+    loop, running, tick: loop.tick(),
+    sessionCreations: () => sessions.length,
+    release: () => { g.open(); },
+    records: () => records,
+    halts: () => halts,
+    reArms: () => reArms,
+  };
 }
 
 describe('what a stop can reach — one case per effect class', () => {
@@ -634,10 +747,42 @@ describe('what a stop can reach — one case per effect class', () => {
     // ⛔ The worst of the seven to answer wrongly: `bulk_apply` writes its targets, so
     // `{stopped:true}` over a run that carries on is not a cosmetic lie — the owner stops
     // watching a write they asked to end.
+    //
+    // ⚠ TWO LIMITS, stated rather than implied. This pauses at the client factory, which
+    // `executeBulk` awaits BEFORE its write loop — so `sessionCreations()` witnesses "no
+    // session before the pause", not "none in the whole run"; threading a signal into
+    // `executeBulk` later would leave this green while the comment above it went stale.
+    // And `bulk_undo` has no case of its own because it rides this same case clause: a
+    // twin would pin one line twice.
     const h = makeClassHarness({ effect: 'bulk_apply', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
     await h.running;
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'bulk_apply' });
     expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('a stopped BULK PREVIEW is HALTED, not snoozed for 30 seconds and recorded a success', async () => {
+    // ⛔ THE WORST OUTCOME THE 202 COULD HAVE, and it was the only effect that answers
+    // `via: 'signal'`. `runBulkPreview` reads an aborted signal as a PAUSE and returns
+    // `pending(now + 30s)`; the handler's pending branch then recorded `success` and
+    // re-armed the trigger. So the one stop the route called delivered bought a
+    // half-minute snooze, told the ledger the run succeeded, and restarted the read —
+    // with no error thrown, so none of the stop machinery downstream ever saw it.
+    //
+    // Driven all the way INTO `runBulkPreview` (the previous case stops before it), so
+    // the assertion is the handler's real outcome and not the route's answer.
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true,
+      record: { bulk_run_id: 'bulk-1' },
+    });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    h.release();
+
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2], 'a stop is not a success').toBe('stopped');
+    // The state the owner resumes from, rather than one that resumes itself.
+    expect(h.halts()).toEqual(['the owner stopped the run']);
+    expect(h.reArms(), 'nothing re-armed the trigger it just stopped').toHaveLength(0);
   });
 
   it('a BULK PREVIEW is stoppable through its SIGNAL — the one handler that polls it', async () => {
@@ -656,11 +801,9 @@ describe('what a stop can reach — one case per effect class', () => {
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'run_workflow' });
 
     // ⛔ THE POSITIVE HALF, and the reason this test mocks the runner rather than the
-    // handler: it is not merely that nothing was ATTACHED — nothing was PASSED. The
-    // measurement that justifies this whole route (the 15.2-minute run) is about this
-    // effect, and a comment in `ActiveTask` used to list the session-less effects
-    // without it. Three arguments, none of them a signal; a fix that threads one in
-    // changes this assertion, which is where the next reader will find the gap named.
+    // handler: it is not merely that nothing was ATTACHED — nothing was PASSED. Three
+    // arguments, none of them a signal; a fix that threads one in changes this
+    // assertion, which is where the next reader will find the gap named.
     expect(wf.calls).toHaveLength(1);
     expect(wf.calls[0]).toHaveLength(3);
     expect(wf.calls[0]!.some(a => a instanceof AbortSignal)).toBe(false);
@@ -693,6 +836,24 @@ describe('what a stop can reach — one case per effect class', () => {
       'the watch analysis to end as a stop',
       () => h.history.getTrigger('trg-stop')?.last_run_status === 'stopped',
     );
+  });
+
+  it('an UNSTOPPABLE run that later fails on its own is recorded as a failure, and retries', async () => {
+    // ⛔ THE PROMISE OF THE `unstoppable` BRANCH — "report that, and change NOTHING" —
+    // was pinned by no test: a mutant that set `stopRequested` there survived the whole
+    // suite. What it would cost is exactly what the branch's comment describes: the
+    // run's own ending stamped as the owner's stop, its retry suppressed, and its
+    // notification relabelled, for a stop that by definition reached nothing.
+    const h = makeClassHarness({
+      effect: 'notify', pauseAt: 'notify', failAfterRelease: true,
+      record: { max_retries: 2 },
+    });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'notify' });
+    h.release();
+
+    await waitUntil('the run to be recorded', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('failed');
   });
 
   it('stopHandleOf prefers the CERTAIN handle and reports none when there is none', () => {

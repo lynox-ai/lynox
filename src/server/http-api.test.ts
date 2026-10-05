@@ -6219,14 +6219,25 @@ describe('LynoxHTTPApi', () => {
     // while the same file at the base commit passed all 565. A comment further down
     // records the same collision being measured once before.
     //
-    // So this block hands the window back when it is done. Deliberately an `afterAll`
-    // HERE and not a file-wide hook: it repays exactly what these cases spend and
-    // changes no other describe's conditions. The general problem — any new route test
-    // can starve a later describe, with a 429 that names neither — is filed rather than
-    // fixed in passing, because the fix is the harness's (a fresh server per describe),
-    // not this route's.
+    // So this block hands back exactly what it spent — a SNAPSHOT and restore, not a
+    // `clear()`. The first version cleared the whole window, which is a different thing
+    // and was measured to be one: the later `rate limiting` describe reached its
+    // 130-request headroom assertion at a count of 209 instead of 517, so a regression
+    // shrinking the loopback ceiling to 400 would have become invisible there. The
+    // comment claimed it "changes no other describe's conditions" while it relaxed them
+    // by 308 requests.
+    //
+    // The general problem is filed rather than fixed in passing: any new route test can
+    // starve a later describe with a 429 that names neither, and the fix is the
+    // harness's (a fresh server per describe), not this route's.
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => {
+      windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count]));
+    });
     afterAll(() => {
-      (api as unknown as { rateCounts: Map<string, unknown> }).rateCounts.clear();
+      for (const [k, entry] of rateCounts()) entry.count = windowBefore.get(k) ?? 0;
     });
 
     it('POST /api/tasks/:id/stop answers 202 — a stop is DELIVERED, not completed', async () => {
@@ -6272,8 +6283,15 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(409);
         const err = ((await res.json()) as { error: string }).error;
         expect(err).toContain('bulk_apply');
-        expect(err).toContain('finish on its own');
+        expect(err).toContain('PATCH {enabled:false}');
         expect(err).not.toContain('not running');
+        // ⛔ The sentence that must not come back. It read "It will finish on its own",
+        // which is false for the class that most often reaches this answer: a saved
+        // workflow's step agents ARE aborted — by any other task's stop, because
+        // `Session.abort()` is process-wide. The route can say what it will not do; it
+        // cannot promise what the rest of the process will not do.
+        expect(err).not.toContain('finish on its own');
+        expect(err).toContain('through this route');
       });
     });
 

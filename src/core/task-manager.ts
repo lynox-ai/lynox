@@ -736,10 +736,19 @@ export class TaskManager {
    * (three invented replacement configs). So a stopped one-shot is written `completed`:
    * the word is the SCHEDULE's lifecycle ("it is finished, nothing will give it another
    * run"), not a verdict on the run, and `last_run_status = 'stopped'` carries the
-   * outcome — the same division the cron branch already relies on. `'stopped'` cannot
-   * go in `status` itself: the permitted values are `open | in_progress | completed |
-   * failed` and that `CHECK` cannot be altered in place, so a status of its own needs a
-   * migration. That migration is filed, not improvised here.
+   * outcome — the same division the cron branch already relies on.
+   *
+   * ⛔ WHY NOT A `stopped` STATUS, corrected: NOT because a `CHECK` forbids it. An
+   * earlier version of this paragraph quoted `CHECK(status IN ('open','in_progress',
+   * 'completed','failed'))` — which belongs to the LEGACY `triggers` table in the
+   * history.db ladder, not to the live one. Every trigger write goes through
+   * `TriggerStore` to engine.db, whose `triggers` has NO check on `status`;
+   * `engine-db.ts` says so in as many words and adds that "which of the two a search
+   * shows first depends on the tool". The live proof is `'waiting'`, which that column
+   * already holds and the quoted list does not contain. What a `stopped` status actually
+   * costs is the VOCABULARY and its readers — `TriggerStatus`, `VALID_STATUSES`, the
+   * status filter the agent tool offers, and the UI's status map — which is a wider unit
+   * than this one and is filed as its own. No migration.
    */
   recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped'): void {
     const task = this.history.getTrigger(id);
@@ -824,8 +833,12 @@ export class TaskManager {
       } else if (status === 'stopped' && task.status !== 'waiting') {
         // Terminal, for the reason in the docstring: this row has no next run and
         // nothing will give it one, so leaving it `open` is a lie the model acts on.
-        // A PARKED trigger is excluded by name — its wait is still open and only the
-        // sweep or its own un-park may end it.
+        //
+        // ⚠ The `waiting` carve-out is DEFENSIVE rather than live on the stop path: a
+        // stop's controller abort makes the run's own `finally` un-park the trigger
+        // before it unwinds to here, so this branch sees `waiting` only when that
+        // un-park failed and swallowed its error. It is kept because the unit that
+        // constructs the state directly is cheap and the failure it guards is silent.
         this.history.updateTrigger(id, { status: 'completed' });
       }
       // `next_run_at` is cleared regardless: a parked trigger must not become due
