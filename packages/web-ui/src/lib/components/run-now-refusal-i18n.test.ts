@@ -32,8 +32,13 @@ const ROUTE = readFileSync(`${HERE}../../../../../src/server/http-api.ts`, 'utf8
 
 describe('the Run-now refusal reaches its owner', () => {
   it('the engine sends a code, the view switches on it, and both languages have the line', () => {
-    // The engine half: the code is in the body, not only in the prose.
-    expect(ROUTE, 'the route has to SEND the code').toContain("code: 'awaiting_answer'");
+    // The engine half, asserted on the MECHANISM rather than the spelling: an earlier
+    // version of this line matched the literal `code: 'awaiting_answer'` in a hand-built
+    // body, and it broke the moment the route was corrected to go through
+    // `errorResponse` — which is where masking and capping live. What has to hold is
+    // that the refusal carries the code at all, and that the one emitter supports it.
+    expect(ROUTE, 'the refusal has to pass a code').toMatch(/errorResponse\([^)]*'awaiting_answer'\)/);
+    expect(ROUTE, 'and the single emitter has to carry one through').toMatch(/function errorResponse\([^)]*code\?: string/);
     // The view half: it reads the body and branches. Asserting the branch rather than
     // the mere presence of the word — a key named in a comment would satisfy a
     // substring check while the handler still showed one fixed string.

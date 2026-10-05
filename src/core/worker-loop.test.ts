@@ -140,6 +140,8 @@ function makeEngine(opts?: {
     // wiring under test handles it by returning the canonical skip marker.
     getPromptStore: vi.fn(() => ps),
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
   } as unknown as Engine;
 }
 
@@ -685,6 +687,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager([makeTask()])),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getPromptStore: vi.fn(() => null),
       createSession: vi.fn(() => {
         // Return a proxy that captures promptUser assignment
@@ -798,6 +803,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => tm),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -846,6 +854,9 @@ describe('WorkerLoop', () => {
       getTaskManager: vi.fn(() => tm),
       createSession: vi.fn(() => session),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({})), // truthy → executePipeline reaches the null-target skip
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
@@ -889,6 +900,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -950,6 +964,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1043,6 +1060,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1109,6 +1129,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1158,6 +1181,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1389,6 +1415,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1561,6 +1590,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),

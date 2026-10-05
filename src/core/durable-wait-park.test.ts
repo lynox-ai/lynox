@@ -64,7 +64,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[] }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -97,7 +97,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       run: vi.fn(() => {
         const turn = (async () => {
           // The agent turn: one `ask_user`, then whatever the answer was.
-          const answering = session.promptUser!('Which client?', ['Acme', 'Globex']);
+          const answering = session.promptUser!(opts?.question ?? 'Which client?', ['Acme', 'Globex']);
           // Give the closure a turn to insert + park before the test looks.
           await new Promise(r => setImmediate(r));
           promptId = prompts.getPending(session.sessionId)?.id;
@@ -139,7 +139,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       getSecretStore: () => opts?.secretValues
         ? ({ maskAll: (t: string) => maskSecretsAndPatterns(t, opts.secretValues!) } as unknown as ReturnType<Engine['getSecretStore']>)
         : null,
-      getUserConfig: () => ({}),
+      getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       escalateToUser: () => null,
     } as unknown as Engine;
 
@@ -258,6 +258,35 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
   });
 
   // ── T2 / A8 / A11: what the park writes ──────────────────────────────────
+
+  it('the question is masked where it LEAVES the box, and not where the owner reads it', async () => {
+    // ⛔ THREE CONSUMERS, TWO OF WHICH NEED THE MASK. The question is model-authored from
+    // the run's context — files, mail, the data store — and the notification is the one
+    // that leaves the machine: the escalation channel puts it in an email body and the
+    // web-push payload carries it. The same string was already masked for the MODEL, on
+    // the stated reasoning that an `ask_user` exchange is where someone pastes an API
+    // key; the off-box path had no mask at all, which is the half of that judgement that
+    // was wrong.
+    //
+    // ⚠ And the stored row is deliberately NOT masked: the owner reads it on their own
+    // machine, through their own UI, and masking it would cost them the question's detail
+    // to protect them from themselves. Masking at the source would have taken it with it,
+    // which is why this test asserts both directions.
+    // ⚠ Deliberately NOT key-shaped. The mask is driven by the vault's own VALUES, so any
+    // string exercises it — and a realistic `sk-live-…` literal is a finding to gitleaks
+    // (measured: it refused the commit, correctly). A test that has to look like a
+    // credential to work would be a test that cannot be committed.
+    const secret = 'vault-value-that-must-not-leave-the-box';
+    const h = makeHarness({ secretValues: [secret], question: `Use ${secret} for the call?` });
+    await h.parked;
+
+    const sent = vi.mocked(h.router.notify).mock.calls[0]?.[0] as { body?: string; inquiry?: { question?: string } } | undefined;
+    expect(sent?.body, 'the notification body leaves the box').not.toContain(secret);
+    expect(sent?.body).toContain('***');
+    expect(sent?.inquiry?.question, 'and so does the inquiry payload').not.toContain(secret);
+    // The owner's own copy keeps its detail.
+    expect(h.prompts.getById(h.promptIdOf()!)?.question).toContain(secret);
+  });
 
   it('T2 — the prompt row carries the trigger that raised it', async () => {
     const h = makeHarness();
@@ -894,6 +923,49 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.prompts.getAnsweredForTrigger('trg-1')?.id).toBe(promptId);
   });
 
+  it('W2-13 — a trigger COMPLETED while parked is startable, and its orphan question is settled', async () => {
+    // ⛔ THE MIRROR OF THE STATE ABOVE, and the first version of the guard locked the
+    // owner out of it. `complete`/`update` take a trigger out of `waiting` through
+    // `updateFields` and touch `pending_prompts` not at all — the bypass
+    // `TriggerStore.endWait`'s docblock names — so a pending row can point at a trigger
+    // that is no longer waiting. A guard that asked only the ROW refused there: for 24
+    // hours, "Run now" told the owner to answer a question no view surfaces, on a
+    // trigger they had just completed.
+    //
+    // ⛔ And the orphan has to be SETTLED, not stepped over: nothing else collects it.
+    // The boot sweep spares any row with a live pointer, the expiry and answer-rearm
+    // passes iterate `waiting` triggers only, and `expireOld` waits for its own 24-hour
+    // clock. Until then it holds the thread's slot in the partial unique index, so the
+    // next `ask_user` in that chat throws — uncaught on that path. Before the teardown
+    // fix a deploy drained it; now it survives, which is what makes this a repair.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+
+    // What the owner's "complete" does to a parked trigger, through the real path.
+    //
+    // ⚠ And then the process goes away. In the SAME process `activeTasks` still holds the
+    // run, so Run-now is refused as `already_running` whatever this guard does — the
+    // lockout only bites in the next process, which is also the only place the surviving
+    // row can be found. A fixture that skipped the restart would have passed against the
+    // guard it is meant to catch.
+    h.manager.complete('trg-1');
+    h.loop.stop();
+    await waitUntil('the first run to release its lease', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+    expect(h.history.getTrigger('trg-1')?.status, 'out of waiting').not.toBe('waiting');
+    expect(h.prompts.getPendingForTrigger('trg-1')?.id, 'with its question orphaned').toBe(promptId);
+
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    await expect(next.runTriggerNow('trg-1')).resolves.toEqual({ ok: true });
+    // THE REPAIR, asserted on the ORPHAN by id rather than on "no pending row": the
+    // hand-started run parks on a question of its own, so there IS one again — and an
+    // assertion that counted rows would have failed for the right reason by accident.
+    expect(h.prompts.getById(promptId)?.status, 'the orphan is settled on the way through').toBe('expired');
+
+    next.stop();
+    await waitUntil('the hand-started run to unwind', () => next.activeTaskCount === 0);
+  });
+
   it('W2-13 — a trigger stuck `waiting` with no open question is still startable by hand', async () => {
     // ⛔ THE REGRESSION THE FIRST VERSION OF THAT GUARD SHIPPED, and it is the reason the
     // guard now asks the PROMPT STORE instead of the trigger's status. `endTriggerWait`
@@ -949,6 +1021,27 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(new Date(after!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
   });
 
+  it('A10 — a long answer is CAPPED before it reaches the autonomous turn', async () => {
+    // ⛔ THE ONE CONSUMER OF AN ANSWER THAT HAD NO BOUND. The live tool-result path
+    // truncates at `max_tool_result_chars`; this path composed the stored string
+    // verbatim, and `answerUser` stores what the request body carried — bounded only by
+    // the 30 MB body cap. The teardown fix promotes this path from the crash-only one to
+    // the every-deploy one, so the missing bound became the ordinary case.
+    const h = makeHarness({ maxToolResultChars: 40 });
+    await h.parked;
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'G'.repeat(500));
+
+    await h.loop.tick();   // re-arms it
+    await h.loop.tick();   // dispatches it
+    await waitUntil('the second run to start', () => h.dispatches() >= 2);
+
+    const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
+    expect(secondPrompt).toContain('[truncated]');
+    // The bound itself, not just the marker: the answer's own text is cut to the cap, so
+    // a 500-character reply cannot carry 500 characters into the turn.
+    expect(secondPrompt).not.toContain('G'.repeat(60));
+  });
+
   it('A10 — the re-armed run is told the question AND the answer', async () => {
     // The acceptance criterion with its own red: reusing the thread is not
     // enough, because answering writes a `pending_prompts` row and touches no
@@ -967,7 +1060,14 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // be told the answer was the question and the question was the answer, with
     // every test green.
     expect(secondPrompt).toMatch(/<asked>\s*Which client\?\s*<\/asked>/);
-    expect(secondPrompt).toMatch(/<answer>\s*Globex\s*<\/answer>/);
+    expect(secondPrompt).toMatch(/<answer>[\s\S]*?Globex[\s\S]*?<\/answer>/);
+    // ⛔ AND THE FRAME CARRIES A DO-NOT-FOLLOW LINE. The answer is the owner's own text,
+    // so wrapping it as untrusted data would be false — but it reaches an AUTONOMOUS
+    // turn's strongest prompt position, and `renderFence` deadens only the payload's own
+    // closing tag (its docblock says a payload that opens a DIFFERENT engine frame passes
+    // through). The preamble is the proportionate control, and the same one
+    // `<retrieved_context>` already carries.
+    expect(secondPrompt).toContain('not as instructions');
     // And the answer is claimed exactly once — a later scheduled run must not be
     // handed the same reply again.
     expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();
