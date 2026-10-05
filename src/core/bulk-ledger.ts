@@ -927,9 +927,12 @@ export class BulkLedger {
    * shown, not overwritten. An undo of an undo is the same mechanism.
    */
   planUndo(sourceRunId: string, params: { createdBy?: string | undefined } = {}):
-    { ok: true; status: BulkRunStatus } | { ok: false; reason: 'not_found' | 'not_undoable' | 'nothing_to_undo' | 'atomic_partial' | 'undo_open' } {
+    { ok: true; status: BulkRunStatus } | { ok: false; reason: 'not_found' | 'not_undoable' | 'nothing_to_undo' | 'atomic_partial' | 'undo_open' | 'mail_api' } {
     const src = this.runRow(sourceRunId);
     if (!src) return { ok: false, reason: 'not_found' };
+    // An undo writes the same host and paths under the same contract, so it could never be
+    // approved; refuse it here rather than leave a run that only waits.
+    if (contractWritesMail(src.target_system, src.contract_json)) return { ok: false, reason: 'mail_api' };
     if (!isStopped(src)) return { ok: false, reason: 'not_undoable' };
     // An undo beside another run of the family that may write would write the same targets.
     if (this.openInFamily(sourceRunId, null) !== null) return { ok: false, reason: 'undo_open' };

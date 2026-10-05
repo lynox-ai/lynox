@@ -33,6 +33,12 @@ describe('isMailProviderTarget', () => {
     'https://www.googleapis.com/gmail/v1/users/me/settings/vacation',
     'https://www.googleapis.com/upload/gmail/v1/users/me/messages',
     'https://www.googleapis.com/batch/gmail/v1',
+    'https://content-gmail.googleapis.com/gmail/v1/users/me/settings/vacation',
+    'https://gmail.mtls.googleapis.com/gmail/v1/users/me/settings/vacation',
+    'https://content.googleapis.com/gmail/v1/users/me/settings/vacation',
+    'https://graph.microsoft.com/v1.0/me/events/1',
+    'https://graph.microsoft.com/v1.0/me/calendars/abc/events/1',
+    'https://graph.microsoft.com/v1.0/groups/g1/threads/t1',
     'https://graph.microsoft.com/v1.0/me/mailboxSettings',
     'https://graph.microsoft.com/v1.0/users/abc/messages/xyz',
     'https://graph.microsoft.com/beta/me/mailFolders/inbox/messageRules/1',
@@ -48,6 +54,9 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me/MailboxSettings')).toBe(true);
     expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me/%6DailboxSettings')).toBe(true);
     expect(isMailProviderTarget('https://www.googleapis.com/GMAIL/v1/users/me/settings/vacation')).toBe(true);
+    // An encoded slash is a separator: decoded before the path is split.
+    expect(isMailProviderTarget('https://www.googleapis.com/gmail%2Fv1/users/me/settings/vacation')).toBe(true);
+    expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me%2FmailboxSettings')).toBe(true);
   });
 
   it.each([
@@ -55,7 +64,9 @@ describe('isMailProviderTarget', () => {
     'https://www.googleapis.com/drive/v3/files/1',
     'https://www.googleapis.com/calendar/v3/calendars/primary',
     'https://graph.microsoft.com/v1.0/me/drive/items/1',
-    'https://graph.microsoft.com/v1.0/me/events/1',
+    'https://graph.microsoft.com/v1.0/me/drive/root:/messages/a.xlsx:',
+    'https://graph.microsoft.com/v1.0/teams/t1/channels/c1/messages/m1',
+    'https://graph.microsoft.com/v1.0/me',
     'https://api.example.com/gmail/settings',
     'not a url',
   ])('leaves %s alone', (url) => {
@@ -116,15 +127,26 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     expect(requests).toEqual([]);
   });
 
+  it('still writes a non-mail path on the same Google host that serves Gmail', async () => {
+    const drive = 'https://www.googleapis.com/drive/v3/files/1';
+    const gmail = 'https://www.googleapis.com/gmail/v1/users/me/settings/vacation';
+    const c = client('www.googleapis.com', [drive, gmail], 'PATCH');
+    expect(await c.write(gmail, 'PATCH', { enableAutoReply: true })).toEqual({ kind: 'blocked' });
+    expect(requests).toEqual([]);
+    // The control: the same client, host and policy reach the transport for the drive file.
+    expect(await c.write(drive, 'PATCH', { name: 'x' })).toEqual({ kind: 'ok', value: undefined });
+    expect(requests).toEqual([{ method: 'PATCH', url: drive }]);
+  });
+
   it('still writes to a host that is not a mail API', async () => {
     const c = client(SHOP, [shopUrl(0)]);
     expect(await c.write(shopUrl(0), 'PATCH', { price: '2' })).toEqual({ kind: 'ok', value: undefined });
     expect(requests).toEqual([{ method: 'PATCH', url: shopUrl(0) }]);
   });
 
-  /** A run planned before mail targets were refused at planning: its mail target is a
-   *  writing target, and its contract grants the write. Moved to `phase`. */
-  function earlierMailRun(phase: 'previewed' | 'approved'): string {
+  /** A run whose contract grants a write to a mail API (as only a stored run can carry it:
+   *  planning now marks such a target invalid). Moved to `phase`. */
+  function runWithMailContract(phase: 'previewed' | 'approved'): string {
     const targets: ExternalPlanned[] = [{ key: GMAIL_VACATION, after: { enableAutoReply: true } }];
     const out = ledger.recordExternalPlan({
       createdBy: 't', host: 'gmail.googleapis.com', targets, contract: mintBulkContract('gmail.googleapis.com', [GMAIL_VACATION], 'PUT'),
@@ -139,19 +161,25 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
   }
 
   it('refuses to approve a run whose contract writes a mail API', () => {
-    const id = earlierMailRun('previewed');
+    const id = runWithMailContract('previewed');
     expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'mail_api' });
   });
 
   it('refuses to resume an approved run whose contract writes a mail API', () => {
-    const id = earlierMailRun('approved');
+    const id = runWithMailContract('approved');
     expect(ledger.resume(id, { checksum: ledger.computeChecksum(id)! })).toEqual({ ok: false, reason: 'mail_api' });
+  });
+
+  it('refuses to plan an undo of a run whose contract writes a mail API', () => {
+    const id = runWithMailContract('approved');
+    engineDb.getDb().prepare("UPDATE bulk_runs SET phase = 'done' WHERE id = ?").run(id);
+    expect(ledger.planUndo(id)).toEqual({ ok: false, reason: 'mail_api' });
   });
 
   it('reads the contract, not the target list, so the check needs no decryption', () => {
     expect(contractWritesMail('http:gmail.googleapis.com', JSON.stringify({ pathPatterns: ['/gmail/v1/users/me/settings/vacation'] }))).toBe(true);
-    expect(contractWritesMail('http:graph.microsoft.com', JSON.stringify({ pathPatterns: ['/v1.0/me/events/1', '/v1.0/me/mailboxSettings'] }))).toBe(true);
-    expect(contractWritesMail('http:graph.microsoft.com', JSON.stringify({ pathPatterns: ['/v1.0/me/events/1'] }))).toBe(false);
+    expect(contractWritesMail('http:graph.microsoft.com', JSON.stringify({ pathPatterns: ['/v1.0/me/drive/items/1', '/v1.0/me/mailboxSettings'] }))).toBe(true);
+    expect(contractWritesMail('http:graph.microsoft.com', JSON.stringify({ pathPatterns: ['/v1.0/me/drive/items/1'] }))).toBe(false);
     expect(contractWritesMail(`http:${SHOP}`, JSON.stringify({ pathPatterns: ['/products/0'] }))).toBe(false);
     expect(contractWritesMail('workspace', null)).toBe(false);
   });

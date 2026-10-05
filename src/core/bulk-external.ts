@@ -304,8 +304,8 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   let sent = 0;
   const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined): Promise<ExternalRead> => {
     if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
-    // Last line for a run approved before mail targets were refused: nothing is sent, and a
-    // write halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
+    // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
+    // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
     if (isMailProviderTarget(url)) return { kind: 'blocked' };
     const hostname = new URL(url).hostname;
     try {
