@@ -31,6 +31,7 @@ function createMockAuth(scopes: string[] = [...FULL_SCOPES], ownPair = true): Go
     getAccessToken: vi.fn().mockResolvedValue('mock-token'),
     hasScope: vi.fn().mockImplementation((s: string) => scopes.includes(s)),
     hasOwnClientPair: vi.fn().mockReturnValue(ownPair),
+    usesServiceAccount: vi.fn().mockReturnValue(false),
   } as unknown as GoogleAuth;
 }
 

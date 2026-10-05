@@ -1247,6 +1247,35 @@ describe('GoogleAuth', () => {
     it('returns false when not authenticated', () => {
       expect(auth.hasScope(SCOPES.GMAIL_READONLY)).toBe(false);
     });
+
+    // A service-account instance has no stored grant: its token asks for the
+    // configured scopes, or the defaults. Those are the scopes it has — not
+    // none (which refused every action), and not every scope.
+    it('answers a service account from the scopes its token asks for', () => {
+      const sa = new GoogleAuth({ serviceAccountKeyPath: '/tmp/key.json', scopes: [SCOPES.DRIVE_READONLY] });
+      expect(sa.usesServiceAccount()).toBe(true);
+      expect(sa.hasScope(SCOPES.DRIVE_READONLY)).toBe(true);
+      expect(sa.hasScope(SCOPES.GMAIL_READONLY), 'a scope the service account does not request').toBe(false);
+    });
+
+    it('answers a service account with no configured scopes from the default set', () => {
+      const sa = new GoogleAuth({ serviceAccountKeyPath: '/tmp/key.json' });
+      expect(sa.hasScope(SCOPES.DRIVE_FILE)).toBe(true);
+      expect(sa.hasScope(SCOPES.GMAIL_READONLY)).toBe(false);
+    });
+
+    it('answers from the stored grant, not the service account, once one is stored', () => {
+      const store = new Map<string, string>([['GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'a', refresh_token: 'r', expires_at: Date.now() + 3600_000, scopes: [SCOPES.CALENDAR_EVENTS],
+      })]]);
+      const both = new GoogleAuth({
+        serviceAccountKeyPath: '/tmp/key.json', scopes: [SCOPES.DRIVE_READONLY],
+        vault: { get: (k: string) => store.get(k) ?? null, set: () => undefined, delete: () => true } as never,
+      });
+      expect(both.usesServiceAccount()).toBe(false);
+      expect(both.hasScope(SCOPES.CALENDAR_EVENTS)).toBe(true);
+      expect(both.hasScope(SCOPES.DRIVE_READONLY)).toBe(false);
+    });
   });
 
   describe('getScopes', () => {

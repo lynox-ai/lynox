@@ -52,6 +52,9 @@ export function refuseUnlessScoped(
  * has that identity too, and would get the wrong sentence.
  */
 function grantRemedy(auth: GoogleAuth): string {
+  if (auth.usesServiceAccount()) {
+    return 'This connection uses a service account: it has the scopes set in google_oauth_scopes (or the default set), within what the account is granted in Google Workspace. Add the scope there.';
+  }
   if (auth.hasOwnClientPair()) {
     return 'Grant access in Settings → Channels → Google.';
   }

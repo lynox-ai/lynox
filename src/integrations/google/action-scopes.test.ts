@@ -25,6 +25,7 @@ function auth(scopes: readonly string[], ownPair = true): GoogleAuth {
     getAccessToken: vi.fn().mockResolvedValue('mock-token'),
     hasScope: vi.fn().mockImplementation((s: string) => scopes.includes(s)),
     hasOwnClientPair: vi.fn().mockReturnValue(ownPair),
+    usesServiceAccount: vi.fn().mockReturnValue(false),
   } as unknown as GoogleAuth;
 }
 
@@ -255,5 +256,20 @@ describe('the broker set: every action either works or refuses with a remedy', (
       .handler({ action: 'teleport' } as Record<string, unknown>, agent()) as string;
     expect(r).toContain('Unknown action');
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('the refusal on a service-account connection', () => {
+  it('names the service account and where its scopes are set, not a client it does not use', async () => {
+    const sa = {
+      getAccessToken: vi.fn().mockResolvedValue('mock-token'),
+      hasScope: vi.fn().mockReturnValue(false),
+      hasOwnClientPair: vi.fn().mockReturnValue(false),
+      usesServiceAccount: vi.fn().mockReturnValue(true),
+    } as unknown as GoogleAuth;
+    const out = await (createDriveTool(() => sa) as ToolEntry).handler({ action: 'list' }, agent()) as string;
+    expect(out).toContain('service account');
+    expect(out).toContain('google_oauth_scopes');
+    expect(out).not.toContain("lynox's shared Google client");
   });
 });
