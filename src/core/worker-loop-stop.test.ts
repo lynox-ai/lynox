@@ -58,7 +58,7 @@ interface Harness {
   abortCalls: () => number;
 }
 
-function makeHarness(opts?: { dispatch?: boolean }): Harness {
+function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -69,14 +69,25 @@ function makeHarness(opts?: { dispatch?: boolean }): Harness {
   const prompts = new PromptStore(history.getDb());
   const manager = new TaskManager(history);
 
-  // A CRON trigger on purpose: it is the case where a stop must leave the schedule
-  // intact. A one-shot would hide the retry question, and the retry question is the
-  // one that makes a wrongly-recorded stop restart the very run its owner stopped.
-  history.insertTrigger({
-    id: 'trg-stop', title: 'Long report', source: 'cron', effect: 'run_agent',
-    scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
-    confirmedAt: '2026-01-01T00:00:00.000Z',
-  });
+  // TWO shapes, because they reach different branches of `recordTaskRun` and each
+  // hides the other's question.
+  //
+  // ⛔ A cron trigger CANNOT reach the retry branch at all — that branch is the third
+  // `else if`, guarded on having neither a cron nor a watch config. A mutation round
+  // found this: a mutant that sent a stop INTO the backoff re-fire survived a
+  // `retry_count` assertion written against a cron fixture, because the fixture could
+  // never execute the line being mutated. The retriable one-shot below is the witness.
+  history.insertTrigger(opts?.retriable === true
+    ? {
+        id: 'trg-stop', title: 'One-shot import', source: 'user', effect: 'run_agent',
+        nextRunAt: '2026-01-01T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z',
+        maxRetries: 2,
+      }
+    : {
+        id: 'trg-stop', title: 'Long report', source: 'cron', effect: 'run_agent',
+        scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
+        confirmedAt: '2026-01-01T00:00:00.000Z',
+      });
 
   let signalRunning: () => void;
   const running = new Promise<void>(resolve => { signalRunning = resolve; });
@@ -215,6 +226,26 @@ describe('stopping a running background task', () => {
     // stop is not that. A cron's next occurrence is still ahead of it.
     expect(after.next_run_at).not.toBe('');
     expect(after.next_run_at).not.toBe(null);
+  });
+
+  it('a RETRIABLE one-shot is not re-fired by a stop — the branch a cron cannot reach', async () => {
+    // ⛔ This is the assertion the cron fixture could not make. `failed` and `timeout`
+    // enter the backoff re-fire; `stopped` must not, or a stop restarts the very run its
+    // owner stopped. The trigger here has `max_retries: 2` and no schedule, which is the
+    // only shape that executes that branch.
+    const h = makeHarness({ retriable: true });
+    await h.running;
+    const before = h.history.getTrigger('trg-stop')!;
+    expect(before.max_retries).toBe(2); // the fixture really is retriable — else this proves nothing
+
+    h.loop.stopTask('trg-stop');
+    await h.tick;
+    await waitUntil('the stop to be recorded', () => h.history.getTrigger('trg-stop')?.last_run_status === 'stopped');
+    const after = h.history.getTrigger('trg-stop')!;
+
+    expect(after.retry_count ?? 0).toBe(before.retry_count ?? 0);
+    // A one-shot that was stopped is over: no backoff instant was written for it.
+    expect(after.next_run_at ?? '').toBe('');
   });
 
   it('answers not_running for a task that is not running — the route turns this into 409', () => {
