@@ -2088,11 +2088,20 @@ describe('wrapWithGate — the approval wrapper is transparent to a ToolSoftFail
 // these cases were living under `secretStore propagation …` for no reason but proximity,
 // and a test's address is part of what it tells the next reader.
 describe('a step agent joins the caller\'s abort scope', () => {
-  // ⚠ Not decoration, and the move is what proved it: these two cases read
-  // `Agent.mock.calls[0]`, so without the clear they assert against the config of whichever
-  // test ran last in the file. Under the old host describe they inherited this `beforeEach`;
-  // moving them out made both fail with `abortScope: undefined` — a stale call, not a
-  // missing field. Every other describe in this file carries the same two lines.
+  // ⚠ The two lines are NOT both load-bearing here, and saying so is the point — an earlier
+  // version of this comment implied they were.
+  //
+  // `vi.clearAllMocks()` is required, measured: these cases read `Agent.mock.calls[0]`, so
+  // without it they assert against the config of whichever test ran last in the file. Under
+  // the old host describe they inherited its clear; moving them out made both fail with
+  // `abortScope: undefined` — a stale call, not a missing field.
+  //
+  // `mockGetRole` is unreachable for these two cases: every `getRole` call in the module under
+  // test is gated on `step.role`, and neither case sets one. It stays because `clearAllMocks`
+  // does NOT reset an implementation — measured, against `resetAllMocks`, which does — so a
+  // `mockReturnValue` set by an earlier test survives into this describe. The day a case here
+  // declares a role, it would silently inherit that role and pass for the wrong reason. That
+  // is the fail-open direction, which is worth a line at zero present occurrences.
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetRole.mockReturnValue(undefined);
