@@ -117,6 +117,23 @@ describe('Engine boot — a brokered Google connection is rebuilt from the vault
     expect(engine.getGoogleAuth()).toBeNull();
   });
 
+  it('keeps the brokered credential through a reload, which resolves no pair either', async () => {
+    // `POST /api/google/reload` runs after the user resets their own client pair.
+    // On a brokered tenant there is no pair before or after, and the reload used
+    // to drop the connection the boot had just rebuilt.
+    const engine = await boot({ managed: true, token: JSON.stringify(BROKERED_TOKEN) });
+    expect(await engine.reloadGoogle()).toBe(true);
+    const auth = engine.getGoogleAuth();
+    expect(auth, 'the connection must survive the reload').not.toBeNull();
+    expect(auth?.hasBrokerRefreshHandle()).toBe(true);
+  });
+
+  it('leaves a managed instance without a stored token unconnected after a reload', async () => {
+    const engine = await boot({ managed: true, token: null });
+    expect(await engine.reloadGoogle()).toBe(false);
+    expect(engine.getGoogleAuth()).toBeNull();
+  });
+
   it('builds none on a self-host instance with a stored token but no pair', async () => {
     // Without the control-plane identity there is no broker to refresh through.
     const engine = await boot({ managed: false, token: JSON.stringify(BROKERED_TOKEN) });

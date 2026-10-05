@@ -1667,20 +1667,9 @@ export class Engine {
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
-    } else if (process.env['LYNOX_MANAGED_INSTANCE_ID'] && this.secretVault?.get(GOOGLE_OAUTH_TOKENS_KEY)) {
-      // A brokered tenant never resolves a pair, but its connection survives a restart in the
-      // vault. Build the credential from it here, as `ensureGoogleAuth` does at claim time —
-      // and before the mail context below, which takes the credential as a value. Kept only
-      // when the stored token carries the broker's refresh handle: without a pair, a token without
-      // one (or one that does not parse) cannot be refreshed, so `getGoogleAuth()` stays null and
-      // the user is shown "not connected" and can connect again. Nothing is constructed at all
-      // when no token is stored.
-      try {
-        const auth = await this._createGoogleAuth(null);
-        if (auth.hasBrokerRefreshHandle()) this._googleAuth = auth;
-      } catch {
-        // Google Workspace init failed — non-critical, continue without it
-      }
+    } else {
+      // Before the mail context below, which takes the credential as a value.
+      this._googleAuth = await this._brokeredGoogleAuthFromVault();
     }
 
     // Provider-agnostic Mail integration (IMAP/SMTP + OAuth-Gmail).
@@ -2430,12 +2419,34 @@ export class Engine {
    * is the whole of the change. That is also why the resolver must not memoise
    * — see `google/index.ts`.
    */
+  /**
+   * The credential of a brokered connection stored in the vault, or null.
+   *
+   * A brokered tenant never resolves a client pair, but its connection survives in the vault.
+   * Built only with the control-plane identity and a stored token, and kept only when that token
+   * carries the broker's refresh handle: without a pair, a token without one (or one that does
+   * not parse) cannot be refreshed, so the user is shown "not connected" and can connect again.
+   * Nothing is constructed when no token is stored. Used by the boot and by `reloadGoogle`.
+   */
+  private async _brokeredGoogleAuthFromVault(): Promise<import('../integrations/google/google-auth.js').GoogleAuth | null> {
+    if (!process.env['LYNOX_MANAGED_INSTANCE_ID'] || !this.secretVault?.get(GOOGLE_OAUTH_TOKENS_KEY)) return null;
+    try {
+      const auth = await this._createGoogleAuth(null);
+      return auth.hasBrokerRefreshHandle() ? auth : null;
+    } catch {
+      // Google Workspace init failed — non-critical, continue without it
+      return null;
+    }
+  }
+
   async reloadGoogle(): Promise<boolean> {
     const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = pair?.source ?? null;
     if (!pair) {
-      this._googleAuth = null;
-      return false;
+      // No pair is also the normal state of a brokered tenant, whose connection lives in the
+      // vault — the same rebuild the boot does, or a reload would drop that connection.
+      this._googleAuth = await this._brokeredGoogleAuthFromVault();
+      return this._googleAuth !== null;
     }
     try {
       this._googleAuth = await this._createGoogleAuth(pair);
