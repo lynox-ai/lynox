@@ -24,6 +24,7 @@ import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
 import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
+import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { BULK_HALT_REASONS } from './bulk-ledger.js';
 
 /** An external after-state: a non-empty JSON object of scalar fields. */
@@ -162,6 +163,8 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
   return keyed.map(({ row, key }): ExternalPlanned => {
     charge(JSON.stringify(key ?? row.target));
     if (key === null) return { key: row.target, invalid: 'bad_url' };
+    // Never a writing target, so never in the run's contract (see bulk-mail-targets.ts).
+    if (isMailProviderTarget(key)) return { key, invalid: 'mail_api' };
     if (urlScanForms(key).some((form) => scan(form) !== null)) return { key, invalid: 'secret_in_target' };
     const after = row.after;
     if (!isPlainObject(after) || Object.keys(after).length === 0) return { key, invalid: 'after_not_object' };
@@ -301,6 +304,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   let sent = 0;
   const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined): Promise<ExternalRead> => {
     if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
+    // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
+    // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
+    if (isMailProviderTarget(url)) return { kind: 'blocked' };
     const hostname = new URL(url).hostname;
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
