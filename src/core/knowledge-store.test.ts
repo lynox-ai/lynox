@@ -36,6 +36,61 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(subjects.findCanonical('ACME', 'organization')).not.toBeNull();
   });
 
+  it('links a topic-shaped NAME to the subject that already carries it — the shape gate guards a mint, not a lookup', () => {
+    const { ks, subjects } = make();
+    // "Maria dos Santos" trips the shape detector (a lowercase particle outside the
+    // connective list). When the gate ran before the lookup, every fact about her
+    // landed as a bare hint, unlinked. An existing subject is not a mint.
+    const maria = subjects.findOrCreate({ kind: 'person', name: 'Maria dos Santos' });
+    if (maria.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const r = ks.write({ text: 'Maria dos Santos prefers invoices in Portuguese', subjectName: 'Maria dos Santos', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(r.subjectId).toBe(maria.id);
+    expect(r.subjectAmbiguous).toBeFalsy();
+  });
+
+  it('still holds a topic-shaped name that the graph does not know as a hint, minting nothing', () => {
+    const { ks, subjects } = make();
+    const r = ks.write({ text: 'Card ending 4242 is on file', subjectName: 'client payment details', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(r.subjectId).toBeNull();
+    expect(subjects.findCanonical('client payment details', 'organization')).toBeNull();
+  });
+
+  it('still folds the written surface form into the aliases of a kinded normalized hit, as the mint did', () => {
+    // A kinded write used to go straight through `findOrCreate`, which records the
+    // written form ("Meridian AG!") as an alias of the stored "Meridian AG" when the
+    // normalized fallback matches. A bare `row.id` would link correctly and drop that.
+    // (The kind-agnostic arm reaches such a form through the brand fold, which never
+    // merged aliases — measured, unchanged here.)
+    const { ks, subjects } = make();
+    const org = subjects.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+    if (org.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const kinded = ks.write({ text: 'Meridian AG! moved to Zug', subjectName: 'Meridian AG!', subjectKind: 'organization', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(kinded.subjectId).toBe(org.id);
+    expect(JSON.parse(subjects.getSubject(org.id)!.aliases) as string[]).toContain('Meridian AG!');
+    const agnostic = ks.write({ text: 'Meridian AG. pays net 30', subjectName: 'Meridian AG.', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(agnostic.subjectId).toBe(org.id);
+  });
+
+  it('holds a topic-shaped name that collides with several old subjects as a hint, not as a question', () => {
+    // Two topic-shaped subjects from before the shape gate: the lookup now reaches them
+    // and comes back ambiguous. A topic is not handed back for disambiguation — the
+    // paragraph above the gate says why — so the write keeps the hint and no flag.
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: "Client's compliance risk" });
+    subjects.findOrCreate({ kind: 'product', name: "Client's compliance risk" });
+    const r = ks.write({ text: 'Reviewed quarterly', subjectName: "Client's compliance risk", sourceChannel: 'agent', sourceUntrusted: false });
+    expect(r.subjectId).toBeNull();
+    expect(r.subjectAmbiguous).toBeFalsy();
+  });
+
+  it('links a topic-shaped name within an explicit kind before any mint', () => {
+    const { ks, subjects } = make();
+    const maria = subjects.findOrCreate({ kind: 'person', name: 'Maria dos Santos' });
+    if (maria.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const r = ks.write({ text: 'Maria dos Santos signed the renewal', subjectName: 'Maria dos Santos', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(r.subjectId).toBe(maria.id);
+  });
+
   it('a ui write lands user_asserted', () => {
     const { ks } = make();
     const r = ks.write({ text: 'Prefers terse replies', sourceChannel: 'ui', sourceUntrusted: false });
@@ -1277,6 +1332,19 @@ describe('previewHintTarget — the approve target, resolved without performing 
     expect(ks.previewHintTarget(hint)).toMatchObject({
       resolution: 'existing', name: 'Nordberg AG', kind: 'organization',
     });
+  });
+
+  it('folds a brand variant into the existing subject, as the approval does', () => {
+    // `_resolveWriteSubject` folds "n8n" into "n8n.io" by brand key before it would mint;
+    // the preview once lacked that step and announced a mint the approval never made.
+    const { ks, subjects } = make();
+    const org = subjects.findOrCreate({ kind: 'organization', name: 'n8n.io' });
+    if (org.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+
+    expect(ks.previewHintTarget('n8n')).toEqual({
+      resolution: 'existing', id: org.id, name: 'n8n.io', kind: 'organization',
+    });
+    expect(countSubjects(subjects, 'n8n')).toBe(0);
   });
 
   it('reports the MINT for an unknown name instead of performing it', () => {
