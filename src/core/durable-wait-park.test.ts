@@ -749,7 +749,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     recorded.mockRestore();
   });
 
-  it('W2-13 — a GRACEFUL SHUTDOWN leaves the question standing, and its answer still re-arms the run', async () => {
+  it('W2-13 — a GRACEFUL SHUTDOWN leaves the question standing, and its answer makes the trigger DUE again', async () => {
     // ⛔ WHY THIS IS THE COMMON PATH AND NOT A CORNER. `Engine.shutdown()` calls
     // `WorkerLoop.stop()` FIRST and `runHistory.close()` LAST, with awaits in between
     // (an in-flight inbox rebootstrap, the inbox runtime, every shutdown hook — the
@@ -773,6 +773,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
 
     // ── what the next process needs to find
+    //
+    // ⛔ FIRST: the run did not report SUCCESS. The teardown branch sets
+    // `questionWentUnanswered`, which is the only thing standing between this path and
+    // a `success` record — and deleting that line passed every other test in both
+    // files. §0 A7 ("a run whose question went unanswered does NOT report success") is
+    // the invariant the whole arc started from, and the new branch had to re-earn it.
+    expect(h.history.getTrigger('trg-1')?.last_run_status).not.toBe('success');
     expect(h.prompts.getById(promptId)?.status).toBe('pending');
     // The POINTER is the half a reader would not think to check, and it is the half the
     // resume path reads: `getAnsweredForTrigger` finds nothing once it is released.
@@ -787,10 +794,58 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const next = new WorkerLoop(h.engine, h.router, 60_000);
     await next.tick();
 
+    // ⚠ DUE, which is as far as this reaches: whether the run then starts depends on
+    // the lease, which a SIGKILLed process holds for up to its TTL after the last
+    // heartbeat (this harness reaches its `finally`, so the lease is free here). And the
+    // question's own bound is wall-clock from the ask — 24 hours, downtime included, no
+    // grace period — so a long enough outage has the boot sweep collect it first.
     const revived = h.history.getTrigger('trg-1');
     expect(revived?.status).toBe('open');
     expect(revived?.waiting_until).toBeUndefined();
     expect(new Date(revived!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
+    next.stop();
+  });
+
+  it('W2-13 — "Run now" refuses a trigger that is still waiting, instead of starting a SECOND run', async () => {
+    // ⛔ THE DEFECT THE TEARDOWN FIX MADE REACHABLE. `runTriggerNow` guards on
+    // `activeTasks` and the lease, and after a restart the map is empty and the lease
+    // frees 15 minutes after the last heartbeat — while the trigger now stays `waiting`
+    // by design. A second run then mints a FRESH session id, so the per-session unique
+    // index does not collide: the trigger ends up with two pending prompts, the second
+    // park overwrites the `waiting_until` that bounded the first, and the second run's
+    // `finally` un-parks the trigger — leaving the first question collectable by
+    // neither sweep (it has a pointer; its trigger is no longer `waiting`) for its full
+    // 24-hour TTL.
+    //
+    // `stop()` here IS the restart, as far as this guard can tell: it clears the map and
+    // leaves the row waiting, which is exactly the state the next process boots into.
+    const h = makeHarness();
+    await h.parked;
+    h.loop.stop();
+    await waitUntil('the teardown to unwind', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+    expect(h.history.getTrigger('trg-1')?.status, 'the fixture must be in the state the fix creates').toBe('waiting');
+
+    // ⛔ And the REASON, not just the refusal: without the new check this falls through
+    // to the lease, which answers `already_running` — a true-ish sentence about a run
+    // that is not running, and one that tells the owner nothing about the question
+    // waiting for them.
+    await expect(h.loop.runTriggerNow('trg-1')).resolves.toEqual({ ok: false, reason: 'awaiting_answer' });
+
+    // THE POSITIVE CONTROL, or the check above would be satisfied by refusing
+    // everything. On a SECOND trigger that is not waiting, and a deterministic effect
+    // rather than an agent turn: dispatching `trg-1` again would mint a session with the
+    // same id as the parked one and collide on the per-session unique index — the test
+    // would then fail on its own fixture, with the error of the defect one test up.
+    h.history.insertTrigger({
+      id: 'trg-2', title: 'Nightly backup', source: 'cron', effect: 'backup',
+      scheduleCron: '0 3 * * *', nextRunAt: '2026-01-01T03:00:00.000Z',
+    });
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    const control = await next.runTriggerNow('trg-2');
+    expect(control, 'a trigger that is not waiting still runs on request').toEqual({ ok: true });
+    // Drained before teardown closes the handles: the dispatch is fire-and-forget, and
+    // a run still unwinding when sqlite closes raises a rejection belonging to no test.
+    await waitUntil('the control run to finish', () => next.activeTaskCount === 0);
     next.stop();
   });
 

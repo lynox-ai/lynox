@@ -1822,6 +1822,10 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     // owner's explicit stop is the route that ends a computing run.
     const recordCalls = (manager.recordTaskRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     await settle(() => recordCalls.length > 0);
+    // ⚠ THE CALL FIRST. `settle` polls and returns without throwing, so with no record
+    // at all the index below is `undefined` and `not.toBe('timeout')` passes — the
+    // assertion was green against a loop that skipped `recordTaskRun` entirely.
+    expect(recordCalls.length, 'the run has to have been recorded for the word to mean anything').toBeGreaterThan(0);
     expect(recordCalls[0]?.[2], 'a deadline must not be recorded as the end of the run').not.toBe('timeout');
     expect(store.getPending(SESSION_ID)).toBeUndefined();
     // And no question was PUSHED. This is the assertion that distinguishes
@@ -1874,6 +1878,15 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     await loop.tick();
     await settle(() => parked !== undefined);
     expect(parked).toBe('__dismissed__');
+    // ⛔ THE NEGATIVE CONTROL FOR THE TEARDOWN FIX, and it was missing: this test only
+    // ever asserted the dismissal, so "never drain, on any path" passed the whole file.
+    // Two tests then pinned "do not drain at teardown" and NOTHING pinned "drain when
+    // it is not a teardown" — including the alternative the fix argues against (keying
+    // the skip on `outcome.status === 'aborted'`), which also survived. A run that
+    // FAILED is not a teardown: its question is over, and the row must not keep the
+    // session's slot or stay answerable with no waiter.
+    const drained = store.getPending(SESSION_ID);
+    expect(drained, 'a failing run still drains its question').toBeUndefined();
   });
 
   // 12 — a TEARDOWN leaves the row alone, and the cancellation happens anyway.
@@ -1979,9 +1992,14 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     // case for the same reason, but SQLITE_BUSY and schema drift are, and the swallowed
     // catch names them.)
     const real = makeRealStore();
+    // Counted, because the previous version of this test asserted the row was not
+    // `expired` — which is equally true when `expirePrompt` was never CALLED, i.e. it
+    // passed in exactly the case it claimed to catch. The count is the only thing that
+    // distinguishes "ran and threw" from "never ran".
+    let drainCalls = 0;
     const store = new Proxy(real, {
       get(t, prop, r) {
-        if (prop === 'expirePrompt') return () => { throw new Error('database connection is not open'); };
+        if (prop === 'expirePrompt') return () => { drainCalls++; throw new Error('database connection is not open'); };
         return Reflect.get(t, prop, r) as unknown;
       },
     }) as PromptStore;
@@ -2007,9 +2025,8 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     await settle(() => real.getPending(SESSION_ID) !== undefined);
     await settle(() => answer !== undefined);
     expect(answer).toBe('__dismissed__');
-    // The drain really was attempted — without this the test would pass again the day
-    // the path moves, exactly as it just did.
-    expect(real.getById(real.getPending(SESSION_ID)?.id ?? 'none')?.status ?? 'gone').not.toBe('expired');
+    // The drain really was attempted, which is what makes the swallow meaningful.
+    expect(drainCalls, 'the throwing drain has to have RUN for this test to mean anything').toBeGreaterThan(0);
   });
 
   // 8 — the TTL is INHERITED, not merely available. The store having a 24h

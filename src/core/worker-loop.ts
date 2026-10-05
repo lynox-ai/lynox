@@ -250,9 +250,12 @@ export class WorkerLoop {
   }
 
   stop(): void {
-    // Set BEFORE the aborts below, because they are what settles a parked wait: the
-    // continuation reads this flag, and `waitForSettled` resolves off the signal
-    // synchronously, so an assignment after the loop would come too late.
+    // ⚠ Position does NOT matter here, and the comment that said it did was wrong:
+    // `settle()` in the prompt store calls `resolve()`, which queues a microtask rather
+    // than running the awaiting continuation, and `stop()` is synchronous throughout —
+    // so no reader can run before it returns, wherever in the body this sits. Measured:
+    // moving it to the last line kills nothing. It is written first because that is
+    // where the method's intent belongs, not because of an ordering hazard.
     this.tearingDown = true;
     if (this.timer) {
       clearInterval(this.timer);
@@ -322,12 +325,27 @@ export class WorkerLoop {
    */
   async runTriggerNow(
     triggerId: string,
-  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' }> {
+  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' }> {
     const taskManager = this.engine.getTaskManager();
     if (!taskManager) return { ok: false, reason: 'not_found' };
     const trigger = taskManager.getTrigger(triggerId);
     if (!trigger) return { ok: false, reason: 'not_found' };
     if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
+    // ⛔ A PARKED trigger is running too, and after a restart `activeTasks` cannot say
+    // so. In-process the guard above covers it; in the NEXT process the map is empty and
+    // the lease frees 15 minutes after the last heartbeat, so "Run now" dispatched a
+    // trigger whose question was still open: a second run minted a fresh session id, so
+    // the per-session unique index did not collide, and the trigger ended up with TWO
+    // pending prompts pointing at it. The second park overwrote `waiting_until`,
+    // extending the deadline that bounded the first, and the second run's `finally`
+    // un-parked the trigger — orphaning the first question where neither
+    // `expireUnparked` (it has a pointer) nor the waiting sweep (the trigger is no
+    // longer `waiting`) can collect it, for its full 24-hour TTL.
+    //
+    // ⚠ This became reachable through a deploy only with the teardown fix: before it, a
+    // graceful shutdown left nothing `waiting`, so the window was crash-only. It is
+    // closed here rather than filed because the state is now created by design.
+    if (trigger.status === 'waiting') return { ok: false, reason: 'awaiting_answer' };
     // A run another engine process holds counts as running too. A lost run does not stop
     // a manual one: running it again is what the person asked for.
     const lease = this.takeLease(trigger.id);
@@ -1065,9 +1083,9 @@ export class WorkerLoop {
         // answer is never overwritten.
         //
         // ⛔ A TEARDOWN IS NOT AN END TO THE WAIT, and this is where that was lost.
-        // `Engine.shutdown()` calls `stop()` FIRST and closes the history DB LAST, with
-        // awaits in between (an in-flight inbox rebootstrap, the inbox runtime, every
-        // shutdown hook). So the abort settles this wait, this continuation runs while
+        // `Engine.shutdown()` calls `stop()` FIRST and closes the history DB much later,
+        // with awaits in between (an in-flight inbox rebootstrap, the inbox runtime,
+        // every shutdown hook). So the abort settles this wait, this continuation runs while
         // the database is still WIDE OPEN, and the three writes on this path all went
         // through cleanly: the prompt expired, its trigger pointer released, the trigger
         // un-parked. A question the product promises will "survive the restart it is
@@ -1142,14 +1160,21 @@ export class WorkerLoop {
         // Bounded by `waiting_until` either way, so a process that never comes back
         // still costs only what the expiry sweep collects.
         //
-        // ⚠ THIS GUARD IS MOSTLY REDUNDANT, said plainly because a mutation round showed
-        // it: `releaseTrigger`'s own SQL is scoped `status != 'pending'`, so on a row the
-        // teardown just left pending it is already a no-op, and replacing the condition
-        // with `true` changes nothing in the ordinary case. It earns its place in ONE
-        // case, which is why it stays: a teardown that RACES a committed answer leaves
-        // the row `answered` with its pointer live, and there the release would take —
-        // discarding the answer the next process needs to re-arm the run. The test pins
-        // the CALL rather than an effect, for exactly that reason.
+        // ⚠ EFFECT-REDUNDANT IN THE ORDINARY CASE: `releaseTrigger`'s own SQL is scoped
+        // `status != 'pending'`, so on a row the teardown just left pending it is
+        // already a no-op. It earns its place in ONE case: a teardown that RACES a
+        // committed answer leaves the row `answered` with its pointer live, and there
+        // the release would take — discarding the answer the next process needs. Because
+        // that race cannot be sequenced from a test, the test pins the CALL instead,
+        // which is what kills the `true` replacement. (Before that call assertion
+        // existed the mutant survived; it does not now.)
+        //
+        // ⚠ AND ITS COST, which the justification above does not name: keeping an
+        // answered pointer means the next process re-arms and re-runs the task with an
+        // answer the dying process's turn may already have acted on. That is at-least-
+        // once, deliberately — it is what a crash does anyway — but it is a change from
+        // the old behaviour, where the release took and a graceful shutdown could not
+        // duplicate.
         if (!this.tearingDown) {
           try {
             promptStore.releaseTrigger(promptId);

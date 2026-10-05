@@ -6312,6 +6312,10 @@ export class LynoxHTTPApi {
       const outcome = await workerLoop.runTriggerNow(params['id']!);
       if (!outcome.ok) {
         if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
+        // Its own answer, not "already running": the run exists and is waiting for the
+        // owner, and the owner is the one being told. Answering the question is what
+        // moves it; starting a second run would strand the first question.
+        if (outcome.reason === 'awaiting_answer') { errorResponse(res, 409, 'This task is waiting for your answer — answer its question instead of starting it again'); return; }
         errorResponse(res, 404, 'Trigger not found'); return;
       }
       jsonResponse(res, 202, { started: true });
