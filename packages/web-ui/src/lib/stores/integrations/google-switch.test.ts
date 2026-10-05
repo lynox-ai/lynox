@@ -86,3 +86,21 @@ describe('performSwitchToManaged — nothing proceeds on a failed step', () => {
 		expect((await fn('/api/google/reload', { method: 'POST' })).ok).toBe(true);
 	});
 });
+
+describe('revokeNotice — the page reports a revocation only when Google confirmed it', () => {
+	it('says revoked when the engine reports Google confirmed it', async () => {
+		const { revokeNotice } = await import('./google-switch.js');
+		expect(revokeNotice({ ok: true, revoked_at_google: true })).toEqual({ key: 'integrations.google_revoked', type: 'success' });
+	});
+
+	it('says disconnected here only, when Google did not confirm', async () => {
+		const { revokeNotice } = await import('./google-switch.js');
+		expect(revokeNotice({ ok: true, revoked_at_google: false })).toEqual({ key: 'integrations.google_revoked_locally_only', type: 'info' });
+	});
+
+	it('does not read a missing field as a revocation (an older engine sends none)', async () => {
+		const { revokeNotice } = await import('./google-switch.js');
+		expect(revokeNotice({ ok: true }).type).toBe('info');
+		expect(revokeNotice(null).type).toBe('info');
+	});
+});

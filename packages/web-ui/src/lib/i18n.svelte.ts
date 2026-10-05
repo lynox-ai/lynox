@@ -1645,6 +1645,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_managed_desc': { de: 'Verbinde dein Google-Konto mit einem Klick — wir kümmern uns um den Rest.', en: 'Connect your Google account with one click — we handle the rest.' },
 	'integrations.google_connected_managed': { de: 'Google Workspace verbunden!', en: 'Google Workspace connected!' },
 	'integrations.google_oauth_unavailable': { de: 'Google-Verbindung konnte nicht hergestellt werden.', en: 'Could not establish Google connection.' },
+	'integrations.google_revoked': { de: 'Zugriff entzogen, auch bei Google widerrufen.', en: 'Access removed and revoked at Google.' },
+	'integrations.google_revoked_locally_only': { de: 'Verbindung getrennt: lynox hat keinen Zugriff mehr. Bei Google ließ sich der Zugriff aber nicht widerrufen. Entferne lynox dafür in den Sicherheitseinstellungen deines Google-Kontos.', en: 'Disconnected: lynox no longer has access. Revoking it at Google itself did not go through, so remove lynox in your Google Account\'s security settings.' },
 	'integrations.google_code_copied': { de: 'Code kopiert — im geöffneten Tab einfügen', en: 'Code copied — paste in the opened tab' },
 	// NOT a restart: `POST /api/google/reload` rebuilds the Google credential in
 	// the running engine and answers `{ ok }`. The old wording promised something

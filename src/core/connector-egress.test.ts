@@ -590,3 +590,49 @@ describe('source: every authenticated Google call goes through the helper', () =
     expect(callers.length).toBeGreaterThanOrEqual(8);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "Revoke Google": the local grant goes either way, and `revokedAtGoogle` is
+// what Google answered — measured, not inferred from the policy. Under
+// `allow-list` with Google's revoke host listed the revocation goes through.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('revoke says whether Google confirmed it', () => {
+  async function authWithToken(pol: HostPolicyContext | undefined): Promise<{ auth: import('../integrations/google/google-auth.js').GoogleAuth; deleted: string[] }> {
+    const { GoogleAuth } = await import('../integrations/google/google-auth.js');
+    const deleted: string[] = [];
+    const store = new Map<string, string>([['GOOGLE_OAUTH_TOKENS', JSON.stringify({
+      access_token: 'access-to-revoke', refresh_token: 'refresh-to-revoke',
+      expires_at: Date.now() + 3600_000, scopes: [],
+    })]]);
+    const auth = new GoogleAuth({
+      clientId: 'id', clientSecret: 'secret',
+      vault: { get: (k: string) => store.get(k) ?? null, set: () => undefined, delete: (k: string) => { deleted.push(k); return store.delete(k); } } as never,
+      ...(pol ? { hostPolicy: pol } : {}),
+    });
+    return { auth, deleted };
+  }
+
+  it('drops the grant locally and reports no revocation when the policy refuses the call', async () => {
+    const { auth, deleted } = await authWithToken(policy('deny-all'));
+    await expect(auth.revoke()).resolves.toEqual({ revokedAtGoogle: false });
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(deleted).toContain('GOOGLE_OAUTH_TOKENS');
+    expect(auth.isAuthenticated()).toBe(false);
+  });
+
+  it('reports the revocation when Google confirms it under an allow-list that names its host', async () => {
+    mockFetch.mockResolvedValueOnce(okJson());
+    const { auth, deleted } = await authWithToken(policy('allow-list', ['oauth2.googleapis.com']));
+    await expect(auth.revoke()).resolves.toEqual({ revokedAtGoogle: true });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(deleted).toContain('GOOGLE_OAUTH_TOKENS');
+  });
+
+  it('reports no revocation when Google answers with an error, and still drops the grant', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{"error":"invalid_token"}', { status: 400, headers: { 'content-type': 'application/json' } }));
+    const { auth, deleted } = await authWithToken(undefined);
+    await expect(auth.revoke()).resolves.toEqual({ revokedAtGoogle: false });
+    expect(deleted).toContain('GOOGLE_OAUTH_TOKENS');
+  });
+});

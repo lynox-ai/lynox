@@ -58,3 +58,22 @@ export async function performSwitchToManaged(
 	await fetchFn(`${apiBase}/google/reload`, { method: 'POST' });
 	return { ok: true };
 }
+
+// === "Revoke Google": what the page says afterwards ===
+//
+// The engine drops the local grant either way and reports whether Google
+// confirmed the revocation. Only a confirmed one may read as revoked; anything
+// else — refused by the network policy, an error, an older engine that sends no
+// field — says the connection is gone here and the user should remove lynox at
+// Google themselves.
+export type RevokeNotice =
+	| { key: 'integrations.google_revoked'; type: 'success' }
+	| { key: 'integrations.google_revoked_locally_only'; type: 'info' };
+
+export function revokeNotice(body: unknown): RevokeNotice {
+	const confirmed = typeof body === 'object' && body !== null
+		&& (body as { revoked_at_google?: unknown }).revoked_at_google === true;
+	return confirmed
+		? { key: 'integrations.google_revoked', type: 'success' }
+		: { key: 'integrations.google_revoked_locally_only', type: 'info' };
+}

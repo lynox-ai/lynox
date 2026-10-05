@@ -1045,22 +1045,31 @@ export class GoogleAuth {
   }
 
   /**
-   * Revoke tokens and clean up.
+   * Revoke the grant at Google, then drop it here — dropped either way.
+   *
+   * `revokedAtGoogle` is what Google answered, not what the network policy
+   * suggests: the call can be refused before it leaves (`deny-all`, an
+   * allow-list without Google's host), time out, or be answered with an error.
+   * In each of those cases the local grant is still gone, which is what the user
+   * asked for on this side, and the caller says that Google was not told.
    */
-  async revoke(): Promise<void> {
+  async revoke(): Promise<{ revokedAtGoogle: boolean }> {
+    let revokedAtGoogle = false;
     if (this.tokenData?.access_token) {
       try {
-        await googleFetch(REVOKE_URL, {
+        const res = await googleFetch(REVOKE_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ token: this.tokenData.access_token }),
           signal: AbortSignal.timeout(10_000),
         }, this.hostPolicy);
+        revokedAtGoogle = res.ok;
       } catch {
-        // Best-effort revocation
+        // Refused by the network policy, or no answer: not revoked at Google.
       }
     }
     this._dropTokens();
+    return { revokedAtGoogle };
   }
 
   /**

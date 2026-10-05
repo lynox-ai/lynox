@@ -128,7 +128,7 @@ const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
 const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
 const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state', state: 'test-state' });
 const mockGoogleExchangeRedirectCode = vi.fn().mockResolvedValue(undefined);
-const mockGoogleRevoke = vi.fn().mockResolvedValue(undefined);
+const mockGoogleRevoke = vi.fn().mockResolvedValue({ revokedAtGoogle: true });
 const mockGoogleDisconnect = vi.fn();
 const mockGoogleAuth = {
   isAuthenticated: mockGoogleIsAuthenticated,
@@ -8183,9 +8183,15 @@ describe('LynoxHTTPApi', () => {
     it('/api/google/revoke still revokes — the control that keeps the line above meaningful', async () => {
       mockGoogleRevoke.mockClear();
       mockGoogleDisconnect.mockClear();
-      await jsonFetch('/api/google/revoke', { method: 'POST' });
+      // Google did not confirm it (e.g. the network policy refused the call): the
+      // route still answers ok — the local grant is gone — and says so in the
+      // field the page reads. One request, so this file's shared rate window
+      // does not grow.
+      mockGoogleRevoke.mockResolvedValueOnce({ revokedAtGoogle: false });
+      const res = await jsonFetch('/api/google/revoke', { method: 'POST' });
       expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
       expect(mockGoogleDisconnect).not.toHaveBeenCalled();
+      expect(await res.json()).toEqual({ ok: true, revoked_at_google: false });
     });
   });
 
