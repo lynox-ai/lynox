@@ -481,9 +481,10 @@ export class MailContext {
     // which metadata-only access cannot serve. Admitting the scope would
     // therefore register a provider that lists mail nobody can open — a worse
     // failure than refusing, because it looks like it works.
-    return this.googleAuth.hasScope(SCOPES.GMAIL_READONLY)
-      || this.googleAuth.hasScope(SCOPES.GMAIL_MODIFY)
-      || this.googleAuth.hasScope(SCOPES.MAIL_GOOGLE_COM);
+    // `hasUserScope`: a service account acts as itself and has no user's mailbox.
+    return this.googleAuth.hasUserScope(SCOPES.GMAIL_READONLY)
+      || this.googleAuth.hasUserScope(SCOPES.GMAIL_MODIFY)
+      || this.googleAuth.hasUserScope(SCOPES.MAIL_GOOGLE_COM);
   }
 
   private async _buildProvider(account: MailAccountConfig): Promise<MailProvider | null> {

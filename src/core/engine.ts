@@ -2078,7 +2078,7 @@ export class Engine {
               if (!auth) throw new Error('Google is not connected — no Drive backup upload.');
               return auth.getAccessToken();
             },
-            hasScope: (scope: string) => this._googleAuth?.hasScope(scope) ?? false,
+            hasScope: (scope: string) => this._googleAuth?.hasUserScope(scope) ?? false,
             // §3.8: the backup upload is a Google call like any other and is
             // subject to `network_policy`. Same live context as the credential.
             hostPolicy: hostPolicyOf(this._toolContext),

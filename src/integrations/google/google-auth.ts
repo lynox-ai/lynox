@@ -709,7 +709,14 @@ export class GoogleAuth {
    * Get the current scopes.
    */
   getScopes(): string[] {
-    return this.tokenData?.scopes ?? [];
+    return [...this._activeScopes()];
+  }
+
+  /** The scopes of the credential calls use: the stored grant, else the service-account token's request. */
+  private _activeScopes(): readonly string[] {
+    if (this.tokenData) return this.tokenData.scopes;
+    if (this.serviceAccountKeyPath) return this.configuredScopes ?? DEFAULT_SCOPES;
+    return [];
   }
 
   /**
@@ -722,14 +729,21 @@ export class GoogleAuth {
    * it has.
    */
   hasScope(scope: string): boolean {
-    if (this.tokenData) return this.tokenData.scopes.includes(scope);
-    if (this.serviceAccountKeyPath) return (this.configuredScopes ?? DEFAULT_SCOPES).includes(scope);
-    return false;
+    return this._activeScopes().includes(scope);
   }
 
   /** True when calls run on the service account because no user grant is stored. */
   usesServiceAccount(): boolean {
     return !this.tokenData && !!this.serviceAccountKeyPath;
+  }
+
+  /**
+   * `hasScope`, but only for a user's own grant. A service account acts as
+   * itself: a Gmail scope on its token reaches no user's mailbox, and a Drive
+   * scope reaches its own Drive, which is not where a user's backup belongs.
+   */
+  hasUserScope(scope: string): boolean {
+    return !this.usesServiceAccount() && this.hasScope(scope);
   }
 
   /**

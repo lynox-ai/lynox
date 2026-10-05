@@ -1256,12 +1256,25 @@ describe('GoogleAuth', () => {
       expect(sa.usesServiceAccount()).toBe(true);
       expect(sa.hasScope(SCOPES.DRIVE_READONLY)).toBe(true);
       expect(sa.hasScope(SCOPES.GMAIL_READONLY), 'a scope the service account does not request').toBe(false);
+      expect(sa.hasScope(SCOPES.DRIVE_FILE), 'configured scopes replace the defaults, they do not add to them').toBe(false);
+      expect(sa.getScopes(), 'the status route reads the same set').toEqual([SCOPES.DRIVE_READONLY]);
     });
 
     it('answers a service account with no configured scopes from the default set', () => {
       const sa = new GoogleAuth({ serviceAccountKeyPath: '/tmp/key.json' });
       expect(sa.hasScope(SCOPES.DRIVE_FILE)).toBe(true);
       expect(sa.hasScope(SCOPES.GMAIL_READONLY)).toBe(false);
+    });
+
+    it('reports no user scope for a service account, and the grant\'s for a user', () => {
+      const sa = new GoogleAuth({ serviceAccountKeyPath: '/tmp/key.json', scopes: [SCOPES.GMAIL_READONLY] });
+      expect(sa.hasScope(SCOPES.GMAIL_READONLY)).toBe(true);
+      expect(sa.hasUserScope(SCOPES.GMAIL_READONLY), 'a service account has no user mailbox').toBe(false);
+      const store = new Map<string, string>([['GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'a', refresh_token: 'r', expires_at: Date.now() + 3600_000, scopes: [SCOPES.GMAIL_READONLY],
+      })]]);
+      const user = new GoogleAuth({ vault: { get: (k: string) => store.get(k) ?? null, set: () => undefined, delete: () => true } as never });
+      expect(user.hasUserScope(SCOPES.GMAIL_READONLY)).toBe(true);
     });
 
     it('answers from the stored grant, not the service account, once one is stored', () => {
