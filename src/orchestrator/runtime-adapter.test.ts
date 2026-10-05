@@ -913,26 +913,43 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
     expect(agentConfig['activeScopes']).toEqual(scopes);
   });
 
-  it('a STEP agent registers in the scope its caller supplied, and inherits it', async () => {
-    // ⛔ THE THIRD REGISTRATION SITE, and the one no other test reaches. `Session.abort()`
-    // aborts the members of its own agent's scope; a workflow step lands there only if
-    // this function puts it there. It used to land in a MODULE-LEVEL set instead, so any
-    // session's abort killed every step agent in the process — including other
-    // background runs', whose triggers then re-fire through the backoff.
+  it.each([
+    ['spawnInline', async (scope: { members: Set<{ abort: () => void }> }) => {
+      const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'inline', task: 'tidy up tasks' };
+      await spawnInline(
+        step, {}, mockConfig, mockParentTools,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, scope,
+      );
+    }],
+    ['spawnViaAgent', async (scope: { members: Set<{ abort: () => void }> }) => {
+      const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'agent', task: 'tidy up tasks' };
+      const agentDef: AgentDef = { id: 'scoped-abort', name: 'scoped-abort', systemPrompt: 'do it', tools: [] };
+      await spawnViaAgent(
+        step, agentDef, {}, mockConfig, undefined, 'run-1',
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        scope,
+      );
+    }],
+  ])('a STEP agent registers in the scope its caller supplied, and inherits it (%s)', async (_name, drive) => {
+    // ⛔ BOTH EXECUTORS, because this file's own rule for the taint wiring is that the two
+    // paths cannot diverge — and a mutation round proved the point: mutating only the
+    // first of the two registration sites left the other's test green, so a one-path test
+    // would have read as coverage for both.
+    //
+    // `Session.abort()` aborts the members of its own agent's scope; a workflow step
+    // lands there only if these functions put it there. It used to land in a MODULE-LEVEL
+    // set, so any session's abort killed every step agent in the process — including
+    // other background runs', whose triggers then re-fire through the backoff.
     //
     // Two assertions, because either alone passes a wrong implementation: not registering
     // leaves the set empty (a stop reaches nothing), and registering without passing the
     // scope on leaves anything the STEP spawns unreachable.
-    const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'inline', task: 'tidy up tasks' };
     const scope = { members: new Set<{ abort: () => void }>() };
     let sizeDuringRun = -1;
     mockSend.mockImplementationOnce(async () => { sizeDuringRun = scope.members.size; return 'done'; });
 
-    await spawnInline(
-      step, {}, mockConfig, mockParentTools,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, scope,
-    );
+    await drive(scope);
 
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(sizeDuringRun, 'the step is in the caller\'s scope while it runs').toBe(1);
