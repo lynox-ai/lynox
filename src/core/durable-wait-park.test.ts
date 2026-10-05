@@ -1000,6 +1000,15 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const settleFails = vi.spyOn(h.prompts, 'expirePrompt').mockImplementation(() => {
       throw new Error('database is locked');
     });
+    // ⚠ A CALL assertion, and deliberately, which is the weaker form this file normally
+    // refuses. `releaseTrigger`'s SQL is scoped `status != 'pending'`, so against the row
+    // a teardown leaves behind it is a no-op and has no EFFECT to observe — measured as a
+    // surviving mutant when the condition was replaced with `true`. The case where the
+    // effect is real cannot be sequenced from here: a teardown racing an answer that
+    // commits between the abort settling and this `finally`, where the release would
+    // discard the answer. So the call is what there is to pin, and the limit is written
+    // down rather than dressed up.
+    const detach = vi.spyOn(h.prompts, 'releaseTrigger');
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     h.loop.stop();
@@ -1012,9 +1021,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // leave stderr stubbed for the rest of the file.
     const row = h.prompts.getById(promptId);
     const drainAttempts = settleFails.mock.calls.length;
+    const detachAttempts = detach.mock.calls.length;
     settleFails.mockRestore();
+    detach.mockRestore();
     stderr.mockRestore();
     expect(drainAttempts, 'a teardown must not drain the question it is leaving behind').toBe(0);
+    expect(detachAttempts, 'nor detach it from the trigger that will need it').toBe(0);
     expect(row?.status).toBe('pending');
     expect(row?.trigger_id).toBe('trg-1');
   });

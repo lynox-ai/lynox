@@ -234,8 +234,14 @@ export class WorkerLoop {
   start(): void {
     if (this.timer) return; // already running
     // A loop that is started again is not tearing down. Without this a restarted loop
-    // (tests do it; a provider re-bootstrap could) would keep the flag for good and
-    // never drain a later park — leaking the row's slot in the partial unique index.
+    // would keep the flag for good and never drain a later park, leaking the row's slot
+    // in the partial unique index.
+    //
+    // ⚠ NO TEST KILLS THIS LINE, and the reason is that it has no production path today:
+    // `Engine.shutdown()` drops the loop (`this._workerLoop = null`) right after stopping
+    // it, so nothing restarts one outside tests. Measured as a surviving mutant rather
+    // than assumed covered. It stays because the alternative is a flag whose correctness
+    // depends on an object never being reused — a property no type enforces.
     this.tearingDown = false;
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
     this.timer.unref(); // don't prevent process exit
@@ -1135,6 +1141,15 @@ export class WorkerLoop {
         // `getAnsweredForTrigger`, and that finds NOTHING once the pointer is released).
         // Bounded by `waiting_until` either way, so a process that never comes back
         // still costs only what the expiry sweep collects.
+        //
+        // ⚠ THIS GUARD IS MOSTLY REDUNDANT, said plainly because a mutation round showed
+        // it: `releaseTrigger`'s own SQL is scoped `status != 'pending'`, so on a row the
+        // teardown just left pending it is already a no-op, and replacing the condition
+        // with `true` changes nothing in the ordinary case. It earns its place in ONE
+        // case, which is why it stays: a teardown that RACES a committed answer leaves
+        // the row `answered` with its pointer live, and there the release would take —
+        // discarding the answer the next process needs to re-arm the run. The test pins
+        // the CALL rather than an effect, for exactly that reason.
         if (!this.tearingDown) {
           try {
             promptStore.releaseTrigger(promptId);
