@@ -12,11 +12,10 @@
  *
  * The list names the mail APIs a bulk run refuses: Gmail on every Google host that
  * serves it, the legacy Outlook REST hosts, and the mailbox and calendar resources of
- * Microsoft Graph. Graph also serves files, chats and directories, so there only the
- * resource right after its owner (`me`, `users/{id}`, `groups/{id}`) decides — a folder
- * that happens to be called `messages` in a drive is not a mailbox. Hosts and paths are
- * compared lower-cased and percent-decoded, and decoded before they are split, so an
- * encoded `/` is a separator like any other.
+ * Microsoft Graph. Graph also serves files, chats and directories: a name that only means
+ * a mailbox is refused wherever it stands, a name that also means something else only
+ * right after its owner (`me`, `users/{id}`, `groups/{id}`). Hosts and paths are
+ * compared lower-cased and percent-decoded, so a spelling of a resource is that resource.
  */
 
 /** Hosts whose whole API is mail and calendar. */
@@ -29,7 +28,7 @@ const MAIL_HOSTS: ReadonlySet<string> = new Set([
 /** Google hosts are `<label>.googleapis.com`; Gmail answers under these first labels
  *  (`gmail.mtls.googleapis.com` included) and under a `/gmail` path on any of them. */
 const GOOGLE_GMAIL_LABELS: ReadonlySet<string> = new Set(['gmail', 'content-gmail']);
-const GOOGLE_GMAIL_PREFIXES: readonly (readonly string[])[] = [['gmail'], ['upload', 'gmail'], ['batch', 'gmail']];
+const GOOGLE_GMAIL_PREFIXES: readonly (readonly string[])[] = [['gmail'], ['upload', 'gmail'], ['batch']];
 
 /** Microsoft Graph, in each of its national clouds. */
 const GRAPH_HOSTS: ReadonlySet<string> = new Set([
@@ -38,16 +37,23 @@ const GRAPH_HOSTS: ReadonlySet<string> = new Set([
   'dod-graph.microsoft.us',
   'microsoftgraph.chinacloudapi.cn',
 ]);
-/** Graph resources, right after their owner, that are a mailbox or a calendar: messages,
+/** Graph segment names that only ever mean a mailbox, refused wherever they stand:
  *  folders (inbox rules live under them), sending, the mailbox's settings (the automatic
- *  reply), calendar entries (an organiser's change mails the attendees) and a group's
- *  conversations (a post mails the group). */
-const GRAPH_MAIL_RESOURCES: ReadonlySet<string> = new Set([
-  'messages',
+ *  reply), its rules and its focused-inbox overrides — and `$batch`, which carries other
+ *  requests in its body. */
+const GRAPH_MAIL_ANYWHERE: ReadonlySet<string> = new Set([
   'mailfolders',
   'sendmail',
   'mailboxsettings',
+  'messagerules',
   'inferenceclassification',
+  '$batch',
+]);
+/** Graph names that are a mailbox or calendar only right after their owner — `messages`
+ *  is also a Teams chat's, a drive may hold a folder called `events`: messages, calendar
+ *  entries (an organiser's change mails the attendees) and a group's conversations. */
+const GRAPH_MAIL_RESOURCES: ReadonlySet<string> = new Set([
+  'messages',
   'events',
   'calendar',
   'calendars',
@@ -57,24 +63,38 @@ const GRAPH_MAIL_RESOURCES: ReadonlySet<string> = new Set([
   'conversations',
 ]);
 
-function segmentsOf(pathname: string): string[] {
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(pathname);
-  } catch {
-    decoded = pathname;
-  }
-  return decoded.toLowerCase().split('/').filter((s) => s !== '');
+/** A path segment: its name, and whether it carried an OData key (`users('id')`). */
+interface Segment { name: string; keyed: boolean }
+
+/**
+ * Path segments, lower-cased and percent-decoded one by one — a malformed escape spoils only
+ * its own segment — and split again after decoding, so an encoded `/` is a separator.
+ * OData key syntax is cut off (`mailFolders('inbox')` is `mailfolders`, keyed).
+ */
+function segmentsOf(pathname: string): Segment[] {
+  return pathname.split('/').flatMap((raw) => {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {
+      decoded = raw;
+    }
+    return decoded.toLowerCase().split('/');
+  }).filter((s) => s !== '').map((s) => ({ name: s.replace(/\(.*$/, ''), keyed: s.includes('(') }));
 }
 
-/** The Graph resource a path addresses: the segment after `me`, or after `users/{id}` or
- *  `groups/{id}` — whichever owner comes first. Null when the path names no owner. */
-function graphResource(segments: readonly string[]): string | null {
-  for (let i = 0; i < segments.length; i++) {
-    if (segments[i] === 'me') return segments[i + 1] ?? null;
-    if (segments[i] === 'users' || segments[i] === 'groups') return segments[i + 2] ?? null;
-  }
-  return null;
+/** The Graph resource a path addresses: after the version, the owner is `me`, or `users` /
+ *  `groups` followed by an id (or carrying it as `users('id')`), and type casts
+ *  (`microsoft.graph.user`) are skipped. Null when the path does not start that way. */
+function graphResource(segments: readonly Segment[]): string | null {
+  let i = segments[0]?.name === 'v1.0' || segments[0]?.name === 'beta' ? 1 : 0;
+  const owner = segments[i];
+  if (owner === undefined) return null;
+  if (owner.name === 'me') i += 1;
+  else if (owner.name === 'users' || owner.name === 'groups') i += owner.keyed ? 1 : 2;
+  else return null;
+  while (segments[i]?.name.startsWith('microsoft.graph.')) i += 1;
+  return segments[i]?.name ?? null;
 }
 
 /**
@@ -94,9 +114,10 @@ export function isMailProviderTarget(url: string): boolean {
   const segments = segmentsOf(parsed.pathname);
   if (host === 'googleapis.com' || host.endsWith('.googleapis.com')) {
     if (GOOGLE_GMAIL_LABELS.has(host.split('.')[0]!)) return true;
-    return GOOGLE_GMAIL_PREFIXES.some((prefix) => prefix.every((p, i) => segments[i] === p));
+    return GOOGLE_GMAIL_PREFIXES.some((prefix) => prefix.every((p, i) => segments[i]?.name === p));
   }
   if (GRAPH_HOSTS.has(host)) {
+    if (segments.some((seg) => GRAPH_MAIL_ANYWHERE.has(seg.name))) return true;
     const resource = graphResource(segments);
     return resource !== null && GRAPH_MAIL_RESOURCES.has(resource);
   }

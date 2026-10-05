@@ -39,6 +39,15 @@ describe('isMailProviderTarget', () => {
     'https://graph.microsoft.com/v1.0/me/events/1',
     'https://graph.microsoft.com/v1.0/me/calendars/abc/events/1',
     'https://graph.microsoft.com/v1.0/groups/g1/threads/t1',
+    "https://graph.microsoft.com/v1.0/me/mailFolders('inbox')/messageRules",
+    "https://graph.microsoft.com/v1.0/users('abc')/mailboxSettings",
+    "https://graph.microsoft.com/v1.0/users('abc')/sendMail",
+    "https://graph.microsoft.com/v1.0/users('abc')/messages/1",
+    'https://graph.microsoft.com/v1.0/users/abc/microsoft.graph.user/mailboxSettings',
+    'https://graph.microsoft.com/v1.0/users/abc/microsoft.graph.user/events/1',
+    'https://graph.microsoft.com/v1.0/users/me/messages/1',
+    'https://graph.microsoft.com/v1.0/$batch',
+    'https://www.googleapis.com/batch',
     'https://graph.microsoft.com/v1.0/me/mailboxSettings',
     'https://graph.microsoft.com/v1.0/users/abc/messages/xyz',
     'https://graph.microsoft.com/beta/me/mailFolders/inbox/messageRules/1',
@@ -64,6 +73,8 @@ describe('isMailProviderTarget', () => {
     // An encoded slash is a separator: decoded before the path is split.
     expect(isMailProviderTarget('https://www.googleapis.com/gmail%2Fv1/users/me/settings/vacation')).toBe(true);
     expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me%2FmailboxSettings')).toBe(true);
+    // A malformed escape spoils only its own segment, not the decoding of the others.
+    expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me/%6DailboxSettings/x%ZZ')).toBe(true);
   });
 
   it.each([
@@ -72,6 +83,8 @@ describe('isMailProviderTarget', () => {
     'https://www.googleapis.com/calendar/v3/calendars/primary',
     'https://graph.microsoft.com/v1.0/me/drive/items/1',
     'https://graph.microsoft.com/v1.0/me/drive/root:/messages/a.xlsx:',
+    'https://graph.microsoft.com/v1.0/drives/d/root:/me/events/x.xlsx:',
+    "https://graph.microsoft.com/v1.0/users('abc')/drive/items/1",
     'https://graph.microsoft.com/v1.0/teams/t1/channels/c1/messages/m1',
     'https://graph.microsoft.com/v1.0/me',
     'https://api.example.com/gmail/settings',
