@@ -50,6 +50,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     sessionRunArgs: () => unknown[][];
     /** The options each `createSession` was called with. */
     sessionOpts: () => Array<{ sessionId?: string } | undefined>;
+    /** The same engine, so a test can build a SECOND loop over the same stores —
+     *  which is what "after the restart" means when the process does not actually
+     *  restart. A second `tick()` on the FIRST loop would not do: it is the object
+     *  whose in-memory state the restart is supposed to lose. */
+    engine: Engine;
+    router: NotificationRouter;
   }
 
   /** A worker loop whose single trigger's run asks one question and waits.
@@ -170,7 +176,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const run = loop.tick();
 
     return {
-      loop, history, prompts, manager, parked, run,
+      loop, history, prompts, manager, parked, run, engine, router,
       promptIdOf: () => promptId,
       dispatches: () => session.run.mock.calls.length,
       sessionRunArgs: () => session.run.mock.calls as unknown[][],
@@ -743,6 +749,51 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     recorded.mockRestore();
   });
 
+  it('W2-13 — a GRACEFUL SHUTDOWN leaves the question standing, and its answer still re-arms the run', async () => {
+    // ⛔ WHY THIS IS THE COMMON PATH AND NOT A CORNER. `Engine.shutdown()` calls
+    // `WorkerLoop.stop()` FIRST and `runHistory.close()` LAST, with awaits in between
+    // (an in-flight inbox rebootstrap, the inbox runtime, every shutdown hook — the
+    // managed billing hook is registered whenever the tier env var is set). So the abort
+    // settles this wait and the continuation runs while the database is still OPEN: the
+    // prompt was expired, its trigger pointer released and the trigger un-parked, all
+    // successfully. On managed that is every deploy, and the product states the opposite
+    // promise — the question "must survive the restart it is waiting across".
+    //
+    // ⚠ The barrier is `last_run_at`, not a sleep: it is written after the turn returns,
+    // which is after the closure's `finally` — the very block under test. Waiting for
+    // the ROW's absence of change would be waiting for nothing, which passes against any
+    // implementation.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+    expect(h.history.getTrigger('trg-1')?.status, 'the fixture must really be parked').toBe('waiting');
+
+    h.loop.stop();
+    await waitUntil('the aborted wait to unwind through its finally',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    // ── what the next process needs to find
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');
+    // The POINTER is the half a reader would not think to check, and it is the half the
+    // resume path reads: `getAnsweredForTrigger` finds nothing once it is released.
+    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    const parkedAfter = h.history.getTrigger('trg-1');
+    expect(parkedAfter?.status).toBe('waiting');
+    expect(parkedAfter?.waiting_until).toBeTruthy();
+
+    // ── the restart: a new loop over the same stores, and the answer arrives
+    expect(h.prompts.answerUser(promptId, 'Acme'),
+      'an expired row cannot be answered — this is false if the shutdown drained it').toBe(true);
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    await next.tick();
+
+    const revived = h.history.getTrigger('trg-1');
+    expect(revived?.status).toBe('open');
+    expect(revived?.waiting_until).toBeUndefined();
+    expect(new Date(revived!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
+    next.stop();
+  });
+
   it('A10 — an answer makes a parked trigger due again', async () => {
     const h = makeHarness();
     await h.parked;
@@ -917,17 +968,30 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(secondPrompt).toContain('Which password?');
   });
 
-  it('a question whose settle FAILED keeps its pointer through the teardown', async () => {
-    // Driven, not restated. Calling `releaseTrigger` directly and asserting
-    // `false` is satisfied by a stub that always returns false; what has to hold
-    // is that the real abort path cannot orphan a row.
+  it('a teardown does not even TRY to drain the row, and the pointer survives it', async () => {
+    // ⛔ THIS TEST MOVED WITH THE BEHAVIOUR, and the old version is why the move has to
+    // be written down. It used to drive a FAILING settle: `stop()` aborted the wait, the
+    // abort branch called `expirePrompt` — throwing here, exactly as its swallowed catch
+    // anticipates (it names SQLITE_BUSY and schema drift) — and the `finally` then
+    // detached the row unconditionally, so the claim was that a pointer survives even
+    // that. W2-13 makes the teardown path skip the drain entirely, which leaves the
+    // throwing settle UNREACHABLE from `stop()` — `stop()` is the only thing that aborts
+    // a parked wait today, measured: one production caller, `Engine.shutdown()`.
     //
-    // The scenario: `stop()` aborts the wait, the closure's abort branch drains
-    // its row with `expirePrompt` — which throws here, exactly as the swallowed
-    // catch there anticipates (it names SQLITE_BUSY and schema drift) — and then
-    // the `finally` runs its unconditional detach. The row is still `pending` and
-    // still answerable, so it must keep its pointer or no run can ever be handed
-    // its answer, which is what §0 A2 keeps the pointer for.
+    // Two things would have been wrong to do instead. Re-aiming only the BARRIER: the
+    // old one waited for the trigger to leave `waiting`, which no longer happens, so it
+    // timed out — but fixing the wait and keeping the scenario leaves a spy that never
+    // fires standing in for a guarantee. And deleting the test: the pointer-orphan
+    // question is real, it just has a different answer now.
+    //
+    // So the claim is what holds and is still worth pinning: at teardown the drain is
+    // NOT ATTEMPTED and the pointer is kept. The throwing spy stays as a belt — if the
+    // code ever tries again, it both throws and is counted.
+    //
+    // ⚠ FOR WHOEVER ADDS A SECOND ABORT CAUSE (an owner's explicit stop of a running
+    // task): the drain becomes reachable again on THAT path, and with it the question
+    // this test used to ask. It will need its own case; this one will not cover it,
+    // because `tearingDown` is false there by design.
     const h = makeHarness();
     await h.parked;
     const promptId = h.promptIdOf()!;
@@ -939,14 +1003,19 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     h.loop.stop();
-    await waitUntil('the aborted run to finish', () => h.dispatches() > 0 && h.history.getTrigger('trg-1')?.status !== 'waiting');
+    // The barrier is the RUN finishing, not the trigger being un-parked: the un-park is
+    // the thing under test and waiting for it would be waiting for the defect.
+    await waitUntil('the aborted run to finish',
+      () => h.dispatches() > 0 && (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
 
     // Read the state, THEN restore, THEN assert — a failing assertion must not
     // leave stderr stubbed for the rest of the file.
     const row = h.prompts.getById(promptId);
+    const drainAttempts = settleFails.mock.calls.length;
     settleFails.mockRestore();
     stderr.mockRestore();
-    expect(row?.status, 'the settle really did fail').toBe('pending');
+    expect(drainAttempts, 'a teardown must not drain the question it is leaving behind').toBe(0);
+    expect(row?.status).toBe('pending');
     expect(row?.trigger_id).toBe('trg-1');
   });
 

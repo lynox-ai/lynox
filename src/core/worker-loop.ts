@@ -201,6 +201,23 @@ export function reservationEstimate(task: TriggerRecord): number {
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
+  /**
+   * This loop was STOPPED — the process is going away, so a parked question must
+   * outlive it rather than be drained.
+   *
+   * ⛔ Why a flag and not `outcome.status === 'aborted'` at the wait. The status says a
+   * wait was cut short; it does not say BY WHOM, and the causes want opposite
+   * bookkeeping. `stop()` means teardown and the question must survive. An owner's
+   * explicit stop of a running task aborts the SAME controller and means the opposite —
+   * the run is over because its owner ended it, so its question is moot. Keying on the
+   * status would make the second case leave a pending row and a `waiting` trigger
+   * standing until the sweep collects them.
+   *
+   * ⚠ `stop()` has exactly one production caller, `Engine.shutdown()` (measured, not
+   * assumed). That is what makes the shutdown case the common one rather than a corner:
+   * every managed deploy takes this path.
+   */
+  private tearingDown = false;
   private readonly activeTasks = new Map<string, ActiveTask>();
   /** Names this loop's runs in the lease column; another process's loop has its own. */
   private readonly leaseHolder = randomUUID();
@@ -216,6 +233,10 @@ export class WorkerLoop {
 
   start(): void {
     if (this.timer) return; // already running
+    // A loop that is started again is not tearing down. Without this a restarted loop
+    // (tests do it; a provider re-bootstrap could) would keep the flag for good and
+    // never drain a later park — leaking the row's slot in the partial unique index.
+    this.tearingDown = false;
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
     this.timer.unref(); // don't prevent process exit
     // Run immediately on start
@@ -223,6 +244,10 @@ export class WorkerLoop {
   }
 
   stop(): void {
+    // Set BEFORE the aborts below, because they are what settles a parked wait: the
+    // continuation reads this flag, and `waitForSettled` resolves off the signal
+    // synchronously, so an assignment after the loop would come too late.
+    this.tearingDown = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -1033,6 +1058,30 @@ export class WorkerLoop {
         // already-`expired` outcome costs one no-op UPDATE and a concurrent
         // answer is never overwritten.
         //
+        // ⛔ A TEARDOWN IS NOT AN END TO THE WAIT, and this is where that was lost.
+        // `Engine.shutdown()` calls `stop()` FIRST and closes the history DB LAST, with
+        // awaits in between (an in-flight inbox rebootstrap, the inbox runtime, every
+        // shutdown hook). So the abort settles this wait, this continuation runs while
+        // the database is still WIDE OPEN, and the three writes on this path all went
+        // through cleanly: the prompt expired, its trigger pointer released, the trigger
+        // un-parked. A question the product promises will "survive the restart it is
+        // waiting across" was destroyed BY the restart — on managed, on every deploy.
+        //
+        // ⚠ The premise that hid it is written two screens down, in the `finally`: "a
+        // question that outlives the process never gets here — that path is a crash".
+        // A graceful shutdown gets here, and it is exactly the case the durable pointer
+        // exists for. The sentence is corrected there.
+        //
+        // The two costs the drain below exists to avoid are both costs of CARRYING ON,
+        // and neither is paid at teardown: the row's slot in the partial unique index
+        // only matters to a NEXT `ask_user` in this process, and "answerable with nobody
+        // awaiting it" is not the issue-#77 shape here but the durable wait working as
+        // designed — the next process re-arms the run when the answer lands.
+        if (this.tearingDown) {
+          questionWentUnanswered = true;
+          return DISMISSED_ANSWER;
+        }
+
         // The throw is SWALLOWED, and the reason is specific to where this sits.
         // It runs on the CANCELLATION path, and `Engine.shutdown()` calls
         // `stop()` and later closes the history DB — so the write can land on a
@@ -1071,16 +1120,29 @@ export class WorkerLoop {
         // `answered` with the pointer live and `expirePrompt` a silent no-op.
         // Enumerating exits does not end; owning the row does.
         //
-        // Reaching this line at all means the wait is over IN THIS PROCESS, so a
-        // later one must not re-arm on it. A question that outlives the process
-        // never gets here — that path is a crash, which is exactly the case §0 A2
-        // keeps the pointer for.
-        try {
-          promptStore.releaseTrigger(promptId);
-        } catch (err: unknown) {
-          process.stderr.write(
-            `[lynox:worker] prompt detach failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
-          );
+        // Reaching this line means the wait is over IN THIS PROCESS, so a later one
+        // must not re-arm on it — ⛔ WITH ONE EXCEPTION, and the sentence that used to
+        // stand here denied it: "a question that outlives the process never gets here —
+        // that path is a crash". A GRACEFUL SHUTDOWN gets here too, with the database
+        // open, and then both writes below are wrong: they are what a crash cannot do,
+        // which is why the pointer survives a crash and used to die on a clean deploy.
+        //
+        // So the obligation is still owned HERE, once, for every way this wait can end —
+        // the shape this block argues for and keeps. What changed is its CONDITION, not
+        // its home: at teardown the row stays `pending` with its trigger pointer live
+        // and the trigger stays `waiting`, which is precisely what the next process
+        // reads to re-arm the run (the tick's answered-pointer path calls
+        // `getAnsweredForTrigger`, and that finds NOTHING once the pointer is released).
+        // Bounded by `waiting_until` either way, so a process that never comes back
+        // still costs only what the expiry sweep collects.
+        if (!this.tearingDown) {
+          try {
+            promptStore.releaseTrigger(promptId);
+          } catch (err: unknown) {
+            process.stderr.write(
+              `[lynox:worker] prompt detach failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
         }
         // §0 A6 — END the wait, however it ended: answered, expired, aborted, or
         // thrown. Conditional on the row still being `waiting`, so this and the
@@ -1093,12 +1155,14 @@ export class WorkerLoop {
         // is already closing, and a throw here would turn a clean teardown into a
         // failed tool call. A wait left standing by a failure here is exactly what
         // the sweep exists to collect, so the cost is bounded by `waiting_until`.
-        try {
-          this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
-        } catch (err: unknown) {
-          process.stderr.write(
-            `[lynox:worker] un-park failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
-          );
+        if (!this.tearingDown) {
+          try {
+            this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
+          } catch (err: unknown) {
+            process.stderr.write(
+              `[lynox:worker] un-park failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
         }
         if (active) {
           active.pendingPromptId = undefined;
