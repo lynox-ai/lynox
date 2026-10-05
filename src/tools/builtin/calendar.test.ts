@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { calendarReadTool, CALENDAR_FEED_PREFIX } from './calendar.js';
 import { isInfraSecret } from '../../core/secret-store.js';
-import type { IAgent } from '../../types/index.js';
+import type { IAgent, SecretStoreLike } from '../../types/index.js';
+import { scopeSecretStore } from '../../core/secret-scope.js';
 
 vi.mock('../../integrations/calendar/fetch.js', () => ({
   fetchIcsFeed: vi.fn(),
@@ -46,6 +47,25 @@ describe('calendar_read', () => {
     const out = await calendarReadTool.handler({}, agentWith({}));
     expect(out).toContain('No calendar is connected');
     expect(out).toContain('Secret address in iCal format');
+  });
+
+  it('finds its feed in a spawned child whose vault scope names other keys', async () => {
+    // A child's default scope is the `secret:` refs its brief names, so a calendar feed is
+    // almost never IN it. The feed is an infra secret the tool resolves on the child's
+    // behalf, and the scoped view must still let the tool find it by prefix.
+    vi.mocked(fetchIcsFeed).mockResolvedValue({ ics: TZ_ICS(), truncated: false });
+    const secrets: Record<string, string> = {
+      [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://cal.example/private.ics',
+      STRIPE_KEY: 'sk',
+    };
+    const inner = {
+      listNames: () => Object.keys(secrets),
+      resolve: (n: string) => secrets[n] ?? null,
+    } as unknown as SecretStoreLike;
+    const agent = { toolContext: {}, secretStore: scopeSecretStore(inner, ['STRIPE_KEY']) } as unknown as IAgent;
+    const out = await calendarReadTool.handler({}, agent);
+    expect(out).not.toContain('No calendar is connected');
+    expect(fetchIcsFeed).toHaveBeenCalledTimes(1);
   });
 
   it('lists appointments in the window', async () => {

@@ -226,7 +226,13 @@ export function scopeSecretStore(
     resolve: (name) => (permits(name, 'resolve') ? inner.resolve(name) : null),
     getMasked: (name) => (permits(name, 'getMasked') ? inner.getMasked(name) : null),
 
-    listNames: () => inner.listNames().filter((n) => allowed.has(n)),
+    // Infra names pass here for the reason `permits` lets them pass a read: this is the
+    // store-level list, not the model's (that is `listAgentVisibleNames` below, which the
+    // real store already keeps infra-free), and the unscoped store lists them too. Engine
+    // code discovers infra keys BY NAME through it — `calendar_read` finds its feeds by
+    // prefix — so a view that hid them made a scoped child report "No calendar is
+    // connected" while `resolve` would have read the feed.
+    listNames: () => inner.listNames().filter((n) => allowed.has(n) || isInfraSecret(n)),
     listAgentVisibleNames: () =>
       // `?? []` rather than `?? inner.listNames()`: `listNames` on the real
       // store includes infrastructure secrets, so a store that cannot say what

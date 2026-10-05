@@ -150,6 +150,17 @@ describe('scopeSecretStore — infra secrets are not the scope\'s business', () 
     expect(scoped.hasConsent('HR_PAYROLL')).toBe(false);
   });
 
+  it('lists it at the store level, as the unscoped store does, so engine code can find it', () => {
+    // `listNames` is not the model's list — `listAgentVisibleNames` is, and the test below
+    // keeps infra out of it. Engine code discovers infra keys by name here (calendar_read
+    // finds its feeds by prefix); hiding them made a scoped child read as "nothing connected".
+    // Out-of-scope VAULT names stay hidden: the carve-out is the infra class, not the vault.
+    const scoped = scopeSecretStore(infraStore(), ['STRIPE_KEY']);
+    expect(scoped.listNames()).toContain('MAIL_ACCOUNT_1');
+    expect(scoped.listNames()).toContain('STRIPE_KEY');
+    expect(scoped.listNames()).not.toContain('HR_PAYROLL');
+  });
+
   it('still resolves it for engine code, which reads it on the agent\'s behalf', () => {
     // calendar_read and the mail tools resolve an infra key internally; a scope
     // that denied them would break every such tool for a scoped child.
@@ -159,7 +170,6 @@ describe('scopeSecretStore — infra secrets are not the scope\'s business', () 
 
   it('never advertises it, and never lets it into tool input', () => {
     const scoped = scopeSecretStore(infraStore(), ['STRIPE_KEY']);
-    expect(scoped.listNames()).not.toContain('MAIL_ACCOUNT_1');
     expect(scoped.listAgentVisibleNames?.()).not.toContain('MAIL_ACCOUNT_1');
     const out = scoped.resolveSecretRefs({ a: 'secret:MAIL_ACCOUNT_1' }) as Record<string, string>;
     expect(out.a).toBe('secret:MAIL_ACCOUNT_1');
