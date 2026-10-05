@@ -108,8 +108,15 @@ export function triggerDetailLine(t: {
   // whitelist also fails in the wrong DIRECTION: a status added later would
   // render as healthy. Anything recorded that is not success is a run the
   // reader needs to see; absent means never run, which is not a failure.
-  const failed = t.last_run_status !== undefined && t.last_run_status !== 'success';
-  if (failed) {
+  // …and it is the blacklist that stays correct when a WORD is added, which is what
+  // happened: `'stopped'` is not a failure, and rendering it as one told the model that
+  // a task the owner halted on purpose was broken. The branch is unchanged — anything
+  // that is not `success` is a run the reader needs to see — and only the LABEL is
+  // chosen below. Taking the branch away for `'stopped'` would have been worse than the
+  // wrong word: it also silences the "no next run" note, whose reason holds for a
+  // stopped one-shot exactly as it does for a failed one.
+  const ended = t.last_run_status !== undefined && t.last_run_status !== 'success';
+  if (ended) {
     const when = t.last_run_at ? ` (${clean(t.last_run_at).slice(0, 16)})` : '';
     // The FIELD SEPARATOR is neutralised inside the reason, not only line
     // breaks. `parts.join(' · ')` means a reason carrying ` · workflow X` reads
@@ -118,7 +125,7 @@ export function triggerDetailLine(t: {
     // middle dot in a provider's prose and removes the ambiguity entirely.
     const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
-    parts.push(`last run FAILED${when}: ${reason}`);
+    parts.push(`last run ${t.last_run_status === 'stopped' ? 'STOPPED BY ITS OWNER' : 'FAILED'}${when}: ${reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
     // not say: a cron row keeps its next run through a failure and tries again, a
     // one-shot loses it (`task-manager.ts` nulls the column) and does not. That is

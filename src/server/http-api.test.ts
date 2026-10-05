@@ -6186,12 +6186,19 @@ describe('LynoxHTTPApi', () => {
 
     // ── Stopping a RUNNING task ────────────────────────────────────────────
     //
-    // ⛔ The behaviour these three pin is the ROUTE's, not the loop's. That a stop
-    // actually ends a run is pinned in `worker-loop-stop.test.ts`, against the run's
-    // recorded outcome; here the question is narrower and still worth asking: does the
-    // path exist, does it carry the same `user` scope as its four siblings, and does it
-    // tell "no such task" apart from "that task is not running"? A caller that cannot
-    // distinguish those two will retry the wrong one.
+    // ⛔ The behaviour these pin is the ROUTE's, not the loop's. That a stop actually
+    // ends a run is pinned in `worker-loop-stop.test.ts`, against the run's recorded
+    // outcome; here the question is narrower and still worth asking: does the path
+    // exist, does it carry the same `user` scope as its four siblings, and does it
+    // report what actually happened?
+    //
+    // ⛔ THE ANSWER IT MUST NEVER GIVE is `200 {stopped:true}` for a run nothing
+    // interrupted. Four of the seven effects have no stop handle at all, and for a
+    // `bulk_apply` a false success means the owner stops watching a write they asked to
+    // end. So the vocabulary is three-valued and so are these tests: 202 for a stop that
+    // was DELIVERED (the run ends when it unwinds — never a confirmation), 409 for a run
+    // in a phase that cannot be interrupted, and 404/409/503 for the three different
+    // ways there is no run to stop.
     //
     // ⚠ A local engine override rather than the `swapEngine` helper: that helper exists
     // twice in this file already, and both copies are scoped to their own `describe`.
@@ -6204,18 +6211,74 @@ describe('LynoxHTTPApi', () => {
       try { await body(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; }
     }
 
-    it('POST /api/tasks/:id/stop stops a running task (200)', async () => {
-      const stopTask = vi.fn().mockReturnValue('stopped');
+    // ⚠ AND IT PAYS ITS OWN WAY. The per-IP window is 600 requests / 60 s
+    // (`RATE_MAX_LOOPBACK`), every request in this file comes from 127.0.0.1, so the
+    // whole file shares ONE bucket — and at ~590 requests it already sat just under the
+    // ceiling. Measured, not feared: with these cases added and no reset, seven
+    // `GET /api/oauth/callback` tests several thousand lines below failed with 429,
+    // while the same file at the base commit passed all 565. A comment further down
+    // records the same collision being measured once before.
+    //
+    // So this block hands the window back when it is done. Deliberately an `afterAll`
+    // HERE and not a file-wide hook: it repays exactly what these cases spend and
+    // changes no other describe's conditions. The general problem — any new route test
+    // can starve a later describe, with a 429 that names neither — is filed rather than
+    // fixed in passing, because the fix is the harness's (a fresh server per describe),
+    // not this route's.
+    afterAll(() => {
+      (api as unknown as { rateCounts: Map<string, unknown> }).rateCounts.clear();
+    });
+
+    it('POST /api/tasks/:id/stop answers 202 — a stop is DELIVERED, not completed', async () => {
+      const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'session' });
       await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ id: 'task-1', stopped: true });
-        expect(stopTask).toHaveBeenCalledWith('task-1');
+        // ⛔ 202, and the body says `requested`. `Session.abort()` reaches the agent's
+        // controller, which exists only while a model call is in flight; between calls
+        // and inside a tool handler it reaches nothing. There is no instant at which
+        // this route could truthfully say the run has ended, so it does not.
+        expect(res.status).toBe(202);
+        const body = await res.json() as { requested: boolean; via: string; note: string; stopped?: unknown };
+        expect(body.requested).toBe(true);
+        expect(body.via).toBe('session');
+        expect(body).not.toHaveProperty('stopped');
+        expect(body.note).toContain('tool handler');
+      });
+    });
+
+    it('POST /api/tasks/:id/stop asks the loop with the id the STORE resolved, not the caller\'s', async () => {
+      // ⛔ `TriggerStore.getById` matches a short id by PREFIX (the same read/delete UX
+      // as workflows) while `activeTasks` is keyed EXACTLY. Handing the loop the raw
+      // path segment therefore told an owner their running task was not running, with no
+      // recovery short of knowing the full id. The default mock row above is `sched-1`,
+      // so this assertion fails the moment the route goes back to `params['id']`.
+      const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'wait' });
+      await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(202);
+        expect(stopTask).toHaveBeenCalledWith('sched-1');
+        expect((await res.json() as { id: string }).id).toBe('sched-1');
+      });
+    });
+
+    it('POST /api/tasks/:id/stop answers 409 and NAMES the effect when the run cannot be interrupted', async () => {
+      // The finding this route exists to not have: a `bulk_apply` keeps writing its
+      // targets, and `{stopped:true}` over it is fail-open with ceremony. The answer has
+      // to be refusal plus what to do instead — the schedule can still be paused.
+      await withEngine({
+        getWorkerLoop: () => ({ stopTask: () => ({ kind: 'unstoppable', effect: 'bulk_apply' }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const err = ((await res.json()) as { error: string }).error;
+        expect(err).toContain('bulk_apply');
+        expect(err).toContain('finish on its own');
+        expect(err).not.toContain('not running');
       });
     });
 
     it('POST /api/tasks/:id/stop answers 409 — not 404 — when the task exists but is not running', async () => {
-      await withEngine({ getWorkerLoop: () => ({ stopTask: () => 'not_running' }) }, async () => {
+      await withEngine({ getWorkerLoop: () => ({ stopTask: () => ({ kind: 'not_running' }) }) }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
         expect(((await res.json()) as { error: string }).error).toContain('not running');
@@ -6224,8 +6287,8 @@ describe('LynoxHTTPApi', () => {
 
     it('POST /api/tasks/:id/stop answers 409 when there is no worker loop at all', async () => {
       // A reachable shape, not a defensive flourish: the loop is only constructed when
-      // background tasks are started, so an engine running without them has none. A 200
-      // here would tell the caller a run was stopped that could not have been running.
+      // background tasks are started, so an engine running without them has none. A 202
+      // here would tell the caller a stop was delivered to a run that could not exist.
       await withEngine({ getWorkerLoop: () => null }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
@@ -6233,14 +6296,46 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('POST /api/tasks/:id/stop answers 404 for a task that does not exist', async () => {
+    it('POST /api/tasks/:id/stop answers 404 for a task that neither exists nor is running', async () => {
       await withEngine({
         getRunHistory: () => ({ getTrigger: () => undefined }),
-        // Present on purpose: a 404 must come from the LOOKUP, not from a missing loop.
-        getWorkerLoop: () => ({ stopTask: () => 'stopped' }),
+        // Present on purpose, and it must SAY not_running: the lookup is no longer what
+        // produces the 404 on its own. The run is asked first, because a run outlives its
+        // row — `DELETE /api/tasks/:id` removes the row and leaves the run working.
+        getWorkerLoop: () => ({ stopTask: () => ({ kind: 'not_running' }) }),
       }, async () => {
         const res = await jsonFetch('/api/tasks/nope/stop', { method: 'POST' });
         expect(res.status).toBe(404);
+      });
+    });
+
+    it('POST /api/tasks/:id/stop still stops a run whose trigger row was DELETED', async () => {
+      // ⛔ The order is the whole fix. `DELETE /api/tasks/:id` touches `activeTasks`
+      // nowhere, so deleting a trigger mid-run left the run working and unstoppable: the
+      // lookup 404'd before the loop was ever asked. The lookup is an id normaliser, not
+      // a lie-detector for runs.
+      const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'session' });
+      await withEngine({
+        getRunHistory: () => ({ getTrigger: () => undefined }),
+        getWorkerLoop: () => ({ stopTask }),
+      }, async () => {
+        const res = await jsonFetch('/api/tasks/gone-but-running/stop', { method: 'POST' });
+        expect(res.status).toBe(202);
+        expect(stopTask).toHaveBeenCalledWith('gone-but-running');
+      });
+    });
+
+    it('POST /api/tasks/:id/stop answers 503 — not 404 — when the run history is unavailable', async () => {
+      // "There is no such task" is a lie when the store that would know is down, and it
+      // is the one answer a caller will not retry. Its four siblings all use
+      // `requireService` for this; this route used to reach `getTrigger` through `?.`
+      // and read the `undefined` as an absent row.
+      await withEngine({
+        getRunHistory: () => null,
+        getWorkerLoop: () => ({ stopTask: () => ({ kind: 'not_running' }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(503);
       });
     });
 

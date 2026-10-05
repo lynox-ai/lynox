@@ -28,6 +28,35 @@ import { TaskManager } from './task-manager.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
+import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
+import { stopHandleOf } from './worker-loop.js';
+import { getPipelineStore } from '../tools/builtin/pipeline.js';
+
+/**
+ * The saved-workflow runner, gated — the one collaborator a `run_workflow` test has to
+ * replace, because `executePipeline` awaits it and nothing else for long enough to ask
+ * a question about the run.
+ *
+ * ⛔ It stands BELOW the claim under test, which is what makes replacing it legitimate:
+ * the dispatch case, the entry construction, the autonomous-only gate and the
+ * first-run-confirm gate all still run for real. And what the mock RECORDS is the claim
+ * itself — the arguments `executePipeline` hands over. A stop handle would have to be
+ * among them, and the test asserts that none is. Replacing `executePipeline` would have
+ * removed the only thing able to falsify that.
+ */
+const wf = vi.hoisted(() => ({
+  calls: [] as unknown[][],
+  signal: undefined as (() => void) | undefined,
+  wait: undefined as Promise<void> | undefined,
+}));
+vi.mock('./saved-workflow-runner.js', () => ({
+  runGuardedSavedWorkflow: async (...args: unknown[]) => {
+    wf.calls.push(args);
+    wf.signal?.();
+    await wf.wait;
+    return { ok: true, status: 'completed', runId: 'wf-run-1' };
+  },
+}));
 
 const tmpDirs: string[] = [];
 const closers: Array<() => void> = [];
@@ -54,11 +83,15 @@ interface Harness {
   history: RunHistory;
   /** Resolves once the run is actually COMPUTING — not once the tick returned. */
   running: Promise<void>;
+  /** Resolves once the run is PARKED on its question — `park: true` only. */
+  parked: Promise<void>;
   tick: Promise<void> | undefined;
   abortCalls: () => number;
+  /** True once a parked turn has come back from its question. */
+  resumed: () => boolean;
 }
 
-function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean }): Harness {
+function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -93,13 +126,29 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean }): Harnes
   const running = new Promise<void>(resolve => { signalRunning = resolve; });
   let rejectTurn: ((e: Error) => void) | undefined;
 
+  let resumed = false;
   const session = {
     sessionId: 'thread-stop',
     _recreateAgent: vi.fn(),
     promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
-    // The only thing that ends this run. Aborting the controller does not.
-    abort: vi.fn(() => { rejectTurn?.(new Error('run aborted by its owner')); }),
-    run: vi.fn(() => {
+    // The only thing that ends a COMPUTING run. Aborting the controller does not.
+    //
+    // ⚠ `abortThrows` models a `Session.abort()` that raises — it reaches into the
+    // agent, so it can. The turn is then left to the CONTROLLER, which is the whole
+    // point of the test that uses it: a parked run must still come back.
+    abort: vi.fn(() => {
+      if (opts?.abortThrows === true) throw new Error('abort exploded inside the agent');
+      rejectTurn?.(new Error('run aborted by its owner'));
+    }),
+    run: vi.fn(async () => {
+      // A PARKED run: it asks its question through the loop's own `promptUser` wiring,
+      // so `pendingPromptId` is set by the real code path and `waitForSettled` awaits
+      // the real controller signal. Nothing here simulates the park.
+      if (opts?.park === true) {
+        const answer = await session.promptUser!('ready to continue?');
+        resumed = true;
+        return answer;
+      }
       const turn = new Promise<string>((_resolve, reject) => { rejectTurn = reject; });
       // Let the loop finish wiring (and attaching the session) before the test looks.
       setImmediate(() => signalRunning());
@@ -131,7 +180,17 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean }): Harnes
   // not running. Starting a run there left a turn nothing would ever settle, and the
   // only symptom was a 10-second hook timeout on a test whose assertion had passed.
   const tick = opts?.dispatch === false ? undefined : loop.tick();
-  return { loop, history, running, tick, abortCalls: () => session.abort.mock.calls.length };
+  // Polled, because the park has no event of its own: the row appears inside the
+  // loop's `promptUser`, two awaits below the fake's call, and `running` fires before
+  // that. Waiting for the ROW is waiting for `pendingPromptId` to exist.
+  const parked = opts?.park === true
+    ? waitUntil('the run to park on its question', () => prompts.getPending('thread-stop') !== undefined)
+    : Promise.resolve();
+  return {
+    loop, history, running, parked, tick,
+    abortCalls: () => session.abort.mock.calls.length,
+    resumed: () => resumed,
+  };
 }
 
 /**
@@ -174,11 +233,19 @@ afterEach(async () => {
     // Draining only the turns closed the handle underneath them — four green tests and
     // a non-zero exit with two `The database connection is not open` rejections
     // belonging to no test. `activeTaskCount` reaching zero is that `finally`.
+    //
+    // ⚠ EXCEPT FOR A TEST THAT CALLED `stop()`, where that last sentence is false:
+    // `stop()` clears the map, so the barrier is already satisfied while the turn is
+    // unsettled. Probed — 10 repeats produced no closed-handle rejection, so it is
+    // latent rather than observed, and the flush below is a BOUND on it, not a proof.
+    // The honest reading of this hook: it waits for the loop's bookkeeping in every test
+    // that did not shut its loop down, and gives the others a window.
     await Promise.all(runs);
     await waitUntil(
       'the loop to finish recording and release its entry',
       () => toSettle.every(l => l.activeTaskCount === 0),
     );
+    await new Promise(r => setTimeout(r, 25));
   } finally {
     for (const c of toClose) c();
     for (const d of toRemove) rmSync(d, { recursive: true, force: true });
@@ -190,7 +257,7 @@ describe('stopping a running background task', () => {
     const h = makeHarness();
     await h.running;
 
-    expect(h.loop.stopTask('trg-stop')).toBe('stopped');
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'session' });
     await h.tick;
 
     // ⛔ THE ASSERTION THAT MATTERS: a value that exists only once the run has settled.
@@ -215,17 +282,24 @@ describe('stopping a running background task', () => {
     await waitUntil('the stop to be recorded', () => h.history.getTrigger('trg-stop')?.last_run_status === 'stopped');
     const after = h.history.getTrigger('trg-stop')!;
 
-    // ⛔ `failed` and `timeout` both enter the backoff re-fire in `recordTaskRun`. A stop
-    // recorded as either would restart the run its owner just stopped — so the retry
-    // counter is the load-bearing assertion here, not the status word.
+    // ⛔ This fixture is a CRON, and the retry branch is unreachable for one: the
+    // assertion below therefore pins the counter staying put, not the branch. An earlier
+    // comment here called it "the load-bearing assertion", which a mutation round
+    // disproved — the mutant that sends a stop INTO the backoff is killed by the next
+    // test only, whose one-shot fixture can execute that line. Corrected rather than
+    // deleted, because a wrong claim about which assertion carries a test is how a
+    // mutant survives a file that looks covered.
     expect(after.retry_count ?? 0).toBe(before.retry_count ?? 0);
-    // And the trigger's own status is not rewritten to a word that is untrue: none of
-    // `open | in_progress | completed | failed` describes a run its owner stopped.
+    // THE killer here: a recurring trigger's status is derived from its latest run, and
+    // a stop is not a failing schedule. Writing `failed` would mark a healthy cron
+    // broken because one run was halted.
     expect(after.status).toBe(before.status);
-    // The schedule itself survives: pausing a SCHEDULE is `PATCH {enabled:false}`, and a
-    // stop is not that. A cron's next occurrence is still ahead of it.
-    expect(after.next_run_at).not.toBe('');
-    expect(after.next_run_at).not.toBe(null);
+    // The schedule itself survives and MOVES ON: pausing a schedule is
+    // `PATCH {enabled:false}` and a stop is not that, so the cron's next occurrence is
+    // computed as usual. Asserting merely "not empty" passed for every implementation —
+    // the cron branch always writes a timestamp — so the assertion is that it ADVANCED.
+    expect(after.next_run_at ?? '').not.toBe('');
+    expect(after.next_run_at).not.toBe(before.next_run_at);
   });
 
   it('a RETRIABLE one-shot is not re-fired by a stop — the branch a cron cannot reach', async () => {
@@ -250,7 +324,7 @@ describe('stopping a running background task', () => {
 
   it('answers not_running for a task that is not running — the route turns this into 409', () => {
     const h = makeHarness({ dispatch: false });
-    expect(h.loop.stopTask('no-such-trigger')).toBe('not_running');
+    expect(h.loop.stopTask('no-such-trigger')).toEqual({ kind: 'not_running' });
   });
 
   it('SHUTDOWN does not abort the session — the deadline path stays as it was', async () => {
@@ -270,7 +344,242 @@ describe('stopping a running background task', () => {
     h.loop.stop();
     expect(h.abortCalls()).toBe(0);
 
-    // and the run is still going, because nothing it observes has been aborted
+    // ⚠ A BOUNDED WINDOW, not a read on the next statement. This assertion used to run
+    // one line after `stop()`, where no implementation could have recorded anything yet
+    // — so it passed just as well against a `stop()` that DID abort the session. An
+    // absence has no event to wait for, so the honest form is a window inside which the
+    // recording would have happened: in the first test of this file the same rejection
+    // reaches `recordTaskRun` through four awaits, well under this.
+    await new Promise(r => setTimeout(r, 50));
+    expect(h.abortCalls()).toBe(0);
     expect(h.history.getTrigger('trg-stop')?.last_run_status ?? null).toBe(null);
+  });
+
+  it('a PARKED run is stopped through its WAIT — the one handle that certainly ends', async () => {
+    const h = makeHarness({ park: true });
+    await h.parked;
+
+    // `wait` outranks `session` even though both are present: `waitForSettled` awaits
+    // this controller's signal, so the abort ENDS the wait, while `session.abort()`
+    // reaches a null agent controller whenever no model call is in flight.
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'wait' });
+
+    // ⛔ THE ASSERTION: the park is over. Remove the `controller.abort()` from
+    // `stopTask` and the turn waits for its answer until the 24-hour TTL.
+    await waitUntil('the parked turn to come back', () => h.resumed());
+  });
+
+  it('a session whose abort THROWS still has its controller aborted, and still answers', async () => {
+    // ⛔ The mutation this exists for: `stopTask` used to let a throwing
+    // `Session.abort()` propagate, which skipped the controller abort AND answered the
+    // owner 500 — for a stop that would have landed on the wait. No test made the abort
+    // throw, so the ⚠ comment at the call site was certified by nothing.
+    const h = makeHarness({ park: true, abortThrows: true });
+    await h.parked;
+
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'wait' });
+    await waitUntil('the parked turn to come back despite the throwing abort', () => h.resumed());
+  });
+});
+
+/** A deferred the test holds open, so a REAL handler can be caught mid-run. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  let openIt: () => void;
+  const wait = new Promise<void>(resolve => { openIt = resolve; });
+  return { wait, open: () => openIt() };
+}
+
+interface ClassHarness {
+  loop: WorkerLoop;
+  /** Resolves once the handler is INSIDE the gate — the run is really in flight. */
+  running: Promise<void>;
+  tick: Promise<void>;
+  /** How many sessions the run created. The no-handle claim is false if this is > 0. */
+  sessionCreations: () => number;
+}
+
+/**
+ * One run of ONE effect, held inside its real handler so a stop can be asked about it.
+ *
+ * ⛔ WHERE IT PAUSES, and why that is not a fake of the subject. The pause is always a
+ * collaborator the stop handle does not pass through — the notification router, the
+ * backup manager, the external-client factory, the workflow runner. Everything the claim
+ * is about runs for real: the dispatch switch that builds the entry, the case clause that
+ * does or does not hand over `controller.signal`, and the handler's own head down to the
+ * pause. If a handler DID create a session, `sessionCreations` sees it; pausing the
+ * HANDLER instead would have removed the only witness that could say so.
+ *
+ * ⛔ AND IT USES A FAKE TaskManager DELIBERATELY. These tests assert what a stop REACHES,
+ * which is a property of the live entry and needs no database. The tests above, whose
+ * subject is what gets RECORDED, use a real one — that is the observable there, and the
+ * two are not interchangeable.
+ */
+function makeClassHarness(opts: {
+  effect: TriggerEffect;
+  source?: string;
+  pauseAt: 'notify' | 'backup' | 'bulkClient' | 'workflow';
+  record?: Partial<TriggerRecord>;
+}): ClassHarness {
+  const g = gate();
+  releases.push(g.open);
+  let signalRunning: () => void;
+  const running = new Promise<void>(resolve => { signalRunning = resolve; });
+  const hold = async <T>(value: T): Promise<T> => { signalRunning(); await g.wait; return value; };
+
+  const task = {
+    id: 'trg-class', title: 'A run of its own kind', description: '',
+    status: 'open', assignee: 'lynox', scope_type: 'context', scope_id: '',
+    created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
+    next_run_at: '2026-01-01T09:00:00.000Z',
+    source: opts.source ?? 'cron',
+    effect: opts.effect,
+    confirmed_at: '2026-01-01T00:00:00.000Z',
+    ...opts.record,
+  } as unknown as TriggerRecord;
+
+  const manager = {
+    getDueTriggers: () => [task],
+    getExpiredWaitingTriggers: () => [],
+    endWait: () => false,
+    claimLease: () => 'claimed',
+    renewLease: () => true,
+    releaseLease: () => { /* no lease store in this harness */ },
+    getTrigger: (id: string) => (task.id === id || task.id.startsWith(id) ? task : undefined),
+    recordTaskRun: () => { /* the recorded outcome is the heavy harness's subject */ },
+    setEnabled: () => true,
+  } as unknown as TaskManager;
+
+  if (opts.pauseAt === 'workflow') {
+    // The planned workflow the two gates read, placed in the module cache rather than
+    // the database: `getPipeline` checks the cache first, and a trigger inserted through
+    // the store would have its `target_workflow_id` nulled by an FK it cannot satisfy
+    // here. Removed again in teardown — module-level state outlives a test.
+    getPipelineStore().set('wf-1', {
+      id: 'wf-1', mode: 'autonomous', confirmedAt: '2026-01-01T00:00:00.000Z', steps: [],
+    } as unknown as PlannedPipeline);
+    releases.push(() => { getPipelineStore().delete('wf-1'); });
+    wf.calls.length = 0;
+    wf.signal = () => signalRunning();
+    wf.wait = g.wait;
+  }
+  if (opts.pauseAt === 'bulkClient') {
+    // The external-client factory: three dynamic imports and a few store reads, and
+    // nothing to do with a stop handle. Both bulk handlers await it before their own
+    // work, which makes it the pause point that leaves the most of them real.
+    const proto = WorkerLoop.prototype as unknown as { bulkClientFactory: () => Promise<unknown> };
+    const spy = vi.spyOn(proto, 'bulkClientFactory').mockImplementation(() => hold(() => null));
+    releases.push(() => { spy.mockRestore(); });
+  }
+
+  const sessions: number[] = [];
+  const engine = {
+    getTaskManager: () => manager,
+    getRunHistory: () => ({ getTrigger: () => task, updateTrigger: () => { /* noop */ } }),
+    getUserConfig: () => ({}),
+    escalateToUser: () => null,
+    getPromptStore: () => null,
+    getSecretStore: () => null,
+    getDataStore: () => null,
+    getApiStore: () => null,
+    getToolContext: () => null,
+    getBackupManager: () => (opts.pauseAt === 'backup'
+      ? { createBackup: () => hold({ success: true, path: '/tmp/none.db', duration_ms: 1 }), pruneBackups: () => { /* noop */ } }
+      : null),
+    getBulkLedger: () => (opts.pauseAt === 'bulkClient'
+      ? {
+        getRunForApply: () => ({ targetSystem: 'http://example.test' }),
+        getRunForPreview: () => undefined,
+        getStatus: () => undefined,
+        haltPreview: () => { /* noop */ },
+      }
+      : null),
+    // A WITNESS, not a stub: every effect in this harness is claimed to create no
+    // session, so a creation here is the claim failing rather than the test needing one.
+    createSession: () => {
+      sessions.push(1);
+      return { run: () => hold('unexpected'), abort: () => { /* noop */ }, _recreateAgent: () => { /* noop */ } } as unknown as Session;
+    },
+  } as unknown as Engine;
+
+  const router = {
+    hasChannels: () => false,
+    notify: () => (opts.pauseAt === 'notify' ? hold(undefined) : Promise.resolve(undefined)),
+  } as unknown as NotificationRouter;
+
+  const loop = new WorkerLoop(engine, router, 60_000);
+  loops.push(loop);
+  return { loop, running, tick: loop.tick(), sessionCreations: () => sessions.length };
+}
+
+describe('what a stop can reach — one case per effect class', () => {
+  it('a REMINDER run has nothing to interrupt, and the stop SAYS so', async () => {
+    const h = makeClassHarness({ effect: 'notify', pauseAt: 'notify' });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'notify' });
+    expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('a BACKUP run likewise — the owner is told, not answered 200', async () => {
+    const h = makeClassHarness({ effect: 'backup', pauseAt: 'backup' });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'backup' });
+    expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('a BULK WRITE cannot be interrupted — the case where a false 200 lets it keep writing', async () => {
+    // ⛔ The worst of the seven to answer wrongly: `bulk_apply` writes its targets, so
+    // `{stopped:true}` over a run that carries on is not a cosmetic lie — the owner stops
+    // watching a write they asked to end.
+    const h = makeClassHarness({ effect: 'bulk_apply', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'bulk_apply' });
+    expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('a BULK PREVIEW is stoppable through its SIGNAL — the one handler that polls it', async () => {
+    // One case clause apart from the write above, and the opposite answer: the preview
+    // is handed `controller.signal` and `runBulkPreview` checks it between targets. This
+    // is the test that kills the `readsSignal` line — without it the preview reports
+    // `unstoppable` and an owner is told to wait out a read that would have stopped.
+    const h = makeClassHarness({ effect: 'bulk_preview', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+  });
+
+  it('a SAVED WORKFLOW run has no handle at all — and is handed nothing that could become one', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'run_workflow' });
+
+    // ⛔ THE POSITIVE HALF, and the reason this test mocks the runner rather than the
+    // handler: it is not merely that nothing was ATTACHED — nothing was PASSED. The
+    // measurement that justifies this whole route (the 15.2-minute run) is about this
+    // effect, and a comment in `ActiveTask` used to list the session-less effects
+    // without it. Three arguments, none of them a signal; a fix that threads one in
+    // changes this assertion, which is where the next reader will find the gap named.
+    expect(wf.calls).toHaveLength(1);
+    expect(wf.calls[0]).toHaveLength(3);
+    expect(wf.calls[0]!.some(a => a instanceof AbortSignal)).toBe(false);
+    expect(JSON.stringify(wf.calls[0]![2] ?? null)).not.toContain('signal');
+    expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('stopHandleOf prefers the CERTAIN handle and reports none when there is none', () => {
+    // The route's decision function, in isolation. The precedence is the claim: a parked
+    // run has a session too, and reporting `session` for it would call the one certain
+    // handle by the name of the uncertain one.
+    const base = {
+      controller: new AbortController(),
+      effect: 'run_agent',
+      pauseDeadline: (): void => { /* noop */ },
+      resumeDeadline: (): void => { /* noop */ },
+    };
+    const someSession = {} as unknown as Session;
+    expect(stopHandleOf({ ...base })).toBeUndefined();
+    expect(stopHandleOf({ ...base, readsSignal: true })).toBe('signal');
+    expect(stopHandleOf({ ...base, session: someSession })).toBe('session');
+    expect(stopHandleOf({ ...base, pendingPromptId: 'p-1' })).toBe('wait');
+    expect(stopHandleOf({ ...base, session: someSession, readsSignal: true })).toBe('session');
+    expect(stopHandleOf({ ...base, session: someSession, pendingPromptId: 'p-1', readsSignal: true })).toBe('wait');
   });
 });

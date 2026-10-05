@@ -6760,18 +6760,50 @@ export class LynoxHTTPApi {
     // 409 rather than 404 when the task exists but is not running: "there is no such
     // task" and "that task is not working right now" are different answers, and a
     // caller that cannot tell them apart will retry the wrong one.
+    //
+    // ⛔ AND IT NEVER ANSWERS `stopped: true`. A stop is delivered, not completed: what
+    // ends the run is an abort unwinding somewhere else, so 202 is the true code and
+    // `via` says what the abort reached. Four of the seven effects — `run_workflow`,
+    // `bulk_apply`, `bulk_undo`, `backup`, `notify` — have nothing that reads an abort,
+    // and for them this route answers 409 and changes nothing. That is the whole point:
+    // a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets is
+    // fail-open with ceremony, and the owner's reaction to it is to stop watching.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/stop', async (_req, res, params) => {
-      // The TRIGGER table, not `getTask` — which reads `tasks` and would always miss,
-      // exactly as the `PATCH` route two screens up documents.
-      const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
-      if (!trigger) { errorResponse(res, 404, 'Task not found'); return; }
       const loop = engine.getWorkerLoop();
       if (!loop) { errorResponse(res, 409, 'The worker loop is not running, so neither is this task'); return; }
-      if (loop.stopTask(params['id']!) === 'not_running') {
+      // The TRIGGER table, not `getTask` — which reads `tasks` and would always miss,
+      // exactly as the `PATCH` route two screens up documents.
+      //
+      // ⭐ The row is read to NORMALISE the id, not to decide the answer, and the order
+      // is load-bearing in both directions. `getById` matches a short id by PREFIX (the
+      // same read/delete UX as workflows) while `activeTasks` is keyed exactly, so
+      // asking the loop with the caller's raw string told an owner their running task
+      // was not running. And `DELETE /api/tasks/:id` removes the row while leaving the
+      // run alive, so a missing row is not an answer about a run either.
+      const history = engine.getRunHistory();
+      const trigger = history?.getTrigger(params['id']!);
+      const id = trigger?.id ?? params['id']!;
+      const outcome = loop.stopTask(id);
+      if (outcome.kind === 'not_running') {
+        // Only here does the row matter — and a store that is DOWN cannot support "no
+        // such task", which is the one answer a caller will not retry.
+        if (!requireService(res, history, 'Run history')) return;
+        if (!trigger) { errorResponse(res, 404, 'Task not found'); return; }
         errorResponse(res, 409, 'That task is not running right now');
         return;
       }
-      jsonResponse(res, 200, { id: params['id'], stopped: true });
+      if (outcome.kind === 'unstoppable') {
+        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted (effect '${outcome.effect}'). It will finish on its own; pause the schedule with PATCH {enabled:false} so it does not start again.`);
+        return;
+      }
+      jsonResponse(res, 202, {
+        id,
+        requested: true,
+        via: outcome.via,
+        note: outcome.via === 'wait'
+          ? 'The run was parked on a question; the wait has been ended.'
+          : 'The abort was delivered. A tool handler already in flight is not interrupted, so the run ends when it unwinds.',
+      });
     }));
 
     // Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for

@@ -506,6 +506,60 @@ describe('TaskManager', () => {
     });
   });
 
+  describe("recordTaskRun — a STOP is terminal for a one-shot and harmless to a schedule", () => {
+    it('writes `completed` for a stopped one-shot — not `open` forever, and not `failed`', () => {
+      const task = tm.create({ title: 'Long import', assignee: 'lynox' }) as TriggerRecord;
+      expect(task.status).toBe('open');
+
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+
+      const after = tm.getTrigger(task.id)!;
+      // ⛔ The state this replaces was neither: `status` stayed `open` while
+      // `next_run_at` was cleared, so the row was never due again and never closed —
+      // and `task_list` reads exactly that pair as a schedule the model should repair.
+      expect(after.status).toBe('completed');
+      expect(after.next_run_at ?? null).toBeNull();
+      // `completed` is the SCHEDULE's lifecycle word; the outcome lives here, which is
+      // the same division the cron branch relies on.
+      expect(after.last_run_status).toBe('stopped');
+      // And it is not a failure: the word `failed` would send the UI and the model
+      // looking for a defect in a run that did what it was told.
+      expect(after.status).not.toBe('failed');
+    });
+
+    it('leaves a RECURRING trigger alone — a halted run is not a failing schedule', () => {
+      const task = tm.create({
+        title: 'Nightly report', assignee: 'lynox', scheduleCron: '0 3 * * *',
+      }) as TriggerRecord;
+      const before = tm.getTrigger(task.id)!;
+
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+
+      const after = tm.getTrigger(task.id)!;
+      // The cron branch derives `status` from the latest run so a silently-failing
+      // schedule surfaces. A stop must not reach that: it would mark a healthy cron
+      // broken because one of its runs was halted.
+      expect(after.status).toBe(before.status);
+      expect(after.status).not.toBe('failed');
+      // The schedule moves on, which is what makes a stop a stop and not a pause.
+      expect(after.next_run_at ?? '').not.toBe('');
+      expect(after.last_run_status).toBe('stopped');
+    });
+
+    it('leaves a PARKED trigger `waiting` — only the sweep or its own un-park ends a wait', () => {
+      const task = tm.create({ title: 'Asked a question', assignee: 'lynox' }) as TriggerRecord;
+      history.updateTrigger(task.id, { status: 'waiting' });
+
+      tm.recordTaskRun(task.id, 'run aborted by its owner', 'stopped');
+
+      // Two causes withhold the status here and they must not cancel out: the new
+      // terminal write for a stopped one-shot is excluded for `waiting` BY NAME, or a
+      // stop would close a wait whose answer may still arrive.
+      expect(tm.getTrigger(task.id)!.status).toBe('waiting');
+      expect(tm.getTrigger(task.id)!.last_run_status).toBe('stopped');
+    });
+  });
+
   // T1-2 regression — see PRD-HN-LAUNCH-HARDENING §3.
   describe('recordTaskRun — one-shot failure terminates the task', () => {
     it("marks a one-shot task 'failed' and clears next_run_at when it permanently fails with no retries", () => {

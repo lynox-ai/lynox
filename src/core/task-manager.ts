@@ -721,15 +721,25 @@ export class TaskManager {
    *   · **It must not retry.** The branch below sends `failed` and `timeout` into a
    *     backoff re-fire. A stop recorded as `failed` would therefore restart exactly
    *     the run its owner just stopped, which is worse than not having a stop at all.
-   *   · **It must not falsify the trigger's status.** The permitted values are
-   *     `open | in_progress | completed | failed`; none of them is true of a one-shot
-   *     whose only run was stopped — `completed` claims it did its job, `failed`
-   *     claims it broke. So a stop WITHHOLDS the status, exactly as a parked trigger
-   *     does below and for the same stated reason: `last_run_at`, the result and
-   *     `next_run_at` describe the run that happened and are true either way.
-   * Whether a stopped one-shot should instead read `completed`, or needs a new status
-   * (and with it a migration — the trigger table's `CHECK` cannot be altered in place),
-   * is a decision that has not been taken.
+   *   · **It must not falsify a RECURRING trigger's status.** The cron branch below
+   *     derives `status` from the latest run so a silently-failing schedule surfaces;
+   *     a stop is not a failing schedule, and writing `failed` there would mark a
+   *     healthy cron broken because one run was halted. So a stop withholds the status
+   *     THERE, exactly as a parked trigger does and for the same reason: `last_run_at`,
+   *     the result and `next_run_at` describe the run that happened and are true
+   *     either way.
+   *
+   * ⛔ A ONE-SHOT is the opposite case, and withholding there shipped a third state
+   * that is neither: `status` stayed `open` while `next_run_at` was cleared, so the row
+   * was never due again and never closed — and `task_list` reads exactly that pair as a
+   * schedule the model should repair, which is the behaviour its own docstring records
+   * (three invented replacement configs). So a stopped one-shot is written `completed`:
+   * the word is the SCHEDULE's lifecycle ("it is finished, nothing will give it another
+   * run"), not a verdict on the run, and `last_run_status = 'stopped'` carries the
+   * outcome — the same division the cron branch already relies on. `'stopped'` cannot
+   * go in `status` itself: the permitted values are `open | in_progress | completed |
+   * failed` and that `CHECK` cannot be altered in place, so a status of its own needs a
+   * migration. That migration is filed, not improvised here.
    */
   recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped'): void {
     const task = this.history.getTrigger(id);
@@ -809,7 +819,15 @@ export class TaskManager {
       // and clear `next_run_at` so the worker leaves it alone, while
       // last_run_status preserves the actual outcome ('failed' vs
       // 'timeout') for the UI.
-      if (mayWriteStatus) this.history.updateTrigger(id, { status: 'failed' });
+      if (mayWriteStatus) {
+        this.history.updateTrigger(id, { status: 'failed' });
+      } else if (status === 'stopped' && task.status !== 'waiting') {
+        // Terminal, for the reason in the docstring: this row has no next run and
+        // nothing will give it one, so leaving it `open` is a lie the model acts on.
+        // A PARKED trigger is excluded by name — its wait is still open and only the
+        // sweep or its own un-park may end it.
+        this.history.updateTrigger(id, { status: 'completed' });
+      }
       // `next_run_at` is cleared regardless: a parked trigger must not become due
       // again on the strength of a run that ended without its answer. What ends
       // its wait is the sweep, not this.

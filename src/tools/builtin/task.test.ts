@@ -878,6 +878,22 @@ describe('Task Tools', () => {
         expect(triggerDetailLine({ last_run_status: st, last_run_result: 'boom' }),
           `${st} must read as a failure`).toContain('last run FAILED');
       }
+      // ⛔ ONE exception, and it is a word that was added after the loop above was
+      // written: a stop is the owner's own doing and is not a failure. The BRANCH is
+      // unchanged — a run that did not succeed is still shown — and only the LABEL
+      // differs. Taking the branch away for it would have silenced the "no next run"
+      // note too, whose reason holds for a stopped one-shot exactly as for a failed one.
+      expect(triggerDetailLine({ last_run_status: 'stopped', last_run_result: 'run aborted by its owner' }))
+        .toContain('last run STOPPED BY ITS OWNER');
+      expect(triggerDetailLine({ last_run_status: 'stopped', last_run_result: 'run aborted by its owner' }))
+        .not.toContain('FAILED');
+      // And the repair nudge stays away: a stopped one-shot is written `completed`,
+      // which this note excludes by name. The note exists to make the model fix a
+      // broken schedule; a task its owner halted is not one, and the docstring of that
+      // line records the model inventing three replacement configs when it misread one.
+      expect(triggerDetailLine({
+        effect: 'run_agent', last_run_status: 'stopped', last_run_result: 'x', status: 'completed',
+      })).not.toContain('NO NEXT RUN');
       // Never run is not a failure.
       expect(triggerDetailLine({ last_run_result: 'boom' })).toBe('');
       // Both conditions at once read as one line, in a fixed order.
