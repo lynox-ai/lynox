@@ -1124,8 +1124,8 @@ export class LynoxHTTPApi {
    * reservation) lives on, and that is precisely when reclaiming matters.
    *
    * Best-effort by design, mirroring RunExecutor.abort: a teardown must not turn
-   * into a 500 for the caller who asked for it. Two consequences that are real
-   * and are NOT closed here:
+   * into a 500 for the caller who asked for it. Two consequences that are real — the
+   * FIRST one closed since the abort was scoped, the second still open:
    *   - `takeover` ends with `session.abort()`, which NO LONGER reaches other threads:
    *     the two module-level Sets are gone, and an abort now reaches the agents of its
    *     own session's chain only (`AbortScope`). What a caller added here inherits is

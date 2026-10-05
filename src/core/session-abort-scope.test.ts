@@ -87,6 +87,24 @@ describe('Session.abort() is scoped to its own chain', () => {
     expect(after.aborted(), 'the member registered after the throwing one').toBe(true);
   });
 
+  it('a DUCK-TYPED agent with no scope at all does not make abort() throw', () => {
+    // ⛔ The `?.` on `abortScope` was production code with no test: reverting it to a hard
+    // dereference passed the whole targeted suite, and a guard nobody notices the loss of
+    // is a guard the next edit removes. The path is real — `Session.abort()` runs from a
+    // bare `setTimeout` in the orphan-run watchdog with nothing to catch it — and `IAgent`
+    // is in the published barrel, so a JS consumer's own agent is the way a scope-less one
+    // arrives. A TypeScript implementer gets a compile error instead and adds the field.
+    //
+    // ⚠ The guard is PARTIAL, and that is the honest limit: it covers a MISSING
+    // `abortScope`. An agent that carries one whose `members` is not iterable still throws
+    // from the same uncatchable timer, and no `?.` can fix that — only the type can, which
+    // is why the register site in `spawn.ts` keeps its hard dereference.
+    const duckTyped = { abort: () => { /* a consumer's own agent */ } };
+    const s = Object.create(Session.prototype) as { agent: unknown };
+    s.agent = duckTyped;
+    expect(() => (s as unknown as Session).abort()).not.toThrow();
+  });
+
   it('a session with no agent aborts nothing and does not throw', () => {
     const s = Object.create(Session.prototype) as { agent: unknown };
     s.agent = null;
@@ -104,6 +122,14 @@ describe('Session.abort() is scoped to its own chain', () => {
     const shared: AbortScope = { members: new Set() };
     const child = new Agent({ name: 'child', model: 'claude-sonnet-4-6', abortScope: shared });
     expect(child.abortScope).toBe(shared);
+    // ⛔ TWO parentless agents get TWO scopes. Two lines, and they are what kills the
+    // mutant that gives the constructor one shared module-level default — i.e. restores
+    // the process-wide defect. The real-Engine case at the bottom of this file was
+    // written believing it was the only thing that could catch that; it is not, and its
+    // own comment said so wrongly. What that case uniquely catches is the WIRING (see
+    // there), not the constructor's default.
+    const other = new Agent({ name: 'other', model: 'claude-sonnet-4-6' });
+    expect(parentless.abortScope).not.toBe(other.abortScope);
   });
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -144,12 +170,20 @@ describe('Session.abort() is scoped to its own chain', () => {
     }
 
     it('each session gets its own, and an abort in one leaves the other alone', async () => {
-      // ⛔ THE MUTANT THIS KILLS, and nothing else in the suite did: give `Agent`'s
-      // constructor a module-level shared default instead of a fresh Set, which is the
-      // process-wide behaviour this change removes, and every test stayed green. Two
-      // hand-made agents cannot see it — they carry hand-made scopes. Two REAL sessions
-      // from a real Engine can, because the scope they get is the one the constructor
-      // chose.
+      // ⛔ WHAT THIS CASE UNIQUELY KILLS, corrected after it was measured: a mutant in
+      // the WIRING — `_createAgent` handing every session one shared module-level scope —
+      // which nothing else in 14,025 tests catches, because every other test either
+      // builds its agents directly or supplies their scopes.
+      //
+      // ⚠ It was written believing its value was the CONSTRUCTOR's default, and that was
+      // wrong: two bare `new Agent()` objects and one `.not.toBe` kill that mutant in two
+      // milliseconds, and they now do, up in the constructor case. An expensive test whose
+      // justification points at a cheap mutant is an expensive test nobody can defend.
+      //
+      // ⚠ And the second half below — own chain hit, other chain not — has no unique
+      // mutant: the identity line dies first, and no-op'ing `member.abort()` kills it
+      // alongside two unit cases. It stays as the behavioural statement of the property,
+      // not as a pin.
       const engine = await boot();
       const a = engine.createSession();
       const b = engine.createSession();

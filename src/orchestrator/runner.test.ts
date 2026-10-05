@@ -915,8 +915,14 @@ describe('runManifest — inline runtime', () => {
     // pipeline's agents are reachable by nothing". A nested step belongs to the same
     // session as the outer run, so a stop has to reach it too — and this is the sibling
     // of the `parentActiveScopes` case directly above, which is where the shape comes
-    // from. Identity, not equality: a `{...scope}` copy would leave every other test
-    // green while the inner step registered into an object nobody aborts.
+    // from.
+    //
+    // ⚠ Identity, and the assertion is STRICTER than the harm it guards. A `{...scope}`
+    // copy shares the `members` Set by reference, so a session would still reach the
+    // inner step through it — measured, and an earlier version of this comment claimed
+    // the opposite. The copy that actually orphans is `{ members: new Set(...) }`. `.toBe`
+    // refuses both, which is a no-copy convention worth holding; it is not a statement
+    // about what a spread would break.
     const scope = { members: new Set<{ abort: () => void }>() };
     const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
     mockSpawnInline.mockClear();

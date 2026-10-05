@@ -887,15 +887,7 @@ async function executeThinker(
     // above so the runs row records the same provider. Rationale in
     // `resolveSpawnChildProviderConfig`.
     ...childProviderCfg,
-    // ⛔ AFTER the spread, deliberately. `abortScope` used to sit above it, where a key
-    // added to `ChildProviderConfig` later would silently rebind the child's scope — and
-    // a child in the wrong scope is a child a stop cannot reach. The interface is closed
-    // today; the ordering is what keeps that from mattering.
-    //
-    // Inherited, which is the transitive half of the scoping: the child registers in the
-    // PARENT's scope below, and by carrying that same scope it makes its own children
-    // land there too. Without it a grandchild is reachable by nothing.
-    abortScope: parentAgent.abortScope,
+
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
@@ -953,6 +945,17 @@ async function executeThinker(
     // sites across thirteen modules, and putting the sentence in any one tool
     // would leave the other thirteen exactly as they are.
     ...promptCallbacksWithOrigin(parentAgent, spec),
+    // ⛔ AFTER BOTH SPREADS. The first version of this line sat above
+    // `...childProviderCfg` and the second below it but above this one — and the argument
+    // is the same for either: a key added to one of those sources later would rebind the
+    // child's scope, and a child in the wrong scope is a child a stop cannot reach. Both
+    // sources are closed literals today, so this is ordering that keeps a future edit
+    // from mattering rather than a live fix.
+    //
+    // Inherited, which is the transitive half of the scoping: the child registers in the
+    // PARENT's scope below, and by carrying that same scope it makes its own children
+    // land there too. Without it a grandchild is reachable by nothing.
+    abortScope: parentAgent.abortScope,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
@@ -1139,10 +1142,14 @@ async function executeThinker(
   } finally {
     // `?.` here and NOT at the register site above, deliberately. This runs in a
     // `finally`: a throw replaces whatever the catch was rethrowing, so the child's real
-    // failure is lost and the message points at bookkeeping. The register site keeps its
-    // hard dereference — it is one of exactly two expressions that make
-    // `IAgent.abortScope` REQUIRED at compile time, and softening both would leave that
-    // required-ness pinned by nothing.
+    // failure is lost and the message points at bookkeeping.
+    //
+    // ⛔ The register site keeps its hard dereference, and softening THIS one is why that
+    // matters more than it did: making `IAgent.abortScope` optional now produces exactly
+    // ONE compile error, at that line. Measured — before this `?.` there were two, so the
+    // hardness up there is no longer one of a redundant pair but the only thing holding
+    // the required-ness. (An earlier version of this comment said "one of exactly two",
+    // which was the count from before the line it sits on.)
     if (childAgent) parentAgent.abortScope?.members.delete(childAgent);
     // One place for all three exits. The success and failure branches above
     // each read the same snapshot for their own bookkeeping; reporting it here

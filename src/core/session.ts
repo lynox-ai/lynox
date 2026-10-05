@@ -2395,14 +2395,18 @@ export class Session {
     this.agent = new Agent({
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
-      // nothing. There are seven rebuild sites (`setModel`, `setEffort`, `setThinking`,
-      // `addTool`, `reloadUserConfig`, `_recreateAgent`, the ctor) and four are public
-      // API, none of which checks for an in-flight run. The module-level set this
+      // nothing. `_createAgent` has SEVEN callers (the ctor, `setModel`, `setEffort`,
+      // `setThinking`, `addTool`, `reloadUserConfig`, `_recreateAgent`), FIVE of them
+      // public methods, none checking for an in-flight run. The module-level set this
       // replaced was immune by construction, so the scope only became a thing a rebuild
       // can lose when it started living on the agent — which is what `_recreateAgent`'s
       // own comment is about: a rebuild is infrastructural and must not make the session
       // forget who it is.
-      ...(this.agent ? { abortScope: this.agent.abortScope } : {}),
+      //
+      // ⚠ On the first rebuild `this.agent` is null and this is `undefined`, which the
+      // constructor turns into a fresh scope — the same result as omitting the key, and
+      // the reason the plain read replaced a conditional spread that was doing nothing.
+      abortScope: this.agent?.abortScope,
       name: 'lynox',
       model,
       systemPrompt,

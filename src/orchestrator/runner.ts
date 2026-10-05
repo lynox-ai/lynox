@@ -138,13 +138,17 @@ export interface RunManifestOptions {
   /**
    * The session whose abort may reach this run's step agents.
    *
-   * ⚠ Absent for the HEADLESS saved-workflow path only — cron, a trigger, the HTTP
-   * re-target — where there is no calling agent to source it from; then nothing aborts
-   * those steps, which is the filed gap rather than a reason to fall back on a
-   * process-wide set. An earlier version of this comment said "headless or worker-driven",
-   * which was wrong twice over: the worker loop creates a real Session whose agent has a
-   * scope, and the interactive `run_workflow` path has one too — and for a while neither
-   * supplied it, which made the whole step half dead code. See `AbortScope`.
+   * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
+   * the library Run button, the HTTP re-target, and the worker loop's own scheduled
+   * pipelines, which go through the same `runGuardedSavedWorkflow`. Nothing aborts those
+   * steps, which is the filed gap rather than a reason to fall back on a process-wide
+   * set.
+   *
+   * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
+   * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
+   * false is the generalisation, because a worker path that runs an agent turn does have
+   * a session with a scope, and so does the interactive `run_workflow`. For a while
+   * neither supplied it, which made the whole step half dead code. See `AbortScope`.
    */
   abortScope?: import('../types/config.js').AbortScope | undefined;
 }
@@ -176,13 +180,17 @@ export interface RunCtxInput {
   /**
    * The session whose abort may reach this run's step agents.
    *
-   * ⚠ Absent for the HEADLESS saved-workflow path only — cron, a trigger, the HTTP
-   * re-target — where there is no calling agent to source it from; then nothing aborts
-   * those steps, which is the filed gap rather than a reason to fall back on a
-   * process-wide set. An earlier version of this comment said "headless or worker-driven",
-   * which was wrong twice over: the worker loop creates a real Session whose agent has a
-   * scope, and the interactive `run_workflow` path has one too — and for a while neither
-   * supplied it, which made the whole step half dead code. See `AbortScope`.
+   * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
+   * the library Run button, the HTTP re-target, and the worker loop's own scheduled
+   * pipelines, which go through the same `runGuardedSavedWorkflow`. Nothing aborts those
+   * steps, which is the filed gap rather than a reason to fall back on a process-wide
+   * set.
+   *
+   * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
+   * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
+   * false is the generalisation, because a worker path that runs an agent turn does have
+   * a session with a scope, and so does the interactive `run_workflow`. For a while
+   * neither supplied it, which made the whole step half dead code. See `AbortScope`.
    */
   abortScope?: import('../types/config.js').AbortScope | undefined;
 }

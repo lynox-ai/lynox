@@ -923,11 +923,15 @@ export async function spawnInline(
    *
    * ⛔ LAST in the list, and that is not cosmetic: these are POSITIONAL parameters, so a
    * new one inserted between two existing ones re-binds every caller that stops short of
-   * it. Measured — putting it before `parentActiveScopes` made three tests fail with a
-   * scope list arriving as an abort scope, AND `tsc` refuse it with two errors. ⚠ Not
-   * "silently": an earlier version of this sentence said so, which was a measured number
-   * carrying an unmeasured generalisation. The type system catches the shape; what it
-   * cannot catch is a caller that stops short on purpose.
+   * it. Measured: putting it before `parentActiveScopes` makes `tsc` refuse it with two
+   * errors, and fails the tests that assert the sibling field arrives.
+   *
+   * ⚠ Two corrections to earlier versions of this sentence, kept because both are the
+   * same mistake: it said the re-binding was "silent" (the type system catches the shape
+   * — what it cannot catch is a caller that stops short on purpose), and it named a test
+   * COUNT that the very commit rewriting it invalidated by adding another such test. A
+   * number in a comment is a claim with no mechanism behind it; the compiler error is the
+   * part that holds.
    */
   abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
@@ -1233,11 +1237,15 @@ export async function spawnPipeline(
    *
    * ⛔ LAST in the list, and that is not cosmetic: these are POSITIONAL parameters, so a
    * new one inserted between two existing ones re-binds every caller that stops short of
-   * it. Measured — putting it before `parentActiveScopes` made three tests fail with a
-   * scope list arriving as an abort scope, AND `tsc` refuse it with two errors. ⚠ Not
-   * "silently": an earlier version of this sentence said so, which was a measured number
-   * carrying an unmeasured generalisation. The type system catches the shape; what it
-   * cannot catch is a caller that stops short on purpose.
+   * it. Measured: putting it before `parentActiveScopes` makes `tsc` refuse it with two
+   * errors, and fails the tests that assert the sibling field arrives.
+   *
+   * ⚠ Two corrections to earlier versions of this sentence, kept because both are the
+   * same mistake: it said the re-binding was "silent" (the type system catches the shape
+   * — what it cannot catch is a caller that stops short on purpose), and it named a test
+   * COUNT that the very commit rewriting it invalidated by adding another such test. A
+   * number in a comment is a claim with no mechanism behind it; the compiler error is the
+   * part that holds.
    */
   abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
