@@ -373,6 +373,22 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // guard here for that case survived its own mutation test — it changed
         // nothing — so it is not written.
         const pipelineParams = input.params !== undefined ? JSON.stringify(input.params) : undefined;
+        // A workflow saved from the chat carries no `confirmedAt` — the model must
+        // not confirm a workflow for itself — and the WorkerLoop disables a task
+        // for such a workflow at its first due tick (`executePipeline`'s
+        // first-run-confirm gate). This branch used to answer "next run: …"
+        // without ever reading the workflow, so the model relayed a run that was
+        // never going to happen. Read it the way the worker does and refuse,
+        // naming the step that makes the task possible. Not a caveat: "it runs
+        // once confirmed" is false whenever the first tick precedes the
+        // confirmation, because the disabled task does not come back by itself.
+        // A workflow this cannot find is left to the manager and the worker,
+        // which already report a missing target.
+        const { getPipeline } = await import('./pipeline.js');
+        const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
+        if (planned && !planned.confirmedAt) {
+          return `Error: workflow "${planned.name}" (${planned.id}) has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to confirm it in the workflow library (scheduling it from there confirms it and creates the task), then try again.`;
+        }
         const task = managerRef.createPipelineTask({
           ...baseParams,
           pipelineId: input.workflow_id,
