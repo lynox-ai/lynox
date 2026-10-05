@@ -28,7 +28,7 @@ import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
-import { decideConnect, isRefusal } from './oauth-connect-decision.js';
+import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
@@ -7676,19 +7676,12 @@ export class LynoxHTTPApi {
         return;
       }
 
-      const authorize = new URL(decision.authorizeUrl);
-      // `set`, not `append`: a preset's authorize path may legitimately carry
-      // its own query, and a second `state` would let the provider echo back
-      // whichever it preferred.
-      authorize.searchParams.set('response_type', 'code');
-      authorize.searchParams.set('client_id', clientId);
-      authorize.searchParams.set('redirect_uri', profileOAuthRedirectUri());
-      authorize.searchParams.set('state', state);
-      authorize.searchParams.set('code_challenge', challenge);
-      authorize.searchParams.set('code_challenge_method', method);
+      const authorize = buildAuthorizeUrl(decision, {
+        clientId, redirectUri: profileOAuthRedirectUri(), state, challenge, method,
+      });
 
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._buildProfileOAuthSetCookie(signed));
-      res.writeHead(302, { Location: authorize.toString(), 'Cache-Control': 'no-store' });
+      res.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' });
       res.end();
     }));
 

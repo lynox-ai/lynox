@@ -66,6 +66,17 @@ export interface OAuthPreset {
   readonly authorizePath: string;
   readonly tokenPath: string;
   readonly params: readonly OAuthPresetParam[];
+  /**
+   * Scopes every authorization through this preset asks for, whatever the profile says —
+   * e.g. the one a provider needs before it issues a refresh token.
+   */
+  readonly requiredScopes: readonly string[];
+  /**
+   * The scopes a profile may add, as an enumerated allowlist. Anything not named here or in
+   * `requiredScopes` is refused, including a scope the provider introduces later: a profile is
+   * written by the agent, so this list, not the profile, is the limit of what can be asked for.
+   */
+  readonly allowedScopes: readonly string[];
 }
 
 /**
@@ -85,12 +96,35 @@ export interface PresetRegister {
 /**
  * The register itself.
  *
- * It ships empty until the first provider is decided — a preset is a statement
- * about which sites we send users to, and that is a product decision, not a
- * build one. `connect` refuses every profile while it is empty, which is the
- * honest behaviour: nothing can be connected that nobody has vouched for.
+ * An entry is a statement about which sites we send users to, and that is a
+ * product decision, not a build one: nothing here can be connected that nobody
+ * has vouched for. Each entry names its source.
  */
-const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([]);
+const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
+  {
+    // Decided 2026-10-05 as the first provider. Endpoints from bexio's OpenID discovery
+    // document (https://auth.bexio.com/realms/bexio/.well-known/openid-configuration, read
+    // 2026-10-05): issuer https://auth.bexio.com/realms/bexio, PKCE S256 supported.
+    id: 'bexio',
+    label: 'bexio',
+    host: { kind: 'constant', host: 'auth.bexio.com' },
+    authorizePath: '/realms/bexio/protocol/openid-connect/auth',
+    tokenPath: '/realms/bexio/protocol/openid-connect/token',
+    params: [],
+    // bexio issues a refresh token only for `offline_access`; without it the access token
+    // cannot be renewed. `openid` is the protocol scope of its OpenID Connect endpoint.
+    requiredScopes: ['openid', 'offline_access'],
+    // Read access to business records only, and only scopes the discovery document lists.
+    // Write scopes are a separate decision, and so are payroll records.
+    allowedScopes: [
+      'email', 'profile',
+      'contact_show', 'lead_show', 'note_show', 'task_show', 'project_show', 'article_show',
+      'kb_offer_show', 'kb_order_show', 'kb_delivery_show', 'kb_invoice_show', 'kb_credit_voucher_show',
+      'kb_bill_show', 'kb_expense_show', 'kb_article_order_show',
+      'bank_account_show', 'bank_payment_show', 'transaction_show', 'archive_show',
+    ],
+  },
+]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));
 
 export const OAUTH_PRESETS: PresetRegister = Object.freeze({
@@ -126,9 +160,9 @@ export interface PresetEndpoints {
  *
  * A profile can enter the store without passing a save (the boot load, a JSON
  * dropped into the apis directory, a migration), so a check that only runs on
- * save is not a boundary. What the REDIRECT flow uses is derived here every
- * time; the stored `token_url` is still read by `fetch_token`'s own exchange,
- * which is the pre-existing path and not one of these.
+ * save is not a boundary. The redirect flow and `fetch_token` both derive the
+ * token endpoint here for a preset profile; its stored `token_url` is display
+ * only.
  */
 export function derivePresetEndpoints(
   presetId: string,
@@ -255,6 +289,25 @@ export function derivePresetEndpoints(
  * loosening it reopens that hole silently. Two tests hold the line.
  */
 export const PRESET_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+
+/** The scopes to ask for, or the ones that are not allowed. */
+export type PresetScopeResult =
+  | { readonly scopes: readonly string[] }
+  | { readonly refused: readonly string[] };
+
+/**
+ * The scopes an authorization through `preset` asks for: its required scopes, plus what the
+ * profile names (`auth.oauth.scope`, space-separated). A named scope that is in neither of the
+ * preset's two lists refuses the whole request rather than being dropped, so a profile cannot
+ * hold a scope it will never get without being told. Used for the authorize link and for the
+ * refresh, so both ask for the same set.
+ */
+export function presetScopeRequest(preset: OAuthPreset, profileScope: string | undefined): PresetScopeResult {
+  const asked = (profileScope ?? '').split(/\s+/).filter((s) => s !== '');
+  const refused = asked.filter((s) => !preset.requiredScopes.includes(s) && !preset.allowedScopes.includes(s));
+  if (refused.length > 0) return { refused: [...new Set(refused)] };
+  return { scopes: [...new Set([...preset.requiredScopes, ...asked])] };
+}
 
 /** The ids a profile may name, for a message that lists what exists. */
 export function presetIds(register: PresetRegister = OAUTH_PRESETS): string[] {

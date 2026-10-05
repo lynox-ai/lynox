@@ -411,6 +411,115 @@ describe('fetch_token — a revocation verdict and the way back', () => {
   });
 });
 
+describe('fetch_token — a profile connected through a provider preset', () => {
+  // `token_url` stays on the CRM host on purpose: for a preset profile it is display only, and
+  // the exchange must go to the preset's endpoint whatever the profile says.
+  const BEXIO_TOKEN = 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/token';
+  const bexioProfile = (over: Partial<ApiProfile> = {}, scope?: string, extra: Record<string, unknown> = {}): ApiProfile => {
+    const base = crmProfile({ custom_endpoint_ack: { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] }, ...over });
+    return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_id: 'bexio', ...(scope !== undefined ? { scope } : {}), ...extra } } };
+  };
+
+  it('posts the refresh to the preset\'s token endpoint, not to the token_url the profile names', async () => {
+    const store = new ApiStore();
+    store.register(bexioProfile());
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]![0])).toBe(BEXIO_TOKEN);
+  });
+
+  it('sends no audience the profile names: every value that reaches the provider comes from the preset', async () => {
+    const store = new ApiStore();
+    store.register(bexioProfile({}, undefined, { audience: 'https://elsewhere.example' }));
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    const init = spy.mock.calls[0]![1] as RequestInit;
+    expect(new URLSearchParams(String(init.body)).has('audience')).toBe(false);
+  });
+
+  it('still sends the audience of a profile that names no preset', async () => {
+    const store = new ApiStore();
+    const base = crmProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, audience: 'https://api.crm.example' } } });
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    const init = spy.mock.calls[0]![1] as RequestInit;
+    expect(new URLSearchParams(String(init.body)).get('audience')).toBe('https://api.crm.example');
+  });
+
+  it('treats a preset id this engine does not know as no preset, and keeps the paste path', async () => {
+    const store = new ApiStore();
+    const base = crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), state: 'revoked', revoked_fp: tokenFingerprint('rt-1'), revoked_at: '2026-09-22T00:00:00.000Z' } });
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_id: 'not-a-provider' } } });
+    const agent = makeAgent(store, vaultWithRefresh('rt-1'));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('with ask_secret');
+    expect(result).not.toContain('action "connect"');
+  });
+
+  it('asks the refresh for the preset\'s required scopes plus the profile\'s, as the link did', async () => {
+    const store = new ApiStore();
+    store.register(bexioProfile({}, 'contact_show'));
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    await fetchToken(agent);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const init = spy.mock.calls[0]![1] as RequestInit;
+    expect(new URLSearchParams(String(init.body)).get('scope')).toBe('openid offline_access contact_show');
+  });
+
+  it('refuses before the request when the stored profile names a scope the preset does not allow', async () => {
+    // A profile can enter the store without passing a save, so the check runs here too.
+    const store = new ApiStore();
+    store.register(bexioProfile({}, 'contact_edit'));
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await fetchToken(agent);
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result).toContain('contact_edit');
+  });
+
+  it('sends a recorded revocation back to connect, not to a pasted token', async () => {
+    const store = new ApiStore();
+    store.register(bexioProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), state: 'revoked', revoked_fp: tokenFingerprint('rt-1'), revoked_at: '2026-09-22T00:00:00.000Z' } }));
+    const agent = makeAgent(store, vaultWithRefresh('rt-1'));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('action "connect"');
+    expect(result).not.toContain('ask_secret');
+  });
+
+  it('sends a revocation the provider answers now back to connect as well', async () => {
+    const store = new ApiStore();
+    store.register(bexioProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('as revoked or expired');
+    expect(result).toContain('action "connect"');
+    expect(result).not.toContain('ask_secret');
+  });
+});
+
 describe('fetch_token — what a successful exchange records', () => {
   it('stamps a fingerprint of the client, not the id itself, for the refresh token now in play', async () => {
     const store = new ApiStore();

@@ -18,7 +18,7 @@
  * proves nothing, so the test iterates it.
  */
 import type { ApiProfile } from '../core/api-store.js';
-import { derivePresetEndpoints, presetIds, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
 import { checkRedirectTarget } from '../core/oauth-redirect-guard.js';
 
 /** Every way the start route refuses before anything is minted. */
@@ -31,6 +31,7 @@ export type ConnectRefusalKind =
   | 'not-oauth2'
   | 'no-preset'
   | 'bad-preset-param'
+  | 'scope-not-allowed'
   | 'broken-preset'
   | 'no-egress-ack'
   | 'inside-network'
@@ -68,6 +69,8 @@ export interface ConnectTarget {
   readonly authorizeUrl: string;
   readonly tokenUrl: string;
   readonly host: string;
+  /** What the authorize link asks for: the preset's required scopes plus the profile's. */
+  readonly scopes: readonly string[];
 }
 
 /**
@@ -173,6 +176,17 @@ export function decideConnect(
     return { kind: redirect.kind, status: 403, message: redirect.message };
   }
 
+  // `derivePresetEndpoints` succeeded, so the preset exists in this register.
+  const preset = register.get(profile.auth.oauth?.preset_id ?? '');
+  const scope = preset ? presetScopeRequest(preset, profile.auth.oauth?.scope) : { refused: [] };
+  if ('refused' in scope) {
+    return {
+      kind: 'scope-not-allowed',
+      status: 400,
+      message: `This profile asks for access the provider preset does not allow: ${scope.refused.join(', ')}. Remove it from the profile, then ask for a new link.`,
+    };
+  }
+
   if (!facts.httpSecretSet) {
     return {
       kind: 'no-http-secret',
@@ -181,7 +195,35 @@ export function decideConnect(
     };
   }
 
-  return endpoints;
+  return { ...endpoints, scopes: scope.scopes };
+}
+
+/** What the start route adds to the target's authorize URL. */
+export interface AuthorizeLinkParts {
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly state: string;
+  readonly challenge: string;
+  readonly method: string;
+}
+
+/**
+ * The URL the start route redirects the browser to.
+ *
+ * `set`, not `append`: a preset's authorize path may legitimately carry its own
+ * query, and a second `state` would let the provider echo back whichever it
+ * preferred. `scope` only when there is one to ask for.
+ */
+export function buildAuthorizeUrl(target: ConnectTarget, parts: AuthorizeLinkParts): string {
+  const authorize = new URL(target.authorizeUrl);
+  authorize.searchParams.set('response_type', 'code');
+  authorize.searchParams.set('client_id', parts.clientId);
+  authorize.searchParams.set('redirect_uri', parts.redirectUri);
+  authorize.searchParams.set('state', parts.state);
+  authorize.searchParams.set('code_challenge', parts.challenge);
+  authorize.searchParams.set('code_challenge_method', parts.method);
+  if (target.scopes.length > 0) authorize.searchParams.set('scope', target.scopes.join(' '));
+  return authorize.toString();
 }
 
 /** True when the decision refused; `false` when it produced a target. */

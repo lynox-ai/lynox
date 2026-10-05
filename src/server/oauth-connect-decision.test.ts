@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { ApiProfile } from '../core/api-store.js';
-import { decideConnect, isRefusal, type ConnectFacts, type ConnectRefusalKind } from './oauth-connect-decision.js';
+import { buildAuthorizeUrl, decideConnect, isRefusal, type ConnectFacts, type ConnectRefusalKind } from './oauth-connect-decision.js';
 import { presetRegisterOf, type PresetRegister } from '../core/oauth-presets.js';
 
 // No module mock: the decision takes its register as a parameter, so a test
@@ -14,6 +14,8 @@ const REGISTER = presetRegisterOf([{
   authorizePath: '/admin/oauth/authorize',
   tokenPath: '/admin/oauth/access_token',
   params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
+  requiredScopes: ['openid'],
+  allowedScopes: ['read_orders'],
 }]);
 
 /** Every case here decides against the test register unless it brings its own. */
@@ -58,9 +60,10 @@ const good: ConnectFacts = {
 /**
  * One fixture per way the route refuses before it mints anything.
  *
- * Typed as a total record: a new refusal kind fails to compile until it has a
- * case here. And the table is iterated below rather than merely declared —
- * a complete table nobody runs passes the compiler and checks nothing.
+ * Typed as a total record, which documents the intent; test files are not
+ * type-checked here, so the count assertion below is what actually fails when a
+ * new kind has no case. And the table is iterated below rather than merely
+ * declared — a complete table nobody runs checks nothing.
  */
 const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
   'no-session': { ...good, authenticated: false },
@@ -83,6 +86,10 @@ const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
   'broken-preset': { ...good },
   'no-egress-ack': { ...good, profile: profile({ custom_endpoint_ack: undefined }) },
   'no-http-secret': { ...good, httpSecretSet: false },
+  'scope-not-allowed': (() => {
+    const p = profile();
+    return { ...good, profile: { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, scope: 'read_orders write_orders' } } } };
+  })(),
 };
 
 describe('the start route decides everything before it mints anything', () => {
@@ -91,14 +98,14 @@ describe('the start route decides everything before it mints anything', () => {
   const REGISTER_FOR: Partial<Record<ConnectRefusalKind, typeof REGISTER>> = {
     'inside-network': presetRegisterOf([{
       id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: '169.254.169.254' },
-      authorizePath: '/authorize', tokenPath: '/token', params: [],
+      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]),
     'broken-preset': presetRegisterOf([{
       id: 'example-shop', label: 'Broken', host: { kind: 'constant', host: 'shops.example.com' },
       // No leading slash: the path would merge into the authority. Nobody
       // standing in front of the page can fix that, which is the whole reason
       // this is its own refusal.
-      authorizePath: 'admin/oauth/authorize', tokenPath: '/token', params: [],
+      authorizePath: 'admin/oauth/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]),
   };
 
@@ -116,10 +123,10 @@ describe('the start route decides everything before it mints anything', () => {
   });
 
   it('covers every refusal the type allows, and runs each one', () => {
-    // The pairing that makes the table worth having: the compiler keeps it
-    // complete, this keeps it used. Twelve today; a thirteenth kind fails to
-    // compile above and fails this count here.
-    expect(Object.keys(BEFORE_MINT)).toHaveLength(12);
+    // Test files are not type-checked here, so the `Record` type above does not
+    // keep the table complete; this count does. Thirteen today
+    // (`scope-not-allowed` was the thirteenth) — a new kind fails here until it has a row.
+    expect(Object.keys(BEFORE_MINT)).toHaveLength(13);
   });
 
   it('lets a click from this instance through, with the derived target', () => {
@@ -131,7 +138,16 @@ describe('the start route decides everything before it mints anything', () => {
       host: 'acme.shops.example.com',
       authorizeUrl: 'https://acme.shops.example.com/admin/oauth/authorize',
       tokenUrl: 'https://acme.shops.example.com/admin/oauth/access_token',
+      scopes: ['openid'],
     });
+  });
+
+  it('adds the profile\'s allowed scopes to the required ones', () => {
+    const p = profile();
+    const decision = decide({ ...good, profile: { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, scope: 'read_orders' } } } });
+    expect(isRefusal(decision)).toBe(false);
+    if (isRefusal(decision)) return;
+    expect(decision.scopes).toEqual(['openid', 'read_orders']);
   });
 
   it('lets an address-bar open through, which sends site=none', () => {
@@ -183,7 +199,7 @@ describe('the start route decides everything before it mints anything', () => {
     // authorizing. Nothing pinned that difference until this.
     const lan = presetRegisterOf([{
       id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: 'localhost' },
-      authorizePath: '/authorize', tokenPath: '/token', params: [],
+      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, lan);
 
@@ -222,7 +238,7 @@ describe('the start route decides everything before it mints anything', () => {
     // quad and three suffixes — not these four.
     const inside = presetRegisterOf([{
       id: 'example-shop', label: 'inside', host: { kind: 'constant', host },
-      authorizePath: '/authorize', tokenPath: '/token', params: [],
+      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
 
@@ -243,7 +259,7 @@ describe('the start route decides everything before it mints anything', () => {
     // case goes red instead of quietly moving to another branch.
     const inside = presetRegisterOf([{
       id: 'example-shop', label: 'inside', host: { kind: 'constant', host },
-      authorizePath: '/authorize', tokenPath: '/token', params: [],
+      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
 
@@ -263,7 +279,7 @@ describe('the start route decides everything before it mints anything', () => {
     // that names the act does.
     const vetted = presetRegisterOf([{
       id: 'example-shop', label: 'vetted', host: { kind: 'constant', host: 'api.openai.com' },
-      authorizePath: '/authorize', tokenPath: '/token', params: [],
+      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, vetted);
 
@@ -304,5 +320,25 @@ describe('the start route decides everything before it mints anything', () => {
     // without the secret is the user's cross-site open, not a 500.
     const decision = decide({ ...good, fetchSite: 'cross-site', httpSecretSet: false });
     expect(isRefusal(decision) && decision.kind).toBe('cross-site');
+  });
+});
+
+describe('the authorize link', () => {
+  const parts = { clientId: 'cid', redirectUri: 'https://tenant.example/api/oauth/callback', state: 'st', challenge: 'ch', method: 'S256' };
+  const target = { host: 'auth.example.com', authorizeUrl: 'https://auth.example.com/authorize?prompt=consent', tokenUrl: 'https://auth.example.com/token' };
+
+  it('carries the scopes the decision named, space-separated, next to the PKCE and state values', () => {
+    const url = new URL(buildAuthorizeUrl({ ...target, scopes: ['openid', 'offline_access', 'contact_show'] }, parts));
+    expect(url.searchParams.get('scope')).toBe('openid offline_access contact_show');
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(url.searchParams.get('state')).toBe('st');
+    // The preset's own query survives, and `state` is not duplicated.
+    expect(url.searchParams.get('prompt')).toBe('consent');
+    expect(url.searchParams.getAll('state')).toHaveLength(1);
+  });
+
+  it('sends no scope parameter when there is nothing to ask for', () => {
+    const url = new URL(buildAuthorizeUrl({ ...target, scopes: [] }, parts));
+    expect(url.searchParams.has('scope')).toBe(false);
   });
 });

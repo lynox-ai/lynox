@@ -115,19 +115,23 @@ export function reclassifyForeignGrant(
  * the user) and says plainly not to fetch again with the old one: the 401 hint
  * used to send the model round exactly that loop.
  *
- * ⚠ Written before a profile could be authorized by redirect, and it shows: it
- * sends the model to collect a pasted refresh token, which is the path the
- * connect link replaces. Deliberately not changed in the first wave — this is
- * one of several model-visible surfaces that say it, and fixing one of them
- * leaves the class half-done, which reads as covered to whoever greps next.
- *
- * The condition under which it goes from harmless to wrong: the preset register
- * stops shipping empty. A test in `oauth-presets.test.ts` goes red exactly then
- * and names this function.
+ * Two ways back, by how the profile was connected. A profile that names a
+ * provider preset was authorized by redirect, so the way back is a new consent
+ * link from `api_setup connect`; asking the user to paste a refresh token there
+ * would send them looking for a value no provider UI shows. Any other profile
+ * holds a token someone stored, and gets a new one the same way.
  */
-export function revokedGrantMessage(id: string, refreshKey: string, revokedAt: string | undefined): string {
+export function revokedGrantMessage(
+  id: string,
+  refreshKey: string,
+  revokedAt: string | undefined,
+  viaPreset: boolean,
+): string {
   const since = revokedAt ? ` (recorded ${revokedAt})` : '';
-  return `Error: the provider rejected the stored refresh token of api_profile "${id}" as revoked or expired${since}. This is not an expired access token — fetching again with the same refresh token cannot work, and fetch_token will not resend it. The user has to authorize the app again at the provider; store the new refresh token under "${refreshKey}" with ask_secret, then call fetch_token once.`;
+  const head = `Error: the provider rejected the stored refresh token of api_profile "${id}" as revoked or expired${since}. This is not an expired access token — fetching again with the same refresh token cannot work, and fetch_token will not resend it.`;
+  return viaPreset
+    ? `${head} The user has to consent again at the provider: call api_setup with action "connect" for this profile and give the user the link it returns. Do not ask the user for a token.`
+    : `${head} The user has to authorize the app again at the provider; store the new refresh token under "${refreshKey}" with ask_secret, then call fetch_token once.`;
 }
 
 /**
