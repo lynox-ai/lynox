@@ -39,13 +39,12 @@ const GRAPH_HOSTS: ReadonlySet<string> = new Set([
 ]);
 /** Graph segment names that only ever mean a mailbox, refused wherever they stand:
  *  folders (inbox rules live under them), sending, the mailbox's settings (the automatic
- *  reply), its rules and its focused-inbox overrides — and `$batch`, which carries other
- *  requests in its body. */
+ *  reply) and its focused-inbox overrides — and `$batch`, which carries other requests in
+ *  its body. */
 const GRAPH_MAIL_ANYWHERE: ReadonlySet<string> = new Set([
   'mailfolders',
   'sendmail',
   'mailboxsettings',
-  'messagerules',
   'inferenceclassification',
   '$batch',
 ]);
