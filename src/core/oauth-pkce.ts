@@ -22,9 +22,9 @@
  * distinction is the whole mechanism — a channel the attacker can read carries
  * the hash, and a channel they cannot carries the pre-image.
  *
- * ⚠ **Not measured against a real provider, because there is none yet.** The
- * preset register ships empty, so no authorize URL exists to send these
- * parameters to. RFC 7636 §4.4 says a server that does not support PKCE
+ * ⚠ **Not measured against a real provider yet.** The first preset (bexio)
+ * states S256 support in its discovery document, but no authorization has run
+ * against it from this engine. RFC 7636 §4.4 says a server that does not support PKCE
  * ignores the parameters, but "the specification says so" is not the same as
  * "this provider does", and the first preset that lands is where that gets
  * checked. Written now rather than retrofitted because the verifier is a field

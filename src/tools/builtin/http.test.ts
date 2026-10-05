@@ -4139,7 +4139,7 @@ describe('httpRequestTool', () => {
       const store = new ApiStore();
       store.register({
         id: 'crm-api', name: 'CRM', base_url: 'https://api.example.com/v1', description: 'CRM API',
-        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { preset_id: 'bexio', token_url: 'https://api.example.com/oauth/token', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET' } },
         custom_endpoint_ack: ack,
         oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
       });

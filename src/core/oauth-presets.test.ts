@@ -128,12 +128,17 @@ describe('the bexio preset', () => {
     expect(bexio?.requiredScopes).toContain('offline_access');
   });
 
-  it('allows read scopes only, and no payroll records', () => {
-    for (const scope of bexio?.allowedScopes ?? []) {
-      expect(scope, `${scope} is a write scope`).not.toMatch(/_edit$/);
-      expect(scope, `${scope} reaches payroll records`).not.toMatch(/^payroll/);
-    }
-    expect(bexio?.allowedScopes.length).toBeGreaterThan(0);
+  it('allows exactly the decided read scopes', () => {
+    // The exact list, not a shape check: a regex for `_edit` or `payroll` would
+    // let an administrative scope without either through. Widening this list is
+    // a decision (write scopes and payroll records were deliberately left out).
+    expect([...(bexio?.allowedScopes ?? [])].sort()).toEqual([
+      'archive_show', 'article_show', 'bank_account_show', 'bank_payment_show', 'contact_show', 'email',
+      'kb_article_order_show', 'kb_bill_show', 'kb_credit_voucher_show', 'kb_delivery_show', 'kb_expense_show',
+      'kb_invoice_show', 'kb_offer_show', 'kb_order_show', 'lead_show', 'note_show', 'profile', 'project_show',
+      'task_show', 'transaction_show',
+    ]);
+    expect(bexio?.requiredScopes).toEqual(['openid', 'offline_access']);
   });
 
   it('refuses an administrative scope a profile might name', () => {
@@ -275,8 +280,8 @@ describe('derivation happens at use, from the register alone', () => {
     // version of this test green while every profile naming that provider
     // became unsaveable — and because the validator also runs over a STORED
     // profile on the refine path, every later edit of one would fail too.
-    // Vacuous while the register is empty, red the day it matters, which is
-    // the same trick the emptiness alarm above uses.
+    // It runs over every shipped preset, so a new one with an id the validator
+    // would refuse turns this red before any profile can name it.
     for (const id of presetIds()) {
       expect(id, `preset id "${id}" is not one api_setup would accept in a profile`)
         .toMatch(PRESET_ID_PATTERN);

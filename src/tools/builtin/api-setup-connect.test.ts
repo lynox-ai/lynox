@@ -9,8 +9,8 @@ import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
 
-// The register ships empty on purpose, so every test that needs a provider
-// hands in its own — through the same parameter production never passes.
+// Every test here brings its own providers rather than the shipped ones, so
+// what it checks does not change when a provider is added or removed.
 vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../core/oauth-presets.js')>();
   const register = real.presetRegisterOf([{
@@ -20,6 +20,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
+    requiredScopes: [],
+    allowedScopes: ['read_orders'],
   }, {
     // A provider whose host is inside the operator's own network. Nothing would
     // stop a preset from being written this way, and the egress vetting says yes
@@ -30,6 +32,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     params: [],
+    requiredScopes: [],
+    allowedScopes: [],
   }, {
     // A provider whose host is on the VETTED list. It exists to isolate the
     // redirect consent: nothing about this profile is a non-vetted egress, so
@@ -40,6 +44,8 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     params: [],
+    requiredScopes: [],
+    allowedScopes: [],
   }, {
     // Written wrongly on purpose: no leading slash, so the path would merge
     // into the authority. The operator cannot fix this one.
@@ -49,12 +55,16 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     authorizePath: 'admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     params: [],
+    requiredScopes: [],
+    allowedScopes: [],
   }]);
   return {
     ...real,
     derivePresetEndpoints: (id: string, params: Readonly<Record<string, unknown>> | undefined) =>
       real.derivePresetEndpoints(id, params, register),
     presetIds: () => register.ids(),
+    // The same register for every reader, so a test never sees two.
+    OAUTH_PRESETS: register,
   };
 });
 
@@ -135,6 +145,20 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLI
 const connect = (agent: never, id = 'shop-api'): Promise<string> =>
   apiSetupTool.handler({ action: 'connect', id }, agent) as Promise<string>;
 
+describe('connect refuses a scope the preset does not allow', () => {
+  it('hands out no link for a stored profile that asks for one — the route would refuse it', async () => {
+    // A profile can enter the store without passing a save, so connect asks too.
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders write_orders' } } });
+
+    const result = await connect(agentWith(store));
+
+    expect(result).toContain('write_orders');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+});
+
 describe('a preset profile discloses the host it will authorize at', () => {
   it('puts the derived authorize host into the save-time egress question', async () => {
     // Without this the connect route asks for an acceptance of a host the save
@@ -194,7 +218,7 @@ describe('the preset fields are checked at the door, not at the derivation', () 
     ['a vault reference as the provider id', { preset_id: 'secret:LYNOX_ADMIN_TOKEN' }, 'auth.oauth.preset_id'],
     // Checked at save as well as at connect: stored, it would fail only at the
     // link. A write scope is not in bexio's allowed set.
-    ['a scope the provider preset does not allow', { preset_id: 'bexio', scope: 'contact_show contact_edit' }, 'auth.oauth.scope'],
+    ['a scope the provider preset does not allow', { preset_id: 'example-shop', preset_params: { shop: 'acme' }, scope: 'read_orders write_orders' }, 'auth.oauth.scope'],
   ])('refuses %s', async (_label, oauth, field) => {
     const result = await createWith(oauth);
 
@@ -203,7 +227,7 @@ describe('the preset fields are checked at the door, not at the derivation', () 
   });
 
   it('lets a scope from the preset\'s allowed set through', async () => {
-    const result = await createWith({ preset_id: 'bexio', scope: 'contact_show kb_invoice_show' });
+    const result = await createWith({ preset_id: 'example-shop', preset_params: { shop: 'acme' }, scope: 'read_orders' });
     expect(result).not.toContain('auth.oauth.scope');
   });
 

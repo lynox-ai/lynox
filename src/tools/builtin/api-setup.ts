@@ -1804,6 +1804,15 @@ Next steps before calling create:
         }
         return `Error: the value profile "${id}" supplies for ${endpoints.param.describe} (auth.oauth.preset_params.${endpoints.param.name}) is not one its provider accepts. Ask the user to correct it and set it with api_setup update.`;
       }
+      // The route asks this too; asked here as well, so the tool never hands out a link the
+      // route would then refuse.
+      const connectPreset = OAUTH_PRESETS.get(profile.auth.oauth?.preset_id ?? '');
+      if (connectPreset) {
+        const requested = presetScopeRequest(connectPreset, profile.auth.oauth?.scope);
+        if ('refused' in requested) {
+          return `Error: profile "${id}" asks for scopes its provider preset does not allow: ${requested.refused.join(', ')}. Remove them with api_setup update.`;
+        }
+      }
       // The same question the start route asks, from the same function — so a
       // link is not handed out that the route will then refuse. While only the
       // route asked it, the model was told to show a link and the user arrived
@@ -1887,7 +1896,20 @@ Next steps before calling create:
         return `Error: profile "${input.id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
       const oauth = profile.auth.oauth;
-      if (!oauth?.token_url) {
+      // A profile that names a preset this engine knows exchanges tokens at the preset's own
+      // endpoint — the one the callback used — and its `token_url` is display only. Otherwise a
+      // profile the agent wrote could send the provider's refresh token, and the client secret,
+      // to a host of its choosing.
+      const tokenPreset = oauth?.preset_id ? OAUTH_PRESETS.get(oauth.preset_id) : undefined;
+      let tokenUrl = oauth?.token_url;
+      if (tokenPreset) {
+        const derived = derivePresetEndpoints(tokenPreset.id, oauth?.preset_params);
+        if ('kind' in derived) {
+          return `Error: profile "${input.id}" names the provider "${tokenPreset.id}", but its token endpoint cannot be derived from auth.oauth.preset_params. Correct them with api_setup update.`;
+        }
+        tokenUrl = derived.tokenUrl;
+      }
+      if (!oauth || !tokenUrl) {
         return `Error: profile "${input.id}" auth.oauth is missing token_url. Update the profile with the OAuth token endpoint (e.g. https://<shop>.myshopify.com/admin/oauth/access_token).`;
       }
       // Wave 5d runtime egress gate. fetch_token POSTs the vault client_secret
@@ -1899,7 +1921,7 @@ Next steps before calling create:
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
       // The same check the module requires, from the module — so the route that
       // will call `exchangeToken` cannot skip what this path never could.
-      const vetting = vetTokenEndpoint(oauth.token_url, profile.custom_endpoint_ack);
+      const vetting = vetTokenEndpoint(tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
         const host = vetting.host;
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
@@ -1942,7 +1964,7 @@ Next steps before calling create:
       // protected prefix, and an explicit `refresh_token_key` naming one — the
       // profile is model-authorable, and this value is POSTed to `token_url`.
       if (grantType === 'refresh_token' && isProtectedSecretWrite(refreshKey)) {
-        return `Error: profile "${input.id}" resolves its refresh token from "${refreshKey}", which is a protected credential slot — refusing to send it to ${new URL(oauth.token_url).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
+        return `Error: profile "${input.id}" resolves its refresh token from "${refreshKey}", which is a protected credential slot — refusing to send it to ${new URL(tokenUrl).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
       }
       // Resolved once: the token this exchange presents is also the one a failure
       // is judged against — the rotation check and the revocation fingerprint
@@ -1960,7 +1982,7 @@ Next steps before calling create:
       const grant = profile.oauth_grant;
       if (presentedRefresh !== null && grant?.state === 'revoked'
           && grant.revoked_fp === tokenFingerprint(presentedRefresh)) {
-        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at, !!oauth.preset_id);
+        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at, tokenPreset !== undefined);
       }
       // Where the access token will go, checked BEFORE the POST: a refusal after it
       // would throw away a freshly minted token, and with a provider that rotates,
@@ -2027,7 +2049,7 @@ Next steps before calling create:
       // already validated above, so consuming a token here maps 1:1 to the POST.
       // checkRateLimit both checks AND consumes; a token host with no registered
       // rate_limit has no buckets, so this is a no-op for such hosts.
-      const tokenHost = (() => { try { return new URL(oauth.token_url).hostname; } catch { return null; } })();
+      const tokenHost = (() => { try { return new URL(tokenUrl).hostname; } catch { return null; } })();
       if (tokenHost) {
         const rlBlock = apiStore?.checkRateLimit(tokenHost);
         if (rlBlock) return `Error: ${rlBlock}`;
@@ -2040,9 +2062,8 @@ Next steps before calling create:
       // A profile that connects through a preset asks for the same set the authorize link
       // asked for — the preset's required scopes included — so a refresh cannot narrow away
       // the scope the provider needs to keep issuing refresh tokens.
-      const preset = oauth.preset_id ? OAUTH_PRESETS.get(oauth.preset_id) : undefined;
-      if (preset) {
-        const requested = presetScopeRequest(preset, oauth.scope);
+      if (tokenPreset) {
+        const requested = presetScopeRequest(tokenPreset, oauth.scope);
         if ('refused' in requested) {
           return `Error: profile "${input.id}" asks for scopes its provider preset does not allow: ${requested.refused.join(', ')}. Remove them with api_setup update.`;
         }
@@ -2050,7 +2071,8 @@ Next steps before calling create:
       } else if (oauth.scope) {
         params['scope'] = oauth.scope;
       }
-      if (oauth.audience) params['audience'] = oauth.audience;
+      // Not for a preset profile: every value that reaches the provider there comes from the preset.
+      if (oauth.audience && !tokenPreset) params['audience'] = oauth.audience;
       if (presentedRefresh !== null) params['refresh_token'] = presentedRefresh;
       // The POST itself lives in `core/oauth-token-exchange.ts` because the
       // OAuth callback route needs the same hardened request — and only that.
@@ -2134,7 +2156,7 @@ Next steps before calling create:
             revoked_fp: presentedFp,
             revoked_at: new Date().toISOString(),
           }));
-          return `${revokedGrantMessage(input.id, refreshKey, undefined, !!oauth.preset_id)}\n\n${responseBody}`;
+          return `${revokedGrantMessage(input.id, refreshKey, undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;

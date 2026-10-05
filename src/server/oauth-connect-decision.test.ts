@@ -60,9 +60,10 @@ const good: ConnectFacts = {
 /**
  * One fixture per way the route refuses before it mints anything.
  *
- * Typed as a total record: a new refusal kind fails to compile until it has a
- * case here. And the table is iterated below rather than merely declared —
- * a complete table nobody runs passes the compiler and checks nothing.
+ * Typed as a total record, which documents the intent; test files are not
+ * type-checked here, so the count assertion below is what actually fails when a
+ * new kind has no case. And the table is iterated below rather than merely
+ * declared — a complete table nobody runs checks nothing.
  */
 const BEFORE_MINT: Record<ConnectRefusalKind, ConnectFacts> = {
   'no-session': { ...good, authenticated: false },
@@ -122,9 +123,9 @@ describe('the start route decides everything before it mints anything', () => {
   });
 
   it('covers every refusal the type allows, and runs each one', () => {
-    // The pairing that makes the table worth having: the compiler keeps it
-    // complete, this keeps it used. Thirteen today (`scope-not-allowed` was the
-    // thirteenth); a fourteenth kind fails to compile above and fails this count here.
+    // Test files are not type-checked here, so the `Record` type above does not
+    // keep the table complete; this count does. Thirteen today
+    // (`scope-not-allowed` was the thirteenth) — a new kind fails here until it has a row.
     expect(Object.keys(BEFORE_MINT)).toHaveLength(13);
   });
 

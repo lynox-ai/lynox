@@ -8,6 +8,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 // assume. The barrel import typechecks as a namespace and fails on the member.
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
+import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -1406,7 +1407,7 @@ async function attachEngineManagedAuth(
             ? shapedForLog(refreshKey, VAULT_NAME_SHAPE, 80)
             : shapedForLog(refreshKey, DERIVED_NAME_SHAPE, 80),
           shapedForLog(profile.oauth_grant?.revoked_at, ISO_TIMESTAMP_SHAPE, 30),
-          !!profile.auth?.oauth?.preset_id,
+          OAUTH_PRESETS.get(profile.auth?.oauth?.preset_id ?? '') !== undefined,
         ) };
       }
     }
