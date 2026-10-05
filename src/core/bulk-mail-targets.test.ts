@@ -68,6 +68,12 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget('https://www.googleapis.com/v2/users/me/settings/vacation')).toBe(false);
   });
 
+  it('reads the first owner in the path, and accepts refusing a drive folder that is called one', () => {
+    // Deliberate: a folder named `me` reads as an owner. It refuses a write it need not,
+    // which is the direction this check may err in.
+    expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/drives/d/root:/me/events/x.xlsx:')).toBe(true);
+  });
+
   it('reads a spelling of the same resource as that resource', () => {
     expect(isMailProviderTarget('https://GMAIL.googleapis.com./gmail/v1/users/me/settings/vacation')).toBe(true);
     expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me/MailboxSettings')).toBe(true);
@@ -87,6 +93,7 @@ describe('isMailProviderTarget', () => {
     'https://graph.microsoft.com/v1.0/me/drive/items/1',
     'https://graph.microsoft.com/v1.0/me/drive/root:/messages/a.xlsx:',
     "https://graph.microsoft.com/v1.0/users('abc')/drive/items/1",
+    'https://graph.microsoft.com/v1.0/users/x/joinedTeams/t/channels/c/messages/m',
     'https://www.googleapis.com/batch/drive/v3',
     'https://storage.googleapis.com/batch/storage/v1',
     'https://graph.microsoft.com/v1.0/teams/t1/channels/c1/messages/m1',
