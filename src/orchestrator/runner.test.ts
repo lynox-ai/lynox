@@ -172,6 +172,122 @@ describe('runManifest — on_failure', () => {
   });
 });
 
+describe('runManifest — a declared gate this run cannot apply is refused, not skipped', () => {
+  // A declared gate reads as "this needs approval". Skipping it silently runs the step as if
+  // nobody had asked, so the run refuses before the first step instead. Each refusal case
+  // asserts the refusal AND, through `onStepStart`, that no step started: a refusal raised
+  // after a step would come too late. (`mockSpawnInline` would not do as that witness: a
+  // `pipeline` step never reaches it, so it would pass vacuously there.)
+  const approving: GateAdapter = {
+    submit: async () => 'approval-id',
+    waitForDecision: async (): Promise<GateDecision> => ({ status: 'approved' }),
+  };
+
+  it('refuses gate_points without a gateAdapter, naming the gate and the remedy', async () => {
+    const onStepStart = vi.fn();
+    const manifest: Manifest = {
+      ...MANIFEST,
+      gate_points: ['step-1'],
+      agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 't' }],
+    };
+    await expect(runManifest(manifest, CONFIG, { parentTools: [], hooks: { onStepStart } })).rejects.toThrow(
+      /declares gate_points \(step-1\) but this run has no gateAdapter.*Pass a gateAdapter/,
+    );
+    expect(onStepStart).not.toHaveBeenCalled();
+  });
+
+  it('refuses before the run starts, even when the offending step is not the first', async () => {
+    // Every other case here has one step, so a check run lazily per step, or after the run
+    // row is written, would pass them all. Two steps with the offender second pins the order:
+    // no step starts, and the run itself never starts (no `onRunStart`, so no run row).
+    const onStepStart = vi.fn();
+    const onRunStart = vi.fn();
+    const manifest: Manifest = {
+      ...MANIFEST,
+      manifest_version: '1.1',
+      execution: 'sequential',
+      agents: [
+        { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 't' },
+        { id: 'step-2', agent: 'step-2', runtime: 'inline', task: 't', tool_gates: ['http_request'], input_from: ['step-1'] },
+      ],
+    };
+    await expect(runManifest(manifest, CONFIG, {
+      parentTools: [],
+      gateAdapter: approving,
+      hooks: { onStepStart, onRunStart },
+    })).rejects.toThrow(/Step "step-2".*on the "inline" runtime, which does not apply them/);
+    expect(onRunStart).not.toHaveBeenCalled();
+    expect(onStepStart).not.toHaveBeenCalled();
+  });
+
+  it('refuses a gate point naming a step that does not exist, even WITH a gateAdapter', async () => {
+    // Matched by exact id, so `send-mail` for a step called `send_mail` would never fire.
+    const onStepStart = vi.fn();
+    const manifest: Manifest = {
+      ...MANIFEST,
+      gate_points: ['send-mail'],
+      agents: [{ id: 'send_mail', agent: 'agent-a', runtime: 'mock' }],
+    };
+    await expect(runManifest(manifest, CONFIG, {
+      mockResponses: new Map([['agent-a', 'ok']]),
+      gateAdapter: approving,
+      hooks: { onStepStart },
+    })).rejects.toThrow(/gate_points for step ids that do not exist \(send-mail\).*Steps in this manifest: send_mail\. Correct the ids/);
+    expect(onStepStart).not.toHaveBeenCalled();
+  });
+
+  it('refuses tool_gates on an agent step without a gateAdapter', async () => {
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'agent', tool_gates: ['http_request'] }],
+    };
+    const onStepStart = vi.fn();
+    await expect(runManifest(manifest, CONFIG, {
+      mockResponses: new Map([['agent-a', 'ok']]),
+      hooks: { onStepStart },
+    })).rejects.toThrow(/Step "step-1".*declares tool_gates \(http_request\) but this run has no gateAdapter/);
+    expect(onStepStart).not.toHaveBeenCalled();
+  });
+
+  it.each(['inline', 'pipeline'] as const)(
+    'refuses tool_gates on the %s runtime even WITH a gateAdapter, because it does not apply them',
+    async (runtime) => {
+      const onStepStart = vi.fn();
+      const manifest: Manifest = {
+        ...MANIFEST,
+        agents: [{ id: 'step-1', agent: 'step-1', runtime, task: 't', tool_gates: ['http_request'] }],
+      };
+      await expect(runManifest(manifest, CONFIG, {
+        parentTools: [],
+        gateAdapter: approving,
+        hooks: { onStepStart },
+      })).rejects.toThrow(
+        new RegExp(`declares tool_gates \\(http_request\\) on the "${runtime}" runtime, which does not apply them`),
+      );
+      expect(onStepStart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not refuse an agent step with tool_gates when a gateAdapter is present', async () => {
+    // The positive witness for the check, and only for the check: a check that refused EVERY
+    // declared gate would pass the cases above. It does NOT show that `tool_gates` gates a tool.
+    // `mockResponses` sends the step to `spawnMock`, which wraps nothing, so the one `submit`
+    // here comes from the gate point. The wrapping itself is `wrapWithGate`'s, tested beside it.
+    const submit = vi.fn().mockResolvedValue('approval-id');
+    const manifest: Manifest = {
+      ...MANIFEST,
+      gate_points: ['step-1'],
+      agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'agent', tool_gates: ['http_request'] }],
+    };
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses: new Map([['agent-a', 'ok']]),
+      gateAdapter: { ...approving, submit },
+    });
+    expect(state.status).toBe('completed');
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('runManifest — gate points', () => {
   it('calls onGateSubmit and onGateDecision hooks when gate approves', async () => {
     const manifest: Manifest = {

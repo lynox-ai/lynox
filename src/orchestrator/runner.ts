@@ -240,6 +240,67 @@ function getExecutionMode(m: Manifest): 'sequential' | 'parallel' {
   return m.execution ?? 'parallel';
 }
 
+/**
+ * Refuse a manifest whose approval gates this run cannot enforce.
+ *
+ * A declared gate reads as "this needs approval", so a gate that is silently not applied is the
+ * dangerous failure: the step runs as if nobody had asked for one. Three cases, all checked
+ * before the first step:
+ *  - a `gate_points` entry that names no step in the manifest, which can never match;
+ *  - no `gateAdapter` on this run: nothing can ask anyone, so `gate_points` and `tool_gates`
+ *    would both be skipped;
+ *  - `tool_gates` on a step whose runtime does not apply them. Only the `agent` runtime wraps
+ *    tools with the adapter; `inline` and `pipeline` steps build their tools without it, so
+ *    an adapter on the run does not help them.
+ *
+ * The adapter and runtime cases are refused at run time rather than in `validateManifest`
+ * because the declaration itself is valid: a caller that passes an adapter gets gates on the
+ * paths that apply them. Manifests built
+ * inside this package (`buildManifest`, the nested pipeline manifest) declare neither field.
+ */
+function assertGatesEnforceable(manifest: Manifest, hasGateAdapter: boolean): void {
+  const name = manifest.name ?? '(unnamed)';
+  const gatePoints = manifest.gate_points ?? [];
+  // A gate point is matched against step ids by exact string, so a typo is a gate that never
+  // fires: the same silent skip as a missing adapter, with the adapter present.
+  const stepIds = new Set(manifest.agents.map((s) => s.id));
+  const unknown = gatePoints.filter((id) => !stepIds.has(id));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Manifest "${name}" declares gate_points for step ids that do not exist (${unknown.join(', ')}), ` +
+      `so those gates would never fire. Steps in this manifest: ${[...stepIds].join(', ')}. ` +
+      `Correct the ids or remove them from gate_points.`,
+    );
+  }
+  if (!hasGateAdapter) {
+    if (gatePoints.length > 0) {
+      throw new Error(
+        `Manifest "${name}" declares gate_points (${gatePoints.join(', ')}) but this run has no gateAdapter, ` +
+        `so no approval could be asked for and the gates would be skipped. ` +
+        `Pass a gateAdapter to runManifest, or remove gate_points.`,
+      );
+    }
+  }
+  for (const step of manifest.agents) {
+    const toolGates = step.tool_gates ?? [];
+    if (toolGates.length === 0) continue;
+    if (step.runtime !== 'agent') {
+      throw new Error(
+        `Step "${step.id}" in manifest "${name}" declares tool_gates (${toolGates.join(', ')}) on the ` +
+        `"${step.runtime}" runtime, which does not apply them, so those tools would run without approval. ` +
+        `Use runtime "agent" for gated tools, or remove tool_gates from this step.`,
+      );
+    }
+    if (!hasGateAdapter) {
+      throw new Error(
+        `Step "${step.id}" in manifest "${name}" declares tool_gates (${toolGates.join(', ')}) but this run ` +
+        `has no gateAdapter, so those tools would run without approval. ` +
+        `Pass a gateAdapter to runManifest, or remove tool_gates from this step.`,
+      );
+    }
+  }
+}
+
 export async function runManifest(
   manifest: Manifest,
   config: LynoxUserConfig,
@@ -256,6 +317,8 @@ export async function runManifest(
       `Pass it through validateManifest() before runManifest() to surface schema errors.`,
     );
   }
+
+  assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
 
   // Per-run prompt budget. Allocated only at the top-level run (depth === 0)
   // so sub-pipelines share the parent's cap; autonomous runs (no parent
