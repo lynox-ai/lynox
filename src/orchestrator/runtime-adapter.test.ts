@@ -40,6 +40,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 
 import { Agent } from '../core/agent.js';
 import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
@@ -2009,5 +2010,75 @@ describe('wrapWithGate — the approval wrapper is transparent to a ToolSoftFail
     };
     const wrapped = wrapWithGate(tool, approvingGate, meta);
     await expect(wrapped.handler({}, {} as never)).rejects.toBe(soft);
+  });
+
+  // The other half of the gate: a decision that is not `approved` must stop the call
+  // BEFORE the wrapped handler runs. The approve test above cannot see this — a wrapper
+  // that ignored the decision and always called through would pass it.
+  it.each([
+    [{ status: 'rejected', reason: 'no' }, /rejected by gate: no/],
+    [{ status: 'timeout' }, /gate timed out/],
+  ])('refuses on %o without calling the tool', async (decision, message) => {
+    const handler = vi.fn().mockResolvedValue('must not run');
+    const tool: ToolEntry = {
+      definition: { name: 'http_request', description: '', input_schema: { type: 'object', properties: {} } },
+      handler,
+    };
+    const gate = {
+      submit: vi.fn().mockResolvedValue('approval-2'),
+      waitForDecision: vi.fn().mockResolvedValue(decision),
+    } as never;
+    await expect(wrapWithGate(tool, gate, meta).handler({}, {} as never)).rejects.toThrow(message);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  // Both wrappers that REBUILD a ToolEntry, in one test, because the defect is the shape
+  // and not the field. Naming the fields to keep has cost this codebase `endsTurn` (a
+  // terminal tool stopped ending its turn) and `detailedGuidance` (on-use guidance stopped
+  // firing) at the session-side wrapper, and this wrapper had the same shape until the
+  // spread. A test per field would be the fix per instance; this one asserts that NOTHING
+  // but the handler changes.
+  //
+  // The limits, stated rather than implied, because this test cannot carry them:
+  //  · it covers the fields that exist TODAY. A field added to ToolEntry later is covered
+  //    by the spread in the production code, not by this fixture — the fixture would have
+  //    to grow, and nothing forces it to. Test files are outside the `tsc` scope here
+  //    (`tsconfig.json` excludes `src/**/*.test.ts`, measured), so a `satisfies
+  //    Required<ToolEntry>` weld on the fixture would compile-check nothing.
+  //  · it covers the two wrappers that exist. A third one, written later, has no test here
+  //    and no test anywhere until someone adds it to this list.
+  it('neither wrapper loses a field: everything but the handler survives', async () => {
+    const original = {
+      definition: { name: 'probe_tool', description: 'd', input_schema: { type: 'object', properties: {} } },
+      handler: vi.fn().mockResolvedValue('original'),
+      requiresConfirmation: true,
+      redactInputForAudit: (i: unknown) => i,
+      destructive: { mode: 'external' as const },
+      endsTurn: true,
+      detailedGuidance: 'guidance that must survive',
+      undo: 'restorable' as const,
+    } satisfies ToolEntry;
+
+    const passThroughPlugins = {
+      fireToolGate: vi.fn().mockResolvedValue(true),
+    } as unknown as Parameters<typeof applyPluginToolGate>[1];
+
+    const wrappers: Array<[string, ToolEntry]> = [
+      ['wrapWithGate', wrapWithGate(original, approvingGate, meta)],
+      ['applyPluginToolGate', applyPluginToolGate([original], passThroughPlugins)[0]!],
+    ];
+
+    for (const [name, wrapped] of wrappers) {
+      // The key set first: a rebuild that names its fields shows up here even when every
+      // value it did copy is correct.
+      expect(Object.keys(wrapped).sort(), name).toEqual(Object.keys(original).sort());
+      for (const key of Object.keys(original) as Array<keyof typeof original>) {
+        if (key === 'handler') continue;
+        expect(wrapped[key], `${name} must carry ${key}`).toBe(original[key]);
+      }
+      // And the handler IS replaced — otherwise the two asserts above would also pass for
+      // a wrapper that returned its input untouched, which would gate nothing.
+      expect(wrapped.handler, `${name} must wrap the handler`).not.toBe(original.handler);
+    }
   });
 });
