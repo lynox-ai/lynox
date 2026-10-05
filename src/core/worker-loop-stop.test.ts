@@ -49,6 +49,30 @@ const wf = vi.hoisted(() => ({
   signal: undefined as (() => void) | undefined,
   wait: undefined as Promise<void> | undefined,
 }));
+/**
+ * The pinned fetch, gated — so a WATCH run can be caught in the window before its
+ * session exists. The watch path awaits this for up to 30 seconds with nothing to
+ * abort, and that window is a claim this file has to be able to make.
+ *
+ * ⚠ Spread over the real module: `network-guard` is imported by other code in this
+ * graph, so a bare factory would delete exports nothing here asks for but something
+ * there does. And `await undefined` resolves, so with no gate set this is an ordinary
+ * immediate fetch for every other test in the file.
+ */
+const net = vi.hoisted(() => ({
+  signal: undefined as (() => void) | undefined,
+  wait: undefined as Promise<void> | undefined,
+}));
+vi.mock('./network-guard.js', async (orig) => ({
+  ...(await orig() as Record<string, unknown>),
+  fetchPinned: async () => {
+    net.signal?.();
+    await net.wait;
+    return new Response('<p>the page has changed</p>', {
+      status: 200, headers: { 'content-type': 'text/html' },
+    });
+  },
+}));
 vi.mock('./saved-workflow-runner.js', () => ({
   runGuardedSavedWorkflow: async (...args: unknown[]) => {
     wf.calls.push(args);
@@ -87,11 +111,17 @@ interface Harness {
   parked: Promise<void>;
   tick: Promise<void> | undefined;
   abortCalls: () => number;
+  /** Resolves once the watch run is INSIDE its fetch — `watch: true` only. */
+  fetching: Promise<void>;
+  /** Lets the gated fetch return — `watch: true` only. */
+  finishFetch: () => void;
   /** True once a parked turn has come back from its question. */
   resumed: () => boolean;
+  /** What the notification router was asked to send — `withChannels` only. */
+  notifications: () => Array<{ title: string; body: string }>;
 }
 
-function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean }): Harness {
+function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean; withChannels?: boolean; watch?: boolean }): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -110,7 +140,13 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
   // found this: a mutant that sent a stop INTO the backoff re-fire survived a
   // `retry_count` assertion written against a cron fixture, because the fixture could
   // never execute the line being mutated. The retriable one-shot below is the witness.
-  history.insertTrigger(opts?.retriable === true
+  if (opts?.watch === true) {
+    history.insertTrigger({
+      id: 'trg-stop', title: 'Watch a page', source: 'watch', effect: 'run_agent',
+      watchConfig: JSON.stringify({ url: 'https://example.test/p', interval_minutes: 60 }),
+      nextRunAt: '2026-01-01T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z',
+    });
+  } else history.insertTrigger(opts?.retriable === true
     ? {
         id: 'trg-stop', title: 'One-shot import', source: 'user', effect: 'run_agent',
         nextRunAt: '2026-01-01T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z',
@@ -125,6 +161,17 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
   let signalRunning: () => void;
   const running = new Promise<void>(resolve => { signalRunning = resolve; });
   let rejectTurn: ((e: Error) => void) | undefined;
+  let signalFetching: () => void;
+  const fetching = new Promise<void>(resolve => { signalFetching = resolve; });
+  let openFetch: () => void;
+  const fetchGate = new Promise<void>(resolve => { openFetch = resolve; });
+  if (opts?.watch === true) {
+    net.signal = () => signalFetching();
+    net.wait = fetchGate;
+    // Unconditionally, like every other release in this file: a gate left shut by a
+    // failing assertion above it hangs the run until vitest's hook timeout.
+    releases.push(() => { openFetch(); net.signal = undefined; net.wait = undefined; });
+  }
 
   let resumed = false;
   const session = {
@@ -167,9 +214,13 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
     escalateToUser: () => null,
   } as unknown as Engine;
 
+  // ⚠ `hasChannels` decides whether the loop even composes a notification, so a
+  // harness without channels cannot see the suppression bug: the run ends silently
+  // either way. The test that needs it turns them on.
+  const sent: Array<{ title: string; body: string }> = [];
   const router = {
-    hasChannels: () => false,
-    notify: vi.fn().mockResolvedValue(undefined),
+    hasChannels: () => opts?.withChannels === true,
+    notify: vi.fn((payload: { title: string; body: string }) => { sent.push(payload); return Promise.resolve(undefined); }),
   } as unknown as NotificationRouter;
 
   releases.push(() => { rejectTurn?.(new Error('released by teardown')); });
@@ -189,7 +240,10 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
   return {
     loop, history, running, parked, tick,
     abortCalls: () => session.abort.mock.calls.length,
+    fetching,
+    finishFetch: () => openFetch(),
     resumed: () => resumed,
+    notifications: () => sent,
   };
 }
 
@@ -353,6 +407,56 @@ describe('stopping a running background task', () => {
     await new Promise(r => setTimeout(r, 50));
     expect(h.abortCalls()).toBe(0);
     expect(h.history.getTrigger('trg-stop')?.last_run_status ?? null).toBe(null);
+  });
+
+  it('a SHUTDOWN racing the stop does not turn it back into a RETRIED FAILURE', async () => {
+    // ⛔ The owner's next move after stopping a runaway task is to restart the
+    // container, so this race is the normal case rather than a corner. `stop()` CLEARS
+    // the map, and the stopped run's error is still unwinding — in the real system
+    // through `Session.run`'s own catch, which awaits a dynamic import, a run update,
+    // the after-run hook loop and a totals rollup before it rethrows.
+    //
+    // Read `stopRequested` through a fresh `activeTasks.get()` and the miss reads as
+    // "not stopped": status `failed`, into the backoff branch, and the run the owner
+    // stopped RESTARTS. The fixture is the retriable one-shot because that is the only
+    // shape whose retry branch can execute.
+    const h = makeHarness({ retriable: true });
+    await h.running;
+
+    h.loop.stopTask('trg-stop');
+    h.loop.stop();
+    await h.tick;
+
+    await waitUntil(
+      'the stopped run to be recorded after the shutdown',
+      () => (h.history.getTrigger('trg-stop')?.last_run_status ?? null) !== null,
+    );
+    const after = h.history.getTrigger('trg-stop')!;
+    expect(after.last_run_status).toBe('stopped');
+    expect(after.retry_count ?? 0).toBe(0);
+    expect(after.next_run_at ?? '').toBe('');
+  });
+
+  it('a stopped retriable one-shot is NOT retried and NOT silent', async () => {
+    // ⛔ Two outcomes that used to disagree. `willRetry` was computed from the retry
+    // counters alone, so after a stop it still read "it will try again" — while
+    // `recordTaskRun` sends only `failed` and `timeout` into the backoff. Its SECOND
+    // job is to suppress the failure notification, so the run ended in total silence:
+    // no retry, and no word to the owner that nothing would happen again.
+    const h = makeHarness({ retriable: true, withChannels: true });
+    await h.running;
+
+    h.loop.stopTask('trg-stop');
+    await h.tick;
+
+    await waitUntil('the owner to be told', () => h.notifications().length > 0);
+    const note = h.notifications()[0]!;
+    // And it says the right thing: "Explain why this failed" is the wrong offer for a
+    // run that did what it was told.
+    expect(note.body).toContain('Stopped on your instruction');
+    expect(note.body).not.toContain('Task failed');
+    expect(note.title).not.toContain('\u2717');
+    expect((h.history.getTrigger('trg-stop')?.retry_count ?? 0)).toBe(0);
   });
 
   it('a PARKED run is stopped through its WAIT — the one handle that certainly ends', async () => {
@@ -562,6 +666,33 @@ describe('what a stop can reach — one case per effect class', () => {
     expect(wf.calls[0]!.some(a => a instanceof AbortSignal)).toBe(false);
     expect(JSON.stringify(wf.calls[0]![2] ?? null)).not.toContain('signal');
     expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('a WATCH run is unstoppable while it FETCHES and stoppable once it analyses', async () => {
+    // ⛔ Two answers for one effect, which is why the question is per PHASE and not per
+    // effect name. Everything before the analysis session — the config parse, a fetch
+    // with a 30-second ceiling, the body read, the hash compare — runs with nothing to
+    // abort. Telling the owner "stopped" there would be the same false success as for a
+    // bulk write, only harder to notice because the same task is stoppable a moment
+    // later.
+    const h = makeHarness({ watch: true });
+    await h.fetching;
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'unstoppable', effect: 'run_agent' });
+    // …and the refusal changed nothing: the run is still going.
+    expect(h.abortCalls()).toBe(0);
+
+    h.finishFetch();
+    await h.running;
+
+    // ⛔ THE SECOND HALF, and the mutant it exists for: delete the `attachSession` call
+    // in `executeWatch` and the watch path keeps NO stop handle at all — every answer
+    // here stays `unstoppable` and nobody notices, because the only other test of this
+    // path is the standard one.
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'session' });
+    await waitUntil(
+      'the watch analysis to end as a stop',
+      () => h.history.getTrigger('trg-stop')?.last_run_status === 'stopped',
+    );
   });
 
   it('stopHandleOf prefers the CERTAIN handle and reports none when there is none', () => {
