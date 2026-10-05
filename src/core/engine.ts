@@ -1670,10 +1670,14 @@ export class Engine {
     } else if (process.env['LYNOX_MANAGED_INSTANCE_ID'] && this.secretVault?.get(GOOGLE_OAUTH_TOKENS_KEY)) {
       // A brokered tenant never resolves a pair, but its connection survives a restart in the
       // vault. Build the credential from it here, as `ensureGoogleAuth` does at claim time —
-      // and before the mail context below, which takes the credential as a value. Only when a
-      // token is stored: a managed instance without a connection keeps `getGoogleAuth()` null.
+      // and before the mail context below, which takes the credential as a value. Kept only
+      // when the stored token carries the broker's refresh handle: without a pair, a token without
+      // one (or one that does not parse) cannot be refreshed, so `getGoogleAuth()` stays null and
+      // the user is shown "not connected" and can connect again. Nothing is constructed at all
+      // when no token is stored.
       try {
-        this._googleAuth = await this._createGoogleAuth(null);
+        const auth = await this._createGoogleAuth(null);
+        if (auth.hasBrokerRefreshHandle()) this._googleAuth = auth;
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
