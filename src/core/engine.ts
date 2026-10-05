@@ -1667,6 +1667,16 @@ export class Engine {
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
+    } else if (process.env['LYNOX_MANAGED_INSTANCE_ID'] && this.secretVault?.get(GOOGLE_OAUTH_TOKENS_KEY)) {
+      // A brokered tenant never resolves a pair, but its connection survives a restart in the
+      // vault. Build the credential from it here, as `ensureGoogleAuth` does at claim time —
+      // and before the mail context below, which takes the credential as a value. Only when a
+      // token is stored: a managed instance without a connection keeps `getGoogleAuth()` null.
+      try {
+        this._googleAuth = await this._createGoogleAuth(null);
+      } catch {
+        // Google Workspace init failed — non-critical, continue without it
+      }
     }
 
     // Provider-agnostic Mail integration (IMAP/SMTP + OAuth-Gmail).
