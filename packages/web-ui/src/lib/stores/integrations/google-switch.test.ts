@@ -86,3 +86,37 @@ describe('performSwitchToManaged — nothing proceeds on a failed step', () => {
 		expect((await fn('/api/google/reload', { method: 'POST' })).ok).toBe(true);
 	});
 });
+
+describe('revokeNotice — the page reports a revocation only when Google confirmed it', () => {
+	it('says revoked when the engine reports Google confirmed it', async () => {
+		const { revokeNotice } = await import('./google-switch.js');
+		expect(revokeNotice({ ok: true, revoked_at_google: true })).toEqual({ key: 'integrations.google_revoked', type: 'success' });
+	});
+
+	it('says disconnected here only, when Google did not confirm', async () => {
+		const { revokeNotice } = await import('./google-switch.js');
+		expect(revokeNotice({ ok: true, revoked_at_google: false })).toEqual({ key: 'integrations.google_revoked_locally_only', type: 'info' });
+	});
+
+	it('does not read a missing field as a revocation (an older engine sends none)', async () => {
+		const { revokeNotice } = await import('./google-switch.js');
+		expect(revokeNotice({ ok: true }).type).toBe('info');
+		expect(revokeNotice(null).type).toBe('info');
+	});
+});
+
+describe('revokeGoogle reports through revokeNotice', () => {
+	// A source guard, because the store is not injectable. It pins only that the
+	// call is there — the behaviour of the decision is pinned above, on the pure
+	// function. Without the call, the page would report a revocation whatever
+	// the engine answered.
+	it('builds its message from revokeNotice', async () => {
+		const { readFileSync } = await import('node:fs');
+		const { fileURLToPath } = await import('node:url');
+		const source = readFileSync(fileURLToPath(new URL('./google.svelte.ts', import.meta.url)), 'utf-8');
+		const start = source.indexOf('export async function revokeGoogle(');
+		expect(start, 'revokeGoogle not found — this guard is pinned to a name that moved').toBeGreaterThan(-1);
+		const body = source.slice(start, source.indexOf('\n}\n', start));
+		expect(body.replace(/\/\/.*$/gm, '')).toMatch(/revokeNotice\(/);
+	});
+});

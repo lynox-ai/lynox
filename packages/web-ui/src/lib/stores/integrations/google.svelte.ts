@@ -20,7 +20,7 @@ import {
 	type ScopeMode,
 	type ServerScopeMode,
 } from './google-scope-labels.js';
-import { deleteClientPair, performSwitchToManaged } from './google-switch.js';
+import { deleteClientPair, performSwitchToManaged, revokeNotice } from './google-switch.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -298,6 +298,10 @@ export async function revokeGoogle(): Promise<void> {
 	try {
 		const res = await fetch(`${getApiBase()}/google/revoke`, { method: 'POST' });
 		if (!res.ok) throw new Error();
+		// The connection is gone either way; say whether Google confirmed it too, so the
+		// page does not report a revocation that did not take place.
+		const notice = revokeNotice(await res.json().catch(() => ({})));
+		addToast(t(notice.key), notice.type, notice.type === 'info' ? 12000 : undefined);
 	} catch {
 		addToast(t('common.save_failed'), 'error');
 	}

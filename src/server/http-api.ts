@@ -7475,8 +7475,11 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/google/revoke', async (_req, res) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
-      await google.revoke();
-      jsonResponse(res, 200, { ok: true });
+      // `ok` is the local disconnect, which always happens; `revoked_at_google`
+      // says whether Google confirmed the revocation, so the page does not
+      // report one that did not take place.
+      const { revokedAtGoogle } = await google.revoke();
+      jsonResponse(res, 200, { ok: true, revoked_at_google: revokedAtGoogle });
     });
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back
