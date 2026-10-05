@@ -2412,14 +2412,6 @@ export class Engine {
   }
 
   /**
-   * Re-build the Google credential after a credential change.
-   *
-   * It no longer touches the registry: the tools are registered from boot and
-   * read `this._googleAuth` through a resolver, so swapping the instance here
-   * is the whole of the change. That is also why the resolver must not memoise
-   * — see `google/index.ts`.
-   */
-  /**
    * The credential of a brokered connection stored in the vault, or null.
    *
    * A brokered tenant never resolves a client pair, but its connection survives in the vault.
@@ -2439,6 +2431,14 @@ export class Engine {
     }
   }
 
+  /**
+   * Re-build the Google credential after a credential change.
+   *
+   * It no longer touches the registry: the tools are registered from boot and
+   * read `this._googleAuth` through a resolver, so swapping the instance here
+   * is the whole of the change. That is also why the resolver must not memoise
+   * — see `google/index.ts`.
+   */
   async reloadGoogle(): Promise<boolean> {
     const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = pair?.source ?? null;

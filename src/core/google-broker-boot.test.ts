@@ -128,6 +128,15 @@ describe('Engine boot — a brokered Google connection is rebuilt from the vault
     expect(auth?.hasBrokerRefreshHandle()).toBe(true);
   });
 
+  it('drops the credential on a reload once the connection was ended', async () => {
+    // A reload must re-read the vault, not keep whatever instance it found: after
+    // a disconnect the token is gone, and the connection must not come back.
+    const engine = await boot({ managed: true, token: JSON.stringify(BROKERED_TOKEN) });
+    engine.getGoogleAuth()?.disconnect();
+    expect(await engine.reloadGoogle()).toBe(false);
+    expect(engine.getGoogleAuth()).toBeNull();
+  });
+
   it('leaves a managed instance without a stored token unconnected after a reload', async () => {
     const engine = await boot({ managed: true, token: null });
     expect(await engine.reloadGoogle()).toBe(false);
