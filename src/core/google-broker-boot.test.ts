@@ -85,6 +85,8 @@ describe('Engine boot — a brokered Google connection is rebuilt from the vault
 
   it('hands that credential to the mail context, which takes it as a value at boot', async () => {
     const engine = await boot({ managed: true, token: true });
+    // Not null first: with no credential built at all, both sides are null and `toBe` would pass.
+    expect(mailContextAuth(engine), 'the mail context must hold a credential').not.toBeNull();
     expect(mailContextAuth(engine), 'the mail context must hold the same credential').toBe(engine.getGoogleAuth());
   });
 
