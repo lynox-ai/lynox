@@ -595,6 +595,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('test-token'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     const ctxWithAuth = new MailContext(stateDb, backend, undefined, {}, auth);
@@ -611,6 +612,27 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
     }
   });
 
+  it('registers no Gmail provider for a service account, whatever scopes its token asks for', async () => {
+    // A service account acts as itself: a Gmail scope on its token reaches no
+    // user's mailbox. `hasScope` says yes here; `hasUserScope` is the question.
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'sa@example.iam.gserviceaccount.com' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const auth = {
+      isAuthenticated: vi.fn().mockReturnValue(true),
+      getAccessToken: vi.fn().mockResolvedValue('t'),
+      hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(false),
+    } as unknown as import('../google/google-auth.js').GoogleAuth;
+    const ctxWithAuth = new MailContext(stateDb, backend, undefined, {}, auth);
+    try {
+      await ctxWithAuth.init();
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
+    } finally {
+      await ctxWithAuth.close();
+    }
+  });
+
   it('is idempotent — second engine boot does not insert a duplicate row', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ emailAddress: 'user@example.com' }), {
       status: 200, headers: { 'Content-Type': 'application/json' },
@@ -619,6 +641,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('t'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     const ctx1 = new MailContext(stateDb, backend, undefined, {}, auth);
@@ -640,6 +663,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(false),
       getAccessToken: vi.fn(),
       hasScope: vi.fn(),
+      hasUserScope: vi.fn(),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
@@ -660,6 +684,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('t'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     // Pre-seed an IMAP row + creds so init() registers both
@@ -683,6 +708,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('t'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
@@ -716,6 +742,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('t'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
@@ -739,6 +766,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('t'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
@@ -845,6 +873,7 @@ describe('MailContext — persisted default flag', () => {
       isAuthenticated: vi.fn().mockReturnValue(true),
       getAccessToken: vi.fn().mockResolvedValue('t'),
       hasScope: vi.fn().mockReturnValue(true),
+      hasUserScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     try {
@@ -980,6 +1009,7 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
       auth: {
         isAuthenticated: () => true,
         hasScope: (s: string) => scopes.includes(s),
+        hasUserScope: (s: string) => scopes.includes(s),
         getAccessToken: async () => { calls++; return 'token'; },
       },
       tokenCalls: () => calls,
@@ -1094,6 +1124,7 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     const live = {
       isAuthenticated: () => true,
       hasScope: (s: string) => scopes.includes(s),
+      hasUserScope: (s: string) => scopes.includes(s),
       getAccessToken: async () => 'token',
     };
     const c = new MailContext(stateDb, backend, undefined, {}, live as never);
@@ -1123,6 +1154,7 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     const restarted = new MailContext(stateDb, backend, undefined, {}, {
       isAuthenticated: () => true,
       hasScope: (s: string) => (READONLY as readonly string[]).includes(s),
+      hasUserScope: (s: string) => (READONLY as readonly string[]).includes(s),
       getAccessToken: async () => 'token',
     } as never);
     try {

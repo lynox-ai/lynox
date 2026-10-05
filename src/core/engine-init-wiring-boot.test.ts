@@ -46,7 +46,7 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     // whose own `vault.key` file is never created and whose referenced path is then deleted by
     // `afterEach`. No assertion depended on it, but it is exactly the uncontrolled cross-case
     // state the comment below argues against for the other seven.
-    'LYNOX_VAULT_KEY',
+    'LYNOX_VAULT_KEY', 'GOOGLE_SERVICE_ACCOUNT_KEY',
   ] as const;
   const saved = new Map<string, string | undefined>();
 
@@ -172,6 +172,20 @@ describe('Engine boot — the two init() gates are actually wired', () => {
 
     expect(engine.getBackupManager()).not.toBeNull();
     expect(engine.getBackupManager()!.getGDriveUploader()).not.toBeNull();
+  });
+
+  it('gives the Drive uploader no scope while calls run on a service account', async () => {
+    // A service account acts as itself: its own Drive is not where a user's
+    // backup belongs, even though its token asks for drive.file by default.
+    freshDataDir('drive-sa');
+    setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
+    setEnv('GOOGLE_SERVICE_ACCOUNT_KEY', '/tmp/lynox-test-sa-key.json');
+    const engine = await boot();
+
+    expect(engine.getGoogleAuth()?.usesServiceAccount(), 'no user grant is stored, so calls use the service account').toBe(true);
+    const uploader = engine.getBackupManager()!.getGDriveUploader() as unknown as { auth: { hasScope(s: string): boolean } };
+    expect(uploader.auth.hasScope('https://www.googleapis.com/auth/drive.file')).toBe(false);
   });
 
   it('refuses the Drive uploader on a CP-provisioned instance', async () => {
