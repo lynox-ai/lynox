@@ -1953,6 +1953,15 @@ export class WorkerLoop {
     // nothing, and the run became unstoppable exactly after a shutdown had asked it to
     // stop. The entry object outlives its map entry — the rule `attachSession`
     // documents, which this one site did not follow.
+    //
+    // ⛔ AND NO TEST CAN SEE THIS LINE, measured rather than assumed: replacing it with
+    // a fresh lookup at the attach site below SURVIVES the whole suite. The reason is
+    // structural, so do not go looking for the test that is missing — the only reader of
+    // the entry is `stopTask`, which resolves it THROUGH the map, so the two versions
+    // differ exactly when the map has been cleared, and then neither is reachable. It is
+    // kept because it follows the rule this file states and cannot be worse; what it
+    // buys is a second reader being safe, not a defect closed today. The `attachSession`
+    // CALL below is covered (deleting it fails the watch test).
     const stopEntry = this.activeTasks.get(task.id);
     let config: { url?: string; interval_minutes?: number; selector?: string; last_hash?: string };
     try {
