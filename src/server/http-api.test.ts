@@ -8192,6 +8192,15 @@ describe('LynoxHTTPApi', () => {
       expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
       expect(mockGoogleDisconnect).not.toHaveBeenCalled();
       expect(await res.json()).toEqual({ ok: true, revoked_at_google: false });
+
+      // And confirmed, so a route that always reports `false` fails too.
+      const confirmed = await jsonFetch('/api/google/revoke', { method: 'POST' });
+      expect(await confirmed.json()).toEqual({ ok: true, revoked_at_google: true });
+      // That second request is paid back: this file shares ONE per-IP window
+      // (every request comes from 127.0.0.1), and a request added here can tip a
+      // test thousands of lines away into a 429 that names no cause.
+      const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);
     });
   });
 

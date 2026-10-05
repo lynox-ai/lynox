@@ -636,3 +636,21 @@ describe('revoke says whether Google confirmed it', () => {
     expect(deleted).toContain('GOOGLE_OAUTH_TOKENS');
   });
 });
+
+describe('revoke sends the token Google can still revoke the grant with', () => {
+  it('sends the refresh token when the grant has one, not the access token that may have expired', async () => {
+    mockFetch.mockResolvedValueOnce(okJson());
+    const { GoogleAuth } = await import('../integrations/google/google-auth.js');
+    const store = new Map<string, string>([['GOOGLE_OAUTH_TOKENS', JSON.stringify({
+      access_token: 'access-expired', refresh_token: 'refresh-still-valid',
+      expires_at: Date.now() - 3600_000, scopes: [],
+    })]]);
+    const auth = new GoogleAuth({
+      clientId: 'id', clientSecret: 'secret',
+      vault: { get: (k: string) => store.get(k) ?? null, set: () => undefined, delete: (k: string) => store.delete(k) } as never,
+    });
+    await auth.revoke();
+    const init = mockFetch.mock.calls[0]![1] as RequestInit;
+    expect(new URLSearchParams(String(init.body)).get('token')).toBe('refresh-still-valid');
+  });
+});
