@@ -168,6 +168,29 @@ export interface ActiveTask {
   controller: AbortController;
   /** Store id of the prompt this task is parked on; undefined while computing. */
   pendingPromptId?: string | undefined;
+  /**
+   * This RUN is being torn down — the process is going away, so a question it is parked
+   * on must outlive it rather than be drained.
+   *
+   * ⛔ Why a mark and not `outcome.status === 'aborted'` at the wait. The status says a
+   * wait was cut short; it does not say BY WHOM, and the causes want opposite
+   * bookkeeping: a teardown means the question must survive, while an owner's explicit
+   * stop of a running task aborts the SAME controller and means the opposite — that run
+   * is over because its owner ended it, so its question is moot. Keying on the status
+   * would leave the second case's pending row and `waiting` trigger standing until a
+   * sweep collected them.
+   *
+   * ⛔ AND IT LIVES ON THE ENTRY, not on the loop. A loop-level flag needed clearing in
+   * `start()` for a loop that is stopped and started again — a line with no production
+   * path (`Engine.shutdown()` drops the loop right after stopping it), so no test could
+   * cover it, which is a line that ships uncertified for a case nobody has. Per run, the
+   * state is fresh by construction: an entry is built per `executeTask` and never reused.
+   *
+   * ⚠ `stop()` has exactly one production caller, `Engine.shutdown()` (measured). That is
+   * what makes the teardown case the common one rather than a corner: every managed
+   * deploy takes this path.
+   */
+  tearingDown?: boolean | undefined;
   /** Stop the execution deadline while parked on a human, and re-arm after.
    *  Human think-time must not consume the task's compute budget. */
   pauseDeadline: () => void;
@@ -201,23 +224,6 @@ export function reservationEstimate(task: TriggerRecord): number {
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
-  /**
-   * This loop was STOPPED — the process is going away, so a parked question must
-   * outlive it rather than be drained.
-   *
-   * ⛔ Why a flag and not `outcome.status === 'aborted'` at the wait. The status says a
-   * wait was cut short; it does not say BY WHOM, and the causes want opposite
-   * bookkeeping. `stop()` means teardown and the question must survive. An owner's
-   * explicit stop of a running task aborts the SAME controller and means the opposite —
-   * the run is over because its owner ended it, so its question is moot. Keying on the
-   * status would make the second case leave a pending row and a `waiting` trigger
-   * standing until the sweep collects them.
-   *
-   * ⚠ `stop()` has exactly one production caller, `Engine.shutdown()` (measured, not
-   * assumed). That is what makes the shutdown case the common one rather than a corner:
-   * every managed deploy takes this path.
-   */
-  private tearingDown = false;
   private readonly activeTasks = new Map<string, ActiveTask>();
   /** Names this loop's runs in the lease column; another process's loop has its own. */
   private readonly leaseHolder = randomUUID();
@@ -233,16 +239,6 @@ export class WorkerLoop {
 
   start(): void {
     if (this.timer) return; // already running
-    // A loop that is started again is not tearing down. Without this a restarted loop
-    // would keep the flag for good and never drain a later park, leaking the row's slot
-    // in the partial unique index.
-    //
-    // ⚠ NO TEST KILLS THIS LINE, and the reason is that it has no production path today:
-    // `Engine.shutdown()` drops the loop (`this._workerLoop = null`) right after stopping
-    // it, so nothing restarts one outside tests. Measured as a surviving mutant rather
-    // than assumed covered. It stays because the alternative is a flag whose correctness
-    // depends on an object never being reused — a property no type enforces.
-    this.tearingDown = false;
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
     this.timer.unref(); // don't prevent process exit
     // Run immediately on start
@@ -250,18 +246,14 @@ export class WorkerLoop {
   }
 
   stop(): void {
-    // ⚠ Position does NOT matter here, and the comment that said it did was wrong:
-    // `settle()` in the prompt store calls `resolve()`, which queues a microtask rather
-    // than running the awaiting continuation, and `stop()` is synchronous throughout —
-    // so no reader can run before it returns, wherever in the body this sits. Measured:
-    // moving it to the last line kills nothing. It is written first because that is
-    // where the method's intent belongs, not because of an ordering hazard.
-    this.tearingDown = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     for (const [, active] of this.activeTasks) {
+      // Marked BEFORE the abort, which is what settles a parked wait — and on the entry,
+      // so the run's own continuation reads it from the object it already captured.
+      active.tearingDown = true;
       // No `resolve('Task cancelled.')` here any more. That string was handed to
       // a parked agent in the slot a USER ANSWER occupies, where it is not
       // distinguishable from one — the same failure `onboarding-promotion.ts`
@@ -331,21 +323,31 @@ export class WorkerLoop {
     const trigger = taskManager.getTrigger(triggerId);
     if (!trigger) return { ok: false, reason: 'not_found' };
     if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
-    // ⛔ A PARKED trigger is running too, and after a restart `activeTasks` cannot say
-    // so. In-process the guard above covers it; in the NEXT process the map is empty and
-    // the lease frees 15 minutes after the last heartbeat, so "Run now" dispatched a
-    // trigger whose question was still open: a second run minted a fresh session id, so
-    // the per-session unique index did not collide, and the trigger ended up with TWO
-    // pending prompts pointing at it. The second park overwrote `waiting_until`,
-    // extending the deadline that bounded the first, and the second run's `finally`
-    // un-parked the trigger — orphaning the first question where neither
-    // `expireUnparked` (it has a pointer) nor the waiting sweep (the trigger is no
-    // longer `waiting`) can collect it, for its full 24-hour TTL.
+    // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
+    // `activeTasks` cannot say so. In-process the guard above covers it; in the next
+    // process the map is empty and the lease is free — on a graceful deploy immediately,
+    // because `executeTask`'s `finally` releases it, and only after its TTL when the
+    // process was killed. "Run now" then dispatched a trigger whose question was still
+    // open: the second run mints a fresh session id, so the per-session unique index does
+    // not collide, and the trigger ends up with TWO pending prompts pointing at it. The
+    // second park overwrites `waiting_until`, extending the deadline that bounded the
+    // first, and the second run's `finally` un-parks the trigger — orphaning the first
+    // question where neither `expireUnparked` (it has a pointer) nor the waiting sweep
+    // (the trigger is no longer `waiting`) can collect it, for its full 24-hour TTL.
     //
-    // ⚠ This became reachable through a deploy only with the teardown fix: before it, a
-    // graceful shutdown left nothing `waiting`, so the window was crash-only. It is
-    // closed here rather than filed because the state is now created by design.
-    if (trigger.status === 'waiting') return { ok: false, reason: 'awaiting_answer' };
+    // ⚠ Reachable through a DEPLOY only since the teardown fix: before it, a graceful
+    // shutdown left nothing waiting, so the window was crash-only. Closed here rather
+    // than filed because the state is now created by design.
+    //
+    // ⛔ AND IT ASKS THE PROMPT STORE, not the trigger's status. The first version of
+    // this guard read `trigger.status === 'waiting'`, which is a correlate — and it took
+    // away the owner's only way out of a trigger stuck `waiting` by a swallowed
+    // `endTriggerWait` failure, for up to 24 hours, while the refusal told them to answer
+    // a question that was already answered and consumed. A recovery path must not be
+    // blocked by the state it exists to recover from. See `getPendingForTrigger`.
+    if (this.engine.getPromptStore()?.getPendingForTrigger(trigger.id)) {
+      return { ok: false, reason: 'awaiting_answer' };
+    }
     // A run another engine process holds counts as running too. A lost run does not stop
     // a manual one: running it again is what the person asked for.
     const lease = this.takeLease(trigger.id);
@@ -1082,6 +1084,11 @@ export class WorkerLoop {
         // already-`expired` outcome costs one no-op UPDATE and a concurrent
         // answer is never overwritten.
         //
+        // ⚠ `active` is undefined only if the entry was already gone when this closure was
+        // wired, i.e. the run is not tracked at all; then the drain runs, which is the
+        // behaviour that predates this fix and costs nothing — there is no process to
+        // leave the question for.
+        //
         // ⛔ A TEARDOWN IS NOT AN END TO THE WAIT, and this is where that was lost.
         // `Engine.shutdown()` calls `stop()` FIRST and closes the history DB much later,
         // with awaits in between (an in-flight inbox rebootstrap, the inbox runtime,
@@ -1101,7 +1108,7 @@ export class WorkerLoop {
         // only matters to a NEXT `ask_user` in this process, and "answerable with nobody
         // awaiting it" is not the issue-#77 shape here but the durable wait working as
         // designed — the next process re-arms the run when the answer lands.
-        if (this.tearingDown) {
+        if (active?.tearingDown === true) {
           questionWentUnanswered = true;
           return DISMISSED_ANSWER;
         }
@@ -1164,10 +1171,13 @@ export class WorkerLoop {
         // `status != 'pending'`, so on a row the teardown just left pending it is
         // already a no-op. It earns its place in ONE case: a teardown that RACES a
         // committed answer leaves the row `answered` with its pointer live, and there
-        // the release would take — discarding the answer the next process needs. Because
-        // that race cannot be sequenced from a test, the test pins the CALL instead,
-        // which is what kills the `true` replacement. (Before that call assertion
-        // existed the mutant survived; it does not now.)
+        // the release would take — discarding the answer the next process needs.
+        //
+        // ⭐ That race IS sequenceable, and a test asserts the EFFECT. An earlier version
+        // of this comment said it was not and settled for pinning the CALL — on a
+        // premise this file itself refutes two screens up: `resolve()` only queues a
+        // microtask, and `stop()` is synchronous, so answering and stopping in one tick
+        // puts the committed answer and the teardown flag in the order the race needs.
         //
         // ⚠ AND ITS COST, which the justification above does not name: keeping an
         // answered pointer means the next process re-arms and re-runs the task with an
@@ -1175,7 +1185,7 @@ export class WorkerLoop {
         // once, deliberately — it is what a crash does anyway — but it is a change from
         // the old behaviour, where the release took and a graceful shutdown could not
         // duplicate.
-        if (!this.tearingDown) {
+        if (active?.tearingDown !== true) {
           try {
             promptStore.releaseTrigger(promptId);
           } catch (err: unknown) {
@@ -1195,7 +1205,7 @@ export class WorkerLoop {
         // is already closing, and a throw here would turn a clean teardown into a
         // failed tool call. A wait left standing by a failure here is exactly what
         // the sweep exists to collect, so the cost is bounded by `waiting_until`.
-        if (!this.tearingDown) {
+        if (active?.tearingDown !== true) {
           try {
             this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
           } catch (err: unknown) {

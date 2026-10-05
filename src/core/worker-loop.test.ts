@@ -1826,6 +1826,13 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     // at all the index below is `undefined` and `not.toBe('timeout')` passes — the
     // assertion was green against a loop that skipped `recordTaskRun` entirely.
     expect(recordCalls.length, 'the run has to have been recorded for the word to mean anything').toBeGreaterThan(0);
+    // ⛔ THE RESULT, not the status word, is what discriminates. A deadline wired to end
+    // the computation would abort the controller, and that produces an `AbortError` —
+    // recorded `failed`, exactly like today's unanswered-question ending, so the status
+    // assertion alone survives that mutation. (`timeout` is only written for an error
+    // NAMED `TimeoutError`, which nothing on this path produces.) The run's own output is
+    // the thing a killed computation cannot produce.
+    expect(recordCalls[0]?.[1], 'the computation ran to its own end').toBe('Done.');
     expect(recordCalls[0]?.[2], 'a deadline must not be recorded as the end of the run').not.toBe('timeout');
     expect(store.getPending(SESSION_ID)).toBeUndefined();
     // And no question was PUSHED. This is the assertion that distinguishes
@@ -1975,13 +1982,13 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     );
   });
 
-  // 14 — the drain must not be able to break the cancellation it is cleaning up
-  // after. `Engine.shutdown()` stops the loop and later closes the history DB,
-  // so `expirePrompt` can land on a closed handle. The wait has already settled
-  // by then, so a throw would not re-park it — it would reject `promptUser`,
-  // turning a clean cancellation into a failed tool call. Mutation: drop the
-  // try/catch → this FAILS (the settle poll times out and the answer is
-  // undefined); it does not hang.
+  // 14 — the drain must not be able to break the cancellation it is cleaning up after.
+  // ⚠ Its original motivating case — `Engine.shutdown()` closing the history DB under the
+  // drain — is RETRACTED inside the test below: a teardown no longer drains at all. What
+  // remains, and what the swallowed catch names, is SQLITE_BUSY and schema drift on the
+  // path that does drain: a failing run. A throw there would reject `promptUser` and turn
+  // a clean cancellation into a failed tool call. Mutation: drop the try/catch → this
+  // FAILS (the settle poll times out and the answer is undefined); it does not hang.
   it('still settles the wait when the drain throws', async () => {
     // ⛔ RE-DRIVEN, not re-pointed. This used to cancel with `stop()`, which after W2-13
     // does not drain at all — so the throwing `expirePrompt` was never called and the

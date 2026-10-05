@@ -6313,9 +6313,22 @@ export class LynoxHTTPApi {
       if (!outcome.ok) {
         if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
         // Its own answer, not "already running": the run exists and is waiting for the
-        // owner, and the owner is the one being told. Answering the question is what
-        // moves it; starting a second run would strand the first question.
-        if (outcome.reason === 'awaiting_answer') { errorResponse(res, 409, 'This task is waiting for your answer — answer its question instead of starting it again'); return; }
+        // owner. Answering the question is what moves it; starting a second run would
+        // strand the first question.
+        //
+        // ⛔ THE CODE IS WHAT CARRIES IT, not the prose. The only caller of this route
+        // shows a fixed string for every 409 and never reads the body, so the first
+        // version of this branch composed a sentence the owner could not be shown — the
+        // UI still said "already running", which is the answer this exists to replace.
+        // `code` is what the view switches on; the `error` text is for a caller that has
+        // no view.
+        if (outcome.reason === 'awaiting_answer') {
+          jsonResponse(res, 409, {
+            code: 'awaiting_answer',
+            error: 'This task is waiting for your answer — answer its question instead of starting it again',
+          });
+          return;
+        }
         errorResponse(res, 404, 'Trigger not found'); return;
       }
       jsonResponse(res, 202, { started: true });

@@ -1563,6 +1563,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.run_now': { de: 'Jetzt ausführen', en: 'Run now' },
 	'triggers.run_started': { de: 'Trigger gestartet.', en: 'Trigger started.' },
 	'triggers.run_already': { de: 'Trigger läuft bereits.', en: 'Trigger is already running.' },
+	'triggers.run_awaiting_answer': {
+		de: 'Diese Aufgabe wartet auf deine Antwort — beantworte ihre Frage, statt sie neu zu starten.',
+		en: 'This task is waiting for your answer — answer its question instead of starting it again.',
+	},
 	'triggers.run_failed': { de: 'Trigger konnte nicht gestartet werden.', en: 'Could not start the trigger.' },
 	'triggers.pause': { de: 'Pausieren', en: 'Pause' },
 	'triggers.resume': { de: 'Fortsetzen', en: 'Resume' },
