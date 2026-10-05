@@ -65,6 +65,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # The PROPERTY, from GitHub's own payload — not the repo name, which is a proxy that a
+          # rename breaks without a symptom. The script fails CLOSED (treats the record as public)
+          # when this is absent, which for THIS repo is also the correct answer.
+          REPO_PRIVATE: ${{ github.event.pull_request.base.repo.private }}
         run: |
           set -euo pipefail
           printf '%s' "$PR_BODY" > /tmp/pr-body.txt

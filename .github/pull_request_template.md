@@ -101,13 +101,33 @@ and the third is a full answer rather than an admission:
 - `security: own round, no findings`
 - `security: leaning on the v1/v2 parity run, no findings` — a round run for
   another question, which is a different claim and should read as one
-- `security: origin unclear, 1 finding, 1 filed` — **use this when you do not
-  know whether the round was yours.** Writing `own round` instead is the lie
+- `security: origin unclear, findings filed privately` — **use this when you do
+  not know whether the round was yours.** Writing `own round` instead is the lie
   the field exists to prevent; one PR on record carried the gate on a parity
   run whose brief was behavioural equality, and only a question caught it.
 
 A `leaning on …` reference carries no comma: the comma separates origin from
 result. The result half is the same grammar as `review:`.
+
+**⛔ THIS REPO IS PUBLIC, so neither field counts findings that are still open.**
+Write `findings filed privately` — the number belongs in the private register
+row. A security finding that is not yet closed must not be named in public
+text, and that includes its mere EXISTENCE, which is what a `filed` count
+states. The rule binds the
+FIELD, not the gate: it applies whether the diff owes `security`, merely lists
+it, or just carries the line, and the count is refused anywhere in the value —
+including inside a `leaning on …` reference. `review:` is read the same way
+whenever security is in play at all, because the same findings are routinely
+counted in both halves and the two numbers are then one set, not two.
+
+Still allowed, and deliberately: `no findings`, `<N> findings, all fixed`, and a
+`<N> filed` in `review:` on a diff with no security dimension — a filed CODE
+defect is not a security finding, and hiding those would cost measurability for
+nothing.
+
+⚠ The example above USED to read `1 finding, 1 filed`, so a template reader
+produced the very thing the rule forbids. If you are reading this in an old
+checkout, the field grammar changed under you and the check will say so.
 
 ## Notes
 

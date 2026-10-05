@@ -428,10 +428,20 @@ fi
 # than failing. There is no CI half to fail closed FOR — this runs at pre-push,
 # where refusing to run is refusing to push.
 
-# check-meta — commit messages in base..head, plus the PR title/body when the
-# caller exports them. Mirrors scripts/no-ai-attribution.sh: only the commits a PR
-# ADDS are scanned, never the whole history, so a name already merged (there are
-# none today) could not turn every future PR red.
+# check-meta — commit messages in base..head, AND NOTHING ELSE. Mirrors
+# scripts/no-ai-attribution.sh: only the commits a PR ADDS are scanned, never the
+# whole history, so a name already merged (there are none today) could not turn
+# every future PR red.
+#
+# ⛔ This line used to read "plus the PR title/body when the caller exports them",
+# and that was a surface the script does not have: no variable here holds a body,
+# the only caller (.lefthook/pre-push/public-repo-guard-meta.sh) exports none, and
+# a measurement settles it — `PR_BODY=<a private register id> check-meta base HEAD`
+# returns clean, while the same id in a COMMIT SUBJECT is the surface that is
+# scanned. A comment claiming a surface is how a guard gets credited with
+# a reach it has never had; the PR BODY in this repo is covered by no guard at
+# all, which is why scripts/gate-record.mjs has to refuse an open-finding count
+# itself rather than lean on this one.
 #
 # As everywhere in this class, no matched text is printed: a commit is named by
 # its short SHA alone, never by its subject line.

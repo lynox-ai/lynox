@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -792,11 +792,15 @@ describe('gate-record — the `review:` evidence line', () => {
   it('accepts a breakdown with `refuted`, the slot whose absence forced a lie', () => {
     // ⛔ A finding the author CHECKED AND REJECTED has to be sayable. Without this slot the honest
     // author must write `filed` for a register row that does not exist, or quietly lower N.
-    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted' }), head: HEAD, files: CODE }).ok).toBe(true);
+    // ⚠ `visibility: 'private'` because the count is INCIDENTAL here: this test is about the
+    // `refuted` slot, and in the public repo an open count is refused on its own grounds. Flipping
+    // the verdict instead would delete the witness this test exists to be.
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted' }), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
   });
 
   it('accepts fixed + filed when they sum to N', () => {
-    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 2 filed' }), head: HEAD, files: CODE }).ok).toBe(true);
+    // `visibility: 'private'` — the arithmetic is the subject; see the note above.
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 fixed, 2 filed' }), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
   });
 
   it('REJECTS an UNDER-count — a finding nobody accounted for', () => {
@@ -1023,7 +1027,7 @@ describe('gate-record — the `review:` evidence line', () => {
     // one combined slot. ⚠ NOT per-round models; that is a limit of this form, named rather than
     // hidden: `3 fable+opus rounds` says which models ran, not which ran when.
     expect(evaluate({ body: record({ review: '1 sonnet-4.6 round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
-    expect(evaluate({ body: record({ review: '3 fable+opus rounds, 7 findings, 5 fixed, 2 filed' }), head: HEAD, files: CODE }).ok).toBe(true);
+    expect(evaluate({ body: record({ review: '3 fable+opus rounds, 7 findings, 5 fixed, 2 filed' }), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
   });
 
   it('accepts a human round, because a person reviewing is not a format error', () => {
@@ -1053,7 +1057,9 @@ describe('the `security:` evidence line', () => {
   it('accepts `own round` and `leaning on <what>`', () => {
     for (const sec of ['own round, no findings', 'leaning on the v1/v2 parity run, no findings',
                        'own round, 2 findings, 1 fixed, 1 filed', 'Own Round, no findings.'])
-      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC }), sec).toMatchObject({ ok: true });
+      // ⚠ `visibility: 'private'`: one of these counts an OPEN finding, which a PUBLIC record
+      // refuses for its own reason. The origin vocabulary is what this test is about.
+      expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: sec }), head: HEAD, files: SEC, visibility: 'private' }), sec).toMatchObject({ ok: true });
   });
 
   it('accepts `origin unclear` as a FULL value, not an escape hatch', () => {
@@ -1062,7 +1068,7 @@ describe('the `security:` evidence line', () => {
     // exists to prevent, and which is how the one recorded instance arose. So this is a plain
     // accept, with no penalty and no second-class message.
     expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, no findings' }), head: HEAD, files: SEC }).ok).toBe(true);
-    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, 2 findings, 1 fixed, 1 filed' }), head: HEAD, files: SEC }).ok).toBe(true);
+    expect(evaluate({ body: record({ gates: 'code-review, security, delta', security: 'origin unclear, 2 findings, 1 fixed, 1 filed' }), head: HEAD, files: SEC, visibility: 'private' }).ok).toBe(true);
   });
 
   it('names `origin unclear` in the message a missing line produces', () => {
@@ -1169,5 +1175,225 @@ describe('the `security:` evidence line', () => {
     const e = evaluate({ body: record({ gates: 'code-review, security, delta', security: 'own round, 2 findings, 1 fixed' }), head: HEAD, files: SEC }).errors.join(' ');
     expect(e).toMatch(/sums to 1, not 2/);
     expect(e).not.toMatch(/read as the/);
+  });
+});
+
+describe('a PUBLIC record does not count open findings', () => {
+  // ⛔ Why this exists: the `review:` and `security:` evidence lines were designed in the PRIVATE
+  // repo, where `2 findings, 0 fixed, 2 filed` is a useful, checkable sentence. Nobody asked what
+  // that sentence means HERE. This repo is public, and the rule is that a security finding which
+  // is not yet closed must not be named in public text — not even its existence, which is exactly
+  // what a `filed` count states. `gate-record` was the thing REQUIRING it. The grammar was innocent; the SCOPE
+  // was the gap.
+  const G = 'code-review, security, delta';
+  const WITH_COUNT = '1 opus round, 2 findings, 1 fixed, 1 filed';
+  const SEC_COUNT = 'own round, 2 findings, 1 fixed, 1 filed';
+  const pub = (over: Record<string, string>, files = SEC, visibility = 'public') =>
+    evaluate({ body: record(over), head: HEAD, files, visibility });
+
+  it('resolves visibility from the PROPERTY, with the slug as a second source', () => {
+    expect(repoVisibility({ privateFlag: 'false', repoSlug: 'lynox-ai/lynox' })).toBe('public');
+    expect(repoVisibility({ privateFlag: 'true', repoSlug: 'lynox-ai/lynox-pro' })).toBe('private');
+    expect(repoVisibility({ privateFlag: 'false' })).toBe('public');
+    expect(repoVisibility({ repoSlug: 'lynox-ai/lynox-pro' })).toBe('private');
+  });
+
+  it('answers `unknown` when the two sources CONTRADICT, rather than picking one', () => {
+    // The second source exists to contradict, not to decide: if the property says public and the
+    // slug says private, something is wrong in a way neither value explains.
+    expect(repoVisibility({ privateFlag: 'false', repoSlug: 'lynox-ai/lynox-pro' })).toBe('unknown');
+    expect(repoVisibility({ privateFlag: 'true', repoSlug: 'lynox-ai/lynox' })).toBe('unknown');
+  });
+
+  it('answers `unknown` with no sources, and lets an explicit value win', () => {
+    expect(repoVisibility({})).toBe('unknown');
+    expect(repoVisibility({ privateFlag: 'false', repoSlug: 'lynox-ai/lynox', explicit: 'private' })).toBe('private');
+  });
+
+  it('counts only `filed`, because that is what stays open', () => {
+    expect(openFiledCount('no findings')).toBe(0);
+    expect(openFiledCount('5 findings, all fixed')).toBe(0);
+    expect(openFiledCount('findings filed privately')).toBe(0);
+    expect(openFiledCount('2 findings, 1 fixed, 1 filed')).toBe(1);
+    expect(openFiledCount('13 findings, 11 fixed, 1 filed, 1 refuted')).toBe(1);
+    // ⛔ Two surviving mutants, both fail-OPEN in the public repo: dropping the `i` flag misses
+    // `1 Filed`, which the result grammar accepts as a legal spelling, and `\d+` → `\d` reads a
+    // two-digit count as its first digit. Nothing drove either case.
+    expect(openFiledCount('3 findings, 2 Fixed, 1 Filed')).toBe(1);
+    expect(openFiledCount('20 findings, 8 fixed, 12 filed')).toBe(12);
+  });
+
+  it('REFUSES a `security:` count in public, and says where the number belongs', () => {
+    const v = pub({ gates: G, review: '1 opus round, no findings', security: SEC_COUNT });
+    expect(v.ok).toBe(false);
+    const e = v.errors.join(' ');
+    expect(e).toMatch(/counts OPEN findings/);
+    expect(e).toMatch(/private register row/);
+  });
+
+  it('ACCEPTS the same `security:` count when the record goes into the private repo', () => {
+    // The same check ships in both repos, so `private` has to stay a working answer here.
+    const v = evaluate({ body: record({ gates: G, review: '1 opus round, no findings', security: SEC_COUNT }), head: HEAD, files: SEC, visibility: 'private' });
+    expect(v.ok, (v.errors ?? []).join(' ')).toBe(true);
+  });
+
+  it('REFUSES a `review:` count in public WHEN the record also owes security', () => {
+    // The overlap is real wherever security is in play: the same findings get counted in both
+    // halves, and the two numbers are then one set rather than two.
+    const v = pub({ gates: G, review: WITH_COUNT, security: 'own round, findings filed privately' });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
+  });
+
+  it('ACCEPTS a `review:` count in public when security is NOT in play — the narrow cut', () => {
+    // ⭐ The discriminator for the whole cut: a review finding is not a security finding. Two filed
+    // CODE defects counted in public break no rule, and forbidding them would cost measurability
+    // for nothing. Without this test the condition could be dropped and the suite stay green.
+    const v = evaluate({ body: record({ gates: 'code-review, delta', review: WITH_COUNT }), head: HEAD, files: CODE, visibility: 'public' });
+    expect(v.ok, (v.errors ?? []).join(' ')).toBe(true);
+  });
+
+  it('counts `security` as in play when the record CLAIMS it, not only when the diff owes it', () => {
+    // `securityInPlay` reads both sets. A record that names the gate on a diff with no security
+    // path has still told the reader a security round happened, so its `review:` count carries the
+    // same risk — and without this case the `claimed` half could be dropped and the suite stay
+    // green. (That a claimed gate owes no proof of its own is a separate, registered question.)
+    const v = evaluate({
+      body: record({ gates: 'code-review, security, delta', review: WITH_COUNT }),
+      head: HEAD, files: CODE, visibility: 'public',
+    });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
+  });
+
+  it('treats `unknown` as public AND says the property was undeterminable', () => {
+    // Fail-closed, with the diagnosis the false red needs: without it the author looks for the
+    // mistake in their own body, and a false red without a reason teaches going around the check.
+    const v = pub({ gates: G, review: '1 opus round, no findings', security: SEC_COUNT }, SEC, 'unknown');
+    expect(v.ok).toBe(false);
+    const e = v.errors.join(' ');
+    expect(e).toMatch(/COULD NOT BE DETERMINED/);
+    expect(e).toMatch(/the mistake is NOT in your body/);
+    expect(e).toMatch(/--repo-visibility private/);
+  });
+
+  it('reads the FIELD, not the branch — a CLAIMED security gate is checked too', () => {
+    // ⛔ The first cut hung this on `required.has('security')`, so a record that merely NAMES the
+    // gate, or carries the line on a diff with no security path, was never read: measured GREEN
+    // with a `filed` count on a plain code diff. A rule hung on `required` is a rule about the
+    // DIFF; this one is about the TEXT.
+    for (const over of [
+      { gates: G, review: '1 opus round, no findings', security: SEC_COUNT },   // claimed, not owed
+      { gates: 'code-review, delta', review: '1 opus round, no findings', security: SEC_COUNT }, // not even named
+    ]) {
+      const v = evaluate({ body: record(over), head: HEAD, files: CODE, visibility: 'public' });
+      expect(v.ok, JSON.stringify(over)).toBe(false);
+      expect(v.errors.join(' ')).toMatch(/counts OPEN findings/);
+    }
+  });
+
+  it('counts security as in play when the LINE is there, even unnamed and unowed', () => {
+    // ⛔ Surviving mutant: dropping `|| !!f.security` from `securityInPlay` left every test green,
+    // because the claimed-gate case has the count in `security:` itself — so the security check
+    // fires and the review half is never reached. This is the case that separates them: a
+    // `security:` line with NO count, the gate neither owed nor named, and the number in
+    // `review:`. A security round ran (the line says so), so the review count can be the same
+    // findings.
+    const v = evaluate({
+      body: record({ gates: 'code-review, delta', review: WITH_COUNT, security: 'own round, findings filed privately' }),
+      head: HEAD, files: CODE, visibility: 'public',
+    });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
+  });
+
+  it('reads the WHOLE field, so the origin free text cannot carry the count', () => {
+    // Measured GREEN before: `leaning on the 2 findings 2 filed round, no findings` — the count was
+    // read from the result half only, and `leaning on <what>` is free text by design.
+    const v = evaluate({
+      body: record({ gates: G, review: '1 opus round, no findings', security: 'leaning on the 2 findings 2 filed round, no findings' }),
+      head: HEAD, files: SEC, visibility: 'public',
+    });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toMatch(/counts OPEN findings/);
+  });
+
+  it('refuses an INVALID explicit visibility rather than falling back to the env', () => {
+    // `--repo-visibility pubic` is a typo, and using the environment instead would make the
+    // strictness depend on which mistake you made. Fail-closed includes the flag.
+    expect(repoVisibility({ explicit: 'pubic', privateFlag: 'true' })).toBe('unknown');
+    expect(repoVisibility({ explicit: 'PUBLIC', privateFlag: 'true' })).toBe('unknown');
+    expect(repoVisibility({ explicit: 'private', privateFlag: 'false' })).toBe('private');
+    expect(repoVisibility({ explicit: 'public', privateFlag: 'true' })).toBe('public');
+  });
+
+  it('is robust about the property and the slug, as the resolver claims', () => {
+    // ⛔ Four surviving mutants: `.trim()` and both `.toLowerCase()` calls could be deleted with
+    // every test green, because nothing drove a padded or upper-case value. The docblock claims
+    // robustness; a claim without a witness is a comment.
+    expect(repoVisibility({ privateFlag: ' true ' })).toBe('private');
+    expect(repoVisibility({ privateFlag: 'TRUE' })).toBe('private');
+    expect(repoVisibility({ privateFlag: 'False' })).toBe('public');
+    expect(repoVisibility({ repoSlug: 'LYNOX-AI/LYNOX-PRO' })).toBe('private');
+    expect(repoVisibility({ repoSlug: ' lynox-ai/lynox ' })).toBe('public');
+  });
+
+  it('is fail-closed in the `review:` branch too, not only in `security:`', () => {
+    // ⛔ Measured as a surviving mutant: `visibility !== 'private'` weakened to `=== 'public'` in
+    // the review branch left every other test here green, because the `unknown` case was only
+    // witnessed through `security:`. Fail-closed has to hold in both branches, and a rule proven
+    // in one place is proven in one place.
+    const v = evaluate({
+      body: record({ gates: G, review: WITH_COUNT, security: 'own round, findings filed privately' }),
+      head: HEAD, files: SEC, visibility: 'unknown',
+    });
+    expect(v.ok).toBe(false);
+    const e = v.errors.join(' ');
+    expect(e).toMatch(/the `review:` line counts OPEN findings/);
+    expect(e).toMatch(/COULD NOT BE DETERMINED/);
+  });
+
+  it('does NOT add that diagnosis when the repo IS known to be public', () => {
+    // The discriminator: a public repo is a determined answer, so the advice about an
+    // undeterminable property would be noise — and noise is how advice stops being read.
+    const e = pub({ gates: G, review: '1 opus round, no findings', security: SEC_COUNT }).errors.join(' ');
+    expect(e).toMatch(/counts OPEN findings/);
+    expect(e).not.toMatch(/COULD NOT BE DETERMINED/);
+  });
+
+  it('ACCEPTS the count-free form everywhere, in both fields', () => {
+    for (const visibility of ['public', 'private', 'unknown']) {
+      const v = evaluate({
+        body: record({ gates: G, review: '1 opus round, findings filed privately', security: 'own round, findings filed privately' }),
+        head: HEAD, files: SEC, visibility,
+      });
+      expect(v.ok, `${visibility}: ${(v.errors ?? []).join(' ')}`).toBe(true);
+    }
+  });
+
+  it('⛔ does NOT echo the refused value back — an Actions log is public text too', () => {
+    // The message is printed in a public Actions log, and the value is the count being refused:
+    // quoting it back would publish the number in the course of refusing it. The repo's own
+    // precedent says so out loud — public-repo-guard names a commit by its short SHA alone,
+    // "never by its subject line". So the message carries the FIELD NAME and nothing else.
+    const e = pub({ gates: G, review: '1 opus round, no findings', security: SEC_COUNT }).errors.join(' ');
+    expect(e).toMatch(/the `security:` line counts OPEN findings/);
+    expect(e).not.toMatch(/2 findings/);
+    expect(e).not.toMatch(/1 filed/);
+  });
+
+  it('still ACCEPTS `all fixed` in public — nothing is open, so there is nothing to hide', () => {
+    const v = pub({ gates: G, review: '1 opus round, 2 findings, all fixed', security: 'own round, 2 findings, all fixed' });
+    expect(v.ok, (v.errors ?? []).join(' ')).toBe(true);
+  });
+
+  it('⛔ keeps the TEMPLATE from teaching the form the check now refuses', () => {
+    // The template's `security:` example used to read `1 finding, 1 filed`, so an author following
+    // it produced exactly what this cut forbids — a false red earned by reading the docs. The
+    // other direction of the same trap: a template that still says `filed` while the check refuses
+    // it is a documented lie, and nothing else notices.
+    const tpl = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8');
+    expect(tpl).toContain('findings filed privately');
+    expect(tpl).not.toMatch(/`security:[^`]*\d+ filed`/);
   });
 });
