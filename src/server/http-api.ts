@@ -6752,10 +6752,14 @@ export class LynoxHTTPApi {
     // reach one short of restarting the container.
     //
     // ⛔ Why this is a route and not a deadline: the demand is rare and the only
-    // measurement points the other way — on one production instance 1 of 17 pipeline
-    // runs and 1 of 58 headless runs ran past the five-minute default, the longest
-    // (15.2 minutes) SUCCEEDING. An automatic bound would abort work that completes
-    // today; an owner's instruction cannot, because the owner is the one asking.
+    // measurement points the other way — see the production reading quoted at
+    // `worker-loop.ts`'s NOTE ON REACH, which is where it lives. An automatic bound
+    // would abort work that completes today; an owner's instruction cannot, because the
+    // owner is the one asking.
+    //
+    // ⚠ Quoted by reference deliberately: this change first restated the numbers here
+    // and in the stop test, which gave ONE reading three copies with no shared source —
+    // the shape in which a figure stays right in one place and goes stale in the others.
     //
     // 409 rather than 404 when the task exists but is not running: "there is no such
     // task" and "that task is not working right now" are different answers, and a
@@ -6793,7 +6797,11 @@ export class LynoxHTTPApi {
         return;
       }
       if (outcome.kind === 'unstoppable') {
-        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted (effect '${outcome.effect}'). It will finish on its own; pause the schedule with PATCH {enabled:false} so it does not start again.`);
+        // ⚠ The effect is CAPPED on the way out. It is read from a TEXT column, and the
+        // dispatch switch says in its own comment that a value the union does not know is
+        // possible at runtime — a newer schema, a synced or corrupt row. Naming it helps
+        // the owner; echoing an unbounded stored string into an error body does not.
+        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted (effect '${outcome.effect.slice(0, 40)}'). It will finish on its own; pause the schedule with PATCH {enabled:false} so it does not start again.`);
         return;
       }
       jsonResponse(res, 202, {

@@ -384,10 +384,10 @@ describe('stopping a running background task', () => {
   it('SHUTDOWN does not abort the session — the deadline path stays as it was', async () => {
     // ⛔ This asserts an ABSENCE, and deliberately. Whether the execution deadline should
     // end a computing run is a decision nobody has taken, and the measurement points away
-    // from it: 1 of 17 pipeline and 1 of 58 headless runs on one production instance ran
-    // past the five-minute default, the longest (15.2 min) SUCCEEDING. So `stop()` and the
-    // deadline still abort only the controller, and this test fails the day someone wires
-    // the session into either of them without that decision.
+    // from it — the production reading is quoted once, at `worker-loop.ts`'s NOTE ON
+    // REACH, and not restated here. So `stop()` and the deadline still abort only the
+    // controller, and this test fails the day someone wires the session into either of
+    // them without that decision.
     //
     // ⚠ Its positive twin is the first test in this file, on the same machinery: there the
     // same `session.abort` path IS exercised and observed. A negative assertion without
