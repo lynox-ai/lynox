@@ -14,6 +14,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
+import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
@@ -194,6 +195,31 @@ export interface WorkerTaskContext {
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
+  /**
+   * The run's session, so an owner has something to stop.
+   *
+   * ⛔ WHY THIS FIELD EXISTS, because the obvious alternative is wrong. Aborting
+   * `controller` ends a WAIT and nothing else: its three readers are the bulk-preview
+   * signal, the dismissed-answer check and `waitForSettled`. A task that is COMPUTING
+   * observes none of them, so a stop route built on the controller alone would answer
+   * 200 while the run carried on — which is exactly what the register row prescribed
+   * before it was refuted. Ending a computing run needs `session.abort()`.
+   *
+   * ⚠ `undefined` until the run reaches the point where it creates its session, and
+   * for the effects that never create one (bulk, backup, reminder). A stop in that
+   * window still aborts the controller, which is all there is to abort.
+   */
+  session?: Session | undefined;
+  /**
+   * Set ONLY by `stopTask` — never by the execution deadline, never by `stop()`.
+   *
+   * ⛔ All three abort the same controller, so `signal.aborted` cannot tell them apart,
+   * and the difference is what the run gets RECORDED as: an owner's stop is not a
+   * failure and must not be retried. Reading the signal instead of this flag would
+   * have made a deadline expiry look like a stop, which is the same conflation in the
+   * other direction.
+   */
+  stopRequested?: boolean | undefined;
   /** Store id of the prompt this task is parked on; undefined while computing. */
   pendingPromptId?: string | undefined;
   /**
@@ -278,6 +304,51 @@ export class WorkerLoop {
     this.timer.unref(); // don't prevent process exit
     // Run immediately on start
     void this.tick();
+  }
+
+  /**
+   * Hand the run's session to its `activeTasks` ENTRY OBJECT, so a stop can reach it.
+   *
+   * ⛔ The entry, never a fresh `activeTasks.get()`. This file already paid for that
+   * distinction once, two screens below: `stop()` CLEARS the map, so a per-call lookup
+   * found `undefined` after a cancellation and skipped the aborted-check — an
+   * unabortable park for the full 24-hour TTL. The entry object outlives its map entry,
+   * which is what makes a cancellation observable at all. Taking the object also makes
+   * the identity question disappear instead of answering it: there is no key to resolve
+   * to a successor's run.
+   */
+  private static attachSession(entry: ActiveTask | undefined, session: Session): void {
+    if (entry === undefined) return;
+    entry.session = session;
+  }
+
+  /**
+   * Stop a RUNNING task on its owner's explicit instruction.
+   *
+   * ⭐ Both aborts, and in this order. `session.abort()` is the one that ends a
+   * computing run; `controller.abort()` is the one that ends a wait. A run can be in
+   * either state and the caller cannot know which, so a stop that did one of them
+   * would work for half the cases — and the half it missed is the motivating one.
+   *
+   * ⚠ The session abort is wrapped: it reaches into the agent, and if it throws, the
+   * controller must still be aborted. Otherwise a throwing session leaves a task that
+   * is neither stopped nor running.
+   *
+   * ⛔ This is NOT the execution deadline. The deadline still ends only a wait, and
+   * wiring it to this method is a decision nobody has taken — see the NOTE ON REACH
+   * in `executeTask`. Do not route the timer here "but disabled".
+   */
+  stopTask(taskId: string): 'stopped' | 'not_running' {
+    const active = this.activeTasks.get(taskId);
+    if (active === undefined) return 'not_running';
+    active.stopRequested = true;
+    try {
+      active.session?.abort();
+    } finally {
+      active.pauseDeadline();
+      active.controller.abort();
+    }
+    return 'stopped';
   }
 
   stop(): void {
@@ -893,7 +964,15 @@ export class WorkerLoop {
         ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
         : (err instanceof Error ? err.message : String(err));
       const errorMsg = maskSecretPatterns(rawErrorMsg, { includeGeneric: true });
-      const status = isTimeout ? 'timeout' as const : 'failed' as const;
+      // ⭐ A stop outranks both. The abort that ends the run is indistinguishable from a
+      // deadline expiry at the signal, so the cause comes from the flag the owner's stop
+      // sets — and getting this wrong is not cosmetic: `failed` and `timeout` both enter
+      // the backoff re-fire in `recordTaskRun`, so a stop recorded as either would
+      // RESTART the run its owner just stopped.
+      const wasStopped = this.activeTasks.get(task.id)?.stopRequested === true;
+      const status = wasStopped
+        ? 'stopped' as const
+        : (isTimeout ? 'timeout' as const : 'failed' as const);
 
       // Check if task will be retried BEFORE recording (retry_count not yet incremented)
       const willRetry = (task.max_retries ?? 0) > 0
@@ -1174,6 +1253,9 @@ export class WorkerLoop {
     // for the full 24h TTL. The entry object outlives the map entry, which is
     // exactly what makes the cancellation observable after a `stop()`.
     const active = this.activeTasks.get(task.id);
+    // The owner's stop handle, attached to the SAME captured entry the prompt wiring
+    // below uses — so a stop reaches this run whether it is computing or parked.
+    WorkerLoop.attachSession(active, session);
     session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
       // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
       // null and is assigned during init (engine.ts:1101), and is set back to
@@ -1813,6 +1895,10 @@ export class WorkerLoop {
       // not assumed. If this turn ever gains tools, the report has to come with them.
       costGuard: { maxBudgetUSD: capUSD ?? WATCH_ANALYSIS_MAX_USD },
     });
+    // Same stop handle as the standard path. A watch analysis is short, but "short" is
+    // not "uninterruptible", and an owner who stops a task should not have to know which
+    // effect it happens to be.
+    WorkerLoop.attachSession(this.activeTasks.get(task.id), analysisSession);
     const workerProfile3 = this.engine.getUserConfig().worker_profile;
     if (workerProfile3) {
       analysisSession._recreateAgent({ profile: workerProfile3 });

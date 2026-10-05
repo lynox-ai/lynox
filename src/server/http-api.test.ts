@@ -6183,6 +6183,67 @@ describe('LynoxHTTPApi', () => {
       // the human HTTP create route supplies confirmedAt; the agent task_create tool never does.
       expect(mockTaskCreate).toHaveBeenCalledWith(expect.objectContaining({ confirmedAt: expect.any(String) }));
     });
+
+    // ── Stopping a RUNNING task ────────────────────────────────────────────
+    //
+    // ⛔ The behaviour these three pin is the ROUTE's, not the loop's. That a stop
+    // actually ends a run is pinned in `worker-loop-stop.test.ts`, against the run's
+    // recorded outcome; here the question is narrower and still worth asking: does the
+    // path exist, does it carry the same `user` scope as its four siblings, and does it
+    // tell "no such task" apart from "that task is not running"? A caller that cannot
+    // distinguish those two will retry the wrong one.
+    //
+    // ⚠ A local engine override rather than the `swapEngine` helper: that helper exists
+    // twice in this file already, and both copies are scoped to their own `describe`.
+    // A third copy would be drift; reaching for one that is out of scope would not
+    // compile. This is the same four lines, inline, with its restore in a `finally`.
+    async function withEngine(overrides: Record<string, () => unknown>, body: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origs: Record<string, unknown> = {};
+      for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+      try { await body(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; }
+    }
+
+    it('POST /api/tasks/:id/stop stops a running task (200)', async () => {
+      const stopTask = vi.fn().mockReturnValue('stopped');
+      await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ id: 'task-1', stopped: true });
+        expect(stopTask).toHaveBeenCalledWith('task-1');
+      });
+    });
+
+    it('POST /api/tasks/:id/stop answers 409 — not 404 — when the task exists but is not running', async () => {
+      await withEngine({ getWorkerLoop: () => ({ stopTask: () => 'not_running' }) }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toContain('not running');
+      });
+    });
+
+    it('POST /api/tasks/:id/stop answers 409 when there is no worker loop at all', async () => {
+      // A reachable shape, not a defensive flourish: the loop is only constructed when
+      // background tasks are started, so an engine running without them has none. A 200
+      // here would tell the caller a run was stopped that could not have been running.
+      await withEngine({ getWorkerLoop: () => null }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toContain('worker loop');
+      });
+    });
+
+    it('POST /api/tasks/:id/stop answers 404 for a task that does not exist', async () => {
+      await withEngine({
+        getRunHistory: () => ({ getTrigger: () => undefined }),
+        // Present on purpose: a 404 must come from the LOOKUP, not from a missing loop.
+        getWorkerLoop: () => ({ stopTask: () => 'stopped' }),
+      }, async () => {
+        const res = await jsonFetch('/api/tasks/nope/stop', { method: 'POST' });
+        expect(res.status).toBe(404);
+      });
+    });
+
   });
 
   // PRD bulk-changes-reversible §3.4/§3.5 — the human side of a bulk run.

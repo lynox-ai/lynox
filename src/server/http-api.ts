@@ -6746,6 +6746,34 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
+    // Stop a RUNNING task on its owner's explicit instruction. Pausing a SCHEDULE is
+    // `PATCH /api/tasks/:id {enabled:false}` and deleting it is `DELETE`; neither
+    // touches a run that is already working, and until this route there was no way to
+    // reach one short of restarting the container.
+    //
+    // ⛔ Why this is a route and not a deadline: the demand is rare and the only
+    // measurement points the other way — on one production instance 1 of 17 pipeline
+    // runs and 1 of 58 headless runs ran past the five-minute default, the longest
+    // (15.2 minutes) SUCCEEDING. An automatic bound would abort work that completes
+    // today; an owner's instruction cannot, because the owner is the one asking.
+    //
+    // 409 rather than 404 when the task exists but is not running: "there is no such
+    // task" and "that task is not working right now" are different answers, and a
+    // caller that cannot tell them apart will retry the wrong one.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/stop', async (_req, res, params) => {
+      // The TRIGGER table, not `getTask` — which reads `tasks` and would always miss,
+      // exactly as the `PATCH` route two screens up documents.
+      const trigger = engine.getRunHistory()?.getTrigger(params['id']!);
+      if (!trigger) { errorResponse(res, 404, 'Task not found'); return; }
+      const loop = engine.getWorkerLoop();
+      if (!loop) { errorResponse(res, 409, 'The worker loop is not running, so neither is this task'); return; }
+      if (loop.stopTask(params['id']!) === 'not_running') {
+        errorResponse(res, 409, 'That task is not running right now');
+        return;
+      }
+      jsonResponse(res, 200, { id: params['id'], stopped: true });
+    }));
+
     // Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
     // unattended execution — stamps `confirmed_at` so it becomes due + dispatches
     // (an unconfirmed run_agent trigger is neither, closing the injection-

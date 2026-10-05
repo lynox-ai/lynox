@@ -713,7 +713,25 @@ export class TaskManager {
   }
 
   /** Record the result of a worker trigger execution. Updates last_run_at, result, status, and optionally next_run_at for recurring triggers. */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout'): void {
+  /**
+   * Record the outcome of a run against its trigger.
+   *
+   * ⭐ `'stopped'` is the owner's deliberate halt, and it is NOT a kind of failure —
+   * which matters twice over:
+   *   · **It must not retry.** The branch below sends `failed` and `timeout` into a
+   *     backoff re-fire. A stop recorded as `failed` would therefore restart exactly
+   *     the run its owner just stopped, which is worse than not having a stop at all.
+   *   · **It must not falsify the trigger's status.** The permitted values are
+   *     `open | in_progress | completed | failed`; none of them is true of a one-shot
+   *     whose only run was stopped — `completed` claims it did its job, `failed`
+   *     claims it broke. So a stop WITHHOLDS the status, exactly as a parked trigger
+   *     does below and for the same stated reason: `last_run_at`, the result and
+   *     `next_run_at` describe the run that happened and are true either way.
+   * Whether a stopped one-shot should instead read `completed`, or needs a new status
+   * (and with it a migration — the trigger table's `CHECK` cannot be altered in place),
+   * is a decision that has not been taken.
+   */
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped'): void {
     const task = this.history.getTrigger(id);
     if (!task) {
       throw new Error(`Trigger not found: ${id}`);
@@ -730,7 +748,9 @@ export class TaskManager {
     // This comparison is also the compile-time consumer §0 G3 names: it is a
     // TS2367 error unless `waiting` is a member of TriggerStatus, so narrowing
     // that union breaks the build here rather than silently disarming the guard.
-    const mayWriteStatus = task.status !== 'waiting';
+    // A stop withholds the status for the reason given above; a parked trigger
+    // withholds it because its wait is still open. Two causes, one mechanism.
+    const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped';
 
     const now = new Date();
     const truncatedResult = result.length > MAX_RUN_RESULT_CHARS
