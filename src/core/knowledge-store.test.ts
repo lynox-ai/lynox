@@ -55,6 +55,34 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(subjects.findCanonical('client payment details', 'organization')).toBeNull();
   });
 
+  it('still folds the written surface form into the aliases of a kinded normalized hit, as the mint did', () => {
+    // A kinded write used to go straight through `findOrCreate`, which records the
+    // written form ("Meridian AG!") as an alias of the stored "Meridian AG" when the
+    // normalized fallback matches. A bare `row.id` would link correctly and drop that.
+    // (The kind-agnostic arm reaches such a form through the brand fold, which never
+    // merged aliases — measured, unchanged here.)
+    const { ks, subjects } = make();
+    const org = subjects.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+    if (org.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const kinded = ks.write({ text: 'Meridian AG! moved to Zug', subjectName: 'Meridian AG!', subjectKind: 'organization', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(kinded.subjectId).toBe(org.id);
+    expect(JSON.parse(subjects.getSubject(org.id)!.aliases) as string[]).toContain('Meridian AG!');
+    const agnostic = ks.write({ text: 'Meridian AG. pays net 30', subjectName: 'Meridian AG.', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(agnostic.subjectId).toBe(org.id);
+  });
+
+  it('holds a topic-shaped name that collides with several old subjects as a hint, not as a question', () => {
+    // Two topic-shaped subjects from before the shape gate: the lookup now reaches them
+    // and comes back ambiguous. A topic is not handed back for disambiguation — the
+    // paragraph above the gate says why — so the write keeps the hint and no flag.
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: "Client's compliance risk" });
+    subjects.findOrCreate({ kind: 'product', name: "Client's compliance risk" });
+    const r = ks.write({ text: 'Reviewed quarterly', subjectName: "Client's compliance risk", sourceChannel: 'agent', sourceUntrusted: false });
+    expect(r.subjectId).toBeNull();
+    expect(r.subjectAmbiguous).toBeFalsy();
+  });
+
   it('links a topic-shaped name within an explicit kind before any mint', () => {
     const { ks, subjects } = make();
     const maria = subjects.findOrCreate({ kind: 'person', name: 'Maria dos Santos' });

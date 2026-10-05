@@ -229,9 +229,28 @@ export class KnowledgeStore {
     | { ambiguous: true } {
     const found = this._lookupWriteSubject(name);
     if (found.ambiguous) return { ambiguous: true };
-    if (found.row) return { ambiguous: false, id: found.row.id };
+    if (found.row) return { ambiguous: false, id: this._linkWriteHit(found, name) };
     const minted = this.subjects.findOrCreate({ kind: 'organization', name });
     return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+  }
+
+  /**
+   * Turn a hit of {@link _lookupWriteSubject} into the id a WRITE links to. A hit found by
+   * the normalized fallback goes back through `findOrCreate`, which resolves to the same
+   * row and — the part a bare `row.id` would drop — folds the written surface form into
+   * the subject's aliases, as every such hit did before the read half was extracted
+   * ("Meridian AG." written against a stored "Meridian AG" leaves the alias behind). An
+   * exact or brand hit never went through `findOrCreate` and does not now. The preview
+   * stays on the bare row: looking must leave the graph untouched.
+   */
+  private _linkWriteHit(
+    found: { row: SubjectRow; via: 'exact' | 'brand' | 'normalized' },
+    name: string,
+    kind: SubjectKind = 'organization',
+  ): string {
+    if (found.via !== 'normalized') return found.row.id;
+    const merged = this.subjects.findOrCreate({ kind, name });
+    return merged.ambiguous ? found.row.id : merged.id;
   }
 
   /**
@@ -254,16 +273,18 @@ export class KnowledgeStore {
    */
   private _lookupWriteSubject(name: string):
     | { ambiguous: true; candidates: number }
-    | { ambiguous: false; row: SubjectRow | null } {
+    | { ambiguous: false; row: null }
+    | { ambiguous: false; row: SubjectRow; via: 'exact' | 'brand' | 'normalized' } {
     const existing = this.subjects.findByNameAnyKind(name);
     if (existing.ambiguous) return { ambiguous: true, candidates: existing.candidateIds.length };
-    if (existing.row) return { ambiguous: false, row: existing.row };
+    if (existing.row) return { ambiguous: false, row: existing.row, via: 'exact' };
     const folded = this.subjects.findByBrandKey(name);
     if (folded.ambiguous) return { ambiguous: true, candidates: folded.candidateIds.length };
-    if (folded.row) return { ambiguous: false, row: folded.row };
+    if (folded.row) return { ambiguous: false, row: folded.row, via: 'brand' };
     const asOrg = this.subjects.resolveForCreate({ kind: 'organization', name });
     if (asOrg.ambiguous) return { ambiguous: true, candidates: asOrg.candidateIds.length };
-    return { ambiguous: false, row: asOrg.row };
+    if (asOrg.row) return { ambiguous: false, row: asOrg.row, via: 'normalized' };
+    return { ambiguous: false, row: null };
   }
 
   /**
@@ -275,11 +296,13 @@ export class KnowledgeStore {
    * {@link _lookupWriteSubject}, for the arm that names a kind.
    */
   private _lookupKindedSubject(kind: SubjectKind, name: string):
-    | { ambiguous: true }
-    | { ambiguous: false; row: SubjectRow | null } {
+    | { ambiguous: true; candidates: number }
+    | { ambiguous: false; row: null }
+    | { ambiguous: false; row: SubjectRow; via: 'normalized' } {
     const found = this.subjects.resolveForCreate({ kind, name });
-    if (found.ambiguous) return { ambiguous: true };
-    return { ambiguous: false, row: found.row };
+    if (found.ambiguous) return { ambiguous: true, candidates: found.candidateIds.length };
+    if (found.row) return { ambiguous: false, row: found.row, via: 'normalized' };
+    return { ambiguous: false, row: null };
   }
 
   /**
@@ -403,19 +426,25 @@ export class KnowledgeStore {
         // rule exists to stop a topic from being minted as a subject; an existing subject
         // is not a mint, whatever its name looks like. An existing match links; only a
         // MISS is held to the shape test, and only a non-topic miss is minted.
-        const found = params.subjectKind !== undefined
-          ? this._lookupKindedSubject(params.subjectKind, name)
-          : this._lookupWriteSubject(name);
+        //
+        // Two rules survive the reordering unchanged. A topic-shaped name that comes back
+        // AMBIGUOUS is held as a hint, not reported as ambiguous: the paragraph above
+        // explains why a topic must not be handed back for disambiguation, and a
+        // collision among old topic-shaped subjects does not make it a name. And a hit
+        // links the way the mint would have (`_linkWriteHit`): a normalized hit goes back
+        // through `findOrCreate`, which resolves to the same row and folds the written
+        // surface form into its aliases, as it always did.
+        const kind = params.subjectKind;
+        const found = kind !== undefined ? this._lookupKindedSubject(kind, name) : this._lookupWriteSubject(name);
         if (found.ambiguous) {
-          subjectId = null; subjectHint = name; subjectAmbiguous = true;
+          if (isTopicShapedName(name)) { subjectHint = name; }
+          else { subjectId = null; subjectHint = name; subjectAmbiguous = true; }
         } else if (found.row) {
-          subjectId = found.row.id;
+          subjectId = this._linkWriteHit(found, name, kind);
         } else if (isTopicShapedName(name)) {
           subjectHint = name;
         } else {
-          const minted = params.subjectKind !== undefined
-            ? this.subjects.findOrCreate({ kind: params.subjectKind, name })
-            : this.subjects.findOrCreate({ kind: 'organization', name });
+          const minted = this.subjects.findOrCreate({ kind: kind ?? 'organization', name });
           if (minted.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = minted.id; }
         }
       } else {
