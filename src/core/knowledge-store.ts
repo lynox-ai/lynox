@@ -227,20 +227,59 @@ export class KnowledgeStore {
   private _resolveWriteSubject(name: string):
     | { ambiguous: false; id: string }
     | { ambiguous: true } {
-    const existing = this.subjects.findByNameAnyKind(name);
-    if (existing.ambiguous) return { ambiguous: true };
-    if (existing.row) return { ambiguous: false, id: existing.row.id };
-    // Last lookup before minting: the same entity written another way. Exact paths have
-    // already missed, so this can only ever REPLACE a mint, never outrank a real match.
-    // What it catches, measured on the canary: 15 groups / 32 subjects, all one class —
-    // "n8n" beside "n8n.io", "lynox" beside "lynox.ai", "Notion" beside "notion.com".
-    // Several of those pairs also straddle KINDS (`n8n`/product vs `n8n.io`/organization),
-    // which is why it runs kind-agnostically like the lookup above it.
-    const folded = this.subjects.findByBrandKey(name);
-    if (folded.ambiguous) return { ambiguous: true };
-    if (folded.row) return { ambiguous: false, id: folded.row.id };
+    const found = this._lookupWriteSubject(name);
+    if (found.ambiguous) return { ambiguous: true };
+    if (found.row) return { ambiguous: false, id: found.row.id };
     const minted = this.subjects.findOrCreate({ kind: 'organization', name });
     return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+  }
+
+  /**
+   * The READ half of {@link _resolveWriteSubject}: every lookup the write surface performs
+   * before it would mint, in the order it performs them, and nothing that writes. ONE
+   * function for three callers — the write path, which gates a mint on the name's shape
+   * only after this has missed; the approval, which mints after it; and the preview,
+   * which only reports — so none of them can drift from the others again. The preview
+   * once mirrored this "step for step" by hand and lacked the brand fold, so a hint of
+   * `n8n` previewed as "will be created" while the approval folded it into `n8n.io`.
+   *
+   * The brand fold is the last lookup before a mint: the same entity written another way.
+   * Exact paths have already missed, so it can only ever REPLACE a mint, never outrank a
+   * real match. What it catches, measured on the canary: 15 groups / 32 subjects, all one
+   * class — "n8n" beside "n8n.io", "lynox" beside "lynox.ai", "Notion" beside "notion.com".
+   * Several of those pairs also straddle KINDS (`n8n`/product vs `n8n.io`/organization),
+   * which is why it runs kind-agnostically like the lookup above it. `resolveForCreate` is
+   * the read half of `findOrCreate` — the normalized fallback the any-kind lookup does not
+   * have — extracted so this and the mint read the same way.
+   */
+  private _lookupWriteSubject(name: string):
+    | { ambiguous: true; candidates: number }
+    | { ambiguous: false; row: SubjectRow | null } {
+    const existing = this.subjects.findByNameAnyKind(name);
+    if (existing.ambiguous) return { ambiguous: true, candidates: existing.candidateIds.length };
+    if (existing.row) return { ambiguous: false, row: existing.row };
+    const folded = this.subjects.findByBrandKey(name);
+    if (folded.ambiguous) return { ambiguous: true, candidates: folded.candidateIds.length };
+    if (folded.row) return { ambiguous: false, row: folded.row };
+    const asOrg = this.subjects.resolveForCreate({ kind: 'organization', name });
+    if (asOrg.ambiguous) return { ambiguous: true, candidates: asOrg.candidateIds.length };
+    return { ambiguous: false, row: asOrg.row };
+  }
+
+  /**
+   * The read half of a KINDED write (`remember` with an explicit `subjectKind`): exactly
+   * what `findOrCreate({kind, name})` reads before it mints — canonical, alias, then the
+   * normalized fallback — and nothing more. Deliberately not wider than the mint's own
+   * read: a lookup that found what the mint would not have found would change which
+   * subject a kinded write lands on, and that is not this fix. Same contract as
+   * {@link _lookupWriteSubject}, for the arm that names a kind.
+   */
+  private _lookupKindedSubject(kind: SubjectKind, name: string):
+    | { ambiguous: true }
+    | { ambiguous: false; row: SubjectRow | null } {
+    const found = this.subjects.resolveForCreate({ kind, name });
+    if (found.ambiguous) return { ambiguous: true };
+    return { ambiguous: false, row: found.row };
   }
 
   /**
@@ -254,25 +293,16 @@ export class KnowledgeStore {
    * queue entry never leaves an empty minted subject behind"). The mint is REPORTED here
    * and performed only by an approval.
    *
-   * It mirrors {@link _resolveWriteSubject} step for step, and BOTH steps matter. The
-   * first version stopped after `findByNameAnyKind` and was wrong for a whole class of
-   * hints: the approval does not stop there either — it hands the name to
-   * `findOrCreate({kind:'organization'})`, whose read half applies a NORMALIZED fallback
-   * the any-kind lookup does not have. With `Meridian AG` in the graph, a hint of
-   * `"Meridian AG."` previewed as "will be created" while the approval folded it into the
-   * existing subject: a warning about a mint that never happens, and no mention of the
-   * subject that actually receives the fact. `resolveForCreate` is that same read half,
-   * extracted, so the two cannot drift again.
+   * It shares the approval's read half, {@link _lookupWriteSubject}, rather than mirroring
+   * it: two hand-kept copies drifted twice (first the normalized fallback was missing, then
+   * the brand fold), and each time the preview announced a mint the approval never made.
    */
   previewHintTarget(name: string): KnowledgeSubjectTarget | null {
     const hint = name.trim();
     if (!hint) return null;
-    const found = this.subjects.findByNameAnyKind(hint);
-    if (found.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: found.candidateIds.length };
+    const found = this._lookupWriteSubject(hint);
+    if (found.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: found.candidates };
     if (found.row) return { resolution: 'existing', id: found.row.id, name: found.row.name, kind: found.row.kind };
-    const asOrg = this.subjects.resolveForCreate({ kind: 'organization', name: hint });
-    if (asOrg.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: asOrg.candidateIds.length };
-    if (asOrg.row) return { resolution: 'existing', id: asOrg.row.id, name: asOrg.row.name, kind: asOrg.row.kind };
     return { resolution: 'new', name: hint, kind: 'organization' };
   }
 
@@ -365,13 +395,28 @@ export class KnowledgeStore {
         // and overriding that would make the queue's own approve button lie.
         // (An earlier version of this comment said "only the automatic path" while the gate
         // already wrapped both arms — the code was right and the comment was not.)
-        if (isTopicShapedName(name)) {
+        //
+        // LOOKUP FIRST, gate only before a MINT. The gate used to run before any lookup, so
+        // a name the graph already knew was turned into a bare hint whenever its shape
+        // tripped the detector — "Maria dos Santos" (a lowercase particle the connective
+        // list does not carry) wrote unlinked facts about an existing person. The shape
+        // rule exists to stop a topic from being minted as a subject; an existing subject
+        // is not a mint, whatever its name looks like. An existing match links; only a
+        // MISS is held to the shape test, and only a non-topic miss is minted.
+        const found = params.subjectKind !== undefined
+          ? this._lookupKindedSubject(params.subjectKind, name)
+          : this._lookupWriteSubject(name);
+        if (found.ambiguous) {
+          subjectId = null; subjectHint = name; subjectAmbiguous = true;
+        } else if (found.row) {
+          subjectId = found.row.id;
+        } else if (isTopicShapedName(name)) {
           subjectHint = name;
         } else {
-        const r = params.subjectKind !== undefined
-          ? this.subjects.findOrCreate({ kind: params.subjectKind, name })
-          : this._resolveWriteSubject(name);
-        if (r.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = r.id; }
+          const minted = params.subjectKind !== undefined
+            ? this.subjects.findOrCreate({ kind: params.subjectKind, name })
+            : this.subjects.findOrCreate({ kind: 'organization', name });
+          if (minted.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = minted.id; }
         }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
