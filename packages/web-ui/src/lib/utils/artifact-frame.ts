@@ -287,6 +287,58 @@ export function injectIntoArtifactFrame(html: string, extraHead: string, scriptC
 }
 
 /**
+ * overflow-x:auto (not hidden) so a wide document — an A4-print HTML artifact, a
+ * deck — can be PANNED on mobile instead of being clipped off-screen.
+ */
+const OVERFLOW_FIX =
+	'<style>html,body{overflow-x:auto;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}'
+	+ 'html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>';
+
+/**
+ * The frame's own styling for an artifact that brought NO document of its own.
+ * An iframe srcdoc does not inherit the parent's CSS variables, so a fragment
+ * would otherwise render black-on-white inside a dark app.
+ */
+function fragmentDefaults(theme: 'light' | 'dark'): string {
+	const bg = theme === 'light' ? '#ffffff' : '#0a0a1a';
+	const fg = theme === 'light' ? '#0b0b14' : '#e8e8f0';
+	return `<style>body{background:${bg};color:${fg};font-family:system-ui,-apple-system,sans-serif;`
+		+ `margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
+}
+
+/**
+ * The srcdoc for the INLINE artifact bubble.
+ *
+ * ## Why the head is built here and not by the component
+ *
+ * It used to be: the component composed a `headHtml` string and passed it in. A
+ * mutation round then computed it and passed `''` instead, and nothing failed —
+ * the artifact lost its overflow fix and, for a fragment, its default colours.
+ * The only pin available at a `.svelte` call site is a spelling ("the second
+ * argument is this identifier"), which is the shape this change has already
+ * deleted three times. Moving the composition into an exported function makes it
+ * RUNNABLE, so the same mutation now dies on a behavioural assertion.
+ *
+ * What the component still supplies is the one thing this module cannot know:
+ * the resolved theme. A mutant can pass the wrong one — and that is a VALUE a
+ * test can pin, not a whole concern it can drop.
+ *
+ * An artifact that brought its own document owns its styling, so it gets the
+ * overflow fix and nothing else. `hasOwnDocument` decides that, the same
+ * predicate that decides parse-vs-wrap.
+ */
+export function buildArtifactBubbleFrame(
+	html: string,
+	theme: 'light' | 'dark',
+	scriptCode: string,
+): string {
+	const extra = hasOwnDocument(html)
+		? OVERFLOW_FIX
+		: `<meta charset="utf-8">${fragmentDefaults(theme)}${OVERFLOW_FIX}`;
+	return injectIntoArtifactFrame(html, extra, scriptCode);
+}
+
+/**
  * Build the srcdoc for a fullscreen artifact preview: the CSP and a default
  * viewport first in `<head>`, the fit-to-width script last in `<body>`.
  *

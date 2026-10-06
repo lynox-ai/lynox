@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
 	isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview,
-	injectIntoArtifactFrame, hasOwnDocument, ARTIFACT_CSP, ARTIFACT_FIT_CODE,
+	injectIntoArtifactFrame, buildArtifactBubbleFrame, hasOwnDocument, ARTIFACT_CSP, ARTIFACT_FIT_CODE,
 	clearArtifactFitStyles,
 } from './artifact-frame.js';
 import type { ArtifactFitStyle } from './artifact-frame.js';
@@ -186,6 +186,71 @@ describe('injectIntoArtifactFrame — the breakout it used to allow', () => {
 	});
 });
 
+describe('buildArtifactBubbleFrame', () => {
+	// ⭐ These exist because the head used to be composed at the component's call
+	// site and a mutant emptied it with the suite green. Composition is behind an
+	// exported function now, so the same mutation dies here.
+	const DOC = '<html><head></head><body><p>x</p></body></html>';
+	const FRAGMENT = '<div>frag</div>';
+
+	// ⚠ These assert on `box-sizing:border-box` and on light-vs-dark DIFFERING,
+	// not on hex literals. The colours are deliberate fixed values — an iframe
+	// srcdoc does not inherit the parent's CSS variables, so a token is
+	// structurally unavailable across that boundary — and `hex-guard` fails any
+	// web-ui file outside its allowlist. Writing the expected colour here would
+	// have put this test on that list for no gain: a theme that is ignored
+	// produces IDENTICAL output for both values, which is the property.
+	const FRAGMENT_MARKER = 'box-sizing:border-box';
+
+	it('⭐ gives a document artifact the overflow fix and NOT our colours', () => {
+		// An artifact that brought its own document owns its styling — forcing our
+		// background onto it is the defect, and dropping the overflow fix stops a
+		// wide document being pannable on a phone.
+		const withHead = buildArtifactBubbleFrame(DOC, 'dark', 'void 0;');
+		expect(withHead, 'the overflow fix is gone').toContain('overflow-x:auto');
+		expect(withHead, 'our default styling was forced onto a document artifact').not.toContain(FRAGMENT_MARKER);
+		// …and the bare injector does NOT carry the overflow fix, so the assertion
+		// above is about what this function adds rather than about the injector.
+		expect(injectIntoArtifactFrame(DOC, '', 'void 0;')).not.toContain('overflow-x:auto');
+	});
+
+	it('⭐ gives a fragment our styling, a charset and the overflow fix', () => {
+		const out = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
+		expect(out, 'a fragment lost our default styling').toContain(FRAGMENT_MARKER);
+		expect(out, 'a fragment lost its charset').toContain('<meta charset="utf-8">');
+		expect(out, 'a fragment lost the overflow fix').toContain('overflow-x:auto');
+	});
+
+	it('⭐ honours the theme it is given', () => {
+		// The one value the module cannot know. A mutant that ignores it is a
+		// light artifact in a dark app, or the reverse — and it shows up as the
+		// two outputs becoming identical.
+		const light = buildArtifactBubbleFrame(FRAGMENT, 'light', 'void 0;');
+		const dark = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
+		// ⚠ EACH declaration separately. `light !== dark` is too weak: pinning
+		// only the background leaves the text colour still varying, so the two
+		// outputs differ and a half-ignored theme survives. Measured — that is
+		// exactly what the first version of this assertion let through.
+		const decl = (out: string, prop: string) => new RegExp(`${prop}:([^;}]+)`).exec(out)?.[1] ?? '';
+		for (const prop of ['background', 'color']) {
+			const l = decl(light, prop);
+			const d = decl(dark, prop);
+			// Both non-empty first, or `not.toBe` would pass on two absences.
+			expect(l, `no ${prop} declaration in the light output`).not.toBe('');
+			expect(d, `no ${prop} declaration in the dark output`).not.toBe('');
+			expect(l, `${prop} no longer follows the theme`).not.toBe(d);
+		}
+	});
+
+	it('still gets the policy and the viewport, which it does not compose either', () => {
+		for (const html of [DOC, FRAGMENT]) {
+			const out = buildArtifactBubbleFrame(html, 'dark', 'void 0;');
+			expect(out).toContain('Content-Security-Policy');
+			expect(out).toContain('width=device-width');
+		}
+	});
+});
+
 describe('injectArtifactPreview', () => {
 	it('injects the policy + a default viewport + the fit script into a full doc', () => {
 		const out = asDoc(injectArtifactPreview('<html><head><title>T</title></head><body>hi</body></html>'));
@@ -239,62 +304,31 @@ describe('injectArtifactPreview', () => {
 describe('both frame paths route through it', () => {
 	/**
 	 * ⚠ A SOURCE ASSERTION, and a weak one on purpose — it is no longer the only
-	 * thing standing between the policy and a caller. The structural fix above is
-	 * what makes "the policy got dropped" impossible; this only notices that a
-	 * component stopped calling the injector at all, which is a loud absence.
+	 * thing standing between a caller and the frame's head. The structural fix is
+	 * that NOTHING about the head is composed at a call site any more: the policy,
+	 * the viewport, the default colours and the overflow fix are all owned by
+	 * exported functions, which the tests above run. This only notices that a
+	 * component stopped calling in at all, which is a loud absence.
 	 *
-	 * ## A KNOWN GAP, named rather than covered
-	 *
-	 * A mutation that computes `extraHead` in the component and then passes `''`
-	 * to the injector SURVIVES this suite, measured. What it costs is styling: a
-	 * wide document stops being pannable (`overflowFix`), and a fragment renders
-	 * on the default white background inside a dark app (`defaultStyles`). It
-	 * does NOT cost the policy or the viewport — the injector owns both, so that
-	 * class is impossible rather than merely caught.
-	 *
-	 * It is not pinned because the only available pin is a spelling: "the second
-	 * argument is the identifier `extraHead`". The set of ways to pass nothing is
-	 * open — `''`, a differently-named variable, a conditional that yields empty
-	 * — and this change already deleted three assertions of exactly that shape
-	 * for exactly that reason. A styling regression is also immediately visible
-	 * in the UI, which is the opposite failure mode from the silent one this
-	 * module exists for. Closing it properly means the injector owning the whole
-	 * head, parameterised by the theme it cannot know; that is a bigger cut than
-	 * this change, and it is stated here so the next person does not have to
-	 * rediscover why there is no test.
+	 * That ordering is the lesson of this change. A mutation round emptied the
+	 * head string a component used to build and nothing failed, because the only
+	 * pin available at a `.svelte` call site is a spelling — "the second argument
+	 * is this identifier" — and this change had already deleted three assertions
+	 * of exactly that shape. Moving the composition behind an exported function
+	 * was what made the mutant die, not a better search.
 	 */
 	it('the inline bubble and the fullscreen preview both call it', () => {
 		const renderer = readFileSync(
 			fileURLToPath(new URL('../components/MarkdownRenderer.svelte', import.meta.url)),
 			'utf-8',
 		);
-		expect(renderer, 'MarkdownRenderer no longer calls injectIntoArtifactFrame').toContain('injectIntoArtifactFrame(');
+		expect(renderer, 'MarkdownRenderer no longer calls buildArtifactBubbleFrame').toContain('buildArtifactBubbleFrame(');
 		const gallery = readFileSync(
 			fileURLToPath(new URL('../components/ArtifactsView.svelte', import.meta.url)),
 			'utf-8',
 		);
 		expect(gallery, 'ArtifactsView no longer imports the shared injector').toContain("from '../utils/artifact-frame.js'");
 		expect(gallery, 'ArtifactsView no longer calls the shared injector').toContain('injectArtifactFit(');
-	});
-
-	it('⭐ a document artifact keeps its own styling, a fragment gets ours', () => {
-		// The distinction `hasOwnDocument` decides on the caller's side, and the
-		// one nothing pinned: inverting the predicate swapped the two head arms
-		// and the suite stayed green. An artifact that brought its own document
-		// must NOT get our background forced onto it; a fragment must, or it
-		// renders black-on-white inside a dark app.
-		const renderer = readFileSync(
-			fileURLToPath(new URL('../components/MarkdownRenderer.svelte', import.meta.url)),
-			'utf-8',
-		);
-		const arm = renderer.match(/const extraHead = hasOwnDocument\(clean\)\n([\s\S]*?);\n/)?.[1] ?? '';
-		expect(arm, 'the head-arm expression is gone or reshaped — this test cannot see it').not.toBe('');
-		const [own, fragment] = arm.split(':');
-		expect(own, 'a document artifact is being given our default styles').not.toContain('defaultStyles');
-		expect(fragment, 'a fragment no longer gets our default styles').toContain('defaultStyles');
-		// Both get the overflow fix — a wide document has to be pannable either way.
-		expect(own).toContain('overflowFix');
-		expect(fragment).toContain('overflowFix');
 	});
 
 	it('⭐ neither component keeps its own copy of the policy', () => {

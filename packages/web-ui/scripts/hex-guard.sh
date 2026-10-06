@@ -7,6 +7,10 @@
 #
 # Allowlist (deliberate fixed-light or fixed-dark surfaces with rationale):
 #   - utils/artifact-print.ts                     (print stylesheet, always white paper)
+#   - utils/artifact-frame.ts                     (iframe srcdoc: CSS vars do NOT cross
+#                                                  the sandbox boundary, so a token is
+#                                                  structurally unavailable; moved here
+#                                                  from MarkdownRenderer, already listed)
 #   - MarkdownRenderer.svelte mermaid PNG export  (asset-export decision)
 #   - MarkdownRenderer.svelte html2canvas         (asset-export decision)
 #   - KnowledgeGraphView.svelte typeHues          (categorical mid-tone palette, AA on both themes)
@@ -33,6 +37,7 @@ ALLOWLIST=(
   "packages/web-ui/src/app.css"
   "packages/web-ui/src/lib/components/MarkdownRenderer.svelte"
   "packages/web-ui/src/lib/utils/artifact-print.ts"
+  "packages/web-ui/src/lib/utils/artifact-frame.ts"
   "packages/web-ui/src/lib/components/KnowledgeGraphView.svelte"
   "packages/web-ui/src/lib/components/SubjectsView.svelte"
   "packages/web-ui/src/lib/components/MobileAccess.svelte"

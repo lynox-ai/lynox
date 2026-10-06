@@ -9,7 +9,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight, injectIntoArtifactFrame, hasOwnDocument } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { substituteRenderedFences } from '../utils/fence-substitution.js';
@@ -225,28 +225,17 @@
 		// inherit into the iframe document. Read the theme at render time and
 		// inject matching styles. Theme-flip invalidates richCache (downstream
 		// $effect on getResolvedTheme) so srcdoc is regenerated.
-		const theme = getResolvedTheme();
-		const bg = theme === 'light' ? '#ffffff' : '#0a0a1a';
-		const fg = theme === 'light' ? '#0b0b14' : '#e8e8f0';
-		const defaultStyles = `<style>body{background:${bg};color:${fg};font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		// overflow-x:auto (not hidden) so a wide document (e.g. an A4-print HTML
-		// artifact) can be PANNED on mobile instead of being clipped off-screen.
-		const overflowFix = `<style>html,body{overflow-x:auto;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
-		// An artifact that brought its own document owns its styling, so it does
-		// not get our default background/colour. ⚠ ONE predicate decides this —
-		// the same one that decides parse-vs-wrap. They used to be two
-		// (`clean.includes('<html')` here, a document-TAG regex there) and they
-		// disagreed: `<body>x</body>` got the fragment's default styling inside a
-		// parsed document, `<htmlx>x</htmlx>` got the document head inside a
-		// wrapper we built ourselves.
+		// ⚠ NOTHING about the frame's head is composed here any more — not the
+		// policy, not the viewport, not the default colours or the overflow fix.
+		// A mutation round emptied the head string this used to build and nothing
+		// failed, because the only pin available at a component call site is a
+		// spelling. `buildArtifactBubbleFrame` owns the whole head and is
+		// exported, so the same mutation dies on a behavioural assertion.
 		//
-		// The policy and the viewport default are NOT passed. The injector owns
-		// both, so no caller can drop them — which is what a mutation round broke
-		// when they were parameters. `utils/artifact-frame.ts` holds the reason.
-		const extraHead = hasOwnDocument(clean)
-			? overflowFix
-			: `<meta charset="utf-8">${defaultStyles}${overflowFix}`;
-		const fullHtml = injectIntoArtifactFrame(clean, extraHead, RESIZE_CODE);
+		// The theme is the one thing that module cannot know. It is a value, not
+		// a concern that can be dropped. `utils/artifact-frame.ts` holds the
+		// measurement and the reason.
+		const fullHtml = buildArtifactBubbleFrame(clean, getResolvedTheme(), RESIZE_CODE);
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
