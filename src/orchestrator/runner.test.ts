@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { channel } from 'node:diagnostics_channel';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -285,6 +285,64 @@ describe('runManifest — a declared gate this run cannot apply is refused, not 
     });
     expect(state.status).toBe('completed');
     expect(submit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runManifest — a tool gate the agent cannot wrap is refused before the run', () => {
+  // The agent runtime gates a tool by wrapping it in the list built from the agent definition.
+  // A gated name outside that list never applies, and the provider-side `web_search` is always
+  // outside it. The check loads each gated step's definition before the run starts, so an
+  // earlier step cannot act first. The definition lives on disk, as `loadAgentDef` reads it.
+  let agentsDir = '';
+  const approving: GateAdapter = {
+    submit: async () => 'approval-id',
+    waitForDecision: async (): Promise<GateDecision> => ({ status: 'approved' }),
+  };
+  beforeAll(() => {
+    agentsDir = mkdtempSync(join(tmpdir(), 'gate-agents-'));
+    writeFileSync(join(agentsDir, 'package.json'), '{"type":"module"}');
+    mkdirSync(join(agentsDir, 'gate-agent'));
+    writeFileSync(join(agentsDir, 'gate-agent', 'index.js'),
+      "export default { name: 'gate-agent', version: '1', defaultTier: 'balanced', systemPrompt: 'x', " +
+      "tools: [{ name: 'http_request', description: 'd', input_schema: { type: 'object', properties: {} }, execute: async () => 'ok' }] };\n");
+  });
+  afterAll(() => rmSync(agentsDir, { recursive: true, force: true }));
+
+  const twoSteps = (gates: string[]): Manifest => ({
+    ...MANIFEST,
+    manifest_version: '1.1',
+    execution: 'sequential',
+    agents: [
+      { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 't' },
+      { id: 'step-2', agent: 'gate-agent', runtime: 'agent', tool_gates: gates, input_from: ['step-1'] },
+    ],
+  });
+
+  it('refuses web_search before any step', async () => {
+    const onRunStart = vi.fn();
+    const onStepStart = vi.fn();
+    await expect(runManifest(twoSteps(['http_request', 'web_search']), CONFIG, {
+      agentsDir, parentTools: [], gateAdapter: approving, hooks: { onRunStart, onStepStart },
+    })).rejects.toThrow(/declares tool_gates for web_search, which agent "gate-agent" does not define.*Gate only tools listed/);
+    expect(onRunStart).not.toHaveBeenCalled();
+    expect(onStepStart).not.toHaveBeenCalled();
+  });
+
+  it('matches names exactly, as the wrap does', async () => {
+    // The wrap compares exactly, so a check that matched case-insensitively would pass a
+    // name the wrap then skips.
+    await expect(runManifest(twoSteps(['HTTP_REQUEST']), CONFIG, {
+      agentsDir, parentTools: [], gateAdapter: approving,
+    })).rejects.toThrow(/declares tool_gates for HTTP_REQUEST/);
+  });
+
+  it('lets a gate on a defined tool through to the step', async () => {
+    mockSpawnViaAgent.mockClear();
+    const state = await runManifest(twoSteps(['http_request']), CONFIG, {
+      agentsDir, parentTools: [], gateAdapter: approving,
+    });
+    expect(state.status).toBe('completed');
+    expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
   });
 });
 

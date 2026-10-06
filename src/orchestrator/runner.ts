@@ -334,6 +334,35 @@ function assertGatesEnforceable(manifest: Manifest, hasGateAdapter: boolean): vo
   }
 }
 
+/**
+ * Refuse `tool_gates` naming a tool the step's agent definition does not define.
+ *
+ * The `agent` runtime gates a tool by wrapping it in the list built from the definition, so a
+ * name that matches nothing there is a declared approval that never applies: a typo, or a tool
+ * the step gets from elsewhere. The provider-side `web_search` is one; the Agent can add it
+ * itself (see `builtinTools` in `core/agent.ts`), outside that list, so it cannot be wrapped.
+ *
+ * Checked before the run starts, with the other gate checks, because the definitions do not
+ * depend on any step's output: refusing at the step would come after earlier steps had acted.
+ * Skipped when `mockResponses` is set, since every step then goes to `spawnMock` and no tool runs.
+ */
+async function assertToolGatesWrappable(manifest: Manifest, agentsDir: string): Promise<void> {
+  for (const step of manifest.agents) {
+    const gated = step.tool_gates ?? [];
+    if (step.runtime !== 'agent' || gated.length === 0) continue;
+    const agentDef = await loadAgentDef(step.agent, agentsDir);
+    const defined = new Set((agentDef.tools ?? []).map((t) => t.name));
+    const ungatable = gated.filter((name) => !defined.has(name));
+    if (ungatable.length > 0) {
+      throw new Error(
+        `Step "${step.id}" declares tool_gates for ${ungatable.join(', ')}, which agent "${agentDef.name}" ` +
+        `does not define, so no approval could be applied to them. Gate only tools listed in the agent ` +
+        `definition.`,
+      );
+    }
+  }
+}
+
 export async function runManifest(
   manifest: Manifest,
   config: LynoxUserConfig,
@@ -352,6 +381,8 @@ export async function runManifest(
   }
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
+  const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');
+  if (options.mockResponses === undefined) await assertToolGatesWrappable(manifest, agentsDir);
 
   // Per-run prompt budget. Allocated only at the top-level run (depth === 0)
   // so sub-pipelines share the parent's cap; autonomous runs (no parent
@@ -400,7 +431,6 @@ export async function runManifest(
   };
 
   const runId = randomUUID();
-  const agentsDir = options.agentsDir ?? config.agents_dir ?? join(process.cwd(), 'agents');
 
   const state: RunState = {
     runId,
