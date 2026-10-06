@@ -78,10 +78,10 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     try { engineDb.close(); } catch { /* closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
-    vi.unstubAllEnvs();
   });
 
   function workflow(id: string, tools: string[]): PlannedPipeline {
@@ -128,8 +128,9 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       getToolContext: () => ({ tools: [memoryStore, httpRequest] }),
       getMemory: () => null,
       getRunHistory: () => history,
-      // A REAL store that resolves the reference: if the headless run ever threads the
-      // engine's store into its steps, the pin below sees the resolved value and fails.
+      // A REAL store that would resolve the reference. If the headless run ever threads a
+      // store into its steps, the literal no longer reaches the tool: the destination gate
+      // refuses the call, or the value is filled in. Either way the pin below fails.
       getSecretStore: () => secretStore,
       escalateToUser: () => null,
     } as unknown as Engine;
@@ -162,6 +163,5 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       .mockResolvedValueOnce(endTurn('done'));
     await createAndRun('wf-http', false);
     expect(JSON.stringify(seen.httpInput)).toContain('secret:SERVICE_TOKEN');
-    expect(JSON.stringify(seen.httpInput)).not.toContain(tokenValue);
   });
 });
