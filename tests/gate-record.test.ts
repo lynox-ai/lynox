@@ -1224,6 +1224,33 @@ describe('a PUBLIC record does not count open findings', () => {
     expect(openFiledCount('20 findings, 8 fixed, 12 filed')).toBe(12);
   });
 
+  it('sums EVERY mention, so an early `0 filed` cannot hide a later count', () => {
+    expect(openFiledCount('leaning on the 0 filed sweep, 2 findings, 2 filed')).toBe(2);
+  });
+
+  it('counts the other open words: open, left/remaining/still open, deferred, `2x filed`', () => {
+    for (const [text, n] of [['2 findings, 2 open', 2], ['2 findings, 2 left open', 2],
+                             ['the round that left 3 open', 3], ['1 finding remaining open', 1],
+                             ['2 deferred', 2], ['2x filed', 2], ['2 offen', 2]] as const)
+      expect(openFiledCount(text), text).toBe(n);
+    for (const text of ['no findings', '5 findings, all fixed', '1 opus round, no findings', '11 killed, 0 survived'])
+      expect(openFiledCount(text), text).toBe(0);
+  });
+
+  it('REFUSES an open count in ANY field of a public record, also one whose grammar did not run', () => {
+    // `security:` on a code-only diff, `review:` on a docs diff, and an unknown field.
+    const cases: Array<[Record<string, string>, string[]]> = [
+      [{ security: 'own round, 2 findings, 2 open' }, CODE],
+      [{ security: 'leaning on the round that left 3 open, no findings' }, CODE],
+      [{ open: '3' + ' open' }, CODE],
+    ];
+    for (const [over, files] of cases) {
+      const v = evaluate({ body: record(over), head: HEAD, files, visibility: 'public' });
+      expect(v.ok, JSON.stringify(over)).toBe(false);
+      expect(v.errors.join(' '), JSON.stringify(over)).toMatch(/counts OPEN findings/);
+    }
+  });
+
   it('REFUSES a `security:` count in public, and says where the number belongs', () => {
     const v = pub({ gates: G, review: '1 opus round, no findings', security: SEC_COUNT });
     expect(v.ok).toBe(false);
