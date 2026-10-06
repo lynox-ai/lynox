@@ -9,7 +9,6 @@
 	let apiKeyMissing = $state(false);
 	let dismissed = $state(false);
 	let showWizard = $state(false);
-	let currentProvider = $state<Provider>('anthropic');
 	let managedMode = $state<string | null>(null);
 	let loaded = $state(false);
 
@@ -47,7 +46,6 @@
 				const restored: Provider = narrowed === 'openai' && data.api_base_url === 'https://api.mistral.ai/v1'
 					? 'mistral'
 					: narrowed;
-				currentProvider = restored;
 				selectedProvider = restored;
 
 				// Restore the previously chosen model + base URL so the user re-opens

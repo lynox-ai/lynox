@@ -99,7 +99,6 @@
 
 	// Threads (for grouping)
 	let threads = $state<ThreadInfo[]>([]);
-	let hasMoreThreads = $state(true);
 	let expandedThreads = $state<Set<string>>(new Set());
 
 	// Cost chart
@@ -202,7 +201,6 @@
 			if (threadsRes.ok) {
 				const td = (await threadsRes.json()) as { threads: ThreadInfo[] };
 				threads = td.threads;
-				hasMoreThreads = td.threads.length >= 50;
 			}
 		} catch {
 			error = t('common.load_failed');
@@ -224,17 +222,6 @@
 			error = t('common.load_failed');
 		}
 		loadingMore = false;
-	}
-
-	async function loadMoreThreads() {
-		if (!hasMoreThreads) return;
-		try {
-			const res = await fetch(`${getApiBase()}/threads?limit=50&offset=${threads.length}&includeArchived=true`);
-			if (!res.ok) return;
-			const data = (await res.json()) as { threads: ThreadInfo[] };
-			threads = [...threads, ...data.threads];
-			hasMoreThreads = data.threads.length >= 50;
-		} catch { /* silently fail */ }
 	}
 
 	async function toggleRun(id: string) {
@@ -638,6 +625,7 @@
 						<div class="flex items-center justify-between gap-2">
 							<p class="text-sm font-medium truncate max-w-[60%]">
 								{#if searchQuery.trim()}
+									<!-- eslint-disable-next-line svelte/no-at-html-tags -- highlightMatch escapes the text and the query; the only markup it adds is a fixed <mark> -->
 									{@html highlightMatch(run.task_text, searchQuery)}
 								{:else}
 									{run.task_text}

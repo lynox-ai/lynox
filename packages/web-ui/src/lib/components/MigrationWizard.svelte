@@ -17,7 +17,6 @@
 		getProgress,
 		getVerification,
 		getTargetUrl,
-		getMigrationToken,
 		getProvisioningElapsed,
 	} from '../stores/migration.svelte.js';
 	import { t } from '../i18n.svelte.js';
