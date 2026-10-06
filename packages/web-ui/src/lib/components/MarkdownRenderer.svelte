@@ -9,7 +9,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, injectIntoArtifactFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { substituteRenderedFences } from '../utils/fence-substitution.js';
@@ -233,17 +233,20 @@
 		// overflow-x:auto (not hidden) so a wide document (e.g. an A4-print HTML
 		// artifact) can be PANNED on mobile instead of being clipped off-screen.
 		const overflowFix = `<style>html,body{overflow-x:auto;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
-		let fullHtml: string;
-		if (clean.includes('<html')) {
-			// Inject a viewport meta if the artifact's own <html> lacks one, so it
-			// lays out for the device width on mobile instead of desktop-wide.
-			const viewportMeta = /name=["']viewport["']/i.test(clean)
-				? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
-			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${viewportMeta}${overflowFix}`);
-			fullHtml = fullHtml.includes('</body>') ? fullHtml.replace('</body>', `${RESIZE_SCRIPT}</body>`) : fullHtml + RESIZE_SCRIPT;
-		} else {
-			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}${overflowFix}</head><body>${clean}${RESIZE_SCRIPT}</body></html>`;
-		}
+		// Inject a viewport meta only when the artifact lacks one, so it lays out
+		// for the device width on mobile instead of desktop-wide. ⚠ The fragment
+		// branch used to add it UNCONDITIONALLY, which gave a fragment that
+		// declared its own viewport two of them; the condition now covers both.
+		const viewportMeta = /name=["']viewport["']/i.test(clean)
+			? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
+		// An artifact that brought its own `<html>` owns its styling, so it does
+		// not get our default background/colour — that distinction is unchanged.
+		const headHtml = clean.includes('<html')
+			? `${CSP_META}${viewportMeta}${overflowFix}`
+			: `<meta charset="utf-8">${viewportMeta}${CSP_META}${defaultStyles}${overflowFix}`;
+		// Nodes, not two pattern matches over markup the artifact author controls.
+		// `utils/artifact-frame.ts` holds the measurement and the reason.
+		const fullHtml = injectIntoArtifactFrame(clean, headHtml, RESIZE_CODE);
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
@@ -319,7 +322,14 @@
 	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
 	// instead of re-walking the whole DOM. (String backslashes are doubled so the
 	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
-	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0,bw=document.body?document.body.scrollWidth:0;parent.postMessage({type:"lynox-resize",h:sh,w:Math.max(document.documentElement.scrollWidth,bw),deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
+	/**
+	 * The resize script's CODE, not a markup string. It is inserted as a
+	 * `script` element's `textContent` (see `injectIntoArtifactFrame`), so the
+	 * `</` + `script>` split that used to keep the surrounding markup from
+	 * terminating early is no longer needed — and neither is a second copy of
+	 * this code for the fragment case.
+	 */
+	const RESIZE_CODE = '(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0,bw=document.body?document.body.scrollWidth:0;parent.postMessage({type:"lynox-resize",h:sh,w:Math.max(document.documentElement.scrollWidth,bw),deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()';
 
 	// ── Event delegation ─────────────────────────────────────
 

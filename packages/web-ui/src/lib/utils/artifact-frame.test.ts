@@ -1,29 +1,123 @@
 import { describe, it, expect } from 'vitest';
-import { isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview, ARTIFACT_FIT_SCRIPT, clearArtifactFitStyles } from './artifact-frame.js';
+import { DOMParser as LinkedomDOMParser, parseHTML } from 'linkedom';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+import {
+	isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview,
+	injectIntoArtifactFrame, ARTIFACT_FIT_SCRIPT, ARTIFACT_FIT_CODE, clearArtifactFitStyles,
+} from './artifact-frame.js';
 import type { ArtifactFitStyle } from './artifact-frame.js';
+
+/**
+ * ⚠ `injectIntoArtifactFrame` parses with the platform's `DOMParser`. Node has
+ * none, so linkedom's stands in — and ONLY for the DOCUMENT case, which is
+ * where the two agree.
+ *
+ * Measured, because this is the trap: on `<div>frag</div>` linkedom makes the
+ * DIV the `documentElement` and nests a synthesised head and body INSIDE it,
+ * dropping the fragment's own content; a browser always yields html/head/body
+ * for `text/html`. A test built on that would have shown mangled output for a
+ * shape the browser handles, and the repair would have gone into the production
+ * code. The fragment path deliberately does not parse, so the divergence never
+ * reaches this suite.
+ */
+globalThis.DOMParser = LinkedomDOMParser as unknown as typeof globalThis.DOMParser;
+
+const CSP = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'">';
+
+/** The shape this change removed, kept verbatim so each payload can be proven live. */
+function injectAsPatternMatch(html: string, headExtra: string, script: string): string {
+	const viewport = /name=["\']viewport["\']/i.test(html)
+		? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
+	const head = `${headExtra}${viewport}`;
+	let out = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, `$&${head}`) : `${head}${html}`;
+	out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, `${script}</body>`) : `${out}${script}`;
+	return out;
+}
+
+/** Parse a built srcdoc and inspect it as a DOCUMENT, not as a string. */
+const asDoc = (html: string) => parseHTML(html).document;
+
+describe('injectIntoArtifactFrame — the breakout it used to allow', () => {
+	// The artifact author controls this markup completely. `/<head[^>]*>/` does
+	// not fail to match here — it matches TRUNCATED, up to the raw `>` inside the
+	// attribute value, so the insertion lands INSIDE the attribute.
+	const HEAD_PAYLOAD = '<html><head data-x="a>b"><title>T</title></head><body>hi</body></html>';
+
+	it('⭐ puts the CSP meta in the document instead of into a head ATTRIBUTE', () => {
+		// Positive control for the payload: the shape this replaced produces NO
+		// meta element on it. If that ever stops being true the payload has gone
+		// stale and this test says so, instead of passing for nothing.
+		const foil = asDoc(injectAsPatternMatch(HEAD_PAYLOAD, CSP, ARTIFACT_FIT_SCRIPT));
+		expect(
+			foil.querySelectorAll('meta[http-equiv]').length,
+			'the payload no longer suppresses the meta, so this test proves nothing',
+		).toBe(0);
+
+		const out = asDoc(injectIntoArtifactFrame(HEAD_PAYLOAD, CSP, ARTIFACT_FIT_CODE));
+		expect(out.querySelectorAll('meta[http-equiv]').length).toBe(1);
+		// …and FIRST in head, because a policy applies to what follows it.
+		expect(out.head.firstElementChild?.getAttribute('http-equiv')).toBe('Content-Security-Policy');
+	});
+
+	it('⭐ keeps the artifact\'s own head attribute intact', () => {
+		// The second symptom: the old shape ate the attribute it landed in.
+		// Absence of the attack is not the same as presence of the content.
+		const out = asDoc(injectIntoArtifactFrame(HEAD_PAYLOAD, CSP, ARTIFACT_FIT_CODE));
+		expect(out.head.getAttribute('data-x')).toBe('a>b');
+		expect(out.querySelector('title')?.textContent).toBe('T');
+		expect(out.body.textContent).toContain('hi');
+	});
+
+	// A `</body>` inside an attribute, earlier than the real one. A string
+	// `.replace` takes the FIRST occurrence, so the script went in there.
+	const BODY_PAYLOAD = '<html><head></head><body><p title="</body>">x</p></body></html>';
+
+	it('⭐ appends the script as an element, not into an attribute', () => {
+		// Positive control: the old shape mangles the attribute it lands in.
+		const foil = asDoc(injectAsPatternMatch(BODY_PAYLOAD, CSP, ARTIFACT_FIT_SCRIPT));
+		expect(
+			foil.querySelector('p')?.getAttribute('title'),
+			'the payload no longer breaks the old replace, so this test proves nothing',
+		).not.toBe('</body>');
+
+		const out = asDoc(injectIntoArtifactFrame(BODY_PAYLOAD, CSP, ARTIFACT_FIT_CODE));
+		expect(out.querySelector('p')?.getAttribute('title')).toBe('</body>');
+		expect(out.body.lastElementChild?.tagName).toBe('SCRIPT');
+		expect(out.body.lastElementChild?.textContent).toBe(ARTIFACT_FIT_CODE);
+	});
+});
 
 describe('injectArtifactPreview', () => {
 	it('injects head extras + a default viewport + the fit script into a full doc', () => {
-		const out = injectArtifactPreview('<html><head><title>T</title></head><body>hi</body></html>', '<meta name="csp">');
-		expect(out).toContain('<meta name="csp">');
-		expect(out).toContain('width=device-width');
-		expect(out).toContain(ARTIFACT_FIT_SCRIPT);
-		// head extras go inside <head>, the script before </body>
-		expect(out.indexOf('<meta name="csp">')).toBeLessThan(out.indexOf('</head>'));
-		expect(out.indexOf(ARTIFACT_FIT_SCRIPT)).toBeLessThan(out.indexOf('</body>'));
+		const out = asDoc(injectArtifactPreview('<html><head><title>T</title></head><body>hi</body></html>', CSP));
+		// Element-level: the extras are IN head, the script is LAST in body.
+		expect(out.head.querySelectorAll('meta[http-equiv]').length).toBe(1);
+		expect(out.head.querySelector('meta[name="viewport"]')?.getAttribute('content')).toContain('width=device-width');
+		expect(out.body.lastElementChild?.tagName).toBe('SCRIPT');
+		expect(out.body.lastElementChild?.textContent).toBe(ARTIFACT_FIT_CODE);
+		// The artifact's own head content survives.
+		expect(out.querySelector('title')?.textContent).toBe('T');
 	});
 
 	it('does NOT add a second viewport when the artifact already declares one', () => {
-		const out = injectArtifactPreview('<html><head><meta name="viewport" content="width=600"></head><body>x</body></html>', '<meta name="csp">');
-		expect(out.match(/name=["']viewport["']/gi)?.length).toBe(1);
-		expect(out).toContain('width=600');
+		const out = asDoc(injectArtifactPreview('<html><head><meta name="viewport" content="width=600"></head><body>x</body></html>', CSP));
+		expect(out.querySelectorAll('meta[name="viewport"]').length).toBe(1);
+		expect(out.querySelector('meta[name="viewport"]')?.getAttribute('content')).toBe('width=600');
 	});
 
-	it('handles a bare fragment (no <head>/<body>)', () => {
-		const out = injectArtifactPreview('<div>frag</div>', '<meta name="csp">');
-		expect(out.startsWith('<meta name="csp">')).toBe(true);
+	it('handles a bare fragment (no html/head/body) without parsing it', () => {
+		// ⚠ This path is deliberately NOT parsed — see the note at the top of this
+		// file for the measured reason. It is asserted as a string here because
+		// linkedom cannot be trusted to re-parse a fragment-derived document.
+		const out = injectArtifactPreview('<div>frag</div>', CSP);
+		expect(out).toContain(CSP);
 		expect(out).toContain('width=device-width');
-		expect(out.endsWith(ARTIFACT_FIT_SCRIPT)).toBe(true);
+		expect(out).toContain('<div>frag</div>');
+		expect(out).toContain(ARTIFACT_FIT_CODE);
+		// The fragment lands in the body, the extras in the head.
+		expect(out.indexOf(CSP)).toBeLessThan(out.indexOf('<div>frag</div>'));
 	});
 
 	it('the fit script sets viewport width to the content width (fit-to-width), not device-width', () => {
@@ -32,6 +126,51 @@ describe('injectArtifactPreview', () => {
 		expect(ARTIFACT_FIT_SCRIPT).toContain('width="+cw+"');
 		expect(ARTIFACT_FIT_SCRIPT).toContain('initial-scale="+s');
 		expect(ARTIFACT_FIT_SCRIPT).toContain('cw>dev+4');
+	});
+
+	it('⭐ the tag string is DERIVED from the code, so the two cannot drift', () => {
+		// Both forms ship: the code goes into a script element, the tag string into
+		// markup. A test that wrote the value itself could not see them diverge.
+		expect(ARTIFACT_FIT_SCRIPT).toContain(ARTIFACT_FIT_CODE);
+		expect(ARTIFACT_FIT_SCRIPT.startsWith('<scr')).toBe(true);
+		expect(ARTIFACT_FIT_CODE.includes('<script')).toBe(false);
+	});
+});
+
+describe('both frame paths route through it', () => {
+	/**
+	 * The one thing a run cannot show here: that the two call sites still use it.
+	 * There is no component renderer in this package's tests, so this is a source
+	 * assertion — bounded to "is the symbol called", which is not a spelling
+	 * anyone has to guess. What it does NOT cover: a second, inline injection
+	 * added beside the call.
+	 */
+	it('⭐ the inline bubble and the fullscreen preview both call it', () => {
+		const renderer = readFileSync(
+			fileURLToPath(new URL('../components/MarkdownRenderer.svelte', import.meta.url)),
+			'utf-8',
+		);
+		expect(
+			renderer,
+			'MarkdownRenderer no longer calls injectIntoArtifactFrame — a pattern match is back',
+		).toContain('injectIntoArtifactFrame(');
+		// ⚠ The gallery check searched for `injectArtifactPreview` and a mutation
+		// round walked straight through it: ArtifactsView DEFINES a local wrapper
+		// of that very name, so the string is present whether or not it delegates.
+		// A proxy the subject satisfies by itself. It imports the helper under an
+		// alias, so the alias CALL is the bounded thing to pin.
+		const gallery = readFileSync(
+			fileURLToPath(new URL('../components/ArtifactsView.svelte', import.meta.url)),
+			'utf-8',
+		);
+		expect(
+			gallery,
+			'ArtifactsView no longer imports the shared injector',
+		).toContain("from '../utils/artifact-frame.js'");
+		expect(
+			gallery,
+			'ArtifactsView no longer calls the shared injector — a pattern match is back',
+		).toContain('injectArtifactFit(');
 	});
 });
 

@@ -98,30 +98,108 @@ export function clearArtifactFitStyles(style: ArtifactFitStyle): void {
  * the stable device width) so it can't oscillate. The `</scr`+`ipt>` split keeps
  * the surrounding markup from terminating early.
  */
-export const ARTIFACT_FIT_SCRIPT =
-	'<scr' + 'ipt>(function(){var applied=0;function fit(){' +
+export const ARTIFACT_FIT_CODE =
+	'(function(){var applied=0;function fit(){' +
 	'var cw=Math.max(document.documentElement.scrollWidth,document.body?document.body.scrollWidth:0);' +
 	'var dev=(window.screen&&window.screen.width)?window.screen.width:(window.innerWidth||390);' +
 	'if(cw>dev+4&&cw!==applied){var m=document.querySelector("meta[name=viewport]");' +
 	'if(!m){m=document.createElement("meta");m.setAttribute("name","viewport");(document.head||document.documentElement).appendChild(m);}' +
 	'var s=dev/cw;m.setAttribute("content","width="+cw+",initial-scale="+s+",minimum-scale="+s);applied=cw;}}' +
-	'window.addEventListener("load",function(){fit();setTimeout(fit,300);setTimeout(fit,1200);});fit();})()</scr' + 'ipt>';
+	'window.addEventListener("load",function(){fit();setTimeout(fit,300);setTimeout(fit,1200);});fit();})()';
 
 /**
- * Build the srcdoc for a fullscreen artifact preview: inject `headExtra` (CSP +
- * a default viewport when the artifact lacks one) into <head>, and the
- * fit-to-width script before </body>. Pure string transform — DOM-free so it is
- * unit-testable. Handles a full document or a bare fragment.
+ * The same script as a markup string, for the one caller that still needs a
+ * tag. ⚠ ONE OWNER: the code lives in `ARTIFACT_FIT_CODE` and this is derived
+ * from it, because the two had to stay in sync by hand otherwise and a test
+ * that writes a value itself cannot see the two sides diverge.
+ */
+export const ARTIFACT_FIT_SCRIPT = '<scr' + 'ipt>' + ARTIFACT_FIT_CODE + '</scr' + 'ipt>';
+
+/**
+ * Put the frame's own additions into an artifact document: `headHtml` FIRST in
+ * `<head>`, `scriptCode` LAST in `<body>`.
+ *
+ * ## Why this parses instead of pattern-matching
+ *
+ * Both halves used to be regex replacements over the artifact's own markup, and
+ * the artifact author controls that markup completely. `/<head[^>]*>/` does not
+ * fail to match on `<head data-x="a>b">` — it matches TRUNCATED, up to the raw
+ * `>` inside the attribute value. The insertion then lands INSIDE the attribute.
+ *
+ * Measured in Chrome through a real `srcdoc` iframe: with that payload the CSP
+ * meta is not an element at all (`document.querySelectorAll('meta[http-equiv]')`
+ * → 0) and `document.head.getAttributeNames()` returns
+ * `data-x | content-security-policy" | content` — the policy became ATTRIBUTES
+ * ON THE HEAD TAG. The same measurement with the meta intact gives 1 element and
+ * the policy enforced: a `fetch` from inside the frame never reaches the server
+ * (`connect-src 'none'`, confirmed in the server's own request log), where
+ * without it the request arrives.
+ *
+ * ⚠ The in-page error is NOT the instrument for that. `fetch` reports a
+ * TypeError either way — with the policy because it is blocked, without it
+ * because CORS refuses the RESPONSE while the request has already gone out.
+ * Exfiltration does not need the response. The server log is the property.
+ *
+ * The `</body>` half had the same shape: a string `.replace` takes the FIRST
+ * occurrence, so a `</body>` inside an attribute won.
+ *
+ * ## Why a FRAGMENT does not go through the parser
+ *
+ * Because the two parsers disagree exactly there, and in the dangerous
+ * direction for a test. `DOMParser` in a browser always yields html/head/body
+ * for `text/html`; `linkedom`, which is what this package's tests have,
+ * measured on `<div>frag</div>`, makes the DIV the `documentElement` and then
+ * nests a synthesised head and body INSIDE it, dropping the fragment's own
+ * content. A test written on that would have shown mangled output for a shape
+ * the browser handles correctly — and the repair would have gone into the
+ * production code. A fragment has no tag to match into anyway, so it is wrapped
+ * without a parse and both engines agree.
+ *
+ * The predicate's errors are both safe, which is why it may be a regex: a false
+ * positive (the text `<head ` inside an attribute) only means we parse, and a
+ * false negative means there was no document tag to insert into.
+ */
+export function injectIntoArtifactFrame(html: string, headHtml: string, scriptCode: string): string {
+	if (!HAS_DOCUMENT_TAG.test(html)) {
+		// ⚠ `headHtml` and `scriptCode` are interpolated as markup here, so both
+		// MUST be frame-owned constants — never artifact content. The parsed
+		// branch below is immune to that; this one is not.
+		return `<!DOCTYPE html><html><head>${headHtml}</head><body>${html}<scr` + `ipt>${scriptCode}</scr` + `ipt></body></html>`;
+	}
+	const doc = new DOMParser().parseFromString(html, 'text/html');
+	// A template so `headHtml` can carry several elements and still arrive as
+	// NODES rather than as text.
+	//
+	// ⚠ This used to copy the child list first (`...[...childNodes]`) with a
+	// comment saying the live list would shift during the move. A mutation round
+	// removed the copy and nothing failed, over a `headHtml` carrying two
+	// elements — because a spread argument list is built COMPLETELY before the
+	// call runs, so `prepend` never sees the list change. The comment was wrong
+	// and the copy was redundant; both are gone rather than pinned by a test.
+	const holder = doc.createElement('template');
+	holder.innerHTML = headHtml;
+	doc.head.prepend(...holder.content.childNodes);
+	const script = doc.createElement('script');
+	script.textContent = scriptCode;
+	doc.body.appendChild(script);
+	return `<!DOCTYPE html>${doc.documentElement.outerHTML}`;
+}
+
+/** Does this markup bring a document tag we would have to insert INTO? */
+const HAS_DOCUMENT_TAG = /<(?:html|head|body)[\s>]/i;
+
+/**
+ * Build the srcdoc for a fullscreen artifact preview: `headExtra` (CSP + a
+ * default viewport when the artifact lacks one) first in `<head>`, and the
+ * fit-to-width script last in `<body>`.
+ *
+ * ⚠ This docstring used to say "Pure string transform — DOM-free so it is
+ * unit-testable", and that sentence was the reason it was a string transform.
+ * It is also how the defect above survived: a justification for the cheap shape,
+ * stated once and never measured against what it cost.
  */
 export function injectArtifactPreview(html: string, headExtra: string): string {
 	const viewport = /name=["']viewport["']/i.test(html)
 		? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
-	const head = `${headExtra}${viewport}`;
-	let out = /<head[^>]*>/i.test(html)
-		? html.replace(/<head[^>]*>/i, `$&${head}`)
-		: `${head}${html}`;
-	out = /<\/body>/i.test(out)
-		? out.replace(/<\/body>/i, `${ARTIFACT_FIT_SCRIPT}</body>`)
-		: `${out}${ARTIFACT_FIT_SCRIPT}`;
-	return out;
+	return injectIntoArtifactFrame(html, `${headExtra}${viewport}`, ARTIFACT_FIT_CODE);
 }
