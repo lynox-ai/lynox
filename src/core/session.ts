@@ -644,7 +644,8 @@ export class Session {
     }
 
     // Hot-rebuild Agent when the engine's LLM client was recreated (provider
-    // swap, BYOK key rotation, vault reload). _recreateAgent constructs the
+    // swap, BYOK key rotation, vault reload) or its config changed (e.g. a tool
+    // switched off in Tool Toggles, which then holds from this thread's next turn). _recreateAgent constructs the
     // Agent against `this.engine.client`, so a stale snapshot means the
     // Session keeps calling the previous provider's API with the old key —
     // empty assistant replies + footer stuck on the previous provider name
@@ -1541,15 +1542,12 @@ export class Session {
     // DK.1 F5: capture the sticky conversation taint at the TOP, and re-arm it on
     // every exit below.
     //
-    // Two separate things clear it, which is why this sits here and not next to
-    // the reset. The obvious one is `reset()` further down — the
-    // fresh-conversation path, whose post-compaction seed carries no untrusted
-    // marker for `loadMessages` to re-derive from. The one that actually fires
-    // first is the SUMMARISER RUN itself (`this.run(..., { internal: true })`
-    // below): it is a nested run over a rewritten message set, and it lands the
-    // latch on false before compaction has decided anything. So even the
-    // early-return path at `if (!summary)` — which deliberately leaves the thread
-    // intact — came back with the durable-write gate disarmed.
+    // `reset()` further down clears it — the fresh-conversation path, whose
+    // post-compaction seed carries no untrusted marker for `loadMessages` to
+    // re-derive from. The summariser run below (`this.run(..., { internal: true })`)
+    // rebuilds the agent around its tier swap; those rebuilds carry the latch
+    // themselves (`_rebuildAgentKeepingConversation`), so the re-arm on the
+    // early-return path at `if (!summary)` is a second guard there, not the only one.
     //
     // Strictly one-way: a compaction may keep the gate armed, never disarm it.
     const taintedBeforeCompaction = this.agent?.conversationSawUntrusted ?? false;
@@ -1916,10 +1914,8 @@ export class Session {
   // ── Model / Effort / Thinking ──
 
   setModel(tier: ModelTier): string {
-    const messages = this.saveMessages();
     this._model = tier;
-    this._createAgent();
-    this.loadMessages(messages);
+    this._rebuildAgentKeepingConversation();
     return resolveTierModel(tier, getActiveProvider()).modelId;
   }
 
@@ -2011,10 +2007,8 @@ export class Session {
   }
 
   setEffort(level: EffortLevel): void {
-    const messages = this.saveMessages();
     this._effort = level;
-    this._createAgent();
-    this.loadMessages(messages);
+    this._rebuildAgentKeepingConversation();
   }
 
   getEffort(): EffortLevel {
@@ -2022,10 +2016,8 @@ export class Session {
   }
 
   setThinking(mode: ThinkingMode | undefined): void {
-    const messages = this.saveMessages();
     this._thinking = mode;
-    this._createAgent();
-    this.loadMessages(messages);
+    this._rebuildAgentKeepingConversation();
   }
 
   getThinking(): ThinkingMode | undefined {
@@ -2166,9 +2158,26 @@ export class Session {
       if (!resolved) throw new Error(`Unknown model profile "${profile}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
       this._profileOverride = resolved;
     }
+    this._rebuildAgentKeepingConversation();
+  }
+
+  /**
+   * Build a new Agent for the SAME conversation: history saved and reloaded, and the sticky
+   * conversation taint latch carried one way — a rebuild may keep the durable-write gate armed,
+   * never disarm it.
+   *
+   * `loadMessages` re-derives the latch from history, but some sources leave nothing there to
+   * find: a compaction summary, a workflow or a spawned child whose taint was handed back
+   * without a marker. A rebuild is routine (a model, effort or thinking change, a registry or
+   * config change, the per-run changeset rebuild), so the new agent must not start clean on a
+   * thread that is not. The latch is re-armed AFTER the reload because the reload assigns it.
+   */
+  private _rebuildAgentKeepingConversation(): void {
     const messages = this.saveMessages();
+    const tainted = this.agent?.conversationSawUntrusted ?? false;
     this._createAgent();
     this.loadMessages(messages);
+    if (tainted) this.agent?.restoreConversationTaint();
   }
 
   /**
@@ -2395,9 +2404,10 @@ export class Session {
     this.agent = new Agent({
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
-      // nothing. `_createAgent` has SEVEN callers (the ctor, `setModel`, `setEffort`,
-      // `setThinking`, `addTool`, `reloadUserConfig`, `_recreateAgent`), FIVE of them
-      // public methods, none checking for an in-flight run. The module-level set this
+      // nothing. `_createAgent` is reached from the ctor, `addTool` and every rebuild that
+      // keeps the conversation (`setModel`, `setEffort`, `setThinking`, `reloadUserConfig`,
+      // `_recreateAgent`, through `_rebuildAgentKeepingConversation`), most of them public
+      // methods, none checking for an in-flight run. The module-level set this
       // replaced was immune by construction, so the scope only became a thing a rebuild
       // can lose when it started living on the agent — which is what `_recreateAgent`'s
       // own comment is about: a rebuild is infrastructural and must not make the session
@@ -2590,9 +2600,7 @@ export class Session {
 
   async reloadUserConfig(): Promise<void> {
     await this.engine.reloadUserConfig();
-    const messages = this.saveMessages();
-    this._createAgent();
-    this.loadMessages(messages);
+    this._rebuildAgentKeepingConversation();
   }
 
   // ── Shutdown (delegates to engine, plus session-level teardown) ──

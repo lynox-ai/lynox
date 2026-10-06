@@ -41,7 +41,8 @@ import { join } from 'node:path';
  * empty summary: reaching the success path must ADD an exit, not trade one.
  *
  * `compact()` has THREE `rearmTaint()` sites, and the two reachable ones are
- * both covered here. The third — after `reset()`, when `summary` has gone falsy
+ * covered here — the early-return one only together with the rebuild carry in
+ * `_rebuildAgentKeepingConversation` (see the third case). The third site — after `reset()`, when `summary` has gone falsy
  * — cannot be reached: the `if (!summary)` guard above it already proved the
  * summary non-empty, and the only reassignment in between is
  * `SecretStore.maskSecrets`, whose replacements (`maskValue` → `***…`, or the
@@ -186,13 +187,14 @@ describe('a compaction keeps the durable-write gate armed', { timeout: 45_000 },
     // The second exit, and the one this file used to cover exclusively — by
     // accident, because the SDK mock made every summariser run throw. It is a
     // real path: a guard block or a provider failure lands here, and compaction
-    // deliberately keeps the full history. The latch must survive that too,
-    // because the summariser run has ALREADY cleared it by the time compact()
-    // decides to bail (session.ts — the `rearmTaint()` inside `if (!summary)`).
+    // deliberately keeps the full history. The latch must survive that too.
+    // Two guards hold it here: the `rearmTaint()` inside `if (!summary)`, and the
+    // rebuilds around the summariser's tier swap, which carry the latch
+    // themselves (`_rebuildAgentKeepingConversation`). Deleting either one alone
+    // leaves this case green; deleting both fails it.
     //
     // Without this case, reaching the success path above would TRADE coverage
-    // rather than add it: deleting that early-return `rearmTaint()` leaves the
-    // rest of this file green.
+    // rather than add it.
     mockProcess.mockResolvedValue(endTurnResponse(''));
 
     const { Engine } = await import('./engine.js');
