@@ -393,7 +393,14 @@ export function rollbackMergeById(
     // the chain case, and it is the only one with a next step the owner can take.
     const canonical = store.getSubject(file.entry.canonicalId);
     const onward = canonical?.merged_into ?? null;
-    if (onward === null) return { ok: false, reason: 'not_in_effect' };
+    // ⚠ BOTH terms of the conjunction, not one. `inEffect` is false either
+    // because this merge no longer stands, or because its canonical moved on.
+    // Reading only the second answered `chained` for a merge that was ALREADY
+    // taken back and whose canonical happened to merge onward afterwards — and
+    // «take that newer merge back first» is then plainly wrong advice: this one
+    // is already undone, and taking the newer one back changes nothing about it.
+    const stillStands = store.getSubject(file.entry.dupId)?.merged_into === file.entry.canonicalId;
+    if (!stillStands || onward === null) return { ok: false, reason: 'not_in_effect' };
     // ⚠ FILTER AND REQUIRE EXACTLY ONE, not `find`. Not for ordering — `readAll`
     // sorts by id and already marks every superseded ledger of a pair — but
     // because `find` SILENTLY PICKS when several match, and «which merge blocks»

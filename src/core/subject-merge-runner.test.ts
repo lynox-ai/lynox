@@ -797,6 +797,29 @@ describe('owner rollback of a merge chain A→B→C', () => {
     dirs.length = 0;
   });
 
+  it('⭐ a merge ALREADY taken back is not a chain, even if its canonical moved on since', () => {
+    // ⚠ `inEffect` is a conjunction and this branch reads only one of its terms.
+    // Measured before the guard existed: A→B taken back, then B→C, and asking
+    // for A→B again answered `chained` with «take B→C back first» — advice that
+    // is simply wrong. A→B is already undone; taking B→C back changes nothing
+    // about it. The canonical having moved on is only a chain while THIS merge
+    // still stands.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Litware GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Litware' });
+    const c = store.createSubject({ kind: 'organization', name: 'Litware Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    const ab = listMergeRuns(store, sweeps).find(r => r.dupName === 'Litware GmbH')!;
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    // The canonical HAS moved on — the condition that alone would say «chained».
+    expect(store.getSubject(b)!.merged_into).toBe(c);
+    // …but this merge is already undone, so the honest answer is the old one.
+    expect(store.getSubject(a)!.merged_into).toBeNull();
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'not_in_effect' });
+  });
+
   it('⭐ falls back to «no id» when the same pair was merged twice, rather than guessing', () => {
     // The ambiguity the `inEffect` condition exists for: B→D done, taken back,
     // done again leaves TWO ledgers for that exact pair. `readAll` marks the
