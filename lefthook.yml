@@ -140,12 +140,10 @@ pre-commit:
         - merge
         - rebase
     pattern-scan:
-      run: >-
-        git diff --cached --name-only -z |
-        xargs -0 grep -rlE
-        '(sk-ant-|AKIA[A-Z0-9]{16}|ghp_[a-zA-Z0-9]{36}|xoxb-|xapp-|-----BEGIN (RSA |EC )?PRIVATE KEY-----)'
-        -- || true
-      fail_text: "Potential secrets detected in staged files"
+      # Exit 1 = a staged change adds a credential-shaped line; exit 2 = the staged
+      # diff could not be read. The script prints which, above this line.
+      run: bash scripts/secret-pattern-scan.sh
+      fail_text: "secret-pattern-scan refused the commit — see its output above"
     typecheck:
       # A fresh worktree has no node_modules, and the typecheck then dies deep inside
       # tsc/pnpm output where the real cause is invisible. What the operator sees is not
