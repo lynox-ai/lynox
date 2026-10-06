@@ -56,7 +56,8 @@ import { describe, it, expect } from 'vitest';
 import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../../src/core/agent.js';
 import { createToolContext } from '../../src/core/tool-context.js';
-import { LLM_CATALOG, catalogEntryKey } from '../../src/core/llm/catalog.js';
+import { catalogEntryKey } from '../../src/core/llm/catalog.js';
+import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, PRESETS_UNDER_TEST } from './provider-presets.js';
 import type { ToolEntry } from '../../src/types/index.js';
 
 /** How long we give an endpoint to say "I'm here" before skipping its case. */
@@ -83,21 +84,6 @@ interface PresetCase {
   apiKey: string | undefined;
 }
 
-/** Env var carrying the key for each remote preset, and its default test model. */
-const REMOTE_PRESETS: Record<string, { keyEnv: string; defaultModel: string }> = {
-  groq:      { keyEnv: 'GROQ_API_KEY',      defaultModel: 'llama-3.3-70b-versatile' },
-  together:  { keyEnv: 'TOGETHER_API_KEY',  defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
-  fireworks: { keyEnv: 'FIREWORKS_API_KEY', defaultModel: 'accounts/fireworks/models/gpt-oss-120b' },
-};
-
-/** Default test model per loopback runtime. Each must be tool-capable. */
-const LOOPBACK_DEFAULT_MODEL: Record<string, string> = {
-  ollama:   'qwen2.5:7b',
-  lmstudio: 'qwen2.5-7b-instruct',
-  vllm:     'Qwen/Qwen2.5-7B-Instruct',
-  localai:  'qwen2.5-7b-instruct',
-};
-
 const MODEL_ENV: Record<string, string> = {
   ollama:    'OLLAMA_TEST_MODEL',
   lmstudio:  'LMSTUDIO_TEST_MODEL',
@@ -107,16 +93,6 @@ const MODEL_ENV: Record<string, string> = {
   together:  'TOGETHER_TEST_MODEL',
   fireworks: 'FIREWORKS_TEST_MODEL',
 };
-
-/**
- * Every catalog entry that pins an endpoint and is not a native provider — i.e.
- * exactly the presets whose tool-calling is unproven. Derived from the catalog
- * rather than hand-listed, so a new preset cannot be added without this suite
- * noticing it.
- */
-const PRESETS_UNDER_TEST = LLM_CATALOG.filter(
-  (e) => e.base_url_default !== undefined && e.verification !== 'native',
-);
 
 /**
  * Can this case actually run? Two distinct preconditions, and conflating them
@@ -233,23 +209,14 @@ function resolveCase(key: string): PresetCase | null {
 }
 
 describe('provider preset reachability (real API — tool-calling round-trip)', () => {
-  // A guard, not a formality: if the catalog gains a preset and nobody teaches
-  // this suite about it, the preset would silently ship untested.
-  it('knows about every pinned preset in the catalog', () => {
-    const untested = PRESETS_UNDER_TEST
-      .map(catalogEntryKey)
-      .filter((k) => !(k in REMOTE_PRESETS) && !(k in LOOPBACK_DEFAULT_MODEL));
-    expect(untested).toEqual([]);
-  });
-
   for (const entry of PRESETS_UNDER_TEST) {
     const key = catalogEntryKey(entry);
     const baseUrl = entry.base_url_default!;
 
     it(`${key}: drives a full tool_use → tool_result → answer round-trip`, async (ctx) => {
       // `ctx.skip()`, NOT a bare `return`. A `return` reports the case as PASSED,
-      // and this file is inside the default vitest include (`tests/**`), so in CI
-      // — where no runtime is up and no key is set — seven green "passes" would
+      // so in an opted-in run (LYNOX_ONLINE=1) where no runtime is up and no key
+      // is set, seven green "passes" would
       // appear having touched nothing at all, while `catalog.test.ts` pins
       // `ollama` as `verified` on their supposed authority. That is precisely the
       // skip-green-is-not-pass-green trap this suite exists to prevent; it must
