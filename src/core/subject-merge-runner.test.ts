@@ -771,3 +771,61 @@ describe('what refuses a merge rollback, and why', () => {
   });
 });
 
+
+/**
+ * A chain: A merged into B, then B merged into C. The older ledger (A→B) names a canonical
+ * that is itself merged away — its aliases and A's rows sit on C now. Reversing A→B from there
+ * used to un-archive A and restore B's aliases while C kept what the merge had moved: the data
+ * split, and the call reported success. The older ledger is not in effect while the newer
+ * merge stands; the newer one goes back first, then the older is in effect again.
+ */
+describe('owner rollback of a merge chain A→B→C', () => {
+  const dirs: string[] = [];
+  const closers: Array<() => void> = [];
+  function setup(): { dir: string; sweeps: string; store: SubjectStore; threadStore: ThreadStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mergechain-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const history = new RunHistory(join(dir, 'history.db'));
+    closers.push(() => { try { engine.close(); } catch { /* noop */ } try { history.close(); } catch { /* noop */ } });
+    return { dir, sweeps: join(dir, 'sweeps'), store: new SubjectStore(engine), threadStore: new ThreadStore(history.getDb()) };
+  }
+  afterEach(() => {
+    for (const c of closers) c();
+    closers.length = 0;
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  it('refuses the older ledger while its canonical is merged away, and takes both back in order', () => {
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Acme GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Acme' });
+    const c = store.createSubject({ kind: 'organization', name: 'ACME Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Acme GmbH')!;
+    const bc = runs.find(r => r.dupName === 'Acme')!;
+    expect(ab.inEffect).toBe(false);
+    expect(bc.inEffect).toBe(true);
+
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({ ok: false, reason: 'not_in_effect' });
+    // Nothing moved: the chain stands as it was, C still carries what both merges brought.
+    expect(store.getSubject(a)!.merged_into).toBe(b);
+    expect(store.getSubject(b)!.merged_into).toBe(c);
+    expect(JSON.parse(store.getSubject(c)!.aliases)).toEqual(expect.arrayContaining(['Acme', 'Acme GmbH']));
+
+    // Newest first: B→C goes back, which puts A→B in effect again; then A→B goes back.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id).ok).toBe(true);
+    expect(listMergeRuns(store, sweeps).find(r => r.id === ab.id)!.inEffect).toBe(true);
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id).ok).toBe(true);
+    for (const id of [a, b, c]) {
+      expect(store.getSubject(id)!.merged_into).toBeNull();
+      expect(store.getSubject(id)!.archived_at).toBeNull();
+    }
+    // Each list is back to what `createSubject` wrote: the entry's own name.
+    expect(JSON.parse(store.getSubject(c)!.aliases)).toEqual(['ACME Holding']);
+    expect(JSON.parse(store.getSubject(b)!.aliases)).toEqual(['Acme']);
+  });
+});

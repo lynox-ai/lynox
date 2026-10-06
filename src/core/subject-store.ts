@@ -363,6 +363,83 @@ const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> =
 };
 
 /**
+ * The alias union a merge (and every `findOrCreate` fold) writes: `forms` that are not yet in
+ * the list, case-insensitively, appended in order. Pure, so the rollback can recompute what a
+ * merge added from the ledger's before-image and take out exactly that. `json` is the stored
+ * string verbatim when nothing was added — the store never rewrites an unchanged list.
+ */
+export function unionAliases(existingJson: string, forms: readonly string[]): { json: string; added: string[] } {
+  let list: string[];
+  try {
+    const v: unknown = JSON.parse(existingJson);
+    list = Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    list = [];
+  }
+  const seen = new Set(list.map(a => a.toLowerCase()));
+  const added: string[] = [];
+  for (const f of forms) {
+    const key = f.toLowerCase();
+    if (!f || seen.has(key)) continue;
+    list.push(f);
+    seen.add(key);
+    added.push(f);
+  }
+  return { json: added.length > 0 ? JSON.stringify(list) : existingJson, added };
+}
+
+/** `list` without `forms`, case-insensitively — the inverse of one {@link unionAliases}. */
+function withoutForms(list: readonly string[], forms: readonly string[]): string[] {
+  const drop = new Set(forms.map(f => f.toLowerCase()));
+  return list.filter(a => !drop.has(a.toLowerCase()));
+}
+
+/** Two detail cells are the same stored value (`undefined` and `null` both mean "no value"). */
+function sameCell(a: unknown, b: unknown): boolean {
+  return (a ?? null) === (b ?? null);
+}
+
+/**
+ * The detail row a merge leaves on the canonical, computed from the two before-images the
+ * way `executeMerge`'s SQL computes it: per column the canonical's value, the dup's where the
+ * canonical had none — except a money pair's currency, which follows its amount's owner. The
+ * rollback compares the live row against this to tell "still the merge's result" from
+ * "edited since".
+ */
+export function coalesceDetailRow(
+  kind: string, cols: readonly string[], canonicalRow: Record<string, unknown>, dupRow: Record<string, unknown>,
+): Record<string, unknown> {
+  const pair = DETAIL_MONEY_PAIRS[kind];
+  const out: Record<string, unknown> = {};
+  for (const c of cols) {
+    out[c] = pair && c === pair.currency
+      ? ((canonicalRow[pair.amount] ?? null) === null ? dupRow[c] ?? null : canonicalRow[c] ?? null)
+      : canonicalRow[c] ?? dupRow[c] ?? null;
+  }
+  return out;
+}
+
+/**
+ * What the rollback writes back on the canonical's detail row: the before-image for every
+ * column that still holds the merge's result, the live value for every column edited since. A
+ * money pair is decided as one — an amount edited after the merge keeps its currency too.
+ */
+export function restoreDetailColumns(
+  kind: string, cols: readonly string[], rowNow: Record<string, unknown>, afterMerge: Record<string, unknown>, before: Record<string, unknown>,
+): Record<string, unknown> {
+  const pair = DETAIL_MONEY_PAIRS[kind];
+  const edited = (c: string): boolean => !sameCell(rowNow[c], afterMerge[c]);
+  const out: Record<string, unknown> = {};
+  for (const c of cols) {
+    const keep = pair && (c === pair.amount || c === pair.currency)
+      ? edited(pair.amount) || edited(pair.currency)
+      : edited(c);
+    out[c] = keep ? rowNow[c] ?? null : before[c] ?? null;
+  }
+  return out;
+}
+
+/**
  * When does a 1:1 detail row carry SUBSTANTIVE data — data that makes the subject a record
  * in its own right, so the orphan reap must keep it even with no memory left?
  * Not every non-NULL column qualifies: `people.type` / `organizations.type` are NOT NULL
@@ -1674,10 +1751,10 @@ export class SubjectStore {
       // checked against the list a merge writes before the first write.
       if (!entry.repoints.every(isRepointTarget)) throw new Error(`this merge ledger ${FOREIGN_REPOINT_REASON}`);
       const dupRow = db.prepare('SELECT merged_into, kind FROM subjects WHERE id = ?').get(dupId) as { merged_into: string | null; kind: string } | undefined;
-      const canonPresent = db.prepare('SELECT 1 AS ok FROM subjects WHERE id = ?').get(canonicalId) as { ok: number } | undefined;
+      const canonRow = db.prepare('SELECT merged_into, aliases FROM subjects WHERE id = ?').get(canonicalId) as { merged_into: string | null; aliases: string } | undefined;
       const missing = [
         ...(dupRow ? [] : ['the merged-away entry']),
-        ...(canonPresent ? [] : ['the entry it was merged into']),
+        ...(canonRow ? [] : ['the entry it was merged into']),
       ];
       if (missing.length > 0) {
         // Says what is TRUE (the rows are not here) rather than guessing WHY: "belongs to
@@ -1694,6 +1771,16 @@ export class SubjectStore {
             : `this merge is not in effect — the entry is currently merged into ${dupRow!.merged_into}, not into the entry this ledger names. Reversing it from here would un-archive the entry while the other merge still holds its aliases.`,
         );
       }
+      // A canonical that has itself been merged since (A→B, then B→C) carries this merge's
+      // result on a third entry now: C holds B's aliases, and the rows A brought. Reversing
+      // A→B from here would un-archive A and restore B while C keeps what the merge moved —
+      // the data stays split and the call would report success. The newer merge goes back
+      // first; then this ledger is in effect again.
+      if (canonRow!.merged_into !== null) {
+        throw new Error(
+          `this merge is not in effect — the entry it was merged into has since been merged into ${canonRow!.merged_into}. Reverse that newer merge first; this one can be reversed after it.`,
+        );
+      }
       // Step 3 picks the detail table by the ledger's kind; a merge never crosses kinds, so a
       // ledger whose kind is not the entry's own was not written for this entry.
       if (dupRow!.kind !== entry.kind) {
@@ -1705,25 +1792,50 @@ export class SubjectStore {
       db.prepare("UPDATE subjects SET merged_into = ?, archived_at = ?, updated_at = datetime('now') WHERE id = ?")
         .run(entry.dupMergedIntoWas, entry.dupArchivedAtWas, dupId);
 
-      // 2. restore canonical aliases + self-parent.
-      db.prepare("UPDATE subjects SET aliases = ?, updated_at = datetime('now') WHERE id = ?").run(entry.canonicalAliasesWas, canonicalId);
+      // 2. restore canonical aliases + self-parent. The before-image goes back verbatim only
+      //    while the list is still the merge's own result. The canonical keeps learning forms
+      //    after a merge (`findOrCreate` folds every new surface form into it), and writing the
+      //    before-image over them dropped each one. So when the list has moved since, the merge's
+      //    own additions — the dup's forms that were not there before — are taken out and the
+      //    rest stays. `unionAliases` is the same function the merge used to add them.
+      const dupNow = this.getSubject(dupId)!;
+      const mergedAliases = unionAliases(entry.canonicalAliasesWas, [dupNow.name, ...this._parseAliases(dupNow.aliases)]);
+      const aliasesNow = canonRow!.aliases;
+      const aliasesRestored = aliasesNow === mergedAliases.json
+        ? entry.canonicalAliasesWas
+        : JSON.stringify(withoutForms(this._parseAliases(aliasesNow), mergedAliases.added));
+      db.prepare("UPDATE subjects SET aliases = ?, updated_at = datetime('now') WHERE id = ?").run(aliasesRestored, canonicalId);
       if (entry.canonicalParentWasDup) db.prepare("UPDATE subjects SET parent_id = ? WHERE id = ?").run(dupId, canonicalId);
 
-      // 3. detail rollback (inverse of the COALESCE-merge).
+      // 3. detail rollback (inverse of the COALESCE-merge). A column the owner edited AFTER the
+      //    merge keeps its edit: the before-image is written only where the row still holds the
+      //    merge's own result, which `coalesceDetailRow` recomputes from the ledger the way the
+      //    merge computed it. A money pair is judged as one, because its currency follows its
+      //    amount's owner.
       if (entry.detail) {
         const def = DETAIL_TABLE[entry.kind]!;
         const cols = def.cols;
+        const rowNow = (db.prepare(`SELECT * FROM "${def.table}" WHERE subject_id = ?`).get(canonicalId) as Record<string, unknown> | undefined) ?? null;
+        const insCols = ['subject_id', ...cols];
+        const insertDup = db.prepare(`INSERT OR REPLACE INTO "${def.table}" (${insCols.map(c => `"${c}"`).join(', ')}) VALUES (${insCols.map(() => '?').join(', ')})`);
         if (entry.detail.dupRow && !entry.detail.canonicalRow) {
-          // was a repoint → move it back to the dup.
-          db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(dupId, canonicalId);
+          // was a repoint → move it back to the dup — unless it was edited since: then the
+          // canonical keeps the edited row and the dup gets its before-image back, nothing lost.
+          if (rowNow && cols.every(c => sameCell(rowNow[c], entry.detail!.dupRow![c]))) {
+            db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(dupId, canonicalId);
+          } else {
+            insertDup.run(dupId, ...cols.map(c => entry.detail!.dupRow![c] ?? null));
+          }
         } else if (entry.detail.dupRow && entry.detail.canonicalRow) {
-          // was a COALESCE+delete → restore canonical's exact columns + re-insert dup's row.
-          const setC = cols.map(c => `"${c}" = ?`).join(', ');
-          db.prepare(`UPDATE "${def.table}" SET ${setC} WHERE subject_id = ?`)
-            .run(...cols.map(c => (entry.detail!.canonicalRow as Record<string, unknown>)[c] ?? null), canonicalId);
-          const insCols = ['subject_id', ...cols];
-          db.prepare(`INSERT OR REPLACE INTO "${def.table}" (${insCols.map(c => `"${c}"`).join(', ')}) VALUES (${insCols.map(() => '?').join(', ')})`)
-            .run(dupId, ...cols.map(c => (entry.detail!.dupRow as Record<string, unknown>)[c] ?? null));
+          // was a COALESCE+delete → restore canonical's columns where they still hold the merge's
+          // result, keep the ones edited since, re-insert dup's row.
+          if (rowNow) {
+            const afterMerge = coalesceDetailRow(entry.kind, cols, entry.detail.canonicalRow, entry.detail.dupRow);
+            const restored = restoreDetailColumns(entry.kind, cols, rowNow, afterMerge, entry.detail.canonicalRow);
+            const setC = cols.map(c => `"${c}" = ?`).join(', ');
+            db.prepare(`UPDATE "${def.table}" SET ${setC} WHERE subject_id = ?`).run(...cols.map(c => restored[c] ?? null), canonicalId);
+          }
+          insertDup.run(dupId, ...cols.map(c => (entry.detail!.dupRow as Record<string, unknown>)[c] ?? null));
         }
       }
 
@@ -1772,19 +1884,10 @@ export class SubjectStore {
   }
 
   private _mergeAliases(row: SubjectRow, forms: string[]): void {
-    const list = this._parseAliases(row.aliases);
-    const seen = new Set(list.map(a => a.toLowerCase()));
-    let changed = false;
-    for (const f of forms) {
-      const key = f.toLowerCase();
-      if (!f || seen.has(key)) continue;
-      list.push(f);
-      seen.add(key);
-      changed = true;
-    }
-    if (changed) {
+    const u = unionAliases(row.aliases, forms);
+    if (u.added.length > 0) {
       this.db.prepare("UPDATE subjects SET aliases = ?, updated_at = datetime('now') WHERE id = ?")
-        .run(JSON.stringify(list), row.id);
+        .run(u.json, row.id);
     }
   }
 }

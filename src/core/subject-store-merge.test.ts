@@ -528,3 +528,156 @@ describe('DataStore.repointSubjectId (Record-on-spine merge follow-through)', ()
     expect(ds.queryRecords({ collection: 'invoices' }).rows[0]!['client']).toBe('old-id');
   });
 });
+
+/**
+ * What a rollback must leave alone. Two shapes the reversal used to overwrite: a merge whose
+ * canonical has itself been merged since (the chain A→B→C), and the canonical's own aliases
+ * and detail columns edited AFTER the merge — the before-image went back over them.
+ */
+describe('SubjectStore.rollbackMerge — a chain, and edits made after the merge', () => {
+  const tmpDirs: string[] = [];
+  function makeStore(key = ''): { store: SubjectStore; engine: EngineDb; db: Database.Database } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-merge-after-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), key);
+    return { store: new SubjectStore(engine), engine, db: engine.getDb() };
+  }
+  afterEach(() => {
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+  const aliasesOf = (store: SubjectStore, id: string): string[] => JSON.parse(store.getSubject(id)!.aliases) as string[];
+
+  it('refuses to reverse a merge whose canonical has itself been merged since, and changes nothing', () => {
+    const { store, engine } = makeStore();
+    const a = store.createSubject({ kind: 'organization', name: 'Acme GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Acme' });
+    const c = store.createSubject({ kind: 'organization', name: 'ACME Holding' });
+    const ab = store.mergeSubjects(a, b);
+    const bc = store.mergeSubjects(b, c);
+    expect(ab.ok && bc.ok).toBe(true);
+    if (!ab.ok || !bc.ok) return;
+    const before = { a: store.getSubject(a)!, b: store.getSubject(b)!, c: store.getSubject(c)! };
+
+    const back = store.rollbackMerge(ab.entry);
+    expect(back.ok).toBe(false);
+    expect(back.reason).toMatch(/merged into .*Reverse that newer merge first/);
+    expect({ a: store.getSubject(a)!, b: store.getSubject(b)!, c: store.getSubject(c)! }).toEqual(before);
+
+    // In order, both reverse cleanly.
+    expect(store.rollbackMerge(bc.entry).ok).toBe(true);
+    expect(store.rollbackMerge(ab.entry).ok).toBe(true);
+    for (const id of [a, b, c]) expect(store.getSubject(id)!.merged_into).toBeNull();
+    engine.close();
+  });
+
+  it('keeps a surface form the canonical learned after the merge; without one the before-image goes back verbatim', () => {
+    const { store, engine } = makeStore();
+    const a = store.createSubject({ kind: 'organization', name: 'Acme GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Acme', aliases: ['acme.com'] });
+    const bAliasesBefore = store.getSubject(b)!.aliases;
+    const ab = store.mergeSubjects(a, b);
+    expect(ab.ok).toBe(true);
+    if (!ab.ok) return;
+    expect(aliasesOf(store, b)).toEqual(['acme.com', 'Acme GmbH']);
+    // A later mention in new forms folds into the canonical — learned after the merge (the
+    // lower-case name is a new form too: the list dedupes against itself, not the name).
+    const fold = store.findOrCreate({ kind: 'organization', name: 'acme', aliases: ['Acme Holding'] });
+    expect(fold).toEqual({ ambiguous: false, id: b, created: false });
+    expect(aliasesOf(store, b)).toEqual(['acme.com', 'Acme GmbH', 'acme', 'Acme Holding']);
+
+    expect(store.rollbackMerge(ab.entry).ok).toBe(true);
+    expect(aliasesOf(store, b)).toEqual(['acme.com', 'acme', 'Acme Holding']);   // the merge's addition gone, the learned forms kept
+    expect(store.getSubject(a)!.merged_into).toBeNull();
+
+    // Positive control: a pair nothing touched after the merge restores the stored string byte for byte.
+    const d = store.createSubject({ kind: 'organization', name: 'Beta AG' });
+    const e = store.createSubject({ kind: 'organization', name: 'Beta', aliases: ['beta.ch'] });
+    const eAliasesBefore = store.getSubject(e)!.aliases;
+    const de = store.mergeSubjects(d, e);
+    expect(de.ok).toBe(true);
+    if (!de.ok) return;
+    expect(store.rollbackMerge(de.entry).ok).toBe(true);
+    expect(store.getSubject(e)!.aliases).toBe(eAliasesBefore);
+    expect(bAliasesBefore).toBe('["acme.com"]');
+    engine.close();
+  });
+
+  it('keeps a detail column edited after the merge, restores the rest, and re-inserts the dup row', () => {
+    const { store, engine } = makeStore('vault-key-123');
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    store.setPersonDetail(canon, { email: 'canon@x.com', role: 'CEO' });
+    store.setPersonDetail(dup, { email: 'dup@x.com', phone: '+41 79 000' });
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(store.getPersonDetail(canon)!.phone).toBe('+41 79 000');   // filled from the dup
+    // The owner corrects the phone after the merge.
+    store.setPersonDetail(canon, { email: 'canon@x.com', phone: '+41 79 999', role: 'CEO' });
+
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    const c = store.getPersonDetail(canon)!;
+    expect(c.phone).toBe('+41 79 999');
+    expect(c.email).toBe('canon@x.com');
+    expect(c.role).toBe('CEO');
+    const d = store.getPersonDetail(dup)!;
+    expect(d.email).toBe('dup@x.com');
+    expect(d.phone).toBe('+41 79 000');
+    engine.close();
+  });
+
+  it('positive control: with no edit after the merge the filled column goes back to empty', () => {
+    const { store, engine } = makeStore('vault-key-123');
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    store.setPersonDetail(canon, { email: 'canon@x.com', role: 'CEO' });
+    store.setPersonDetail(dup, { email: 'dup@x.com', phone: '+41 79 000' });
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    expect(store.getPersonDetail(canon)!.phone ?? null).toBeNull();
+    expect(store.getPersonDetail(canon)!.email).toBe('canon@x.com');
+    expect(store.getPersonDetail(dup)!.phone).toBe('+41 79 000');
+    engine.close();
+  });
+
+  it('a moved-over detail row edited after the merge stays on the canonical; the dup gets its own row back', () => {
+    const { store, engine } = makeStore('vault-key-123');
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    store.setPersonDetail(dup, { email: 'dup@x.com' });
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(store.getPersonDetail(canon)!.email).toBe('dup@x.com');
+    store.setPersonDetail(canon, { email: 'new@x.com' });
+
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    expect(store.getPersonDetail(canon)!.email).toBe('new@x.com');
+    expect(store.getPersonDetail(dup)!.email).toBe('dup@x.com');
+    engine.close();
+  });
+
+  it('a money pair edited after the merge is kept as one — the currency does not go back alone', () => {
+    const { store, engine, db } = makeStore();
+    const canon = store.createSubject({ kind: 'product', name: 'Widget' });
+    const dup = store.createSubject({ kind: 'product', name: 'Widget v2' });
+    db.prepare('INSERT INTO products (subject_id, price_cents, currency) VALUES (?, NULL, NULL)').run(canon);
+    db.prepare("INSERT INTO products (subject_id, price_cents, currency) VALUES (?, 5000, 'EUR')").run(dup);
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const row = (id: string): { price_cents: number | null; currency: string | null } | undefined =>
+      db.prepare('SELECT price_cents, currency FROM products WHERE subject_id = ?').get(id) as { price_cents: number | null; currency: string | null } | undefined;
+    expect(row(canon)).toEqual({ price_cents: 5000, currency: 'EUR' });
+    // The owner re-prices after the merge; the currency column is untouched by that edit.
+    db.prepare('UPDATE products SET price_cents = 6000 WHERE subject_id = ?').run(canon);
+
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    expect(row(canon)).toEqual({ price_cents: 6000, currency: 'EUR' });
+    expect(row(dup)).toEqual({ price_cents: 5000, currency: 'EUR' });
+    engine.close();
+  });
+});
