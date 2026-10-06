@@ -104,7 +104,7 @@
 		return `${(bytes / 1048576).toFixed(1)} MB`;
 	}
 
-	$effect(() => { loadBackups(); loadConfig(); });
+	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* a failure leaves the settings read-only, by design */ });
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';

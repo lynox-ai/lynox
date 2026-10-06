@@ -196,7 +196,7 @@
 	}
 
 	function handleGraphNodeClick(entity: Entity) {
-		selectEntity(entity);
+		void selectEntity(entity); /* a failure shows no relations */
 	}
 
 	// Dynamic type filters — derived from actual entities
@@ -249,13 +249,13 @@
 		return typeHues[t] ?? 'var(--color-text-subtle)';
 	}
 
-	$effect(() => { loadEntities(); });
+	$effect(() => { void loadEntities(); /* catches and sets its error */ });
 
 	$effect(() => {
-		if (viewMode === 'graph' && !graphLoaded && !graphLoading) loadGraph();
+		if (viewMode === 'graph' && !graphLoaded && !graphLoading) void loadGraph(); /* catches and sets its error */
 	});
 
-	function handleSearch() { loadEntities(); }
+	function handleSearch() { void loadEntities(); /* catches and sets its error */ }
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
@@ -393,12 +393,12 @@
 
 		<!-- Dynamic type filters -->
 		<div class="flex gap-1.5 mb-4 flex-wrap">
-			<button onclick={() => { typeFilter = ''; loadEntities(); }}
+			<button onclick={() => { typeFilter = ''; void loadEntities(); /* catches and sets its error */ }}
 				class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === '' ? 'bg-accent/10 text-accent-text border border-accent/30' : 'text-text-muted hover:text-text border border-transparent'}">
 				{t('kg.all')}
 			</button>
 			{#each availableTypes() as typ}
-				<button onclick={() => { typeFilter = typ; loadEntities(); }}
+				<button onclick={() => { typeFilter = typ; void loadEntities(); /* catches and sets its error */ }}
 					class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === typ ? 'border border-current/30' : 'text-text-muted hover:text-text border border-transparent'}"
 					style={typeFilter === typ ? typeStyle(typ).replace(/15%/, '22%') : ''}>
 					<span class="inline-block h-1.5 w-1.5 rounded-full mr-1" style="background: {svgColor(typ)};"></span>{typ}

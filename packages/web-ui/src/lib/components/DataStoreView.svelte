@@ -44,7 +44,7 @@
 		rowsLoading = false;
 	}
 
-	$effect(() => { loadCollections(); });
+	$effect(() => { void loadCollections(); /* catches and sets its error */ });
 
 	const selectedInfo = $derived(collections.find(c => c.name === selectedCollection));
 	const columnNames = $derived(selectedInfo?.columns.map(c => c.name).filter(n => !n.startsWith('_')) ?? []);
