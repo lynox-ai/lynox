@@ -2886,3 +2886,69 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 });
+
+describe('the stop a run reports belongs to the agent that made it', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetMessages.mockReturnValue([]);
+    mockGetUnpersistedTail.mockReturnValue([]);
+    mockRegister.mockReturnThis();
+    mockSend.mockResolvedValue('response');
+  });
+
+  it('holds the stop of the agent that RAN, not of the one the session ends up with', async () => {
+    // ⛔ WHY THIS IS NOT A UNIT TEST ON A GETTER. `Session.agent` is a mutable field, and
+    // `run()` replaces it from three places in its own prologue; worse, the auto-compaction
+    // `run()` starts just before returning is fire-and-forget and reaches `_recreateAgent()`
+    // SYNCHRONOUSLY (`_autoCompactIfNeeded` → `compact` → a nested `run` → the changeset
+    // branch, with no `await` in between). So a caller that reads
+    // `getAgent()?.getLastStop()` after awaiting `run()` can be handed a brand-new agent
+    // whose stop is `null` — which reads as "ended cleanly". The failure is silent and it
+    // correlates with long runs, i.e. with the runs whose ending anyone asks about.
+    //
+    // The swap is driven from inside `send` here rather than by provoking a real
+    // compaction: what the fix has to survive is "the field changed during the run", and
+    // that is the whole of it. A test that needed a real compaction would also need a real
+    // summarizer call, and would pin the trigger rather than the property.
+    const { session } = await createEngineAndSession();
+    const ran = session.getAgent();
+    expect(ran, 'the probe needs a real agent, not a pass').not.toBeNull();
+
+    (ran as unknown as { getLastStop: () => unknown }).getLastStop = () => ({
+      cause: 'budget_cap', pendingTools: ['web_research'], pendingToolCount: 1, text: 'partial',
+    });
+    (ran as unknown as { send: (...a: unknown[]) => Promise<string> }).send = async () => {
+      (session as unknown as { _recreateAgent: (o?: unknown) => void })._recreateAgent();
+      return 'partial';
+    };
+
+    await session.run('task');
+
+    // The precondition: without a swap this test proves nothing at all.
+    expect(session.getAgent(), 'the session really did swap its agent').not.toBe(ran);
+    // The property: the ending that is reported is the one the RUN had.
+    expect(session.getLastRunStop()?.cause, "the run's own ending").toBe('budget_cap');
+  });
+
+  it('an internal run does not overwrite the ending of the run that started it', async () => {
+    // The compaction run is a different turn on a different agent. Letting it write here
+    // would hand the caller the summarizer's ending instead of its own — and since that
+    // run is exactly what the swap above comes from, the two halves have to hold together.
+    // ⚠ The second stop has to DIFFER, and the first version of this case got that wrong:
+    // with both runs reporting the same cause, removing the `internal` guard altogether
+    // left the test green — it was pinning nothing. Measured as a surviving mutant.
+    const { session } = await createEngineAndSession();
+    const ran = session.getAgent();
+    let reported = 'budget_cap';
+    (ran as unknown as { getLastStop: () => unknown }).getLastStop = () => ({
+      cause: reported, pendingTools: ['web_research'], pendingToolCount: 1, text: 'partial',
+    });
+    await session.run('task');
+    expect(session.getLastRunStop()?.cause).toBe('budget_cap');
+
+    // An internal run, the shape `compact()` makes — and it ends differently.
+    reported = 'end_turn';
+    await session.run('summarize', { noTools: true, internal: true });
+    expect(session.getLastRunStop()?.cause, 'still the outer run\'s').toBe('budget_cap');
+  });
+});

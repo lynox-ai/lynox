@@ -74,7 +74,9 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
   const run = vi.fn(() => new Promise<string>((resolve) => { pending.push(resolve); }));
   releases.push(() => { for (const r of pending.splice(0)) r('released'); });
   settles.push(async () => { await vi.waitFor(() => expect(released).toBeGreaterThanOrEqual(run.mock.calls.length), { timeout: 5_000 }); });
-  const session = { sessionId: 'thread-lease', _recreateAgent: vi.fn(), promptUser: undefined, run };
+  // getLastRunStop: the real Session always has it and executeStandard reads the run's
+  // ending off it; a double without it turns that read into a swallowed TypeError.
+  const session = { sessionId: 'thread-lease', _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined, run };
   const engine = {
     getTaskManager: () => manager,
     createSession: () => session as unknown as Session,
