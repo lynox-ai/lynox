@@ -590,6 +590,32 @@ export interface PinnedTransportInput {
 }
 export type PinnedTransport = (input: PinnedTransportInput) => Promise<Response>;
 
+/**
+ * The headers to send: the caller's, with the body framed by its real byte length.
+ *
+ * Without a length, `req.write(body); req.end()` makes Node send `Transfer-Encoding: chunked`,
+ * and a receiver may refuse that on a request with a body. The control plane does (411, its body
+ * cap cannot count a chunked upload), which broke every `cpFetch` call to it with a body.
+ * The body is already a complete Buffer here, so its length is known and nothing is streamed.
+ *
+ * Any framing the caller set is replaced, in any case spelling, with or without a body: a
+ * `content-length` because the Buffer (or nothing) is what gets sent and a stale length would cut
+ * the body short or stall the receiver,
+ * and a `transfer-encoding` because next to a length, or with a value Node does not frame, it
+ * leaves the receiver and anything in front of it to disagree about where the body ends. Header
+ * names and values reach here from the model through `http_request`.
+ */
+function headersWithLength(headers: Record<string, string>, body: Buffer | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase();
+    if (lower !== 'content-length' && lower !== 'transfer-encoding') out[name] = value;
+  }
+  // Without a body Node frames the request itself (nothing for GET, a zero length for POST).
+  if (body !== undefined) out['content-length'] = String(body.length);
+  return out;
+}
+
 const defaultTransport: PinnedTransport = (input) => {
   const agent = pinnedAgent(input.protocol, input.pinnedIp, input.family);
 
@@ -603,7 +629,7 @@ const defaultTransport: PinnedTransport = (input) => {
       port: input.port,
       method: input.method,
       path: `${parsedPath.pathname}${parsedPath.search}`,
-      headers: input.headers,
+      headers: headersWithLength(input.headers, input.body),
       agent,
       // Explicit servername preserves SNI in case a future Node release
       // changes the implicit-fallback behaviour. The pinned Agent forces the
@@ -651,6 +677,22 @@ const defaultTransport: PinnedTransport = (input) => {
 };
 
 let activeTransport: PinnedTransport = defaultTransport;
+
+/**
+ * The REAL transport, for tests that must see what goes on the wire. Every other test replaces
+ * the transport, so none of them can see a header Node adds or leaves out while sending — which
+ * is how a chunked body reached a receiver that refuses one with every test green.
+ *
+ * Guarded like {@link setPinnedTransportForTests}: this sends to whatever `pinnedIp` it is given
+ * and skips the address validation `fetchPinned` performs, so it must not be reachable outside
+ * a test process.
+ */
+export function defaultPinnedTransportForTests(): PinnedTransport {
+  if (process.env['NODE_ENV'] !== 'test' && !process.env['VITEST']) {
+    throw new Error('defaultPinnedTransportForTests is for tests only');
+  }
+  return defaultTransport;
+}
 
 /**
  * Replace the transport used by fetchPinned. Test-only — production code MUST
