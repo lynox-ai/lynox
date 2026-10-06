@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { DataStore } from './data-store.js';
@@ -12,9 +12,57 @@ import type { MemoryScopeRef } from '../types/index.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
 
+/**
+ * Every temp directory this file has created, so one hook can remove all of them.
+ *
+ * ⛔ WHY A REGISTRY AND NOT A SECOND `rmSync` AT EACH CALL SITE. `makeTmpDb`
+ * returns a path INSIDE a fresh directory, and the teardown removed the FILE
+ * (`rmSync(dbPath)`) — so the directory stayed, empty, once per test. Measured
+ * 2026-10-06: 5400 empty `ds-test-*` directories in the shared `/tmp`, and a run
+ * of this file alone adds 121. The second call site (the real-bridge case further
+ * down) had no cleanup at all, which is where the 45 non-empty ones came from —
+ * an `EngineDb` left open keeps its `-wal` and `-shm` beside the `.db`, 20 MB of
+ * it.
+ *
+ * A registry answers the question that decides the shape — *would a fourth call
+ * site written by someone who does not know about this fall in anyway?* — with
+ * **no**: anything that goes through `makeTmpDb` is removed, having never heard
+ * of the hook.
+ *
+ * ⚠ This is the FILE-LOCAL half. The cross-file half already exists:
+ * `scripts/vitest-global-setup.ts` redirects `TMPDIR` to a per-run root and
+ * removes it, so nothing here leaks into the shared `/tmp` any more. What this
+ * change fixes is the number that root's teardown PRINTS — the comment there says
+ * it is "meant to go DOWN as fixtures are fixed at the source", and this is that
+ * source.
+ */
+const tmpDirs: string[] = [];
+
 function makeTmpDb(): string {
   const dir = mkdtempSync(join(tmpdir(), 'ds-test-'));
+  tmpDirs.push(dir);
   return join(dir, 'test.db');
+}
+
+/**
+ * Remove every directory `makeTmpDb` handed out, and forget them.
+ *
+ * `recursive` is load-bearing, not defensive: a directory that still holds
+ * `test.db-wal` and `test.db-shm` is the normal state when a database was not
+ * closed, and a non-recursive remove would leave exactly those behind. Measured —
+ * 28 of the 45 leaked non-empty directories were that shape.
+ *
+ * Exported-shaped (a plain function the tests can call) rather than inlined in the
+ * hook, because a teardown runs after the last test and no test can observe it.
+ * As a function it can be witnessed, which is the difference between a cleanup
+ * that is claimed and one that is tested.
+ */
+function removeTmpDirs(): void {
+  // Splice rather than iterate-then-clear: the list must be empty afterwards even
+  // if one `rmSync` throws, or a later run would try to remove it a second time.
+  for (const dir of tmpDirs.splice(0, tmpDirs.length)) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
+  }
 }
 
 // A findOrCreate-shaped bridge stub for the `subject`-column tests: `resolve`
@@ -62,8 +110,123 @@ describe('DataStore', () => {
   });
 
   afterEach(() => {
-    ds.close();
-    try { rmSync(dbPath, { force: true }); } catch { /* ignore */ }
+    // `close()` first, then the directory: an open handle keeps the `-wal` alive,
+    // and `removeTmpDirs` takes the whole directory rather than the single file
+    // `dbPath` names — which is what left 5400 empty directories behind.
+    try { ds.close(); } catch { /* a test may have closed it already */ }
+    removeTmpDirs();
+  });
+
+  /**
+   * The directory the real-bridge case further down opens as its SECOND database,
+   * recorded so the case after it can assert the hook removed it. A `let` across two
+   * tests rather than an assertion inside one, because a teardown is what is being
+   * witnessed and no test can observe its own.
+   */
+  let secondDirOfRealBridgeCase: string | null = null;
+
+  // === Temp hygiene ===
+  //
+  // ⛔ The teardown used to remove the FILE `makeTmpDb` names, never the directory
+  // it sits in, so every test left one empty directory behind: 121 per run of this
+  // file, 5400 in the shared `/tmp` when it was measured. The registry fixes it at
+  // the source; these cases are what makes that a mechanism rather than a claim.
+  //
+  // ⚠ The end-to-end number — `test temp root (removed): N entries left behind`,
+  // printed by `scripts/vitest-global-setup.ts` — is deliberately NOT asserted
+  // here: it is produced in a teardown no test can observe. It is a measurement for
+  // the PR body; this is the test. Measured for this file: 121 before, **0** after.
+  //
+  // ⚠ And 0 rather than the 1 I predicted. The redirect's own comment warns that
+  // the count includes Node's `node-compile-cache`, so I wrote down 1 as the honest
+  // floor — for a single-file run it does not appear. The number is a floor that
+  // depends on what else the run writes, not a constant, which is the second reason
+  // it is not an assertion.
+
+  describe('temp directories', () => {
+    // ⚠ These cases call `removeTmpDirs()` in the middle of a test, which also removes
+    // the directory `beforeEach` created for the live `ds` — the registry is per FILE,
+    // not per test. Harmless because none of them touches `ds` afterwards, and on this
+    // platform an open handle survives its directory; the hook then closes it. Named
+    // rather than left to be discovered: a case added here that DOES use `ds` after
+    // the cleanup would be reading a database whose directory is gone.
+    it('⛔ removes the DIRECTORY, not just the database file', () => {
+      const path = makeTmpDb();
+      const dir = dirname(path);
+      expect(existsSync(dir)).toBe(true);
+
+      removeTmpDirs();
+
+      // The old teardown left this directory in place, empty. Reverting the cleanup
+      // to `rmSync(path)` makes exactly this assertion fail.
+      expect(existsSync(dir)).toBe(false);
+    });
+
+    it('⛔ removes a NON-EMPTY directory — the state an unclosed database leaves', () => {
+      // 28 of the 45 non-empty leaked directories had this shape: a `.db` plus a
+      // `-wal` and a `-shm` that outlived an open handle. A non-recursive remove
+      // would leave them, and the recursive flag would be untested.
+      const path = makeTmpDb();
+      const dir = dirname(path);
+      writeFileSync(path, 'x');
+      writeFileSync(`${path}-wal`, 'x');
+      writeFileSync(`${path}-shm`, 'x');
+
+      removeTmpDirs();
+
+      expect(existsSync(dir)).toBe(false);
+    });
+
+    it('removes EVERY registered directory, not only the last', () => {
+      // Two in one test is the real shape — the real-bridge case below opens a
+      // second database — and a cleanup that only took the most recent would pass
+      // both cases above.
+      const dirs = [dirname(makeTmpDb()), dirname(makeTmpDb()), dirname(makeTmpDb())];
+      expect(dirs.filter(existsSync)).toHaveLength(3);
+
+      removeTmpDirs();
+
+      expect(dirs.filter(existsSync)).toEqual([]);
+    });
+
+    it('tolerates a directory that is already gone', () => {
+      // A state the surrounding code produces: a test that cleaned up after itself,
+      // then the hook runs anyway. ⚠ This case does NOT witness that the registry is
+      // emptied — `force: true` makes a repeat removal a no-op, so iterating without
+      // clearing behaves identically here. That mutant survives, and it is equivalent
+      // rather than uncovered; the `splice` stays because an unbounded list in a file
+      // this size is waste, not because a test proves it. (No test count here on
+      // purpose — this comment already said „124-test file" one commit after the file
+      // had 127.)
+      const dir = dirname(makeTmpDb());
+      rmSync(dir, { recursive: true, force: true });
+
+      expect(() => { removeTmpDirs(); }).not.toThrow();
+      expect(() => { removeTmpDirs(); }).not.toThrow();
+    });
+
+    // ── The HOOK, not the function ──────────────────────────────────────────────
+    //
+    // ⛔ Every case above calls `removeTmpDirs()` itself, so they pass whether or not
+    // `afterEach` does. Measured: deleting the call from the hook left all four green.
+    // That is the same shape that cost two rounds yesterday — the function witnessed,
+    // the WIRING not — so the pair below observes the hook instead of the helper: the
+    // first test deliberately leaves a directory, the second asserts it is gone. Only
+    // the hook can have removed it.
+    //
+    // Order matters and vitest gives it: tests in a file run sequentially unless
+    // marked `concurrent`.
+    let leftByPreviousTest: string | null = null;
+
+    it('leaves a directory behind on purpose, for the next case to check', () => {
+      leftByPreviousTest = dirname(makeTmpDb());
+      expect(existsSync(leftByPreviousTest)).toBe(true);
+    });
+
+    it('⛔ the HOOK removed what the previous case left', () => {
+      expect(leftByPreviousTest, 'the previous case did not run').not.toBeNull();
+      expect(existsSync(leftByPreviousTest!)).toBe(false);
+    });
   });
 
   // === Collection Creation ===
@@ -1317,7 +1480,14 @@ describe('DataStore', () => {
       // place the two halves meet, and a stub that mints on write would hide exactly the
       // disagreement being tested.
       const subjDir = makeTmpDb();
-      const subjects = new SubjectStore(new EngineDb(subjDir, ''));
+      // Recorded for the case right after this one, which asserts the hook removed it.
+      // Without that pair, bypassing `makeTmpDb` here — an inline `mkdtempSync`, which
+      // is what this call site did before — leaves its directory behind and no test in
+      // this file notices. That bypass was the source of 28 leaked non-empty
+      // directories, because an open `EngineDb` keeps `-wal`/`-shm` beside the `.db`.
+      secondDirOfRealBridgeCase = dirname(subjDir);
+      const subjDb = new EngineDb(subjDir, '');
+      const subjects = new SubjectStore(subjDb);
       ds.setSubjectBridge(makeSubjectColumnBridge(subjects));
       subjects.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
       subjects.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
@@ -1347,6 +1517,17 @@ describe('DataStore', () => {
       expect(row).toBeDefined();
       expect(row!['note']).toBe('ambiguous patient');   // the unrelated column survived
       expect(row!['patient']).toBeNull();               // only the edge is missing
+      // Closed here rather than in the hook: this is the only test that opens a
+      // second database, and an open handle keeps its `-wal` and `-shm` alive.
+      subjDb.close();
+    });
+
+    it('⛔ the hook also removed the SECOND directory that case opened', () => {
+      // The pair that witnesses the second call site. It is the one that leaked
+      // non-empty — a `.db` plus `-wal` plus `-shm` — so „the directory is gone" here
+      // also covers the recursive remove on real files rather than on a fixture.
+      expect(secondDirOfRealBridgeCase, 'the real-bridge case did not run').not.toBeNull();
+      expect(existsSync(secondDirOfRealBridgeCase!)).toBe(false);
     });
 
     it('AND-joins a widened $eq with a sibling $in by INTERSECTING', () => {
