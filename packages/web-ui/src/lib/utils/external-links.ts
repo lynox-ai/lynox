@@ -29,7 +29,10 @@
  * see the breakout. Measured: a current browser does escape it — `linkedom` does
  * NOT. `setAttribute('title', 'a></body>…')` serialises back with a RAW `>`, so
  * a payload built through linkedom would reproduce this defect perfectly well,
- * and the suite was never blind to it. The literal stays for a better reason
+ * and the suite was never blind to it. (Measured further, and it matters for the
+ * next reader: linkedom is LAXER than the dangerous engine, not equal to it — it
+ * also leaves `&` and NBSP raw, which even the old spec escaped. So "reproduces
+ * the old engine" holds for `<`/`>` and must not be read as equivalence.) The literal stays for a better reason
  * than the one claimed: it pins what the OLD BROWSER emitted, which is the input
  * that was actually dangerous, rather than depending on a test library happening
  * to agree with it.

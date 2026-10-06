@@ -5,25 +5,41 @@ import { fixMarkdownPreprocessing, repairCodeFences } from './markdown-preproces
 import { externalizeLinksInDom, wrapTablesInDom } from './external-links.js';
 
 /**
- * The sanitized markdown pipeline for chat messages — and this module exists so
- * that "the sanitized pipeline" is a FILE rather than a guess.
+ * The sanitized markdown pipeline for chat messages.
  *
- * The pipeline used to be a function inside `MarkdownRenderer.svelte`. The
- * property it has to hold is "no string rewrite runs over the sanitized HTML",
- * and that is a property of the CODE, not of a run: the breakout it prevents is
- * only reachable on an engine whose `innerHTML` serialiser returns `<`/`>` raw
- * in attributes, so no current parser can be made to demonstrate it. The test
- * therefore reads source — and while the pipeline sat in a component full of
- * legitimate string rewrites, reading source meant slicing the function out with
- * a regex. That slice had two measured failure directions: a `}` at the wrong
- * indentation inside the body truncated it (false red), and de-indenting the
- * function let the interesting code fall outside it (false green). A sliced
- * scope is a guess about where a property lives. A file is not.
+ * It lives in its own module so that it can be RUN. The property that matters —
+ * "a raw `>` an attacker put in an attribute stays inside that attribute" —
+ * cannot be observed while the pipeline is a closure inside a `.svelte`
+ * component, because nothing in this package mounts a component. Exported, it
+ * can be driven with a stubbed sanitizer, and `markdown-render.test.ts` does
+ * exactly that, end to end, on the markdown that produces the payload.
  *
- * So: nothing in this file may rewrite a string. Everything that legitimately
- * does — `decodeEntities`, the fence substitution, the artifact paths — stays in
- * the component, where no such rule applies. `markdown-render.test.ts` holds
- * that line over this whole file.
+ * ⚠ An earlier version of this comment claimed the breakout could not be
+ * demonstrated by any current parser. That was FALSE, and it was load-bearing:
+ * it was the whole argument for guarding this with an assertion about source
+ * TEXT instead of a witness. Measured — `linkedom` is a current parser and it
+ * leaves `<`, `>`, `&` and NBSP raw in attribute values, so the dangerous round
+ * trip is available in this package's own test environment.
+ *
+ * ## The rule, and why it is prose
+ *
+ * **Never run a string rewrite over sanitized HTML. Mutate nodes, serialise
+ * once.** That rule is written down and deliberately NOT mechanised. A source
+ * negative on `.replace(`/`.replaceAll(` was tried here and an adversarial round
+ * put five evasions through it against a green baseline: `split`/`join`,
+ * computed member access (`['replace']`), a space before the paren,
+ * `RegExp.prototype[Symbol.replace]`, and a plain `.replace(` hidden from the
+ * comment stripper by a `/*` inside a line comment. The set of pattern-driven
+ * string operations is not closed, so no such check can be — and an evadable
+ * guard is worse than none, because it reports green and takes the pressure off
+ * the rule.
+ *
+ * What IS held mechanically is the PROPERTY, which is the thing the rule exists
+ * for: all six of those spellings die on the witness, because it does not care
+ * how a rewrite is written, only whether its pattern can end inside an
+ * attribute. A rewrite that cannot overrun — anchored before any attribute, say
+ * — breaks the rule and passes the witness. That is the correct split and not a
+ * gap: the rule is a coding guideline, the property is the security boundary.
  */
 
 /**
@@ -63,6 +79,10 @@ export function renderSanitizedMarkdown(src: string): string {
 	// arrives in the new one and leaves its old parent, and the same holds for a
 	// DocumentFragment. The only reason to use `ownerDocument` is that there is
 	// no point forcing an adoption that buys nothing.
+	// ⚠ `?? document` is unreachable at runtime, not a fallback anyone will take:
+	// only a Document node has a null `ownerDocument`, and this is a fragment. It
+	// is there to satisfy `Node.ownerDocument: Document | null`, so no test can
+	// cover that branch — said here rather than left to look like dead defence.
 	const holder = (fragment.ownerDocument ?? document).createElement('div');
 	holder.appendChild(fragment);
 	return holder.innerHTML;

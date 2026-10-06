@@ -1,147 +1,199 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { parseHTML } from 'linkedom';
 
 /**
- * ⚠ THIS FILE ASSERTS ON SOURCE TEXT, and that is a deliberate choice with a
- * reason — not a shortcut around a test that was hard to write.
+ * ⚠ THIS FILE REPLACED A SOURCE-TEXT TRIPWIRE, and the reason it could is a
+ * claim this file used to make and that was FALSE.
  *
- * The property is "nothing in the sanitized pipeline rewrites a string". It
- * cannot be run: the breakout it prevents needs an engine whose `innerHTML`
- * serialiser returns `<`/`>` raw inside attributes, and no current parser does.
- * `DOMPurify.sanitize` is also not a function outside a browser, so the pipeline
- * cannot even be called here. What a run CAN show is that the DOM passes behave
- * — `external-links.test.ts` does exactly that. What is left over is this.
+ * It said: the breakout cannot be run, because it needs an engine whose
+ * `innerHTML` serialiser returns `<`/`>` raw inside attributes and no current
+ * parser does. Measured — `linkedom` is a current parser and it emits raw `<`,
+ * `>`, `&` and NBSP in attribute values. So the dangerous round trip is
+ * available right here, and "it cannot be run" was the only thing standing
+ * between this property and a real witness.
  *
- * ## What a source assertion may and may not be used for
+ * The tripwire that stood in for it was a negative on `.replace(`/`.replaceAll(`
+ * over this module's source, comment-stripped. An adversarial round put FIVE
+ * evasions through it, each measured against a green baseline:
  *
- * A sibling change learned this the expensive way. An assertion that pinned the
- * SPELLING of an argument was wrong in both directions, because the set of
- * spellings has no end — whoever writes the next edit picks it. That is not the
- * situation here. The question is "which METHOD rewrites a string", and
- * `String.prototype` has exactly two that take a pattern: `replace` and
- * `replaceAll`. A closed set can be refused; an open one cannot.
+ *   split('<a ').join(…)              a pattern rewrite without `.replace`
+ *   ['replace'](…)                    computed member access
+ *   .replace (…)                      one space before the paren
+ *   /<a /g[Symbol.replace](…)         the protocol method directly
+ *   a plain `.replace(` hidden between a `/*` inside a `//` comment
+ *     and a later `* /` — the regex stripper deleted the real code
  *
- * The other half of that lesson is SCOPE. This used to slice `renderMarkdown`
- * out of a component with a regex, and the slice had two measured failure
- * directions: a `}` at the wrong indentation inside the body truncated it (false
- * red), and de-indenting the function let the interesting code fall outside it
- * (false green). The pipeline now lives in a file of its own, so the scope is
- * the file. Nothing has to guess where the property lives.
+ * The justification for that tripwire was mine and it was wrong in the same way
+ * twice: I claimed `String.prototype` has "exactly two" methods that rewrite via
+ * a pattern, so the set was CLOSED and could be refused. It is not closed —
+ * `split`/`join`, computed access and `Symbol.replace` are all pattern-driven
+ * rewrites, and the next one is chosen by whoever writes the next edit. By the
+ * rule I was applying, that makes a source negative the wrong instrument.
+ *
+ * ## What is guarded now, and what is only written down
+ *
+ * The PROPERTY — "a raw `>` an attacker put in an attribute stays inside that
+ * attribute" — is measured below, end to end, on the markdown that produces it.
+ * The RULE the module states ("never run a string rewrite over sanitized HTML")
+ * is prose, deliberately. It cannot be held mechanically, and an evadable guard
+ * is worse than none: it takes the pressure off the rule while reporting green.
+ * A rewrite that happens to be safe — anchored before any attribute, say — would
+ * violate the rule and pass this witness, and that is the correct split.
  */
-const MODULE_PATH = new URL('./markdown-render.ts', import.meta.url);
-const MODULE = readFileSync(fileURLToPath(MODULE_PATH), 'utf-8');
-const RENDERER = readFileSync(
-	fileURLToPath(new URL('../components/MarkdownRenderer.svelte', import.meta.url)),
-	'utf-8',
-);
+
+/** What the real `DOMPurify.sanitize` was called with, recorded per test. */
+let sanitizeCalls: { html: string; opts: unknown }[] = [];
 
 /**
- * Comments out, BOTH syntaxes. A comment *about* a string rewrite is not a
- * string rewrite, and the sibling tripwire that stripped only `//` was a false
- * red on the next person to document the change in a `/* *\/` block.
+ * ⚠ THE FAKE IS NOT DOMPURIFY, and what it stands in for is narrow.
  *
- * ⚠ Known limit, stated rather than papered over: this would also strip a `/*`
- * that appeared inside a string literal. The module has none, and the control
- * below shows the stripper leaves real code standing.
+ * It does no sanitizing at all. What it reproduces is the one thing the defect
+ * lives in: the PARSE-AND-SERIALISE ROUND TRIP, where an escaped `&gt;` in the
+ * markdown becomes a real `>` character in an attribute value and comes back out
+ * raw. DOMPurify's cleaning is not under test here — `tests/security` and
+ * DOMPurify's own suite are where that belongs. Using the real thing is not an
+ * option: `DOMPurify.sanitize` is not a function outside a browser.
  */
-function codeOnly(src: string): string {
-	return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+vi.mock('dompurify', () => ({
+	default: {
+		sanitize: (html: string, opts: unknown) => {
+			sanitizeCalls.push({ html, opts });
+			const { document } = parseHTML(`<html><body><template>${html}</template></body></html>`);
+			const tpl = document.querySelector('template');
+			if (!tpl) throw new Error('fake sanitizer lost its template');
+			return tpl.content;
+		},
+	},
+}));
+
+const { renderSanitizedMarkdown } = await import('./markdown-render.js');
+const { marked } = await import('marked');
+const { fixMarkdownPreprocessing, repairCodeFences } = await import('./markdown-preprocess.js');
+
+/**
+ * The shape this change removed: the same pipeline, with the two passes as
+ * STRING rewrites over the sanitized output. Kept verbatim so every witness
+ * below carries its own positive control.
+ */
+function renderAsStringRewrite(src: string): string {
+	const parsed = marked.parse(repairCodeFences(fixMarkdownPreprocessing(src)), { async: false }) as string;
+	// The sanitizer's round trip, which is where the raw `>` comes from.
+	const { document } = parseHTML(`<html><body><template>${parsed}</template></body></html>`);
+	const html = document.querySelector('template')?.innerHTML ?? '';
+	return html
+		.replace(/<a\b[^>]*>/gi, (tag) => {
+			if (/\starget\s*=/i.test(tag)) return tag;
+			if (!/\shref\s*=\s*["']https?:\/\//i.test(tag)) return tag;
+			return `${tag.slice(0, -1).replace(/\/$/, '')} rel="noreferrer noopener" target="_blank">`;
+		})
+		.replace(/<table\b[^>]*>/g, '<div class="table-wrap">$&')
+		.replace(/<\/table>/g, '</table></div>');
 }
 
-/** …and the import block, so statement order means statement order. */
-function bodyCode(src: string): string {
-	return codeOnly(src)
-		.split('\n')
-		.filter((line) => !line.startsWith('import '))
-		.join('\n');
+/** How many of the attacker's marker elements a string really contains. */
+function liveMarkers(html: string): number {
+	const { document } = parseHTML(`<html><body>${html}</body></html>`);
+	return document.querySelectorAll('img[src="/nope"]').length;
 }
 
-describe('the sanitized markdown pipeline', () => {
-	it('is the file this test thinks it is', () => {
-		// Without this every assertion below passes vacuously if the read ever
-		// points somewhere else. A sibling test had exactly this gap.
-		expect(MODULE, 'markdown-render.ts does not export the pipeline').toContain(
-			'export function renderSanitizedMarkdown(',
-		);
+/** A link whose TITLE carries the attacker's payload — content, not a pattern. */
+const BREAKOUT = '[x](https://example.com "a><img src=/nope onerror=alert(1)>")';
+
+beforeEach(() => {
+	sanitizeCalls = [];
+});
+
+describe('the attacker marker and the fake', () => {
+	it('⭐ the marker is countable, so a zero below means absence and not blindness', () => {
+		expect(liveMarkers('<img src="/nope">')).toBe(1);
+		expect(liveMarkers('<p>nothing here</p>')).toBe(0);
 	});
 
-	/**
-	 * ⭐ THE POINT, and the requirement has not changed — only the instrument.
-	 *
-	 * The link work adds attributes to anchors, so it must run on markup the
-	 * sanitizer has already cleaned. Running it BEFORE `DOMPurify.sanitize` would
-	 * decorate tags not yet known to be anchors, and the sanitizer could strip or
-	 * reshape what was just added. That still holds.
-	 *
-	 * ⚠ What changed is that "after the sanitizer" is not enough. Both passes
-	 * used to be STRING rewrites over the sanitized HTML, and the earlier version
-	 * of this test pinned the ORDER of a nested call chain and was green
-	 * throughout — because the order was never the defect. The string was.
-	 */
-	it('⭐ sanitizes to a DOM fragment and mutates nodes, never a string', () => {
-		const code = bodyCode(MODULE);
-		const sanitizeAt = code.indexOf('DOMPurify.sanitize');
-		const linksAt = code.indexOf('externalizeLinksInDom');
-		const tablesAt = code.indexOf('wrapTablesInDom');
-		expect(sanitizeAt, 'the sanitizer call is gone').toBeGreaterThan(-1);
-		expect(linksAt, 'the link pass is gone').toBeGreaterThan(-1);
-		expect(tablesAt, 'the table pass is gone').toBeGreaterThan(-1);
-		expect(sanitizeAt, 'the link pass runs before the sanitizer').toBeLessThan(linksAt);
-		expect(sanitizeAt, 'the table pass runs before the sanitizer').toBeLessThan(tablesAt);
-		// A fragment, not a string — this is what makes "after" sufficient.
-		expect(code, 'the sanitizer hands back a string again').toContain('RETURN_DOM_FRAGMENT');
-	});
-
-	it('⭐ runs no string rewrite over the sanitized markup', () => {
-		const code = bodyCode(MODULE);
-		expect(code, 'a `.replace(` is back in the sanitized pipeline').not.toContain('.replace(');
-		expect(code, 'a `.replaceAll(` is back in the sanitized pipeline').not.toContain('.replaceAll(');
-	});
-
-	it('imports the helpers it calls', () => {
-		// Moved here from `markdown-link-affordance.test.ts`, which asserted this
-		// against the COMPONENT. The component no longer imports the passes — the
-		// pipeline does — so the assertion followed the import rather than being
-		// dropped.
-		expect(MODULE).toContain("from './external-links.js'");
-		expect(MODULE).toContain("from './markdown-preprocess.js'");
-	});
-
-	it('the renderer gets its markdown from this module', () => {
-		// The one thing the file scope cannot prove: that anybody calls it. A
-		// rename reddens this, which is correct — a test names what it depends on.
+	it('⭐ the round trip really produces a RAW `>` inside the attribute', () => {
+		// The fixture's own control: if the serialiser ever starts escaping `>` in
+		// attribute values, the witnesses below would pass because the payload
+		// stopped being dangerous, and this says so instead.
+		//
+		// ⚠ It deliberately does NOT go through the pipeline. A first version did,
+		// and then an overrunning rewrite INSIDE the pipeline failed this test
+		// too — so the first message a developer saw was "the serialiser now
+		// escapes `>`", which is the wrong cause. A control whose path includes
+		// the subject cannot tell the two apart. Subject here is the serialiser
+		// and nothing else.
+		const { document } = parseHTML('<html><body></body></html>');
+		const el = document.createElement('p');
+		el.setAttribute('title', 'a><img src=/nope>');
+		document.body.appendChild(el);
 		expect(
-			RENDERER,
+			document.body.innerHTML,
+			'the serialiser now escapes `>` in attributes — the witnesses below prove nothing',
+		).toMatch(/title="[^"]*>/);
+	});
+});
+
+describe('renderSanitizedMarkdown', () => {
+	it('⭐ keeps a raw `>` in an attribute inside that attribute — the string rewrite did not', () => {
+		// Positive control: the shape this replaced breaks on this very markdown.
+		expect(
+			liveMarkers(renderAsStringRewrite(BREAKOUT)),
+			'the payload no longer breaks the string rewrite, so this test proves nothing',
+		).toBe(1);
+
+		// And the pipeline that replaced it does not.
+		expect(liveMarkers(renderSanitizedMarkdown(BREAKOUT))).toBe(0);
+	});
+
+	it('⭐ asks the sanitizer for NODES, which is what makes the passes node passes', () => {
+		// Observed from the real call, not read out of the source. A string-mode
+		// sanitize would hand the passes a string and they would have nothing to
+		// walk — so this is the option the whole shape rests on.
+		renderSanitizedMarkdown('plain text');
+		expect(sanitizeCalls.length).toBe(1);
+		expect(sanitizeCalls[0]?.opts).toEqual({ RETURN_DOM_FRAGMENT: true });
+	});
+
+	it('⭐ still does the work: an off-site link gets a new tab and a safe rel', () => {
+		const { document } = parseHTML(
+			`<html><body>${renderSanitizedMarkdown('[x](https://example.com/x)')}</body></html>`,
+		);
+		const a = document.querySelector('a');
+		expect(a, 'the link pass did not run').not.toBeNull();
+		expect(a?.getAttribute('target')).toBe('_blank');
+		expect(a?.getAttribute('rel')).toBe('noreferrer noopener');
+	});
+
+	it('⭐ still does the work: a table gets its scroll wrapper', () => {
+		const { document } = parseHTML(
+			`<html><body>${renderSanitizedMarkdown('| a |\n| - |\n| b |')}</body></html>`,
+		);
+		expect(document.querySelector('div.table-wrap table'), 'the table pass did not run').not.toBeNull();
+	});
+
+	it('runs the preprocessors on the raw source, upstream of the sanitizer', () => {
+		// This is the stage a string rewrite is LEGITIMATE at — the markdown is
+		// not sanitized markup yet. The old tripwire reddened on it, which is one
+		// of the two reasons it is gone.
+		renderSanitizedMarkdown('```js\nconst x = 1;\n');
+		expect(sanitizeCalls[0]?.html, 'the fence repair did not reach the sanitizer').toContain('<code');
+	});
+});
+
+describe('the renderer routes through it', () => {
+	/**
+	 * The one thing a run cannot show: that the component still calls this. A
+	 * rename reddens this test, which is correct — a test names what it depends
+	 * on. What it does NOT cover: a second pipeline added beside this one.
+	 */
+	it('⭐ MarkdownRenderer renders its markdown through this module', () => {
+		const renderer = readFileSync(
+			fileURLToPath(new URL('../components/MarkdownRenderer.svelte', import.meta.url)),
+			'utf-8',
+		);
+		expect(
+			renderer,
 			'MarkdownRenderer no longer calls renderSanitizedMarkdown — the pipeline is back in the component',
 		).toContain('renderSanitizedMarkdown(');
-	});
-
-	describe('the instrument itself', () => {
-		// Each of these failed in an earlier version of this tripwire. They are
-		// controls, not decoration: without them a stripper that deleted
-		// everything, or a detector that matched nothing, would read as a pass.
-		it('strips both comment syntaxes and leaves the code', () => {
-			const sample = [
-				'/* was: out.replace(a, b) */',
-				'// also: out.replaceAll(c, d)',
-				'const kept = fn(x);',
-				'/** doc with out.replace(e, f) */',
-			].join('\n');
-			const out = codeOnly(sample);
-			expect(out, 'a commented-out rewrite is still being read as code').not.toContain('.replace(');
-			expect(out, 'the stripper ate the code too').toContain('const kept = fn(x);');
-		});
-
-		it('catches a rewrite that is really there', () => {
-			expect(codeOnly('const y = x.replace(/<a/g, z);')).toContain('.replace(');
-			expect(codeOnly('const y = x.replaceAll("<a", z);')).toContain('.replaceAll(');
-		});
-
-		it('drops imports without dropping statements', () => {
-			const out = bodyCode("import { a } from './a.js';\nconst b = a(1);\n");
-			expect(out).not.toContain('import {');
-			expect(out).toContain('const b = a(1);');
-		});
 	});
 });

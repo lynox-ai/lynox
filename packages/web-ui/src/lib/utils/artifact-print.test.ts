@@ -4,21 +4,28 @@ import { parseHTML } from 'linkedom';
 import { injectPrintScaffold } from './artifact-print.js';
 
 /**
- * ⚠ Three assertions in this file MOVED, and each one was pinning a position
- * where the requirement was something else. Named so the next reader does not
- * have to guess whether a requirement was dropped:
+ * ⚠ ASSERTIONS IN THIS FILE HAVE MOVED AND THEN CHANGED DIRECTION. Named so the
+ * next reader does not have to guess whether a requirement was dropped — and
+ * corrected here, because an earlier version of this paragraph described the
+ * assertion as "style present, before the close of body" after the assertion
+ * itself had been inverted:
  *
- *   · "style before `</head>`" → "style present, before the close of body". The
- *     requirement is that `@page{margin:1.5cm}` APPLIES; a `<style>` element is
- *     valid in body, and moving it there is what removes the second pattern
- *     match rather than hardening it.
+ *   · "style before `</head>`" → "style present, before the close of body"
+ *     → now "style present, AFTER the close of body". The requirement never
+ *     changed: `@page{margin:1.5cm}` has to APPLY. Position was a proxy for
+ *     that, and the proxy has been false twice. What applies is measured in a
+ *     browser (see `artifact-print.ts`), not here.
  *   · "for a bare fragment the style is PREPENDED" → "the scaffold is present".
- *     Prepend-versus-append for a fragment with no body was incidental.
+ *     Prepend-versus-append for a fragment with no body was incidental; what
+ *     kills a prepend now is the `startsWith` assertion on the original.
  *   · "exactly one `window.print()`" is UNCHANGED and still the important one.
+ *   · "is case-insensitive about the closing body tag" was RENAMED, not moved:
+ *     there is no search any more, so that requirement is gone rather than
+ *     satisfied, while `</BODY>` still has to get a working scaffold.
  *
- * What is new is the breakout witness, and it feeds the OLD HTML serialiser's
- * output in as a literal string on purpose — see `external-links.test.ts` for
- * why a test that goes through a parser cannot see this class at all.
+ * The breakout witnesses feed the OLD HTML serialiser's output in as a literal
+ * string on purpose — see `external-links.test.ts` for why, and for the measured
+ * correction to the reason that used to be given.
  */
 
 /** The shape this change removed, kept verbatim so the payload can be proven live. */
@@ -100,6 +107,23 @@ describe('injectPrintScaffold', () => {
 		expect(out).toContain('<p>Hi</p>');
 		expect(out).toContain('<title>X</title>');
 		expect(out.startsWith('<html><head><title>X</title></head><body><p>Hi</p></body></html>')).toBe(true);
+	});
+
+	it('⭐ carries the print hygiene rules the scaffold exists for', () => {
+		// M12: deleting the whole `@media print{…}` block left 30/30 green. The
+		// `@page` margin had an assertion; the break-inside/orphans/widows rules
+		// that answer the original "zeilenumbrüche schlecht" report had none —
+		// and a comment two files over reasons about their cascade position while
+		// nothing noticed them being removed.
+		const out = injectPrintScaffold('<html><body><p>x</p></body></html>');
+		expect(out).toContain('@media print{');
+		for (const rule of [
+			'tr,img,pre,figure,blockquote{break-inside:avoid}',
+			'h1,h2,h3,h4,h5,h6{break-after:avoid;break-inside:avoid}',
+			'p,li{orphans:3;widows:3}',
+		]) {
+			expect(out, `print hygiene rule missing: ${rule}`).toContain(rule);
+		}
 	});
 
 	it('auto-prints and closes after printing', () => {

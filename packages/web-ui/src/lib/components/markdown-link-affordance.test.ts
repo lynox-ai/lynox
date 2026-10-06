@@ -21,19 +21,26 @@ const RENDERER = readFileSync(
 describe('MarkdownRenderer link affordance', () => {
 	/**
 	 * ⚠ THREE TESTS MOVED OUT OF THIS FILE, and this note is here so a reader who
-	 * remembers them does not conclude the requirements were dropped:
+	 * remembers them does not conclude the requirements were dropped. Names as
+	 * they read NOW, because a note whose point is findability has to be greppable:
 	 *
-	 *   · "sanitizes to a DOM fragment and mutates nodes, never a string"
+	 *   · "⭐ sanitizes to a DOM fragment and mutates nodes, never a string"
+	 *     → became "⭐ asks the sanitizer for NODES, which is what makes the
+	 *       passes node passes" — and it is now an OBSERVED call option rather
+	 *       than a string found in the source.
 	 *   · "runs no string replace inside the sanitized pipeline"
-	 *   · "imports the helper it calls"
+	 *     → became "⭐ keeps a raw `>` in an attribute inside that attribute —
+	 *       the string rewrite did not". The old one asserted on source text; the
+	 *       new one runs the pipeline and measures the breakout.
+	 *   · "imports the helper it calls" → the component no longer imports the
+	 *     passes, the pipeline does, so the assertion followed the import and the
+	 *     witnesses above cover that the passes actually run.
 	 *
-	 * All three asserted on the render pipeline, which no longer lives in this
-	 * component — it is `utils/markdown-render.ts`, and they are in
-	 * `utils/markdown-render.test.ts` with the same requirements and a better
-	 * scope. They used to slice `renderMarkdown` out of this file with a regex,
-	 * and that slice had two measured failure directions: a `}` at the wrong
-	 * indentation inside the body truncated it, and de-indenting the function let
-	 * the interesting code fall outside it. A file scope has neither.
+	 * All three now live in `utils/markdown-render.test.ts`. The reason for the
+	 * move is NOT that the regex slice they used was broken — for this shape a
+	 * de-indented function makes the slice empty, which its own guard caught. It
+	 * is that the property turned out to be RUNNABLE once the pipeline was
+	 * importable, and a witness beats an assertion about text.
 	 *
 	 * What stays here is what is genuinely about the component's template.
 	 */

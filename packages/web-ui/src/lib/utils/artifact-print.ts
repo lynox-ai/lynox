@@ -72,12 +72,34 @@ export function injectPrintScaffold(html: string): string {
   // over sanitized HTML. Here the whole document goes to a blob URL, so there
   // are no nodes to mutate — appending is the form that rule takes at this site.
   //
-  // ⚠ One deliberate behaviour change. The print styles are now LAST in document
-  // order, so at equal specificity they beat the artifact's own CSS instead of
-  // losing to it. That is the direction we want — `@page` margins and
-  // break-inside hygiene are the whole point of the scaffold — but it IS a
-  // change: an artifact that deliberately set `break-inside: auto` no longer
-  // wins that tie.
+  // ⚠ APPEND HAS ITS OWN PRECONDITION, and saying it has none would repeat the
+  // mistake this change fixed. It is that `html` must not END in a parser state
+  // that swallows trailing markup. Measured in Chrome via a blob URL, the
+  // scaffold is lost after an unterminated comment, an open `<textarea>`, an
+  // unclosed `<title>`, a `<frameset>` document, an open attribute, and — worst,
+  // because it reproduces the exact symptom the offset shape had — after
+  // `<plaintext>`, where the print CSS appears as visible text. After an
+  // unclosed `<style>` the script still runs but `@page` never becomes a rule.
+  //
+  // The difference from the precondition this replaced is that NO SANITIZED
+  // INPUT can violate it, and that is checked rather than hoped: DOMPurify's
+  // default allowlist strips `plaintext`, `xmp`, `noembed`, `noframes`,
+  // `frameset` and CDATA outright, closes `textarea`/`title`/`style`/`template`,
+  // and drops an unterminated comment — every `WHOLE_DOCUMENT` output probed
+  // ends `</body></html>`. `printMarkdownDocument` wraps its body in a fixed
+  // template. It is also not a regression: none of those inputs contains
+  // `</body>`, so the offset shape fell through to the same append and failed
+  // identically.
+  //
+  // ⚠ And the CASCADE claim here used to name the wrong comparison. Measured in
+  // Chrome under `emulateMedia({media:'print'})`, computed `break-inside` on a
+  // `<tr>`: against the shape this directly replaces there is NO change, because
+  // inserting before `</body>` already made the scaffold the last `<style>` in
+  // document order. The print styles winning a specificity tie is true only
+  // against the ORIGINAL pattern-match shape, which put them in `<head>`. The one
+  // arrangement where append and offset differ — the artifact's own `<style>`
+  // sitting between `</body>` and `</html>` — cannot occur, because the parser
+  // hoists it into the body before the scaffold is appended.
   return `${html}${style}${script}`;
 }
 
