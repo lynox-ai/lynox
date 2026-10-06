@@ -288,7 +288,7 @@ export interface ExternalClient {
   get(url: string, signal?: AbortSignal): Promise<ExternalRead>;
   /** PATCH `body` as JSON. `ok` carries no value: success is the status alone. */
   /** Write `body` as JSON with the run's verb. `ok` carries no value: success is the status alone. */
-  write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal): Promise<ExternalRead>;
+  write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal, onSend?: () => void): Promise<ExternalRead>;
   /** Requests that went out — each is one billable call on a per-call profile. */
   readonly sent: number;
 }
@@ -302,7 +302,7 @@ export interface ExternalClient {
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const now = deps.now ?? Date.now;
   let sent = 0;
-  const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined): Promise<ExternalRead> => {
+  const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined, onSend?: () => void): Promise<ExternalRead> => {
     if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
@@ -327,6 +327,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     let res: Response;
+    onSend?.();
     sent++;
     try {
       res = await fetchPinned(url, {
@@ -348,7 +349,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   return {
     get sent() { return sent; },
     get: (url, signal) => send('GET', url, undefined, signal),
-    write: (url, method, body, signal) => send(method, url, body, signal),
+    write: (url, method, body, signal, onSend) => send(method, url, body, signal, onSend),
   };
 }
 
@@ -443,15 +444,16 @@ export function externalWriter(client: ExternalClient, opts: {
   };
   return {
     readsBack: true,
+    reportsSend: true,
     async read(key, fields) {
       if (fields === null) return 'foreign';
       const image = await readOver(key, fields);
       return image === 'foreign' ? 'foreign' : { absent: false, value: image };
     },
-    async write(key, after) {
+    async write(key, after, onSend) {
       if (after.absent || !isPlainObject(after.value)) throw new Error('an external target is only ever edited, never removed');
       const fields = Object.keys(after.value);
-      const got = await call(() => client.write(key, method, after.value));
+      const got = await call(() => client.write(key, method, after.value, undefined, onSend));
       if (got.kind !== 'ok') throw new Error('write failed');
       // Read back once. When that fails the write stands; the undo then expects what was
       // sent, and a host that changed it answers as a conflict.

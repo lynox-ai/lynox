@@ -50,6 +50,8 @@ interface Shop {
   replacingPut?: boolean;
   /** Paths whose write is applied and then answered 502: it landed, the answer says it failed. */
   landThenFail?: Set<string>;
+  /** `METHOD path` whose request reaches the shop and whose connection then breaks. */
+  dropAfter?: Set<string>;
 }
 
 /** A price as the shop stores it: always two decimals. */
@@ -71,6 +73,7 @@ function serve(s: Shop): () => void {
     const body = input.body === undefined ? undefined : JSON.parse(input.body.toString('utf8')) as unknown;
     const auth = Object.entries(input.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
     s.requests.push({ method: input.method, path, body, auth });
+    if (s.dropAfter?.has(`${input.method} ${path}`)) throw new Error('connection reset');
     const sp = s.special.get(`${input.method} ${path}`);
     if (sp) return new Response(null, { status: sp.status, headers: sp.headers ?? {} });
     const item = s.items.get(path);
@@ -251,6 +254,33 @@ describe('applying an external run', () => {
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(s.items.get('/products/1')!['price']).toBe('12.00');
       expect(ledger.getStatus(runId)!.phase).toBe('undone');
+    } finally {
+      restore();
+    }
+  });
+
+  it('a failed write that landed stays in the undo after a resume turned its retry into a conflict', async () => {
+    const s = shop();
+    s.landThenFail = new Set(['/products/1']);
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15.00' } }, { target: url(1), after: { price: '20' } }]);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      expect(s.items.get('/products/1')!['price']).toBe('20.00');
+      s.landThenFail.clear();
+      // The resume clears the failure and retries: the target no longer holds its before-image,
+      // so the retry records a conflict — the failed write's own mark is gone.
+      expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: contractWriter });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, conflicts: 1 });
+
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      // Both targets may hold the run's write, so both are in the undo.
+      expect(undo.status.total).toBe(2);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: contractWriter });
+      expect(ledger.getStatus(runId)!.phase).not.toBe('undone');
     } finally {
       restore();
     }
@@ -440,7 +470,7 @@ describe('applying an external run', () => {
       let gets = 0;
       const flaky: ExternalClient = {
         get sent() { return c.sent; },
-        write: (u, m, b, sig) => c.write(u, m, b, sig),
+        write: (u, m, b, sig, on) => c.write(u, m, b, sig, on),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) })).status).toBe('done');
@@ -509,8 +539,8 @@ describe('applying an external run', () => {
       const once: ExternalClient = {
         get sent() { return c.sent; },
         get: (u, sig) => c.get(u, sig),
-        async write(u, m, b, sig) {
-          const r = await c.write(u, m, b, sig);
+        async write(u, m, b, sig, on) {
+          const r = await c.write(u, m, b, sig, on);
           s.special.delete('PATCH /products/0');
           return r;
         },
@@ -535,7 +565,7 @@ describe('applying an external run', () => {
       let gets = 0;
       const flaky: ExternalClient = {
         get sent() { return c.sent; },
-        write: (u, m, b, sig) => c.write(u, m, b, sig),
+        write: (u, m, b, sig, on) => c.write(u, m, b, sig, on),
         async get(u, sig) { return ++gets === 2 ? { kind: 'failed' } : c.get(u, sig); },
       };
       await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(flaky) });
@@ -712,6 +742,128 @@ describe('applying an external run', () => {
 });
 
 describe('the write verb and the one-target probe', () => {
+  it('a run approved for one target sends its verb to one target even when that write fails, and may retry it', async () => {
+    const s = shop();
+    // 25 targets, so one failure stays under the failure-rate halt: only the approval's bound
+    // can stop the run after it.
+    for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    s.special.set('PATCH /products/0', { status: 502 });
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 25 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, keys) });
+      const runId = await previewedRun(keys.map((target) => ({ target, after: { price: '15' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      // The failed write may have reached its target: the approval for one is spent.
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, failed: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+
+      // A resume retries the same target — no new one receives the verb.
+      s.special.delete('PATCH /products/0');
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0', '/products/0']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write answered with a redirect counts as sent: the approval for one is spent and the undo takes it back', async () => {
+    const s = shop();
+    for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    // A host may apply a write and answer it with a redirect to the result.
+    s.special.set('PATCH /products/0', { status: 303 });
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 25 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, keys) });
+      const runId = await previewedRun(keys.map((target) => ({ target, after: { price: '15' } })), c);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
+
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status.total).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write whose connection broke after the request left spends the approval', async () => {
+    const s = shop();
+    for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    s.dropAfter = new Set(['PATCH /products/0']);
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 25 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, keys) });
+      const runId = await previewedRun(keys.map((target) => ({ target, after: { price: '15' } })), c);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
+
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write stopped before its request left does not spend the approval', async () => {
+    const s = shop();
+    for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 25 }, (_, i) => url(i));
+      // The scan at the request stops the first target's body, which the plan let through.
+      const c = client({ contract: mintBulkContract(HOST, keys), scan: (text) => (text.includes('MARKED') ? 'x' : null) });
+      const runId = await previewedRun(keys.map((target, i) => ({ target, after: { price: i === 0 ? 'MARKED' : '15' } })), c, 'PATCH', () => null);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 1 }).ok).toBe(true);
+
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      // Nothing went to the first target, so the one target approved is the next one.
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 1, haltReason: BULK_HALT_REASONS.maxTargets });
+    } finally {
+      restore();
+    }
+  });
+
+  it('under a maximum, a resume goes past a target never sent to and retries a later one that may hold the verb', async () => {
+    const s = shop();
+    for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    const restore = serve(s);
+    try {
+      const keys = Array.from({ length: 25 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, keys) });
+      const runId = await previewedRun(keys.map((target) => ({ target, after: { price: '15' } })), c);
+      seedProbe();
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
+      // The first target changed since the preview (a conflict, nothing sent); the third fails.
+      s.items.get('/products/0')!['price'] = '13.00';
+      s.special.set('PATCH /products/2', { status: 502 });
+
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2']);
+
+      s.special.delete('PATCH /products/2');
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      // The failed target is retried; the one never sent to is not written past the maximum.
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2', '/products/2']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, haltReason: BULK_HALT_REASONS.maxTargets });
+    } finally {
+      restore();
+    }
+  });
+
   it('approves an unprobed external run for one target only, and widens it after the owner confirms the probe', async () => {
     const s = shop();
     const restore = serve(s);

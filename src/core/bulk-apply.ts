@@ -41,8 +41,12 @@ export interface TargetWriter {
    *  normalises). A write reports what it read back through its return value; this flag
    *  makes a target found already holding the planned state record what it holds, too. */
   readonly readsBack?: boolean | undefined;
+  /** The writer calls `write`'s `onSend` right before its request leaves, so a write stopped
+   *  before that (a refused credential, a blocked host) does not count as sent. A writer
+   *  without it is taken to have sent whenever `write` is called. */
+  readonly reportsSend?: boolean | undefined;
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage): Promise<string | { result: string; actual: ActualImage }>;
+  write(key: string, after: BeforeImage, onSend?: () => void): Promise<string | { result: string; actual: ActualImage }>;
 }
 
 /**
@@ -155,6 +159,8 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   const pending = ledger.listPending(runId);
   const deadline = now() + Math.max(MIN_RUN_BUDGET_MS, pending.length * BULK_TARGET_BUDGET_MS);
   let consecutive = 0;
+  // A target passed over because the maximum is reached: the run then ends halted on it.
+  let cappedOut = false;
 
   for (const seq of pending) {
     // Let other work (and another loop on the same ledger) in between targets.
@@ -165,12 +171,13 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     if (!current || current.phase !== 'writing' || current.haltReason !== null) {
       return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run stopped by another loop.') };
     }
-    if (current.maxTargets !== null && current.applied >= current.maxTargets) {
-      // Another loop may have written or failed the rest of this loop's list: with no target
-      // left to write, the run is finished, not stopped at its maximum.
-      if (ledger.listPending(runId).length === 0) break;
-      ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
+    // The approval bounds how many different targets receive the verb, not how many writes
+    // landed: a failed write may have reached its target. A retry of a target that already
+    // had the verb sends it to no new one, so it is not refused here — and a target never sent
+    // to is passed over rather than stopped in front of, so a later retry still runs.
+    if (current.maxTargets !== null && ledger.sentCount(runId) >= current.maxTargets && !ledger.wasSent(runId, seq)) {
+      cappedOut = true;
+      continue;
     }
     if (now() > deadline) {
       // An atomic run must not stop half written: out of time, it rolls back instead.
@@ -214,6 +221,12 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   }
 
   if (ledger.listPending(runId).length > 0) {
+    // Another loop may have written or failed the rest: with no target left to write, the
+    // run is finished, not stopped at its maximum.
+    if (cappedOut) {
+      ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
+    }
     return { status: 'pending', summary: summarize(ledger, runId, 'Bulk run waiting for targets another loop holds.') };
   }
   ledger.finish(run);
@@ -231,7 +244,9 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
-      const out = await w.write(t.key, t.after);
+      const sent = (): void => { ledger.markSent(runId, t.seq); };
+      if (w.reportsSend !== true) sent();
+      const out = await w.write(t.key, t.after, sent);
       return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
