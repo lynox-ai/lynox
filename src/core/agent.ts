@@ -2695,8 +2695,13 @@ export class Agent implements IAgent {
     const thinkingConfig: BetaThinkingConfigParam = wireThinking as BetaThinkingConfigParam;
     // web_search is an Anthropic-direct-only server-side tool — not supported on Vertex AI or custom.
     // Disabled when web_research (SearXNG / DDG fallback) is registered to avoid redundant search tools.
+    // Also withheld when either search tool is excluded. A caller that drops a disabled tool from the
+    // list before building the Agent (both pipeline runtimes and spawn do) leaves no web_research here,
+    // and the fallback would otherwise hand back the search the operator switched off, outside any
+    // approval gate on web_research.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
-    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !this._suppressTools
+    const searchExcluded = this._excludeSet.has('web_research') || this._excludeSet.has('web_search');
+    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
     // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the

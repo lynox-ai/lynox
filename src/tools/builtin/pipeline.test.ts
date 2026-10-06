@@ -1472,6 +1472,22 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
     expect(cfgArg.api_key).not.toBe('anthropic-key');
   });
 
+  it('hands steps the calling agent\'s current exclusions, not only the stale disabled_tools', async () => {
+    // The config copy predates a Tool Toggles change made at runtime; the calling agent's
+    // exclusions do not. Both are kept: the union can only narrow a step's tools.
+    const staleConfig: LynoxUserConfig = { api_key: 'k', provider: 'anthropic', disabled_tools: ['bash'] };
+    const agent = {
+      ...makePipelineAgent({ config: staleConfig }),
+      getExcludedToolNames: () => ['web_research'],
+    } as unknown as IAgent;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+    await runWorkflowTool.handler({ name: 'single', steps: [makeStep('s1', 'do thing')] }, agent);
+
+    const cfgArg = mockRunManifest.mock.calls[0]![1] as LynoxUserConfig;
+    expect([...(cfgArg.disabled_tools ?? [])].sort()).toEqual(['bash', 'web_research']);
+  });
+
   it('falls back to userConfig when agent has no getProviderConfig (legacy mock)', async () => {
     const userConfig: LynoxUserConfig = {
       api_key: 'anthropic-key',

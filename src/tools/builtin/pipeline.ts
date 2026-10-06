@@ -1073,7 +1073,7 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     const pipelineProv = typeof (agent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
       ? (agent as { getProviderConfig: () => import('../../types/agent.js').ProviderConfigSnapshot }).getProviderConfig()
       : null;
-    const pipelineConfig: LynoxUserConfig = pipelineProv
+    const providerConfig: LynoxUserConfig = pipelineProv
       ? {
           ...rawPipelineConfig,
           api_key: pipelineProv.apiKey ?? rawPipelineConfig.api_key,
@@ -1082,6 +1082,20 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           openai_model_id: pipelineProv.openaiModelId ?? rawPipelineConfig.openai_model_id,
         }
       : rawPipelineConfig;
+    // The same staleness for `disabled_tools`: the steps filter and exclude tools by it, and the
+    // copy above predates any Tool Toggles change made while the server runs. The calling agent's
+    // exclusions date from that agent's build, which is newer for any agent built after the change
+    // (they also carry the session's own excludes), so they are added — only added: a union can
+    // narrow what a step gets, never widen it. Without this, such an agent's step could miss a
+    // search tool switched off at runtime without having it excluded, and the Agent's
+    // provider-search fallback handed it back.
+    const parentExcluded = typeof (agent as { getExcludedToolNames?: unknown }).getExcludedToolNames === 'function'
+      ? agent.getExcludedToolNames()
+      : [];
+    const disabledTools = [...new Set([...(providerConfig.disabled_tools ?? []), ...parentExcluded])];
+    const pipelineConfig: LynoxUserConfig = disabledTools.length > 0
+      ? { ...providerConfig, disabled_tools: disabledTools }
+      : providerConfig;
 
     if (pipelineTools.length === 0) {
       return 'Error: No parent tools available for inline pipeline steps.';
