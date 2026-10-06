@@ -12,6 +12,7 @@
 	import { deckFrameHeight } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
+	import { substituteRenderedFences } from '../utils/fence-substitution.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 
@@ -581,32 +582,7 @@
 				}
 			})
 		);
-		let result = html;
-		for (const { original, result: replacement } of results) {
-			// A REPLACER FUNCTION, not the string itself.
-			//
-			// `String.prototype.replace` treats a string replacement as a template.
-			// The sequences that are LIVE at this call site, measured rather than
-			// listed from the spec: `$&` becomes the match, `` $` `` and `$'` the
-			// text before and after it, and `$$` collapses to a single `$`. `$1`
-			// and `$<name>` are inert here — `original` is a string, so there are
-			// no capture groups — and saying otherwise would send a reader looking
-			// for a misfire that never happened.
-			//
-			// The replacement is built from the fence body, i.e. from content. So a
-			// `$` sequence an author wrote was read as an instruction: for the
-			// first three the expansion pasted in surrounding markup, and for `$$`
-			// it silently ate one of two dollars. ⚠ The trigger is wider than
-			// "somebody typed `$&`" — `marked` escapes `&` to an entity, so ANY `$`
-			// immediately followed by `&` in a fence body fires it.
-			//
-			// A function replacement is inserted verbatim; that is the documented
-			// way to opt out of substitution. `artifact-fence-substitution.test.ts`
-			// measures both forms against each other, as elements and not as
-			// substrings.
-			if (original) result = result.replace(original, () => replacement);
-		}
-		return result;
+		return substituteRenderedFences(html, results);
 	}
 
 	/*
