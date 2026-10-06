@@ -87,7 +87,7 @@
 		failed: 'bg-danger/15 text-danger',
 	};
 
-	$effect(() => { loadTasks(); });
+	$effect(() => { void loadTasks(); /* catches and sets its error */ });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">

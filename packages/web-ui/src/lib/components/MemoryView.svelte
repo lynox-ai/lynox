@@ -221,7 +221,7 @@
 
 	$effect(() => {
 		if (hasDurableMemory) { void loadDurable(); return; }
-		loadNamespace();
+		void loadNamespace(); /* catches and sets its error */
 		editingIdx = null;
 	});
 

@@ -34,9 +34,9 @@
 
 	function navigate(entry: FileEntry) {
 		if (entry.isDirectory) {
-			loadDir(currentPath === '.' ? entry.name : `${currentPath}/${entry.name}`);
+			void loadDir(currentPath === '.' ? entry.name : `${currentPath}/${entry.name}`); /* catches and sets its error */
 		} else {
-			openPreview(entry.name);
+			void openPreview(entry.name); /* catches and sets its error */
 		}
 	}
 
@@ -44,12 +44,12 @@
 		if (currentPath === '.') return;
 		const parts = currentPath.split('/');
 		parts.pop();
-		loadDir(parts.length === 0 ? '.' : parts.join('/'));
+		void loadDir(parts.length === 0 ? '.' : parts.join('/')); /* catches and sets its error */
 	}
 
 	function toggleHidden() {
 		showHidden = !showHidden;
-		loadDir(currentPath);
+		void loadDir(currentPath); /* catches and sets its error */
 	}
 
 	function filePath(name: string): string {
@@ -102,7 +102,7 @@
 		return `${(bytes / 1048576).toFixed(1)} MB`;
 	}
 
-	$effect(() => { loadDir('.'); });
+	$effect(() => { void loadDir('.'); /* catches and sets its error */ });
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">

@@ -213,7 +213,7 @@
 		timeout: 'text-danger',
 	};
 
-	$effect(() => { loadTriggers(); });
+	$effect(() => { void loadTriggers(); /* catches and sets its error */ });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">

@@ -40,7 +40,7 @@
 	});
 
 	const items: PaletteItem[] = [
-		{ id: 'new-chat', label: t('cmd.new_chat'), group: t('cmd.actions'), action: () => { newChat(); goto('/app'); }, keywords: 'new chat neu' },
+		{ id: 'new-chat', label: t('cmd.new_chat'), group: t('cmd.actions'), action: () => { newChat(); void goto('/app'); /* a navigation; nothing to report if a later one supersedes it */ }, keywords: 'new chat neu' },
 		{ id: 'nav-chat', label: t('nav.chat'), group: t('cmd.nav'), action: () => goto('/app'), keywords: 'chat home' },
 		// PRD-IA-V2 P2-PR-E: Activity has its own root since P2-PR-A. Position
 		// matches Desktop-Sidebar (after Chat/Inbox, before Hub) so palette

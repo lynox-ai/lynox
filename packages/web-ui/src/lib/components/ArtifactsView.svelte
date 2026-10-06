@@ -34,7 +34,7 @@
 	const isLoading = $derived(getIsLoadingArtifacts());
 
 	$effect(() => {
-		loadArtifacts();
+		void loadArtifacts(); /* the store catches and keeps the last list */
 	});
 
 	// Deep-link: `/app/artifacts?id=…` (set by MarkdownRenderer's
@@ -222,7 +222,7 @@
 						role="button"
 						tabindex="0"
 						onclick={() => openArtifact(artifact)}
-						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArtifact(artifact); } }}
+						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openArtifact(artifact); /* getArtifact resolves null on failure, never rejects */ } }}
 					>
 						<div class="flex items-start gap-3">
 							<span class="text-accent-text text-lg mt-0.5 opacity-60">{typeIcon(artifact.type)}</span>

@@ -278,7 +278,7 @@
 		}
 	}
 
-	$effect(() => { loadWorkflows(); });
+	$effect(() => { void loadWorkflows(); /* catches and sets its error */ });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">

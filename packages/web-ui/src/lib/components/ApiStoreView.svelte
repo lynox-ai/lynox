@@ -67,7 +67,7 @@
 		void goto('/app');
 	}
 
-	$effect(() => { loadProfiles(); });
+	$effect(() => { void loadProfiles(); /* catches and sets its error */ });
 </script>
 
 <div class="p-6 max-w-4xl mx-auto">
