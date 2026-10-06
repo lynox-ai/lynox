@@ -75,6 +75,8 @@ export interface TriggerRow {
   /** Human first-run-confirm for a `run_agent` trigger (the consent gate). null =
    *  not confirmed. Fail-closed: only an explicit human action supplies it. */
   confirmedAt?: string | null | undefined;
+  /** The creating session's untrusted-content cause, or null when it had taken in none. */
+  createdUntrusted?: string | null | undefined;
 }
 
 export interface StoredTrigger {
@@ -132,6 +134,7 @@ export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
     maxRetries: rec.max_retries ?? null,
     retryCount: rec.retry_count ?? 0,
     confirmedAt: rec.confirmed_at ?? null,
+    createdUntrusted: rec.created_untrusted ?? null,
   };
 }
 
@@ -185,6 +188,7 @@ interface TriggerFullDbRow {
   updated_at: string;
   confirmed_at: string | null;
   waiting_until: string | null;
+  created_untrusted: string | null;
 }
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
@@ -192,7 +196,7 @@ const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at, waiting_until`;
+   confirmed_at, waiting_until, created_untrusted`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -253,6 +257,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     pipeline_params: row.params_json === '{}' ? undefined : row.params_json,
     enabled: row.enabled,
     confirmed_at: row.confirmed_at ?? undefined,
+    created_untrusted: row.created_untrusted ?? undefined,
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
   };
 }
@@ -303,9 +308,9 @@ export class TriggerStore {
         id, title, description, source, effect, condition_json, target_workflow_id,
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
-        max_retries, retry_count, confirmed_at, created_at, updated_at
+        max_retries, retry_count, confirmed_at, created_untrusted, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -326,6 +331,8 @@ export class TriggerStore {
         max_retries = excluded.max_retries,
         retry_count = excluded.retry_count,
         confirmed_at = excluded.confirmed_at,
+        -- One way: a re-write may record a creator's taint, never clear one already recorded.
+        created_untrusted = COALESCE(excluded.created_untrusted, triggers.created_untrusted),
         updated_at = excluded.updated_at
     `).run(
       row.id,
@@ -348,6 +355,7 @@ export class TriggerStore {
       row.maxRetries ?? null,
       row.retryCount,
       row.confirmedAt ?? null,
+      row.createdUntrusted ?? null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
     );
@@ -414,6 +422,8 @@ export class TriggerStore {
      *  `task_create` tool never does, so an agent-scheduled `run_agent` trigger
      *  lands unconfirmed and is neither due nor dispatched until a human confirms. */
     confirmedAt?: string | undefined;
+    /** The creating session's untrusted-content cause; absent when it had taken in none. */
+    createdUntrusted?: string | undefined;
   }): void {
     this.upsert({
       id: params.id,
@@ -443,6 +453,7 @@ export class TriggerStore {
       maxRetries: params.maxRetries ?? 0,
       retryCount: 0,
       confirmedAt: params.confirmedAt ?? null,
+      createdUntrusted: params.createdUntrusted ?? null,
     });
   }
 

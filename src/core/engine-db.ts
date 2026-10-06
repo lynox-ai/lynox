@@ -888,6 +888,14 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (18);
    ALTER TABLE bulk_targets ADD COLUMN write_sent INTEGER NOT NULL DEFAULT 0;
    UPDATE bulk_targets SET write_sent = 1 WHERE error IN ('write_failed', 'redirect');`,
+
+  // v19 (trigger created untrusted): what the session that created a trigger had taken in, as
+  // its untrusted-content cause (`marker` / `external-tool` / `conversation`), or NULL when it
+  // had taken in nothing. A workflow run the trigger starts has no session of its own to read
+  // this from, so it is seeded from here. Existing rows stay NULL: what their creators had
+  // seen was never recorded and cannot be recovered.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (19);
+   ALTER TABLE triggers ADD COLUMN created_untrusted TEXT;`,
 ];
 
 /**

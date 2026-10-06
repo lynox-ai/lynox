@@ -66,3 +66,13 @@ export function describeTurnUntrusted(signals: UntrustedSignals): UntrustedCause
   if (signals.conversationSawUntrusted === true) return 'conversation';
   return 'none';
 }
+
+/**
+ * Read a cause stored as text back into an {@link UntrustedCause}. Absent means the writer had
+ * taken in nothing (`none`). Any other value that is not a known cause reads as `conversation`:
+ * a stored record of taint is never weakened by a spelling this reader does not know.
+ */
+export function storedUntrustedCause(value: string | null | undefined): UntrustedCause {
+  if (value === undefined || value === null || value === '' || value === 'none') return 'none';
+  return value === 'marker' || value === 'external-tool' || value === 'conversation' ? value : 'conversation';
+}

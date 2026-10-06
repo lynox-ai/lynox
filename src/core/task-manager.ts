@@ -102,6 +102,9 @@ export interface TaskCreateParams {
    *  becomes due nor dispatches until a human confirms it. Ignored for non-run_agent
    *  effects (they aren't gated on it). */
   confirmedAt?: string | undefined;
+  /** The creating session's untrusted-content cause; absent when it had taken in none. A
+   *  workflow run the trigger starts is seeded from it. */
+  createdUntrusted?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -232,6 +235,7 @@ export class TaskManager {
         pipelineId: params.pipelineId,
         pipelineParams: params.pipelineParams,
         confirmedAt: params.confirmedAt,
+        createdUntrusted: params.createdUntrusted,
       });
 
       return this.history.getTrigger(id)!;

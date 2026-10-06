@@ -12,6 +12,7 @@ import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -640,7 +641,13 @@ export async function runSavedWorkflow(
   runHistory: RunHistory | null,
   config: LynoxUserConfig,
   params?: Record<string, unknown> | undefined,
-  runtime?: { tools?: ToolEntry[] | undefined; toolContext?: ToolContext | undefined; memory?: IMemory | null | undefined } | undefined,
+  runtime?: {
+    tools?: ToolEntry[] | undefined;
+    toolContext?: ToolContext | undefined;
+    memory?: IMemory | null | undefined;
+    /** What the session that scheduled this run had taken in (see `TriggerRecord.created_untrusted`). */
+    seed?: UntrustedCause | undefined;
+  } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
     return { ok: false, error: 'Run history is not available.' };
@@ -717,10 +724,10 @@ export async function runSavedWorkflow(
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
-      // Headless: no caller to seed from, but the accumulator still carries
-      // taint ACROSS steps — a saved workflow whose step 1 reads external
-      // content must not land step 2's durable write as active.
-      runTaint: newRunTaint(),
+      // Headless: no caller to seed from, except what the scheduling session had taken in
+      // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
+      // whose step 1 reads external content must not land step 2's durable write as active.
+      runTaint: { ...newRunTaint(), seeded: runtime?.seed ?? 'none' },
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI

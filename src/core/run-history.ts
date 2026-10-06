@@ -2912,6 +2912,8 @@ export class RunHistory {
      *  (fail-closed) — only the human HTTP create route supplies it, never the agent
      *  `task_create` tool. */
     confirmedAt?: string | undefined;
+    /** The creating session's untrusted-content cause; absent when it had taken in none. */
+    createdUntrusted?: string | undefined;
   }): void {
     this._requireTriggerStore().insert(params);
   }

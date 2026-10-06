@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
+import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
@@ -405,11 +406,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
                 : null;
           if (unschedulable !== null) return `Error: workflow ${planned.id} ${unschedulable}`;
         }
+        const createdUntrusted = describeTurnUntrusted(agent);
         const task = managerRef.createPipelineTask({
           ...baseParams,
           pipelineId: input.workflow_id,
           scheduleCron: input.schedule,
           ...(pipelineParams !== undefined ? { pipelineParams } : {}),
+          // The run this task starts has no session of its own; it inherits what this one
+          // had taken in, so a step's durable write carries the trust it would carry here.
+          ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
         const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';

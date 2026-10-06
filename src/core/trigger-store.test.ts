@@ -203,6 +203,40 @@ describe('triggerRecordToRow (record → engine.db row mapping)', () => {
   });
 });
 
+describe('TriggerStore — what the creating session had taken in', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+  function make(): TriggerStore {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-trgu-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    return new TriggerStore(engine);
+  }
+
+  it('keeps the cause through write and read, and absent for a clean creator', () => {
+    const store = make();
+    store.insert({ id: 'u', title: 'x', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z', createdUntrusted: 'marker' });
+    store.insert({ id: 'c', title: 'y', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z' });
+    const due = Object.fromEntries(store.getDue('2030-01-01T00:00:00.000Z').map((t) => [t.id, t.created_untrusted]));
+    expect(due['u']).toBe('marker');
+    expect(due['c']).toBeUndefined();
+  });
+
+  it('never clears a recorded cause when the row is written again without one', () => {
+    const store = make();
+    store.insert({ id: 'u', title: 'x', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z', createdUntrusted: 'external-tool' });
+    store.insert({ id: 'u', title: 'x again', source: 'cron', effect: 'run_workflow', nextRunAt: '2020-01-01T00:00:00.000Z' });
+    expect(store.getDue('2030-01-01T00:00:00.000Z')[0]!.created_untrusted).toBe('external-tool');
+  });
+});
+
 describe('TriggerStore — run_agent consent gate (triggers-consent)', () => {
   const tmpDirs: string[] = [];
   const engines: EngineDb[] = [];

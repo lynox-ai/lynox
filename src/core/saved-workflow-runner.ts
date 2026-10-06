@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { UntrustedCause } from './untrusted-signals.js';
 
 import type { Engine, RunContext } from './engine.js';
 import { checkPersistentBudget } from './session-budget.js';
@@ -55,6 +56,7 @@ export async function runGuardedSavedWorkflow(
   engine: Engine,
   workflowId: string,
   params?: Record<string, unknown> | undefined,
+  opts?: { seed?: UntrustedCause | undefined } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
   const budgetCheck = checkPersistentBudget();
@@ -121,6 +123,7 @@ export async function runGuardedSavedWorkflow(
     tools: toolContext.tools,
     toolContext,
     memory: engine.getMemory(),
+    seed: opts?.seed,
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

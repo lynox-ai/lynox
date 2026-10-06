@@ -9,6 +9,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { storedUntrustedCause } from './untrusted-signals.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
@@ -1457,7 +1458,11 @@ export class WorkerLoop {
     }
 
     const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
-    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams);
+    // Seeded from what the session that created this task had taken in: the run has no session
+    // of its own, and its params came from that one.
+    const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
+      seed: storedUntrustedCause(task.created_untrusted),
+    });
 
     if (!result.ok) {
       // Surface conversion / validation / not-found / not-template errors as
