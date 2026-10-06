@@ -58,10 +58,6 @@ export default [
     },
     rules: RULES,
   },
-  {
-    // In active rework elsewhere; linted once that lands.
-    ignores: ['packages/web-ui/src/lib/components/MarkdownRenderer.svelte'],
-  },
   // The web UI's components: the plugin's recommended set, then the same rules as above on their
   // scripts. Several classes are `warn`, and `warn` does not fail the lint: those are visible here,
   // not enforced.
