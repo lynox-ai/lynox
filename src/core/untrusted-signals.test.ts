@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
+import { deriveTurnUntrusted, describeTurnUntrusted, storedUntrustedCause } from './untrusted-signals.js';
 import type { UntrustedSignals } from './untrusted-signals.js';
 
 describe('deriveTurnUntrusted (the canonical write-trust / taint union)', () => {
@@ -71,3 +71,18 @@ describe('describeTurnUntrusted (which member of the union fired)', () => {
     expect(describeTurnUntrusted({ sawUntrustedData: undefined, conversationSawUntrusted: true })).toBe('conversation');
   });
 });
+
+describe('storedUntrustedCause', () => {
+  it('reads a known cause back as itself and nothing as none', () => {
+    expect(storedUntrustedCause('marker')).toBe('marker');
+    expect(storedUntrustedCause('external-tool')).toBe('external-tool');
+    expect(storedUntrustedCause('conversation')).toBe('conversation');
+    for (const v of [undefined, null, '', 'none']) expect(storedUntrustedCause(v)).toBe('none');
+  });
+
+  it('reads a value it does not know as tainted, never as clean', () => {
+    expect(storedUntrustedCause('Marker')).toBe('conversation');
+    expect(storedUntrustedCause('something-new')).toBe('conversation');
+  });
+});
+

@@ -1801,6 +1801,20 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
   });
 
+  it('seeds the headless run from what the scheduling session had taken in', async () => {
+    const id = 'wf-headless-seeded';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools, seed: 'external-tool' });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'external-tool', earned: 'none' });
+  });
+
   it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
     const agent = makeAutonomyAgent(undefined); // no secretStore set
     mockRunManifest.mockResolvedValueOnce(makeRunState());

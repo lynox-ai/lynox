@@ -364,6 +364,22 @@ describe('Task Tools', () => {
       expect(created?.schedule_cron).toBe('0 9 * * 1');
     });
 
+    it('records what a tainted session had taken in on the workflow task it creates, and nothing for a clean one', async () => {
+      // The run the task starts has no session of its own; it is seeded from this record.
+      history.insertPlannedPipeline({
+        id: 'wf-taint', name: 'Taint', goal: 'g', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+      });
+      history.setWorkflowConfirmedAt('wf-taint', '2026-07-01T00:00:00.000Z');
+      const tainted = makeAgent();
+      (tainted as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+      await taskCreateTool.handler({ title: 'From a tainted turn', assignee: 'lynox', workflow_id: 'wf-taint', schedule: '0 9 * * 1' }, tainted);
+      await taskCreateTool.handler({ title: 'From a clean turn', assignee: 'lynox', workflow_id: 'wf-taint', schedule: '0 9 * * 1' }, makeAgent());
+      const byTitle = Object.fromEntries(tm.listTriggers().map((t) => [t.title, t.created_untrusted]));
+      expect(byTitle['From a tainted turn']).toBe('conversation');
+      expect(byTitle['From a clean turn']).toBeUndefined();
+    });
+
     it('refuses a workflow the human has not confirmed — a task for it would be disabled at its first run', async () => {
       // Saved from the chat: no `confirmedAt`. The WorkerLoop's first-run-confirm
       // gate disables such a task and records a failure the model never sees;

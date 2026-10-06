@@ -930,6 +930,48 @@ describe('WorkerLoop', () => {
   //   executes on its first WorkerLoop tick AND the template row stays
   //   byte-identical (no `executed` flip, no manifest_json mutation), so
   //   the next tick can fire it again.
+  it.each([
+    ['marker', 'marker'],
+    ['a value this reader does not know', 'conversation'],
+    [undefined, 'none'],
+  ])('seeds the run of a task whose creator had taken in %s as %s', async (stored, seeded) => {
+    // The run has no session of its own; the creating session's record is all there is.
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'seeded-run', status: 'completed' }));
+    const template = {
+      id: 'saved-seeded', name: 'Seeded', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'saved', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z',
+    };
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager()),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'saved-seeded', manifest_json: JSON.stringify(template) })),
+        insertPipelineRun: vi.fn(),
+        insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('saved-seeded', JSON.parse(JSON.stringify(template)) as PlannedPipeline);
+    const task = makeTask({
+      id: 'seeded-task', pipeline_id: 'saved-seeded', effect: 'run_workflow', schedule_cron: '0 9 1 * *',
+      ...(stored !== undefined ? { created_untrusted: stored } : {}),
+    });
+    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
+    const runOpts = mockRunManifest.mock.calls[0]?.[2] as { runTaint?: { seeded: string } } | undefined;
+    expect(runOpts?.runTaint?.seeded).toBe(seeded);
+  });
+
   it('executes a scheduled saved workflow and leaves the template row byte-identical', async () => {
     vi.useRealTimers();
     // This suite's beforeEach does NOT reset mockRunManifest — reset here so the
