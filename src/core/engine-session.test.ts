@@ -1809,6 +1809,24 @@ describe('Engine + Session (Orchestrator)', () => {
         }
       });
 
+      it('keeps the profile\'s model across a bare rebuild (compaction tier override, registry bump)', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: FIREWORKS_BALANCED } } });
+        try {
+          const session = engine.createSession({});
+          session._recreateAgent({ profile: 'worker' });
+          vi.mocked(Agent).mockClear();
+          session._recreateAgent();
+          const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+          expect(cfg.model).toBe('ministral-14b-2512');
+          expect(cfg.modelPinnedByProfile).toBe(true);
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
       it('CONTROL: without a profile the tier decides, exactly as before', async () => {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await engine.init();

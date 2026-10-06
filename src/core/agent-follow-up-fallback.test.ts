@@ -150,6 +150,11 @@ describe('follow-up recovery — the call it makes', () => {
     expect(body['model']).not.toBe('mistral-medium-2604');
   });
 
+  it('a profiled agent reports the pin to the children it spawns', () => {
+    expect(makeAgent({ modelPinnedByProfile: true }).agent.getProviderConfig().modelPinnedByProfile).toBe(true);
+    expect(makeAgent().agent.getProviderConfig().modelPinnedByProfile).toBe(false);
+  });
+
   it('on an agent built from a model profile, runs on the profile\'s pair — its client AND its model', async () => {
     // The profile's endpoint serves the profile's model. The fast-tier id sent there
     // is a request for a model that host does not serve (a 400 this path swallows).

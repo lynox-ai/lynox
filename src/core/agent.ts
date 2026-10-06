@@ -856,6 +856,7 @@ export class Agent implements IAgent {
       apiBaseURL: this.inheritedApiBaseURL,
       openaiModelId: this.inheritedOpenaiModelId,
       openaiAuth: this.inheritedOpenaiAuth,
+      modelPinnedByProfile: this.modelPinnedByProfile,
     };
   }
 

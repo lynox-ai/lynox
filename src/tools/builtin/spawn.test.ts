@@ -403,6 +403,68 @@ describe('spawn_agent tool', () => {
     }
   });
 
+  it('a child WITHOUT a profile under a profiled parent inherits the parent\'s whole pair, not the tier model', async () => {
+    // The child inherits the parent's client config (endpoint, key, openaiModelId);
+    // with the tier's model id on top, a profiled worker's spawn sent a tier model
+    // to the profile's endpoint.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const onStream = vi.fn();
+    const profiledParent = makeAgent({
+      onStream: onStream as StreamHandler,
+      getProviderConfig: () => ({
+        provider: 'openai', apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+        openaiModelId: 'ministral-14b-2512', openaiAuth: undefined, modelPinnedByProfile: true,
+      }),
+    } as Partial<IAgent>);
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, profiledParent);
+    const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(cfg['apiBaseURL']).toBe('https://api.mistral.ai/v1');
+    expect(cfg['model']).toBe('ministral-14b-2512');
+    expect(cfg['modelPinnedByProfile']).toBe(true);
+    // The announcement names the model the child runs on, from the same resolution.
+    const spawnEv = streamEvents(onStream).find(e => (e as { type?: string }).type === 'spawn') as { subAgents: Array<{ model?: string }> } | undefined;
+    expect(spawnEv?.subAgents[0]?.model).toBe('ministral-14b-2512');
+
+    // CONTROL: a parent that has an openai model id but no profile pin keeps the tier model.
+    const plainParent = makeAgent({
+      getProviderConfig: () => ({
+        provider: 'openai', apiKey: undefined, apiBaseURL: 'https://api.fireworks.ai/inference/v1',
+        openaiModelId: 'accounts/fireworks/models/gpt-oss-120b', openaiAuth: undefined,
+      }),
+    } as Partial<IAgent>);
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, plainParent);
+    const plain = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(String(plain['model']).startsWith('claude-')).toBe(true);
+    expect(plain['modelPinnedByProfile']).toBe(false);
+  });
+
+  it('in hybrid routing a profile-less child does not inherit the parent\'s client, so it takes no pin either', async () => {
+    // Hybrid without a profile builds the child on the base provider's own config
+    // (resolveSpawnChildProviderConfig), not the parent's — the profile's model
+    // would then go to the base endpoint, the same mix the other way round.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+    setTierSetResolver({ routingMode: 'hybrid', tierSet: {} });
+    try {
+      const profiledParent = makeAgent({
+        getProviderConfig: () => ({
+          provider: 'openai', apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+          openaiModelId: 'ministral-14b-2512', openaiAuth: undefined, modelPinnedByProfile: true,
+        }),
+      } as Partial<IAgent>);
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, profiledParent);
+      const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+      expect(cfg['apiBaseURL']).not.toBe('https://api.mistral.ai/v1');
+      expect(cfg['model']).not.toBe('ministral-14b-2512');
+      expect(cfg['modelPinnedByProfile']).toBe(false);
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
+  });
+
   it('REFUSES a spawn profile pinning a blocked model (cannot be substituted)', async () => {
     const { reloadConfig } = await import('../../core/config.js');
     vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
