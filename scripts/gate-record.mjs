@@ -405,11 +405,12 @@ export function repoVisibility({ privateFlag, repoSlug, explicit } = {}) {
 }
 
 /**
- * How many findings a result reports as still OPEN — `filed`, i.e. carried into a register row.
+ * How many findings a text reports as still OPEN, summed over every mention: `<n> filed` (carried
+ * into a register row), `<n> open`, `<n> left/remaining/still open`, `<n> deferred`.
  *
- * Only `filed` counts: `fixed` is closed in this diff and `refuted` was no finding. `all fixed`
- * is 0 by definition, and `findings filed privately` carries no number at all, which is the whole
- * point of that form.
+ * `fixed` is closed in this diff and `refuted` was no finding. `all fixed` is 0 by definition, and
+ * `findings filed privately` carries no number at all, which is the whole point of that form.
+ * Every match counts, not the first: `0 filed` early in a line must not hide a later count.
  */
 export function openFiledCount(result) {
   // ⛔ `all fixed` and `findings filed privately` had an early `return 0` here, and it was DEAD
@@ -423,9 +424,13 @@ export function openFiledCount(result) {
   // whose removal is strictly the safer direction gets removed, not a test that preserves it.
   // The `i` flag and the `+` DO have witnesses: the result grammar accepts `1 Filed`, and a
   // two-digit count must read as itself rather than as its first digit.
-  const m = /(\d+)\s+filed/i.exec(String(result ?? '').trim());
-  return m ? Number(m[1]) : 0;
+  let n = 0;
+  for (const m of String(result ?? '').matchAll(OPEN_COUNT)) n += Number(m[1]);
+  return n;
 }
+
+/** `<n>[x] [findings] filed|open|deferred` and `<n> [findings] left|remaining|still open`. */
+const OPEN_COUNT = /(\d+)x?\s+(?:findings?\s+)?(?:filed|open|offen|deferred|(?:left|remain(?:s|ing)?|still|stays?)\s+open)/gi;
 
 /** The message a public record gets when it counts open findings. One place, two callers. */
 function openCountRefusal(field, visibility) {
@@ -436,7 +441,7 @@ function openCountRefusal(field, visibility) {
     // public-repo-guard names a commit by its short SHA alone, "never by its subject line". The
     // author has their own body in front of them and needs the field, not a quotation.
     `the \`${field}:\` line counts OPEN findings, and this record goes into a PUBLIC repo.`,
-    'A security finding that is not yet closed must not be named in public text — not even its',
+    'A finding that is not yet closed — security or not — must not be named in public text, not even its',
     'existence, which is what that number states. It belongs in the private register row instead.',
     'Write `findings filed privately` (no count), or, if nothing is unresolved, `no findings` /',
     '`<N> findings, all fixed`.',
@@ -878,21 +883,18 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
   // Reading the WHOLE field value fixes both, and it is the honest scope: what must not become
   // public is the NUMBER anywhere in the line, not the number in one slot of it.
   //
-  // ⚠ What this still does not see, filed rather than claimed: a count in the body's prose outside
-  // the record, and one smuggled into an UNKNOWN record field (`open: 3`), which nothing rejects
-  // today. Refusing unknown fields is a separate claim about the record's shape.
+  // EVERY field, not two: a field whose grammar does not run on this diff (`security:` on a
+  // code-only diff, `review:` on a docs diff) accepts any wording, and so does an unknown field
+  // (`open: 3`). And `review:` ALWAYS, not only where security is in play: an earlier cut exempted
+  // a review count with no security gate named, reasoning that an open CODE defect counted in
+  // public breaks no rule. The rule is wider: no open gap is named in public text, security or not.
+  //
+  // The record's PROSE is outside this script; the private repo's public-text-check reads it.
+  // Bounded, not exact: a count in words ("two remain") passes.
   if (visibility !== 'private') {
-    const securityInPlay = required.has('security') || claimed.has('security') || !!f.security;
-    for (const [field, raw] of [['security', f.security], ['review', f.review]]) {
-      const value = (raw ?? '').trim();
+    for (const [field, raw] of Object.entries(f)) {
+      const value = String(raw ?? '').trim();
       if (!value) continue;
-      // `review:` only where security is in play: a review finding is not a security finding, and
-      // two filed CODE defects counted in public break no rule — forbidding those would cost
-      // measurability for nothing. The overlap is where the same findings are both, which a
-      // record says in its own words: "the `2 filed` in `review:` and the `2 filed` in
-      // `security:` are the same two findings, not four." ⚠ Residue, named not solved: a diff that
-      // does not owe the gate whose round files a security finding anyway still counts it.
-      if (field === 'review' && !securityInPlay) continue;
       if (openFiledCount(value) > 0) errors.push(...openCountRefusal(field, visibility));
     }
   }
