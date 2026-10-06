@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.15.0 — 2026-10-07
 
 ### Changed: stopping one conversation no longer stops work in another
 
@@ -268,7 +268,7 @@
 
   | `network_policy` | before | now |
   |---|---|---|
-  | `allow-all` (default) | Google reachable | unchanged |
+  | `allow-all` (default) | Google reachable | unchanged (public endpoints) |
   | `guarded` | Google reachable, unpoliced | Google reachable — admitted by its own fixed host set |
   | `allow-list` | Google reachable, unpoliced | reachable **only** if you list the Google API hosts |
   | `deny-all` | Google reachable, unpoliced | **blocked**, Gmail-over-OAuth included |
@@ -313,6 +313,379 @@
 
   **Migration:** `const { tools, auth } = createGoogleTools(opts)` becomes
   `const auth = createGoogleAuth(opts); const { tools } = createGoogleTools(() => auth);`
+
+### Changed — BREAKING (operators): a project-directory config can no longer set seven keys
+
+- A `lynox.json` in a working directory is merged over the user config, limited
+  to a list of keys considered safe for a directory to set. Seven keys came off
+  that list because each of them decides more than a value:
+  `embedding_provider`, `plugins`, `changeset_review`, `bugsink_dsn`,
+  `backup_dir`, `backup_retention_days` and `backup_encrypt`. A directory could
+  pick which installed plugins run, where error reports go, where backups are
+  written and how long they are kept, or switch backup encryption off.
+- They still work from the user config, and the environment variables that
+  already existed (`LYNOX_EMBEDDING_PROVIDER`, `LYNOX_BUGSINK_DSN`) still take
+  precedence. A project file that sets one of them is now ignored for that key.
+- `embedding_provider` is the one with a lasting effect: memories are stored with
+  the vectors of the provider that wrote them and there is no re-embed path, so a
+  per-directory switch mixed two providers' vectors in one store for good.
+- The docs now describe `changeset_review` as what it is: a backup before each
+  write plus a diff after the run, not a staging area.
+
+### Changed — BREAKING (operators): IMAP requires STARTTLS when implicit TLS is off
+
+- An IMAP account with `secure: false` now upgrades the connection with STARTTLS
+  and refuses a server that does not offer it — the same rule SMTP already
+  followed. Before, the connection could continue without TLS when the server
+  offered no STARTTLS. Accounts with implicit TLS (all presets, port 993) are
+  unchanged.
+- The account settings report a server without STARTTLS as its own error rather
+  than a generic connection failure. Switch the account to implicit TLS (usually
+  port 993) where the server supports it.
+
+### Changed — BREAKING (operators): Google Drive backup upload is opt-in and needs an encrypted archive
+
+- `backup_gdrive` was documented with a default of `false`, but nothing read it:
+  any instance with a Google connection and a tier that allowed it uploaded its
+  backups to Drive. The setting is now read, from the user config only, and is
+  checked at each upload, so turning it off takes effect without a restart.
+- An archive is uploaded only if it is actually encrypted. Opting in without a
+  vault key logs that the upload was skipped instead of uploading plaintext; a
+  failed upload is reported.
+- On a lynox-hosted instance the Drive upload is skipped: the hosting side keeps
+  its own backups.
+- **If you relied on the Drive upload, set `backup_gdrive: true` in your user
+  config** and make sure a vault key is set.
+- Corrected in the docs: `backup_encrypt` defaults to "on when a vault key is
+  set", not `true`; file contents are encrypted, but the list of files in the
+  manifest is not. `verifyBackup` no longer reports an encrypted backup as invalid.
+- The backup settings page no longer shows an *Automatic backups* schedule
+  control: it wrote a key nothing read. `backup_schedule` stays valid in config
+  files.
+
+### Changed — BREAKING (library consumers): the stream `error` event says whether the turn is over
+
+- `StreamEvent` of type `error` carries `fatal`: `true` when the run has ended
+  (for example at the iteration cap), `false` when the turn continues (for
+  example after a tool input that could not be parsed). The web UI used this to
+  stop showing a live, still-billing turn as "not sent, tap to retry".
+- The published type keeps `fatal` optional, so handlers keep compiling, but
+  everything core emits is typed with it required. Reading `agent.onStream` back
+  as a plain `StreamHandler`, or forwarding a stored `StreamEvent` through it, no
+  longer typechecks.
+
+### Changed: a secret is sent only where it belongs
+
+- A `secret:NAME` reference in a tool call is filled in by the engine before the
+  tool runs. It now also needs a destination it belongs to. For `http_request`,
+  a secret goes without asking only to a host that a person accepted for the API
+  profile that names it. **Any other host is confirmed per destination**: a
+  dialog names the secret and the host, and an approval holds for that secret
+  and host for the rest of the session.
+- Other tools cannot say from their input where a value goes, so each call that
+  carries a secret is shown to the user with the tool and the input, and asked
+  about — also in background sessions that have someone to ask. An input too long
+  to show is refused.
+- **Autonomous runs that would use such a secret are refused.** With no one to
+  ask, `http_request` to a host the secret is not bound to is refused, and other
+  tools carrying a secret run only if the conversation had taken in no untrusted
+  content before that batch of calls. The refusal names the way out: connect the
+  service with `api_setup` and accept it, add the secret to the accepted profile
+  for that host, or approve it once in an interactive session.
+- A reference in the userinfo or host part of a URL is refused, and on a
+  redirect to another origin any header whose value carries a secret is dropped,
+  whatever it is called.
+
+### Changed: outbound requests with a body carry `Content-Length`
+
+- Requests the engine sends with a body went out with `Transfer-Encoding:
+  chunked`, because no length was set. Some receivers refuse that with `411
+  Length Required` — among them the hosting control plane, which broke claiming
+  and refreshing a brokered Google connection.
+- Every request with a body now carries `Content-Length` and no chunked framing.
+  **This applies to `http_request` POST/PUT/PATCH to third-party APIs too**: an
+  API that accepted chunked bodies sees a length instead, and one that refused
+  them now works. A `Content-Length` or `Transfer-Encoding` header passed to
+  `http_request` is replaced by the real framing; a request without a body
+  carries neither.
+
+### Changed: switching a tool off reaches open threads from their next turn
+
+- A change to the tools an agent may use (Tool Toggles), its prompt, its context
+  window or its memory settings used to reach new conversations only; an open
+  thread kept the agent it was built with. An open thread now picks the change up
+  on its next turn. A turn already running keeps the tools it started with.
+- The rebuild keeps the conversation, its autonomy level, iteration cap and
+  profile, and whether it has taken in untrusted content.
+
+### Fixed: reversing a subject merge keeps what happened since
+
+- When A was merged into B and then B into C, the older merge could still be
+  reversed: it reported success and left the data split between entries. Reversing
+  an older merge in such a chain is now refused, naming the newer merge to reverse
+  first; once that is reversed, the older one reverses cleanly.
+- **Edits made after a merge survive its reversal.** Aliases learned since the
+  merge stay, and only the ones the merge added are removed; a detail field edited
+  since the merge keeps its edit, with an amount and its currency judged together.
+- A reversal is refused when the merge is not in effect on this instance (already
+  reversed, replayed, or its rows are gone) instead of reporting an undo that
+  restored nothing. `subject-sweep --rollback` exits non-zero when it fails.
+- An owner can list merges with `GET /api/merges` (applied, in effect, superseded)
+  and reverse one with `POST /api/merges/:id/rollback`, which answers with fixed
+  reasons when it refuses.
+- The merge ledger files are now included in backups and in an instance
+  migration, so a restore no longer makes past merges irreversible. Because they
+  hold contact data, ledgers older than 90 days are deleted; the newest is always
+  kept.
+- `subjects_merge` no longer describes a merge as reversible from chat: its
+  confirmation says that undoing it is a step outside the chat.
+- Erasing memory (an erase request, a private-thread purge) now also removes the
+  subjects that memory created when nothing else refers to them, instead of
+  leaving their names behind.
+
+### Added: run history records which connection each `http_request` went through
+
+- Each `http_request` call in the run history now carries the API profile its
+  host resolved to and that profile's creation time (`run_tool_calls.connection_id`
+  and `connection_created_at`, history schema v54). The value is written by the
+  engine, never from tool input, and outlives the profile.
+- `NULL` means **unknown**, not "no connection": every row from before this
+  release, calls whose host matched no profile (or a host two profiles share),
+  workflow-step calls and every tool other than `http_request`. Read the column as
+  a lower bound, never as "everything that went through connection X".
+
+### Added: a background task can ask a question and wait for the answer
+
+- A scheduled task or trigger that asks the user something now parks in a
+  `waiting` state for up to 24 hours instead of failing or carrying on without an
+  answer. Its question goes through the same prompt store as chat questions,
+  answering it makes the task due again, and the resumed run is told the question
+  and the answer — capped, masked against stored secrets, and marked as data, not
+  instructions. A task whose question went unanswered is no longer reported as a
+  success, and its wall-clock budget pauses while it waits.
+- **A parked question survives a graceful restart** and an engine restart. Chat
+  questions still expire at restart, as before.
+- `run_now` on a task waiting for its answer is refused with `awaiting_answer`.
+  Pressing stop on a run waiting for an answer now actually frees it; before, the
+  stop answered OK and later messages to that thread got 409.
+- A task in progress now holds a lease on its row (engine schema v16), so a second
+  process or a restart does not start it again; a run lost mid-way is recorded as
+  interrupted and not re-run when that would repeat its effect.
+- The schedules view shows a task the agent scheduled that waits for your
+  confirmation — with the instruction it would run or the address a watch would
+  fetch, and how often — and a *Confirm* button. The task list says why a schedule
+  is off or failed, and whether a failed one will try again.
+- A saved workflow is no longer marked as confirmed by saving it; it is confirmed
+  when a person schedules it. Scheduling a workflow from chat that could never run
+  unattended is refused with the missing step named, instead of promising a next
+  run that never comes.
+
+### Fixed: a scheduled mail is sent at most once
+
+- Each due scheduled mail is now claimed before it is sent (`mail_scheduled.sending_at`,
+  mail state schema v17), so a second poll or a second process cannot send it again.
+  Only a failure that proves nothing was sent is retried; a timeout or an ambiguous
+  answer is recorded and not re-sent. Cancelling works only on a mail that is still
+  waiting.
+
+### Changed: error texts sent to the client hide credentials
+
+- Error messages returned by the HTTP API — including the run error shown in the
+  banner, the toast and the copy button — are masked for credential shapes (API
+  keys with a known prefix, passwords in URLs) and for the values stored in the
+  vault, and the run-stream error is length-capped. Masking runs before the cap,
+  so a cut cannot leave half a key readable.
+- Error reports sent to the configured error tracker are masked the same way
+  across the whole cause chain, breadcrumbs and the request URL; request headers
+  and cookies are not sent, and the SDK's data collection is set explicitly. If
+  masking itself fails, the field is replaced with a marker rather than sent raw.
+
+### Changed: rendering hardening for Markdown, print and HTML artifacts
+
+- Links and tables in rendered Markdown and in print/export are now built by
+  walking the sanitized DOM rather than by pattern over markup, and the print
+  styles are appended at the end of the document. One visible effect: print
+  styles now win a tie against an artifact's own CSS.
+- Code fences are put back into the rendered message verbatim, so a `$&` or `$1`
+  in a code block shows as typed.
+- An HTML artifact's preview (in chat and in the gallery) gets its content
+  security policy and resize script inserted as DOM nodes, so the artifact's own
+  markup cannot displace them.
+- Detection of untrusted-content boundaries sees through invisible Unicode format
+  characters, and neutralising a stray boundary tag no longer swallows the text
+  that follows it.
+
+### Changed: wider credential detection on outbound content
+
+- The scan that stops a credential from leaving in a request or a mail now uses
+  one shared list of credential shapes, which adds OpenAI project keys, Stripe,
+  Slack, Shopify, every GitHub token prefix, JWTs and private-key blocks. It reads
+  every form of a URL (as written and percent-decoded), and an HTTP method nobody
+  listed is treated as a write. A refusal names the way out. Configured API
+  profiles still send the key they hold.
+- The web UI's pasted-key guard and its display masking use the same list.
+
+### Changed: tighter limits on what agents and sub-agents can reach
+
+- **A sub-agent gets only the vault keys its order names** (`secret:NAME` in its
+  task or prompt), not the whole vault of the agent that spawned it.
+  `spawn_agent` takes `secret_scope` to name more, or `all`, which only an agent
+  holding the whole vault can grant. When a child asks for a key it was not given,
+  the parent is told which one and how to grant it.
+- A role's tool statement (`readOnly`, `allowTools`, `denyTools`) now bounds a
+  child on every route, an explicit tool list can only ask for less, and a
+  `readOnly` role resolves only from tools whose effects end with the run.
+  Workflow steps honour tools the user switched off. Spawned agents and workflow
+  steps inherit the session context of the session that started them.
+- With web search switched off, the provider-side web search is no longer handed
+  back to workflow steps, chat sessions or spawned agents.
+- Every database file in the lynox data directory is protected like the secret
+  stores (blocked in autonomous runs, confirmed otherwise, refused for
+  `read_file`/`write_file`), not just a list of names. An API profile can no longer
+  point any of its key fields at an infrastructure secret or at the slot that holds
+  the tenant's own provider key.
+- Dialogs say who is asking: the credential dialog has a fixed title with the
+  agent's explanation quoted below it, a question asked with `ask_user` is shown
+  as the agent's text rather than as product text, and a dialog raised by a
+  sub-agent says so.
+- Results of `api_setup`, and mail opened through *Answer in chat*, go through the
+  injection scan and are marked as untrusted, like the mail tool already was.
+- The agent no longer tries to install a tool it does not have.
+
+### Changed: API connections
+
+- **Authorize in the browser:** `api_setup connect` hands the user a link to
+  authorize a provider that has a redirect preset, instead of asking for a pasted
+  token; the profile then renews its own token. A preset fixes the token endpoint and the scopes a profile may ask for.
+- An oauth2 profile's token is renewed shortly before it expires instead of the
+  connection breaking at expiry.
+- A second profile whose id would share a vault slot with an existing one (`x-y`
+  and `x_y`) is refused instead of reported as created.
+- On a 401 from a profile whose credential the agent fills in, the reply says
+  which part the agent owns and whether the vault holds a value under that name
+  (names only), so the agent stops blaming a missing secret.
+- A timed-out tool call, and a timed-out request that writes, now tell the agent
+  the call may still have taken effect and to check before repeating it.
+- Refused `http_request` calls and tools that fail with a normal-looking result
+  (a non-zero `bash` exit, a failed research read) are booked as errors in run
+  history, so `error_count` stops counting them as successes. What the model reads
+  is unchanged. `ToolSoftFailure` is exported for plugins.
+- The suggested-API catalogue the agent answers from now actually ships in the
+  container image (it never did), and lists seven business providers in a section
+  of their own.
+
+### Fixed: hosted Google connections
+
+- *Connect with Google* works again on instances that use the hosted Google
+  connection, the connection is rebuilt at boot and survives a config reload, and
+  its token is refreshed through the hosting side rather than with a client secret
+  held by the instance.
+- Revoking Google access says whether Google confirmed the revoke, not only that
+  it was attempted.
+- The Google client ID and secret are resolved as one pair from one source (vault,
+  environment or config), so halves from two sources can no longer be combined;
+  an empty environment variable no longer hides a working config file. On hosted
+  instances a customer can save their own Google client pair.
+- A service account is granted the scopes its token asks for.
+
+### Fixed: chat and web UI
+
+- After a dropped connection or a non-fatal error, the web UI asks the server
+  whether the turn completed before marking it failed, so a finished turn is not
+  sent and billed again. A tool call still running is no longer shown with a
+  green check, and a lost question prompt comes back while its run is alive.
+- A context compaction shows how much it freed instead of a progress figure, and
+  the summary is written in the conversation's language, so a German thread no
+  longer switches to English after compacting. `LYNOX_LANGUAGE` now reaches the
+  model; before, it was recorded but not applied.
+- Research answers carry their source links; links are underlined and off-site
+  links open in a new tab.
+- When the turn or cost cap stops a turn mid-tool-call, the thread keeps a note
+  saying why, and the cost-cap message no longer points to settings that do not
+  exist.
+- Sub-agents: when all of them fail, each is named with its status; one that
+  returns nothing is shown as returning nothing, not as a success; one stopped by
+  its turn or budget cap says so.
+- Memory: facts from a chat turn are captured again at the end of each web-UI
+  turn, named after the people, organisations and products they are about, and
+  shown in the thread where they were learned; facts from web or mail content
+  still go to review. The review queue shows which subject an approval would
+  attach to, and a decided chip no longer shows its "why queued" line.
+- Mail: a mailbox's background polling error shows in its account settings, and a
+  dropped IMAP connection during a search no longer breaks the mail listing.
+- Voice: the voice list shows all of the provider's voices, `POST /api/speak`
+  uses the requested language to pick one, and an empty recording on iPhone
+  resets the microphone for the next attempt.
+- The iOS app's chat composer can no longer be dragged into blank space
+  (pull-to-refresh is off as a result); the welcome greeting follows the clock;
+  the page reloads only for a script chunk that failed to load.
+- The debug export includes durable knowledge and says why it can list fewer
+  messages than stored rows.
+
+### Changed: what the product says leaves your machine
+
+- Settings, the voice label, the model catalogue and the docs no longer say that
+  only the model call leaves a self-hosted instance or that "nothing leaves your
+  machine": search, `http_request`, mail and connected APIs reach the network too.
+  The sub-processor list and the `network_policy` description (deny-all blocks
+  `http_request`, `api_setup` and research, not the engine's own connections) say
+  what actually happens.
+
+### Changed: network policy and models
+
+- `network_policy`, the operator host list, `enforce_https` and the session cost
+  cap are applied at boot even when run history fails to open. A wildcard in
+  `network_allowed_hosts` is validated, and one ending in a numeric label is
+  refused.
+- Two Fireworks preset models the provider withdrew are replaced with working
+  ones. A model that cannot switch its thinking off fails with a clear error
+  instead of an empty answer. The catalogue notes that gpt-oss is a weak chat
+  model.
+- Backups and instance migrations now include `apis/`, `workspace/` and
+  `artifacts/` (binary files survive), and an import refuses a bundle with a part
+  it does not know instead of reporting success.
+- The Docker image no longer downloads the onnxruntime GPU provider.
+
+### Security: dependency updates
+
+- `sharp` 0.35.5 for GHSA-wq5f-xc86-pv6w, in the package and in the docs site.
+- `source-map-js` 1.2.2, `devalue` ≥ 5.9.3, `brace-expansion` ≥ 5.0.11,
+  `@xmldom/xmldom` 0.8.15, `adm-zip` 0.6.1, `nodemailer` 10.x (requires Node 20 or
+  newer), `imapflow` 2.2.1, `better-sqlite3` 13.0.3 (uses its bundled prebuild)
+  and `@sentry/node` 11.1.0.
+
+### Internal
+
+- Bulk changes with undo exist behind `bulk_runs_enabled`, which is off; their
+  tables are created by the schema upgrade either way.
+- On hosted instances the engine reports a provider billing stop to the control
+  plane, and the usage wire says explicitly whether an account is balance-gated.
+- Release, CI and repository guards were tightened; tests run in their own temp
+  directory on free ports.
+
+### Upgrade and rollback
+
+The upgrade moves three databases forward on first start, each step additive:
+`engine.db` to schema **18** (from 11), `history.db` to **54** (from 52) and the
+mail state to **17** (from 16). There is no down path, but 2.14.2 opens databases
+at these versions: it does not refuse a newer schema and ignores the columns and
+tables it does not know.
+
+Before rolling back to 2.14.x, two steps:
+
+- **Settle every parked trigger first** — every row in `engine.db` `triggers` with
+  `status = 'waiting'`: answer its question or cancel the task. 2.14.x does not
+  know the waiting state and treats a parked trigger as due on every tick. Its
+  question would not survive the rollback either: 2.14.x expires all pending
+  questions at start.
+- **Check scheduled mails already claimed for sending** — rows in
+  `mail_scheduled` with `sending_at` set and neither `sent_at` nor `failed_at`.
+  2.15.0 claims a mail before sending it and does not send a claimed row twice;
+  2.14.x does not read the claim and would send it again. Check the mailbox's sent
+  folder and mark or remove those rows before rolling back.
+
+Rolling back also brings back the two Fireworks preset models the provider has
+withdrawn, which answer 404; pin a working model for those slots.
 
 ## 2.14.2 — 2026-08-18
 
