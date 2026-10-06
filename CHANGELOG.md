@@ -316,8 +316,9 @@
 
 ### Changed — BREAKING (operators): a project-directory config can no longer set seven keys
 
-- A `lynox.json` in a working directory is merged over the user config, limited
-  to a list of keys considered safe for a directory to set. Seven keys came off
+- A project config (`.lynox/config.json` in the working directory) is merged over
+  the user config (`~/.lynox/config.json`), limited to a list of keys considered
+  safe for a directory to set. Seven keys came off
   that list because each of them decides more than a value:
   `embedding_provider`, `plugins`, `changeset_review`, `bugsink_dsn`,
   `backup_dir`, `backup_retention_days` and `backup_encrypt`. A directory could
@@ -328,7 +329,7 @@
   precedence. A project file that sets one of them is now ignored for that key.
 - `embedding_provider` is the one with a lasting effect: memories are stored with
   the vectors of the provider that wrote them and there is no re-embed path, so a
-  per-directory switch mixed two providers' vectors in one store for good.
+  per-directory switch could leave two providers' vectors mixed in one store.
 - The docs now describe `changeset_review` as what it is: a backup before each
   write plus a diff after the run, not a staging area.
 
@@ -346,9 +347,10 @@
 ### Changed — BREAKING (operators): Google Drive backup upload is opt-in and needs an encrypted archive
 
 - `backup_gdrive` was documented with a default of `false`, but nothing read it:
-  any instance with a Google connection and a tier that allowed it uploaded its
+  any instance with a Google connection that had Drive access uploaded its
   backups to Drive. The setting is now read, from the user config only, and is
-  checked at each upload, so turning it off takes effect without a restart.
+  checked at each upload, so turning it off through the settings takes effect
+  without a restart.
 - An archive is uploaded only if it is actually encrypted. Opting in without a
   vault key logs that the upload was skipped instead of uploading plaintext; a
   failed upload is reported.
@@ -358,9 +360,9 @@
   config** and make sure a vault key is set.
 - Corrected in the docs: `backup_encrypt` defaults to "on when a vault key is
   set", not `true`; file contents are encrypted, but the list of files in the
-  manifest is not. `verifyBackup` no longer reports an encrypted backup as invalid.
-- The backup settings page no longer shows an *Automatic backups* schedule
-  control: it wrote a key nothing read. `backup_schedule` stays valid in config
+  manifest is not.
+- `verifyBackup` no longer reports an encrypted backup as invalid.
+- The backup settings page no longer shows a *Backup schedule* control: it wrote a key nothing read. `backup_schedule` stays valid in config
   files.
 
 ### Changed — BREAKING (library consumers): the stream `error` event says whether the turn is over
@@ -386,28 +388,31 @@
   carries a secret is shown to the user with the tool and the input, and asked
   about — also in background sessions that have someone to ask. An input too long
   to show is refused.
-- **Autonomous runs that would use such a secret are refused.** With no one to
-  ask, `http_request` to a host the secret is not bound to is refused, and other
-  tools carrying a secret run only if the conversation had taken in no untrusted
-  content before that batch of calls. The refusal names the way out: connect the
+- **With no one to ask, a secret goes only where it is bound.** `http_request` to
+  a host the secret is not bound to is refused, and other tools carrying a secret
+  run only if the conversation had taken in no untrusted content before that
+  batch of calls. For `http_request` the refusal names the way out: connect the
   service with `api_setup` and accept it, add the secret to the accepted profile
-  for that host, or approve it once in an interactive session.
+  for that host, or make the call from an interactive session.
 - A reference in the userinfo or host part of a URL is refused, and on a
   redirect to another origin any header whose value carries a secret is dropped,
   whatever it is called.
 
 ### Changed: outbound requests with a body carry `Content-Length`
 
-- Requests the engine sends with a body went out with `Transfer-Encoding:
-  chunked`, because no length was set. Some receivers refuse that with `411
+- Requests sent through the engine's pinned network path (used by `http_request`
+  and the calls to the hosting control plane) went out with `Transfer-Encoding:
+  chunked` when they had a body, because no length was set. Some receivers refuse that with `411
   Length Required` — among them the hosting control plane, which broke claiming
   and refreshing a brokered Google connection.
-- Every request with a body now carries `Content-Length` and no chunked framing.
+- Every such request with a body now carries `Content-Length` and no chunked
+  framing.
   **This applies to `http_request` POST/PUT/PATCH to third-party APIs too**: an
   API that accepted chunked bodies sees a length instead, and one that refused
   them now works. A `Content-Length` or `Transfer-Encoding` header passed to
-  `http_request` is replaced by the real framing; a request without a body
-  carries neither.
+  `http_request` is replaced by the real framing; on a request without a body,
+  framing headers passed by the caller are dropped and the request is framed as
+  usual (`Content-Length: 0` for a POST without a body).
 
 ### Changed: switching a tool off reaches open threads from their next turn
 
@@ -420,10 +425,14 @@
 
 ### Fixed: reversing a subject merge keeps what happened since
 
+This concerns the subject graph (`subject_graph_enabled`): on for new hosted
+instances, off by default on self-hosted ones.
+
+
 - When A was merged into B and then B into C, the older merge could still be
   reversed: it reported success and left the data split between entries. Reversing
-  an older merge in such a chain is now refused, naming the newer merge to reverse
-  first; once that is reversed, the older one reverses cleanly.
+  an older merge in such a chain is now refused until the newer merge is reversed;
+  after that, the older one reverses cleanly.
 - **Edits made after a merge survive its reversal.** Aliases learned since the
   merge stay, and only the ones the merge added are removed; a detail field edited
   since the merge keeps its edit, with an amount and its currency judged together.
@@ -435,8 +444,8 @@
   reasons when it refuses.
 - The merge ledger files are now included in backups and in an instance
   migration, so a restore no longer makes past merges irreversible. Because they
-  hold contact data, ledgers older than 90 days are deleted; the newest is always
-  kept.
+  hold contact data, ledgers older than 90 days are deleted at start and on each
+  merge; the newest is always kept.
 - `subjects_merge` no longer describes a merge as reversible from chat: its
   confirmation says that undoing it is a step outside the chat.
 - Erasing memory (an erase request, a private-thread purge) now also removes the
@@ -450,7 +459,8 @@
   and `connection_created_at`, history schema v54). The value is written by the
   engine, never from tool input, and outlives the profile.
 - `NULL` means **unknown**, not "no connection": every row from before this
-  release, calls whose host matched no profile (or a host two profiles share),
+  release, calls refused before the request was prepared, calls whose host
+  matched no profile (or a host two profiles share),
   workflow-step calls and every tool other than `http_request`. Read the column as
   a lower bound, never as "everything that went through connection X".
 
@@ -460,12 +470,13 @@
   `waiting` state for up to 24 hours instead of failing or carrying on without an
   answer. Its question goes through the same prompt store as chat questions,
   answering it makes the task due again, and the resumed run is told the question
-  and the answer — capped, masked against stored secrets, and marked as data, not
+  and the answer — the answer capped, both masked against stored secrets, and marked as data, not
   instructions. A task whose question went unanswered is no longer reported as a
   success, and its wall-clock budget pauses while it waits.
 - **A parked question survives a graceful restart** and an engine restart. Chat
   questions still expire at restart, as before.
-- `run_now` on a task waiting for its answer is refused with `awaiting_answer`.
+- *Run now* (`POST /api/triggers/:id/run`) on a task waiting for its answer is
+  refused with `awaiting_answer`.
   Pressing stop on a run waiting for an answer now actually frees it; before, the
   stop answered OK and later messages to that thread got 409.
 - A task in progress now holds a lease on its row (engine schema v16), so a second
@@ -473,11 +484,13 @@
   interrupted and not re-run when that would repeat its effect.
 - The schedules view shows a task the agent scheduled that waits for your
   confirmation — with the instruction it would run or the address a watch would
-  fetch, and how often — and a *Confirm* button. The task list says why a schedule
-  is off or failed, and whether a failed one will try again.
+  fetch, and how often — and a *Confirm* button. The task list says when a
+  schedule is off, and for a failed one why it failed and whether it will try
+  again.
 - A saved workflow is no longer marked as confirmed by saving it; it is confirmed
-  when a person schedules it. Scheduling a workflow from chat that could never run
-  unattended is refused with the missing step named, instead of promising a next
+  when a person schedules it. Scheduling a workflow from chat that cannot run
+  unattended yet (not autonomous, not saved, or not confirmed) is refused with the
+  missing step named, instead of promising a next
   run that never comes.
 
 ### Fixed: a scheduled mail is sent at most once
@@ -490,26 +503,27 @@
 
 ### Changed: error texts sent to the client hide credentials
 
-- Error messages returned by the HTTP API — including the run error shown in the
-  banner, the toast and the copy button — are masked for credential shapes (API
+- Error responses of the HTTP API and the run-stream error — including the run
+  error shown in the banner, the toast and the copy button — are masked for credential shapes (API
   keys with a known prefix, passwords in URLs) and for the values stored in the
   vault, and the run-stream error is length-capped. Masking runs before the cap,
   so a cut cannot leave half a key readable.
-- Error reports sent to the configured error tracker are masked the same way
-  across the whole cause chain, breadcrumbs and the request URL; request headers
+- Error reports sent to the configured error tracker are masked for credential
+  shapes, including long opaque tokens, across the whole cause chain, breadcrumbs and the request URL; request headers
   and cookies are not sent, and the SDK's data collection is set explicitly. If
   masking itself fails, the field is replaced with a marker rather than sent raw.
 
 ### Changed: rendering hardening for Markdown, print and HTML artifacts
 
-- Links and tables in rendered Markdown and in print/export are now built by
-  walking the sanitized DOM rather than by pattern over markup, and the print
-  styles are appended at the end of the document. One visible effect: print
+- Links and tables in rendered chat Markdown are now built by walking the
+  sanitized DOM rather than by pattern over markup, and print/export styles are
+  appended at the end of the document. One visible effect: print
   styles now win a tie against an artifact's own CSS.
 - Code fences are put back into the rendered message verbatim, so a `$&` or `$1`
   in a code block shows as typed.
-- An HTML artifact's preview (in chat and in the gallery) gets its content
-  security policy and resize script inserted as DOM nodes, so the artifact's own
+- The preview of an HTML artifact that brings its own document (in chat and in
+  the gallery) gets its content security policy and resize script inserted as DOM
+  nodes, so the artifact's own
   markup cannot displace them.
 - Detection of untrusted-content boundaries sees through invisible Unicode format
   characters, and neutralising a stray boundary tag no longer swallows the text
@@ -519,8 +533,8 @@
 
 - The scan that stops a credential from leaving in a request or a mail now uses
   one shared list of credential shapes, which adds OpenAI project keys, Stripe,
-  Slack, Shopify, every GitHub token prefix, JWTs and private-key blocks. It reads
-  every form of a URL (as written and percent-decoded), and an HTTP method nobody
+  Slack, Shopify and Google OAuth tokens, the remaining GitHub token prefixes and
+  more private-key block types. It reads a URL as written and percent-decoded once, and an HTTP method nobody
   listed is treated as a write. A refusal names the way out. Configured API
   profiles still send the key they hold.
 - The web UI's pasted-key guard and its display masking use the same list.
@@ -539,9 +553,10 @@
   steps inherit the session context of the session that started them.
 - With web search switched off, the provider-side web search is no longer handed
   back to workflow steps, chat sessions or spawned agents.
-- Every database file in the lynox data directory is protected like the secret
-  stores (blocked in autonomous runs, confirmed otherwise, refused for
-  `read_file`/`write_file`), not just a list of names. An API profile can no longer
+- Database files in the lynox data directory are now recognised by location and
+  extension rather than a list of names, and are protected like the secret stores:
+  blocked in autonomous runs and confirmed otherwise, for shell commands and
+  `read_file`/`write_file` alike. An API profile can no longer
   point any of its key fields at an infrastructure secret or at the slot that holds
   the tenant's own provider key.
 - Dialogs say who is asking: the credential dialog has a fixed title with the
@@ -586,7 +601,8 @@
   environment or config), so halves from two sources can no longer be combined;
   an empty environment variable no longer hides a working config file. On hosted
   instances a customer can save their own Google client pair.
-- A service account is granted the scopes its token asks for.
+- A service account is granted the scopes its token asks for (Gmail and Drive
+  backup excepted).
 
 ### Fixed: chat and web UI
 
@@ -597,7 +613,8 @@
 - A context compaction shows how much it freed instead of a progress figure, and
   the summary is written in the conversation's language, so a German thread no
   longer switches to English after compacting. `LYNOX_LANGUAGE` now reaches the
-  model; before, it was recorded but not applied.
+  model for the languages the product supports; before, it was recorded but not
+  applied.
 - Research answers carry their source links; links are underlined and off-site
   links open in a new tab.
 - When the turn or cost cap stops a turn mid-tool-call, the thread keeps a note
@@ -618,31 +635,31 @@
   resets the microphone for the next attempt.
 - The iOS app's chat composer can no longer be dragged into blank space
   (pull-to-refresh is off as a result); the welcome greeting follows the clock;
-  the page reloads only for a script chunk that failed to load.
+  the page reloads only for a script or style chunk that failed to load.
 - The debug export includes durable knowledge and says why it can list fewer
   messages than stored rows.
 
 ### Changed: what the product says leaves your machine
 
-- Settings, the voice label, the model catalogue and the docs no longer say that
-  only the model call leaves a self-hosted instance or that "nothing leaves your
-  machine": search, `http_request`, mail and connected APIs reach the network too.
+- Settings, the voice label and the model catalogue no longer say that only the
+  model call leaves a self-hosted instance or that "nothing leaves your machine": search, `http_request`, mail and connected APIs reach the network too.
   The sub-processor list and the `network_policy` description (deny-all blocks
-  `http_request`, `api_setup` and research, not the engine's own connections) say
-  what actually happens.
+  `http_request`, `api_setup`, research and connected Google accounts; the model
+  call, IMAP/SMTP mail, voice and push are not covered by it) say what actually
+  happens.
 
 ### Changed: network policy and models
 
 - `network_policy`, the operator host list, `enforce_https` and the session cost
   cap are applied at boot even when run history fails to open. A wildcard in
   `network_allowed_hosts` is validated, and one ending in a numeric label is
-  refused.
+  ignored with a warning.
 - Two Fireworks preset models the provider withdrew are replaced with working
   ones. A model that cannot switch its thinking off fails with a clear error
-  instead of an empty answer. The catalogue notes that gpt-oss is a weak chat
+  instead of an empty answer when the output budget is too small for its thinking. The catalogue notes that gpt-oss is a weak chat
   model.
-- Backups and instance migrations now include `apis/`, `workspace/` and
-  `artifacts/` (binary files survive), and an import refuses a bundle with a part
+- Backups now include `apis/`, `workspace/` and `artifacts/`, and instance
+  migrations carry the whole of these directories (binary files survive), and an import refuses a bundle with a part
   it does not know instead of reporting success.
 - The Docker image no longer downloads the onnxruntime GPU provider.
 
@@ -650,16 +667,15 @@
 
 - `sharp` 0.35.5 for GHSA-wq5f-xc86-pv6w, in the package and in the docs site.
 - `source-map-js` 1.2.2, `devalue` ≥ 5.9.3, `brace-expansion` ≥ 5.0.11,
-  `@xmldom/xmldom` 0.8.15, `adm-zip` 0.6.1, `nodemailer` 10.x (requires Node 20 or
-  newer), `imapflow` 2.2.1, `better-sqlite3` 13.0.3 (uses its bundled prebuild)
+  `@xmldom/xmldom` 0.8.15, `adm-zip` 0.6.1, `nodemailer` 10.x, `imapflow` 2.2.1, `better-sqlite3` 13.0.3 (uses its bundled prebuild)
   and `@sentry/node` 11.1.0.
 
 ### Internal
 
 - Bulk changes with undo exist behind `bulk_runs_enabled`, which is off; their
   tables are created by the schema upgrade either way.
-- On hosted instances the engine reports a provider billing stop to the control
-  plane, and the usage wire says explicitly whether an account is balance-gated.
+- On managed instances, where lynox supplies the model key, the engine reports a
+  provider billing stop to the control plane, and the usage wire says explicitly whether an account is balance-gated.
 - Release, CI and repository guards were tightened; tests run in their own temp
   directory on free ports.
 
