@@ -12,7 +12,7 @@
  * plans a-priori — the distinction fb_skip_ne_pass_green insists on.
  *
  * Gated: real API (Haiku, ~$0.002), NOT part of the default local gate. Runs at
- * `npx vitest run tests/online/` (staging/online), like every sibling here.
+ * `LYNOX_ONLINE=1 npx vitest run tests/online/` (staging/online), like every sibling here.
  *
  * Cost: ~$0.002.
  */

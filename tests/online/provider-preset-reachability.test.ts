@@ -42,10 +42,10 @@
  *
  *   # local runtimes — free, offline, no key
  *   ollama serve & ollama pull qwen2.5:7b
- *   npx vitest run tests/online/provider-preset-reachability.test.ts
+ *   LYNOX_ONLINE=1 npx vitest run tests/online/provider-preset-reachability.test.ts
  *
  *   # remote gateways — one key each
- *   GROQ_API_KEY=… npx vitest run tests/online/provider-preset-reachability.test.ts
+ *   LYNOX_ONLINE=1 GROQ_API_KEY=… npx vitest run tests/online/provider-preset-reachability.test.ts
  *
  * Model IDs are overridable per preset (`OLLAMA_TEST_MODEL`, …) because the
  * right model is the user's choice, not ours — but the DEFAULT must be a

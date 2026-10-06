@@ -47,7 +47,7 @@
  * on ANTHROPIC_API_KEY exactly like every other file in this directory.
  *
  * Run at the gate:
- *   ANTHROPIC_API_KEY=<your-key> npx vitest run tests/online/lazy-tool-reachability.test.ts
+ *   LYNOX_ONLINE=1 ANTHROPIC_API_KEY=<your-key> npx vitest run tests/online/lazy-tool-reachability.test.ts
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { APIError } from '@anthropic-ai/sdk';

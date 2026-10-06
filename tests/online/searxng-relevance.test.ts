@@ -6,7 +6,7 @@
  *   docker run -d --rm -p 18080:8080 \
  *     -v $(pwd)/searxng/settings.yml:/etc/searxng/settings.yml:ro \
  *     searxng/searxng:latest
- *   LYNOX_TEST_SEARXNG_URL=http://localhost:18080 \
+ *   LYNOX_ONLINE=1 LYNOX_TEST_SEARXNG_URL=http://localhost:18080 \
  *     npx vitest run tests/online/searxng-relevance.test.ts
  *
  * Regression tests for the 2026-04-24 retrieval-quality bug where
