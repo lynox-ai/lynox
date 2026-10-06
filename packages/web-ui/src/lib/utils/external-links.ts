@@ -76,11 +76,17 @@ export function externalizeLinksInDom(root: ParentNode): void {
  * Put each `<table>` inside a scrollable container, so a wide table scrolls
  * instead of stretching the message.
  *
- * The node list is materialised BEFORE the loop mutates the tree: wrapping moves
- * a table, and a live `NodeList` would be walked while it changes underneath.
+ * ⚠ The first version of this spread the node list first, with a comment saying
+ * a live `NodeList` would be walked while the loop mutated the tree. That reason
+ * is FALSE — `querySelectorAll` returns a STATIC list by spec, unlike
+ * `getElementsByTagName` — and a mutation round is what said so: swapping the
+ * spread for a direct iteration survived, which for a snapshot-vs-live question
+ * is the answer, not a gap. The snapshot is gone with its justification; if a
+ * later change moves to a live collection, the snapshot has to come back WITH a
+ * reason that holds.
  */
 export function wrapTablesInDom(root: ParentNode): void {
-	for (const table of [...root.querySelectorAll('table')]) {
+	for (const table of root.querySelectorAll('table')) {
 		const doc = table.ownerDocument;
 		if (!doc) continue;
 		const wrap = doc.createElement('div');
