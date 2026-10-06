@@ -847,6 +847,8 @@ async function executeThinker(
   const agentConfig: AgentConfig = {
     name: spec.name,
     model,
+    // A profile pins endpoint and model as one pair (`AgentConfig.modelPinnedByProfile`).
+    modelPinnedByProfile: profile !== undefined,
     systemPrompt,
     // ⛔ INHERITED, and this line is the transitive half of the scoping: the child
     // registers in the PARENT's scope below, and by carrying that same scope it makes

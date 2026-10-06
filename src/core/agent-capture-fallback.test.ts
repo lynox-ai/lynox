@@ -80,13 +80,13 @@ const USAGE = { input_tokens: 900, output_tokens: 120, cache_creation_input_toke
 const ANSWER = 'Habe die Offerte an Veltamare geschickt. Petra ist dort die Ansprechperson für Bestellungen.';
 const FACTS = [{ text: 'Petra Meier ist bei Veltamare die Ansprechperson für Bestellungen.', subject: 'Veltamare' }];
 
-function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unknown } = {}) {
+function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unknown; modelPinnedByProfile?: boolean } = {}) {
   const reply = opts.reply ?? vi.fn().mockResolvedValue({
     content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: FACTS } }],
     usage: USAGE,
   });
   const write = vi.fn().mockReturnValue(opts.writeResult ?? { id: 'k1', status: 'active', deduped: false });
-  const agent = new Agent({ name: 'test', model: 'minimax-m3', systemPrompt: 'SYS' });
+  const agent = new Agent({ name: 'test', model: 'minimax-m3', systemPrompt: 'SYS', modelPinnedByProfile: opts.modelPinnedByProfile });
   const inner = agent as unknown as Agent & Internals;
   inner.client = {
     beta: { messages: { stream: (params: unknown, opt: unknown) => ({ finalMessage: () => reply(params, opt) }) } },
@@ -105,6 +105,24 @@ function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unkno
 // Call counts are asserted below, and the module-level mocks live for the whole file —
 // without this, `toHaveBeenCalledTimes(1)` reads every earlier test's calls too.
 beforeEach(() => { vi.clearAllMocks(); });
+
+describe('turn-end capture — which model it runs on', () => {
+  it('unprofiled: the fast tier', async () => {
+    const { inner, reply } = makeAgent();
+    await inner._captureFallback(ANSWER, false, 'none');
+    const body = reply.mock.calls[0]![0] as Record<string, unknown>;
+    expect(body['model']).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('on an agent built from a model profile: the profile\'s own model on its own client', async () => {
+    const { inner, reply } = makeAgent({ modelPinnedByProfile: true });
+    await inner._captureFallback(ANSWER, false, 'none');
+    expect(reply).toHaveBeenCalledTimes(1);
+    const body = reply.mock.calls[0]![0] as Record<string, unknown>;
+    expect(body['model']).toBe('minimax-m3');
+    expect(mockResolveTierModel).not.toHaveBeenCalled();
+  });
+});
 
 describe('turn-end capture — the two routes rafael asked for', () => {
   it('a CLEAN turn writes the fact as trusted', async () => {

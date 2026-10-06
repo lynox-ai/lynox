@@ -379,6 +379,30 @@ describe('spawn_agent tool', () => {
     }
   });
 
+  it('a child spawned with a model profile is built with that profile\'s model, pinned as one pair', async () => {
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+    }));
+    reloadConfig();
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    try {
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Analyze', profile: 'pinned' }] }, makeAgent());
+      const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+      expect(cfg['model']).toBe('ministral-14b-2512');
+      expect(cfg['modelPinnedByProfile']).toBe(true);
+
+      vi.mocked(MockAgent).mockClear();
+      await spawnAgentTool.handler({ agents: [{ name: 'plain', task: 'Analyze' }] }, makeAgent());
+      const plain = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+      expect(plain['modelPinnedByProfile']).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig();
+    }
+  });
+
   it('REFUSES a spawn profile pinning a blocked model (cannot be substituted)', async () => {
     const { reloadConfig } = await import('../../core/config.js');
     vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
