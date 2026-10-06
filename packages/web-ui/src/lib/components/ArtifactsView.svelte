@@ -132,12 +132,11 @@
 		return new Date(iso).toLocaleString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 	}
 
-	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
 	/** CSP + a default viewport + the fit-to-width script so a wide artifact (A4
 	 *  contract / deck) is fully visible on mobile. Logic in artifact-frame.ts. */
 	function injectArtifactPreview(html: string): string {
-		return injectArtifactFit(html, CSP_META);
+		return injectArtifactFit(html);
 	}
 
 	function typeIcon(type: string): string {

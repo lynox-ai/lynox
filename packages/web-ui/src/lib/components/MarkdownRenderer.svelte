@@ -9,7 +9,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight, injectIntoArtifactFrame } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, injectIntoArtifactFrame, hasOwnDocument } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { substituteRenderedFences } from '../utils/fence-substitution.js';
@@ -139,7 +139,6 @@
 		return { title: '', clean: code };
 	}
 
-	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
 	/** Detect whether an artifact fence body is explicitly typed as markdown. */
 	function isMarkdownArtifact(code: string): boolean {
@@ -233,20 +232,21 @@
 		// overflow-x:auto (not hidden) so a wide document (e.g. an A4-print HTML
 		// artifact) can be PANNED on mobile instead of being clipped off-screen.
 		const overflowFix = `<style>html,body{overflow-x:auto;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
-		// Inject a viewport meta only when the artifact lacks one, so it lays out
-		// for the device width on mobile instead of desktop-wide. ⚠ The fragment
-		// branch used to add it UNCONDITIONALLY, which gave a fragment that
-		// declared its own viewport two of them; the condition now covers both.
-		const viewportMeta = /name=["']viewport["']/i.test(clean)
-			? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
-		// An artifact that brought its own `<html>` owns its styling, so it does
-		// not get our default background/colour — that distinction is unchanged.
-		const headHtml = clean.includes('<html')
-			? `${CSP_META}${viewportMeta}${overflowFix}`
-			: `<meta charset="utf-8">${viewportMeta}${CSP_META}${defaultStyles}${overflowFix}`;
-		// Nodes, not two pattern matches over markup the artifact author controls.
-		// `utils/artifact-frame.ts` holds the measurement and the reason.
-		const fullHtml = injectIntoArtifactFrame(clean, headHtml, RESIZE_CODE);
+		// An artifact that brought its own document owns its styling, so it does
+		// not get our default background/colour. ⚠ ONE predicate decides this —
+		// the same one that decides parse-vs-wrap. They used to be two
+		// (`clean.includes('<html')` here, a document-TAG regex there) and they
+		// disagreed: `<body>x</body>` got the fragment's default styling inside a
+		// parsed document, `<htmlx>x</htmlx>` got the document head inside a
+		// wrapper we built ourselves.
+		//
+		// The policy and the viewport default are NOT passed. The injector owns
+		// both, so no caller can drop them — which is what a mutation round broke
+		// when they were parameters. `utils/artifact-frame.ts` holds the reason.
+		const extraHead = hasOwnDocument(clean)
+			? overflowFix
+			: `<meta charset="utf-8">${defaultStyles}${overflowFix}`;
+		const fullHtml = injectIntoArtifactFrame(clean, extraHead, RESIZE_CODE);
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
