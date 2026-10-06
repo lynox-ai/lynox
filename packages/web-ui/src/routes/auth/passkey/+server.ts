@@ -7,7 +7,7 @@
  */
 
 import type { RequestHandler } from './$types.js';
-import { json, error } from '@sveltejs/kit';
+import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import { verifySessionToken } from '$lib/server/auth.js';
 
@@ -49,7 +49,7 @@ async function proxyToControlPlane(
 	return json(data, { status: res.status });
 }
 
-export const POST: RequestHandler = async ({ request, cookies, url }) => {
+export const POST: RequestHandler = async ({ request, cookies }) => {
 	const managed = getManagedConfig();
 	if (!managed) return json({ supported: false });
 

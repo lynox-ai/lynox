@@ -65,7 +65,7 @@
     "postinstall": "node -e \"const f='scripts/postinstall.cjs';require('node:fs').existsSync(f)&&require('node:child_process').spawnSync(process.execPath,[f],{stdio:'inherit'})\"",
     "prepare": "lefthook install || true",
     "security": "sh scripts/security-scan.sh && vitest run tests/security/",
-    "lint": "eslint src/",
+    "lint": "pnpm --filter @lynox-ai/web-ui exec svelte-kit sync && eslint src/ packages/web-ui/src/",
     "tokens:contract": "node packages/web-ui/scripts/check-token-contract.mjs",
     "shapes:contract": "node packages/web-ui/scripts/check-shape-contract.mjs",
     "prepack": "find dist -name '*.js.map' -o -name '*.d.ts.map' | xargs rm -f",

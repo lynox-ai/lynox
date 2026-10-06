@@ -168,7 +168,7 @@ export function startProvisioningPoll(): void {
 			if (res.ok) {
 				stopProvisioningPoll();
 				// Instance is ready — start migration automatically
-				startMigration();
+				void startMigration();
 			}
 		} catch {
 			// Instance not ready yet — keep polling

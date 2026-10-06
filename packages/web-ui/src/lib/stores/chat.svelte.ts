@@ -1277,7 +1277,8 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		// /runs/active and either takes over the live run or leaves the turn
 		// failed for the user's explicit tap-to-retry (chat.send_failed).
 	} finally {
-		try { reader.cancel(); } catch { /* already closed */ }
+		// `cancel` returns a promise: a rejection is caught by `.catch`, a synchronous throw by `try`.
+		try { void reader.cancel().catch(() => { /* already closed */ }); } catch { /* already closed */ }
 	}
 
 	// Stream ended without a terminal done/error while still marked streaming.
@@ -1671,7 +1672,6 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'tool_result': {
-			const toolName = String(data['name'] ?? '');
 			// Routing again lives in one place: a child's result closes the CHILD's
 			// call. The old code searched a single shared list, so a child's
 			// `read_file` result closed the parent's still-running `read_file` — and a
@@ -1897,12 +1897,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const max = data['maxTokens'] as number | undefined;
 			const pct = data['usagePercent'] as number | undefined;
 			const budgetPct = data['budgetPercent'] as number | undefined;
-			if (total != null && max != null && pct != null) {
+			if ((total !== null && total !== undefined) && (max !== null && max !== undefined) && (pct !== null && pct !== undefined)) {
 				contextBudget = {
 					totalTokens: total,
 					maxTokens: max,
 					usagePercent: pct,
-					...(budgetPct != null ? { budgetPercent: budgetPct } : {}),
+					...((budgetPct !== null && budgetPct !== undefined) ? { budgetPercent: budgetPct } : {}),
 				};
 				if (max) contextWindow = max;
 			}
@@ -1946,8 +1946,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				msg.pipeline.steps.push(step);
 			}
 			step.status = status;
-			if (elapsed != null) step.elapsed = elapsed;
-			if (durationMs != null) step.durationMs = durationMs;
+			if (elapsed !== null && elapsed !== undefined) step.elapsed = elapsed;
+			if (durationMs !== null && durationMs !== undefined) step.durationMs = durationMs;
 			if (summary) step.summary = summary;
 			break;
 		}
