@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
@@ -546,9 +547,7 @@ export function resolveSpawnChildRouting(input: {
   const inheritedPin = !profile
     && !hybridSlot.crossProviderSlot
     && getActiveRoutingMode() !== 'hybrid'
-    && parent?.modelPinnedByProfile === true
-    && parent.openaiModelId
-    ? parent.openaiModelId
+    ? pinnedModelOf(parent)
     : undefined;
   const model = profile
     ? profile.model_id

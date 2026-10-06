@@ -179,6 +179,20 @@ describe('save_workflow — session source', () => {
     );
   });
 
+  it('a profiled caller extracts on its profile model; an unpinned one leaves the model to the capture', async () => {
+    const snapshot = {
+      provider: 'openai' as const, apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'ministral-14b-2512', openaiAuth: undefined, modelPinnedByProfile: true,
+    };
+    const pinned = { ...makeAgent({ currentThreadId: 'thread-1' }, mockHistory), getProviderConfig: () => snapshot } as unknown as IAgent;
+    await saveWorkflowTool.handler({ name: 'Monthly Report' }, pinned);
+    expect(captureProcessMock.mock.calls.at(-1)![3]).toEqual(expect.objectContaining({ apiBaseURL: 'https://api.mistral.ai/v1', modelId: 'ministral-14b-2512' }));
+
+    const plain = { ...makeAgent({ currentThreadId: 'thread-1' }, mockHistory), getProviderConfig: () => ({ ...snapshot, modelPinnedByProfile: undefined }) } as unknown as IAgent;
+    await saveWorkflowTool.handler({ name: 'Monthly Report' }, plain);
+    expect((captureProcessMock.mock.calls.at(-1)![3] as { modelId?: string }).modelId).toBeUndefined();
+  });
+
   it('falls back to run.session_id when currentThreadId is absent', async () => {
     const agent = makeAgent({ currentThreadId: undefined }, mockHistory);
     await saveWorkflowTool.handler({ name: 'Test' }, agent);

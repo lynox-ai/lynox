@@ -17,6 +17,7 @@
  * result sets, 'custom' proxies (unknown model catalogue / tool-choice
  * support), LLM call failure, malformed response, timeout.
  */
+import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { SearchResult } from './search-provider.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from '../../core/llm-client.js';
 import { calculateCost } from '../../core/pricing.js';
@@ -169,10 +170,14 @@ export async function rerankSearchResults(
     // The OpenAIAdapter implements only `beta.messages.stream` (not `.create`);
     // stream().finalMessage() works for both the Anthropic SDK and the adapter,
     // so use it uniformly. betas are an Anthropic-only concept — omit on openai.
+    // A profiled caller's client serves only its profile model (core/profile-pair.ts):
+    // then rerank on that pair instead of sending the fast-tier id to its endpoint.
+    const pinned = pinnedModelOf(providerConfig);
     const fast = resolveTierModel('fast', provider);
-    const fastClient = clientForTierSnapshot(fast, client, provider);
+    const fastClient = pinned ? client : clientForTierSnapshot(fast, client, provider);
+    const rerankModel = pinned ?? fast.modelId;
     const callPromise = fastClient.beta.messages.stream({
-      model: fast.modelId,
+      model: rerankModel,
       max_tokens: 512,
       ...(fast.betas ? { betas: fast.betas } : {}),
       system: SYSTEM_PROMPT,
@@ -190,7 +195,7 @@ export async function rerankSearchResults(
     // the call site (web-search-tool). Normalize the SDK's null cache fields.
     const u = response.usage;
     const costUsd = u
-      ? calculateCost(fast.modelId, {
+      ? calculateCost(rerankModel, {
           input_tokens: u.input_tokens,
           output_tokens: u.output_tokens,
           cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,

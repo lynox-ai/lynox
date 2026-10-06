@@ -1,4 +1,5 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
@@ -712,7 +713,9 @@ export async function spawnViaAgent(
   // to before; a cross-provider slot drives the wire + creds so the step lands
   // on the right provider/model instead of running on base (or 404-ing).
   const creds = resolveStepSlotCreds(config, runModel.tier);
-  const agentModel = creds.crossProviderSlot ? creds.model : model;
+  // A config overlay from a profiled caller pins the model to its endpoint (core/profile-pair.ts).
+  const pinnedModel = creds.crossProviderSlot ? undefined : pinnedModelOfConfig(config);
+  const agentModel = creds.crossProviderSlot ? creds.model : (pinnedModel ?? model);
 
   let tools = convertAgentTools(agentDef.tools ?? []);
 
@@ -759,6 +762,7 @@ export async function spawnViaAgent(
   const agent = new Agent({
     name: step.agent,
     model: agentModel,
+    modelPinnedByProfile: pinnedModel !== undefined,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
     // agent definition's prompt (or use it standalone when none is defined).
     systemPrompt: agentDef.systemPrompt
@@ -966,7 +970,9 @@ export async function spawnInline(
   // #66: steer this inline step by the hybrid tier_set (see spawnViaAgent).
   // Standard mode → crossProviderSlot=false → byte-parity with the base config.*.
   const creds = resolveStepSlotCreds(config, runModel.tier);
-  const agentModel = creds.crossProviderSlot ? creds.model : model;
+  // A config overlay from a profiled caller pins the model to its endpoint (core/profile-pair.ts).
+  const pinnedModel = creds.crossProviderSlot ? undefined : pinnedModelOfConfig(config);
+  const agentModel = creds.crossProviderSlot ? creds.model : (pinnedModel ?? model);
   // A2: pipeline steps carry the grounding block too (they previously ran on a
   // bare task prompt with no provenance discipline).
   const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
@@ -1082,6 +1088,7 @@ export async function spawnInline(
   const agent = new Agent({
     name: step.id,
     model: agentModel,
+    modelPinnedByProfile: pinnedModel !== undefined,
     systemPrompt,
     tools,
     thinking,

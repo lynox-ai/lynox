@@ -1259,8 +1259,8 @@ export class Agent implements IAgent {
    * A model profile pins endpoint AND model as one pair. On an agent built from a
    * profile, `this.client` points at the profile's endpoint, which serves the
    * profile's model — sending it the tier's `fast` id mixes the pair (a Fireworks
-   * id at a Mistral endpoint is a 400, silently swallowed by these best-effort
-   * paths). So a profiled agent's helper runs on the profile's own pair, and it
+   * id at a Mistral endpoint is a 400, which these best-effort paths only log
+   * and then drop). So a profiled agent's helper runs on the profile's own pair, and it
    * stays on the provider the profile chose (for a worker profile: the cheaper,
    * EU one) rather than moving to the tier's. Unprofiled: the fast-tier snapshot,
    * exactly as before.
@@ -1280,7 +1280,10 @@ export class Agent implements IAgent {
    * that makes this necessary; {@link followUpFallback} for when it is enabled.
    *
    * Shape of the call, and why each part is the way it is:
-   *  - **fast tier, not the turn's model.** This is an ancillary call, and on a
+   *  - **fast tier, not the turn's model** — unless the agent was built from a
+   *    model profile, where it runs on the profile's own model (`_helperModel`):
+   *    a profile's endpoint serves only that model, so the cost saving below
+   *    does not apply there. This is an ancillary call, and on a
    *    non-compliant model it runs on essentially every turn — 14× cheaper on
    *    Mistral, 5× on Opus. `clientForTierSnapshot` so a hybrid `fast→Mistral`
    *    slot reaches Mistral instead of sending a Mistral id to the ambient
@@ -1366,7 +1369,8 @@ export class Agent implements IAgent {
           cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
           cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
         });
-        // Priced on the FAST model, then charged as a dollar amount.
+        // Priced on the model the helper ran on (the fast tier, or a profile's own
+        // model — `_helperModel`), then charged as a dollar amount.
         // `recordTurn` would book these tokens at the run's own `pricePerM` — on
         // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
         this.costGuard?.recordExternalCost(usd);
@@ -1447,7 +1451,9 @@ export class Agent implements IAgent {
    * forced call does.
    *
    * Three deliberate bounds, each protecting something measured:
-   *  - **fast tier**, so the recovered facts never cost more than the turn.
+   *  - **fast tier**, so the recovered facts never cost more than the turn — on an
+   *    agent built from a model profile it is the turn's own model instead
+   *    (`_helperModel`), so there it costs what a turn costs.
    *  - **capped excerpt**, so a long research turn cannot turn this into a large call.
    *  - **at most four facts**, because the precision worth keeping is 7 of 10
    *    proposals confirmed by the user, and a pass that returns fifteen turns an

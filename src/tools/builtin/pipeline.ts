@@ -1,4 +1,5 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, EmittingStreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
+import { pinnedModelOf, pinConfigModel } from '../../core/profile-pair.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
@@ -1080,14 +1081,16 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     const pipelineProv = typeof (agent as { getProviderConfig?: unknown }).getProviderConfig === 'function'
       ? (agent as { getProviderConfig: () => import('../../types/agent.js').ProviderConfigSnapshot }).getProviderConfig()
       : null;
+    // A profiled caller's snapshot pins its model as well as its endpoint; the mark
+    // rides the overlay (and its spreads) to the steps (core/profile-pair.ts).
     const providerConfig: LynoxUserConfig = pipelineProv
-      ? {
+      ? pinConfigModel({
           ...rawPipelineConfig,
           api_key: pipelineProv.apiKey ?? rawPipelineConfig.api_key,
           api_base_url: pipelineProv.apiBaseURL ?? rawPipelineConfig.api_base_url,
           provider: pipelineProv.provider ?? rawPipelineConfig.provider,
           openai_model_id: pipelineProv.openaiModelId ?? rawPipelineConfig.openai_model_id,
-        }
+        }, pinnedModelOf(pipelineProv))
       : rawPipelineConfig;
     // The same staleness for `disabled_tools`: the steps filter and exclude tools by it, and the
     // copy above predates any Tool Toggles change made while the server runs. The calling agent's

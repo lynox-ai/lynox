@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { pinnedModelOfConfig } from '../../core/profile-pair.js';
 import type { RunState, AgentOutput } from '../../types/orchestration.js';
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { withinSurface } from '../resolve-tools.js';
@@ -1470,6 +1471,23 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
     expect(cfgArg.openai_model_id).toBe('mistral-large-2512');
     // CRITICAL: stale anthropic-key MUST NOT leak through.
     expect(cfgArg.api_key).not.toBe('anthropic-key');
+  });
+
+  it('a profiled caller pins the steps\' model to its endpoint; an unpinned one does not', async () => {
+    const snapshot = {
+      provider: 'openai' as const, apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'ministral-14b-2512', openaiAuth: 'static' as const, modelPinnedByProfile: true,
+    };
+    const pinnedAgent = { ...makePipelineAgent({ config: { api_key: 'k', provider: 'anthropic', disabled_tools: ['bash'] } }), getProviderConfig: () => snapshot } as unknown as IAgent;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ name: 'p', steps: [makeStep('s1', 'do thing')] }, pinnedAgent);
+    // Read through the same accessor the steps use — and through the disabled_tools spread.
+    expect(pinnedModelOfConfig(mockRunManifest.mock.calls[0]![1] as object)).toBe('ministral-14b-2512');
+
+    const plainAgent = { ...makePipelineAgent({ config: { api_key: 'k', provider: 'anthropic' } }), getProviderConfig: () => ({ ...snapshot, modelPinnedByProfile: undefined }) } as unknown as IAgent;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ name: 'q', steps: [makeStep('s1', 'do thing')] }, plainAgent);
+    expect(pinnedModelOfConfig(mockRunManifest.mock.calls[1]![1] as object)).toBeUndefined();
   });
 
   it('hands steps the calling agent\'s current exclusions, not only the stale disabled_tools', async () => {

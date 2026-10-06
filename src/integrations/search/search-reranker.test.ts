@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { calculateCost } from '../../core/pricing.js';
 import { rerankSearchResults, getRerankerCapability } from './search-reranker.js';
 import { initLLMProvider } from '../../core/llm-client.js';
 import { setOpenAIModelResolver, getActiveOpenAIModelMap, MISTRAL_MODEL_MAP } from '../../types/models.js';
@@ -12,6 +13,7 @@ import type { SearchResult } from './search-provider.js';
 // stay real (the real module-global provider switch drives tier selection).
 const mockCreate = vi.fn();
 const createLLMClientSpy = vi.fn();
+const clientForTierSnapshotSpy = vi.fn();
 
 const fakeClient = {
   beta: {
@@ -28,6 +30,11 @@ vi.mock('../../core/llm-client.js', async () => {
     createLLMClient: (opts?: unknown) => {
       createLLMClientSpy(opts);
       return fakeClient;
+    },
+    // Observed, not replaced: the tier swap must not even be consulted for a pinned caller.
+    clientForTierSnapshot: (...args: Parameters<typeof actual.clientForTierSnapshot>) => {
+      clientForTierSnapshotSpy(...args);
+      return actual.clientForTierSnapshot(...args);
     },
   };
 });
@@ -57,11 +64,38 @@ describe('rerankSearchResults', () => {
   beforeEach(() => {
     mockCreate.mockReset();
     createLLMClientSpy.mockReset();
+    clientForTierSnapshotSpy.mockReset();
     delete process.env['LYNOX_SEARCH_RERANK'];
   });
 
   afterEach(() => {
     delete process.env['LYNOX_SEARCH_RERANK'];
+  });
+
+  it('a profiled caller reranks on its own client with its profile model', async () => {
+    mockCreate.mockResolvedValueOnce({ ...(makeScoreResponse([9, 1, 10, 2]) as object), usage: { input_tokens: 800, output_tokens: 120 } });
+    const snapshot = {
+      provider: 'openai' as const, apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'ministral-14b-2512', openaiAuth: undefined, modelPinnedByProfile: true,
+    };
+    const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true }, snapshot);
+    const params = mockCreate.mock.calls[0]![0] as { model: string; betas?: unknown };
+    // ONE client — the snapshot's. The fast tier's client swap is not consulted at all.
+    expect(createLLMClientSpy).toHaveBeenCalledTimes(1);
+    expect(clientForTierSnapshotSpy).not.toHaveBeenCalled();
+    // Priced on the model that ran.
+    expect(out.costUsd).toBeCloseTo(calculateCost('ministral-14b-2512', { input_tokens: 800, output_tokens: 120 }), 10);
+    expect(params.model).toBe('ministral-14b-2512');
+    expect(params.betas).toBeUndefined();
+    // The client it ran on is the one built from the snapshot.
+    expect(createLLMClientSpy).toHaveBeenCalledWith(expect.objectContaining({ apiBaseURL: 'https://api.mistral.ai/v1' }));
+
+    // CONTROL: the same snapshot unpinned reranks on the fast tier, through the swap.
+    clientForTierSnapshotSpy.mockClear();
+    mockCreate.mockResolvedValueOnce(makeScoreResponse([9, 1, 10, 2]));
+    await rerankSearchResults('pytrends github', makeResults(), { enabled: true }, { ...snapshot, modelPinnedByProfile: undefined });
+    expect((mockCreate.mock.calls[1]![0] as { model: string }).model).not.toBe('ministral-14b-2512');
+    expect(clientForTierSnapshotSpy).toHaveBeenCalledTimes(1);
   });
 
   it('passes through unchanged when disabled (default)', async () => {
