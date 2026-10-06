@@ -349,8 +349,9 @@
 - `backup_gdrive` was documented with a default of `false`, but nothing read it:
   any instance with a Google connection that had Drive access uploaded its
   backups to Drive. The setting is now read, from the user config only, and is
-  checked at each upload, so turning it off through the settings takes effect
-  without a restart.
+  checked at each upload, so turning it off through the config API
+  (`PUT /api/config`) takes effect without a restart; a hand-edited config file
+  takes effect at the next restart.
 - An archive is uploaded only if it is actually encrypted. Opting in without a
   vault key logs that the upload was skipped instead of uploading plaintext; a
   failed upload is reported.
@@ -427,7 +428,6 @@
 
 This concerns the subject graph (`subject_graph_enabled`): on for new hosted
 instances, off by default on self-hosted ones.
-
 
 - When A was merged into B and then B into C, the older merge could still be
   reversed: it reported success and left the data split between entries. Reversing
@@ -635,7 +635,8 @@ instances, off by default on self-hosted ones.
   resets the microphone for the next attempt.
 - The iOS app's chat composer can no longer be dragged into blank space
   (pull-to-refresh is off as a result); the welcome greeting follows the clock;
-  the page reloads only for a script or style chunk that failed to load.
+  an automatic reload now happens only for a script or style chunk that failed
+  to load.
 - The debug export includes durable knowledge and says why it can list fewer
   messages than stored rows.
 
