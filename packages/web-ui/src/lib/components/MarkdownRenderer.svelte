@@ -12,7 +12,7 @@
 	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
-	import { substituteRenderedFences } from '../utils/fence-substitution.js';
+	import { parseFences, type CodeFence } from '../utils/code-fences.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 
@@ -27,15 +27,6 @@
 	let highlightedHtml = $state('');
 
 	const baseHtml = $derived(renderSanitizedMarkdown(content));
-
-	function decodeEntities(str: string): string {
-		return str
-			.replace(/&lt;/g, '<')
-			.replace(/&gt;/g, '>')
-			.replace(/&amp;/g, '&')
-			.replace(/&#39;/g, "'")
-			.replace(/&quot;/g, '"');
-	}
 
 	// ── Mermaid ──────────────────────────────────────────────
 
@@ -548,33 +539,34 @@
 
 	const richCache = new Map<string, string>();
 
-	async function processBlocks(html: string, matches: RegExpMatchArray[]): Promise<string> {
-		const results = await Promise.all(
-			matches.map(async (match) => {
-				const lang = match[1] ?? 'text';
-				const raw = match[2] ?? '';
-				const code = decodeEntities(raw);
+	/** A rich block (diagram, artifact, full HTML document) is cached by its language and code. */
+	function richKey(f: CodeFence): string {
+		return `${f.lang}:${f.code}`;
+	}
 
-				// Treat html blocks containing full documents as artifacts
-				const isRichBlock = lang === 'mermaid' || lang === 'artifact'
-					|| (lang === 'html' && (code.includes('<!DOCTYPE') || code.includes('<html')));
-				if (isRichBlock) {
-					const cached = richCache.get(raw);
-					if (cached) return { original: match[0], result: cached };
-					// Uncached during streaming → show placeholder instead of raw code
-					const placeholder = `<div class="artifact-placeholder"><span class="artifact-placeholder-dot"></span><span>${t('tool.artifact_creating')}</span></div>`;
-					return { original: match[0], result: placeholder };
-				}
+	function isRich(f: CodeFence): boolean {
+		return f.lang === 'mermaid' || f.lang === 'artifact'
+			|| (f.lang === 'html' && (f.code.includes('<!DOCTYPE') || f.code.includes('<html')));
+	}
 
-				try {
-					const shikiTheme = getResolvedTheme() === 'light' ? 'github-light' : 'github-dark';
-					return { original: match[0], result: await codeToHtml(code, { lang, theme: shikiTheme }) };
-				} catch {
-					return { original: match[0], result: match[0] };
-				}
-			})
-		);
-		return substituteRenderedFences(html, results);
+	/** What each fence becomes: a cached rich block, a placeholder while one is pending, or
+	 *  highlighted code. Never rejects. */
+	async function renderFences(fences: readonly CodeFence[]): Promise<string[]> {
+		return Promise.all(fences.map(async (f) => {
+			if (isRich(f)) {
+				const cached = richCache.get(richKey(f));
+				if (cached) return cached;
+				// Uncached during streaming → show placeholder instead of raw code
+				return `<div class="artifact-placeholder"><span class="artifact-placeholder-dot"></span><span>${t('tool.artifact_creating')}</span></div>`;
+			}
+			try {
+				const shikiTheme = getResolvedTheme() === 'light' ? 'github-light' : 'github-dark';
+				return await codeToHtml(f.code, { lang: f.lang, theme: shikiTheme });
+			} catch {
+				// Unhighlighted, but still as text: the code is escaped, never parsed as markup.
+				return `<pre><code class="language-${f.lang}">${escapeHtml(f.code)}</code></pre>`;
+			}
+		}));
 	}
 
 	/*
@@ -583,7 +575,7 @@
 	 * Mermaid SVGs, Shiki-highlighted HTML, and iframe srcdoc all bake the
 	 * theme palette into their output. When the user toggles theme:
 	 *   1. richCache.clear() drops cached SVGs + iframe srcdocs.
-	 *   2. processBlocks re-runs (theme is read via getResolvedTheme()).
+	 *   2. the fences are rendered again (theme is read via getResolvedTheme()).
 	 *   3. highlightedHtml is reassigned, Svelte re-renders.
 	 *
 	 * Reading getResolvedTheme() inside the $effect tracks it as a dep, so
@@ -598,53 +590,46 @@
 		if (mermaidInitTheme !== null && mermaidInitTheme !== theme) {
 			richCache.clear();
 		}
-		const codeBlockRegex = /<pre><code class="language-(\w+)">([\s\S]*?)<\/code><\/pre>/g;
-		const matches = [...html.matchAll(codeBlockRegex)];
+		// Fences are found on the parsed fragment, never by a pattern over the sanitized string.
+		const parsed = parseFences(html, document);
+		const fences = parsed.fences;
 
-		if (matches.length === 0) {
+		if (fences.length === 0) {
 			highlightedHtml = html;
 			return;
 		}
 
 		// Immediate render — uses cached rich blocks or falls back to shiki
-		processBlocks(html, matches).then(result => {
-			highlightedHtml = result;
+		void renderFences(fences).then((results) => {
+			highlightedHtml = parsed.render(results);
 		});
 
 		// Debounce uncached rich blocks (prevents iframe flash during streaming)
-		const uncached = matches.filter(m => {
-			const lang = m[1] ?? '';
-			const code = m[2] ?? '';
-			const isRich = lang === 'mermaid' || lang === 'artifact'
-				|| (lang === 'html' && (code.includes('&lt;!DOCTYPE') || code.includes('&lt;html')));
-			return isRich && !richCache.has(code);
-		});
+		const uncached = fences.filter((f) => isRich(f) && !richCache.has(richKey(f)));
 		// While streaming, keep iframe artifacts as syntax-highlighted code
 		// to avoid flash. Markdown artifacts render live — no iframe, no flash.
 		const workset = streaming
-			? uncached.filter(m => (m[1] ?? '') === 'artifact' && isMarkdownArtifact(decodeEntities(m[2] ?? '')))
+			? uncached.filter((f) => f.lang === 'artifact' && isMarkdownArtifact(f.code))
 			: uncached;
 		if (workset.length === 0) return;
 
 		// Markdown artifacts render fast, without a debounce — the user
 		// expects them to appear live during streaming. Iframe artifacts
 		// keep the 400 ms debounce to coalesce late fence closings.
-		const delay = workset.every(m => (m[1] ?? '') === 'artifact' && isMarkdownArtifact(decodeEntities(m[2] ?? ''))) ? 0 : 400;
+		const delay = workset.every((f) => f.lang === 'artifact' && isMarkdownArtifact(f.code)) ? 0 : 400;
 
 		const timer = setTimeout(async () => {
-			for (const match of workset) {
-				const lang = match[1] ?? 'text';
-				const raw = match[2] ?? '';
-				const code = decodeEntities(raw);
+			for (const f of workset) {
+				const key = richKey(f);
 				try {
-					if (lang === 'mermaid') richCache.set(raw, await renderMermaid(code));
-					else richCache.set(raw, buildArtifact(code)); // artifact + html full docs
+					if (f.lang === 'mermaid') richCache.set(key, await renderMermaid(f.code));
+					else richCache.set(key, buildArtifact(f.code)); // artifact + html full docs
 				} catch (err) {
 					// Failed mermaid would otherwise show a perma-placeholder
-					// because processBlocks falls back to placeholder for any
+					// because renderFences falls back to placeholder for any
 					// uncached rich block. Cache an error block so the user
 					// sees what happened and can copy the source.
-					if (lang === 'mermaid') {
+					if (f.lang === 'mermaid') {
 						if (isChunkLoadError(err)) {
 							// A stale `import('mermaid')` chunk 404'd after a
 							// deploy — recover by reloading onto the fresh bundle
@@ -652,16 +637,16 @@
 							// vite:preloadError listener may already have fired;
 							// triggerStaleReload is idempotent + loop-guarded.
 							triggerStaleReload();
-							richCache.set(raw, buildMermaidReloading());
+							richCache.set(key, buildMermaidReloading());
 						} else {
 							const message = err instanceof Error ? err.message : String(err);
-							richCache.set(raw, buildMermaidError(code, message));
+							richCache.set(key, buildMermaidError(f.code, message));
 						}
 					}
 				}
 			}
 			if (baseHtml === html) {
-				highlightedHtml = await processBlocks(html, matches);
+				highlightedHtml = parsed.render(await renderFences(fences));
 			}
 		}, delay);
 
