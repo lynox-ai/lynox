@@ -199,6 +199,10 @@ export async function fetchWithValidatedRedirects(
   // that credential to the new origin, and it is exempt from the egress scan
   // precisely because the engine put it there.
   extraCredentialHeader?: string | undefined,
+  // True for a header value that carries a resolved secret. On a cross-origin hop such a
+  // header is dropped whatever it is called: the fixed credential set below cannot know a
+  // header name the caller chose, and the secret was bound to the FIRST host only.
+  carriesSecret?: ((value: string) => boolean) | undefined,
   // Returns the FINAL hop alongside the response. Callers need the URL, not
   // just the bytes: cost attribution profiles by hostname, and link extraction
   // resolves relative hrefs against it and filters on its origin — so handing
@@ -251,6 +255,9 @@ export async function fetchWithValidatedRedirects(
     // Drop credential headers before a cross-origin hop (mirror fetch()) so the
     // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
     headers = redirectHopHeaders(headers, currentUrl, nextUrl, extraCredentialHeader);
+    if (carriesSecret && isCrossOriginHop(currentUrl, nextUrl)) {
+      headers = Object.fromEntries(Object.entries(headers).filter(([, v]) => !carriesSecret(v)));
+    }
     // A 307/308 preserves the method + body — drop the body too on a cross-origin
     // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
     // open redirect), degrading to a bodyless GET like the 301/302/303 path.
@@ -2241,7 +2248,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
       const { response, finalUrl: finalRequestUrl } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;
