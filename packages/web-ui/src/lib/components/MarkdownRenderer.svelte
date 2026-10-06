@@ -583,7 +583,21 @@
 		);
 		let result = html;
 		for (const { original, result: replacement } of results) {
-			if (original) result = result.replace(original, replacement);
+			// A REPLACER FUNCTION, not the string itself.
+			//
+			// `String.prototype.replace` treats a string replacement as a template:
+			// `$&` stands for the match, `` $` `` and `$'` for the text before and
+			// after it, `$1` for a capture group. The replacement here is built from
+			// the fence body, which is content — so a `$` sequence occurring in that
+			// content was being read as an instruction and expanded, and what the
+			// expansion pasted in was the surrounding markup rather than the text
+			// the author wrote.
+			//
+			// A function replacement is inserted verbatim; that is the documented
+			// way to opt out of substitution. `artifact-fence-substitution.test.ts`
+			// measures both forms against each other, as elements and not as
+			// substrings.
+			if (original) result = result.replace(original, () => replacement);
 		}
 		return result;
 	}
