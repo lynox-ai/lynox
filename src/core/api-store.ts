@@ -411,7 +411,7 @@ export function hasRevokedGrant(profile: ApiProfile): boolean {
  * the referenced secrets without re-parsing `config_json`. Never holds secret
  * material — only names.
  */
-function collectVaultKeys(profile: ApiProfile): string[] {
+export function collectVaultKeys(profile: ApiProfile): string[] {
   const keys = new Set<string>();
   // Guarded: a `vault_keys` that is not an array must not throw here, because the
   // purge runs this over every OTHER profile too. `api_setup` refuses one, but a

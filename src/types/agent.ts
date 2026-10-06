@@ -227,6 +227,16 @@ export interface SessionCounters {
    */
   approvedOutboundDomains: Set<string>;
   /**
+   * `secret:NAME` destinations the user approved within this Session, keyed
+   * `NAME\u0000host`. A secret goes without a prompt only to a host a person accepted
+   * for the api_profile that names it; any other host needs this approval. Created on
+   * first use; not carried between Sessions.
+   */
+  approvedSecretDestinations?: Set<string> | undefined;
+  /** The secret-destination prompt last queued in this Session; the next one waits on it, so
+   *  the secret gate's prompts are asked one at a time (one pending prompt per Session). */
+  secretPromptChain?: Promise<void> | undefined;
+  /**
    * In-flight permission prompts keyed by hostname. Parallel
    * `http_request` tool_use blocks against the same host must share one
    * prompt — the PromptStore has a UNIQUE index per session_id WHERE

@@ -94,6 +94,8 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
+import { collectVaultKeys } from './api-store.js';
+import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
 
@@ -732,6 +734,8 @@ export class Agent implements IAgent {
    *  re-derived from history on rehydrate (`loadMessages`). Over-taints in the SAFE direction
    *  (queue-inflow is the watched canary metric), never under. */
   private _conversationSawUntrusted = false;
+  /** The taint state when the current tool batch started; read by the secret gate. */
+  private _taintBeforeBatch: boolean | undefined;
   /** Whether this CONVERSATION has ingested untrusted content (sticky; see field doc). */
   get conversationSawUntrusted(): boolean { return this._conversationSawUntrusted; }
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
@@ -3269,6 +3273,141 @@ export class Agent implements IAgent {
    *   - `update_workflow_steps`: edits + persists a stored workflow; a `secret:NAME`
    *     in an edited task must be stored as a ref, not resolved into the def.
    *   - `spawn_agent`: delegation, not storage — see the note on the member itself. */
+  /**
+   * Where may the secrets in this call go? Consent (`hasConsent`) is per NAME and a vault
+   * entry has it from load, so on its own it does not say anything about the destination.
+   *
+   * - `http_request`: a secret goes without a prompt only to a host a person accepted for the
+   *   api_profile that names it (`collectVaultKeys`; the profile found by `getByHostname`, the
+   *   acceptance by `isEndpointAcked`). Stricter than the credential attach, which also trusts
+   *   the vetted provider hosts `api_setup` saves without asking: those bind nothing here.
+   *   A reference in the userinfo or host (as the URL parser reads them) is refused, and a call
+   *   whose host changes once the secrets are filled in is refused too.
+   *   Any other host needs the user's approval for that name and host, held for the Session;
+   *   with no one to ask, the call is refused.
+   * - Any other tool: its destination cannot be read from the input (a shell command can reach
+   *   any host), so each call is shown to the user with the tool and the secrets — the command
+   *   when it is the whole input, otherwise the whole input — and refused if too long to show.
+   *   With no one to ask it runs only if the conversation had taken in no untrusted data
+   *   before this tool batch (each call's own tool arms the latch on dispatch, before this gate).
+   *
+   * Approving here also records the name consent, so the user is not asked twice. The prompts
+   * of this gate (not the name-consent prompt after it) are asked one at a time per Session
+   * (the prompt store holds one pending prompt per Session), and none of them is raised once
+   * the run is aborted.
+   *
+   * Returns the refusal to send back, or `null` when the call may proceed.
+   */
+  private async _gateSecretDestination(
+    tc: { id: string; name: string; input: unknown },
+    secretNames: string[],
+    taintedBeforeThisCall: boolean,
+  ): Promise<{ type: 'tool_result'; tool_use_id: string; content: string; is_error: true } | null> {
+    const refuse = (content: string) => ({ type: 'tool_result' as const, tool_use_id: tc.id, content, is_error: true as const });
+    const input = (tc.input ?? {}) as Record<string, unknown>;
+    const counters = this.sessionCounters;
+    // One prompt at a time per Session; each waiter re-reads the approvals once it is its turn.
+    const oneAtATime = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const prev = counters.secretPromptChain ?? Promise.resolve();
+      let release!: () => void;
+      counters.secretPromptChain = new Promise<void>((r) => { release = r; });
+      await prev.catch(() => {});
+      try { return await fn(); } finally { release(); }
+    };
+    // A call that waited in the queue must not raise a prompt once the run is aborted: the
+    // prompt would outlive the run as a pending row and block the Session's next prompt.
+    const runSignal = this.abortController?.signal;
+    const asked = async (question: Parameters<NonNullable<typeof this.promptUser>>[0]): Promise<string | null> =>
+      runSignal?.aborted ? null : this.promptUser!(question, ['Allow', 'Deny', '\x00']);
+
+    if (tc.name === 'http_request') {
+      const rawUrl = String(input['url'] ?? '');
+      // Where the request goes is decided by the WHATWG parser, not by a pattern over the text:
+      // it accepts forms (`https:\\…`, `https:/…`, leading whitespace) a pattern does not see.
+      // A reference in the userinfo or host is refused, because its value would decide the
+      // host. As a backstop, the host is read again with the secrets substituted; if the two
+      // differ, the call is refused without naming either, since one of them came from a value.
+      const notGoing = (why: string) => refuse(`Blocked: tool "http_request" ${why}. A secret may go in a header, the path or the query of a request to its own service, never into the part of the URL that names the host.`);
+      let parsed: URL;
+      try { parsed = new URL(rawUrl); } catch {
+        return refuse(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`);
+      }
+      // Only an http(s) URL with a host is somewhere a secret can be sent; anything else would
+      // reach the prompt with an empty host.
+      if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
+        return refuse(`Tool "http_request" referenced secret(s) ${secretNames.join(', ')} with no valid URL to send them to.`);
+      }
+      let authority: string;
+      try { authority = decodeURIComponent(`${parsed.username}:${parsed.password}@${parsed.host}`); } catch {
+        return notGoing('has an address whose host part cannot be read');
+      }
+      if (/secret:/i.test(authority)) return notGoing(`puts secret(s) ${secretNames.join(', ')} into the host part of the URL`);
+      let resolvedHost: string | undefined;
+      try {
+        const resolved = this.secretStore!.resolveSecretRefs({ url: rawUrl }) as { url?: unknown };
+        resolvedHost = new URL(String(resolved.url)).host;
+      } catch { resolvedHost = undefined; }
+      if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
+      const host = parsed.hostname;
+      const profile = this.toolContext.apiStore?.getByHostname(host);
+      const accepted = profile !== undefined && isEndpointAcked(profile.custom_endpoint_ack, rawUrl);
+      const bound = new Set(accepted ? collectVaultKeys(profile) : []);
+      const approved = (counters.approvedSecretDestinations ??= new Set<string>());
+      const key = (n: string) => `${n}\u0000${host}`;
+      const pending = () => secretNames.filter((n) => !bound.has(n) && !approved.has(key(n)));
+      if (pending().length === 0) return null;
+      const text = (names: string[]) => `secret(s) ${names.join(', ')} to ${host}, a host no accepted service ties ${names.length === 1 ? 'it' : 'them'} to`;
+      if (!this.promptUser) {
+        // Which way out exists depends on the profile: api_setup records an acceptance only
+        // for a host it asked a person about, never for the provider hosts it saves silently.
+        const wayOut = profile === undefined
+          ? `Connect the service for ${host} with api_setup and accept it when asked, so the key belongs to that host, or approve it in an interactive session.`
+          : accepted
+            ? `The api_profile for ${host} does not name ${pending().join(', ')}; add ${pending().length === 1 ? 'it' : 'them'} to that profile with api_setup, or approve it in an interactive session.`
+            : `The api_profile for ${host} carries no recorded acceptance by a person, so it does not tie the key to that host; approve it in an interactive session.`;
+        return refuse(`Blocked: this request would send ${text(pending())}, and there is no one to approve it. ${wayOut}`);
+      }
+      return oneAtATime(async () => {
+        const unbound = pending(); // another call in this batch may have been approved meanwhile
+        if (unbound.length === 0) return null;
+        const answer = await asked(pv`Tool "http_request" wants to send ${text(unbound)}. Allow for this session?`);
+        if (answer === null) return refuse('The run was stopped before the secret could be approved.');
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return refuse(`Sending ${text(unbound)} was denied by the user.`);
+        }
+        for (const n of unbound) { approved.add(key(n)); this.secretStore!.recordConsent(n); }
+        return null;
+      });
+    }
+
+    if (!this.promptUser) {
+      if (taintedBeforeThisCall) {
+        return refuse(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} after this conversation took in untrusted content, and there is no one to approve it.`);
+      }
+      return null;
+    }
+    // The command alone when it is the whole input, otherwise the whole input: a field next to
+    // the command can matter as much as the command.
+    const onlyCommand = typeof input['command'] === 'string' && Object.keys(input).length === 1;
+    const shown = onlyCommand ? (input['command'] as string) : JSON.stringify(tc.input);
+    // Shown whole: a cut would let the part the user does not see decide where the secret goes.
+    if (shown.length > Agent.SECRET_PROMPT_MAX_CHARS) {
+      return refuse(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} in an input too long to show for approval (${shown.length} characters, at most ${Agent.SECRET_PROMPT_MAX_CHARS}). Split the work into shorter calls.`);
+    }
+    return oneAtATime(async () => {
+      const answer = await asked(pv`Tool "${tc.name}" wants to use secret(s) ${secretNames.join(', ')} in: ${shown} — Allow?`);
+      if (answer === null) return refuse('The run was stopped before the secret could be approved.');
+      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+        return refuse(`Use of secret(s) ${secretNames.join(', ')} in tool "${tc.name}" was denied by the user.`);
+      }
+      for (const n of secretNames) this.secretStore!.recordConsent(n);
+      return null;
+    });
+  }
+
+  /** Longest tool input shown whole in a secret prompt; longer inputs are refused, not cut. */
+  private static readonly SECRET_PROMPT_MAX_CHARS = 4000;
+
   private static readonly SECRET_RESOLUTION_EXEMPT = new Set([
     'import_workflow',
     'update_workflow_steps',
@@ -3296,6 +3435,11 @@ export class Agent implements IAgent {
       (b) => this.tools.find((t) => t.definition.name === b.name)?.endsTurn !== true,
     ).length;
 
+    // What the conversation had taken in before this batch. The calls below run concurrently and
+    // each arms the latch for its own tool as it starts, so a per-call read would count a
+    // sibling's dispatch as content already taken in (the secret gate asks about the past).
+    this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
+
     // Enforce fan-out limit: execute first N in parallel, truncate excess
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;
     const toExecute = toolCalls.slice(0, limit);
@@ -3304,6 +3448,7 @@ export class Agent implements IAgent {
     const settled = await Promise.allSettled(
       toExecute.map(tc => this._executeOne(tc)),
     );
+    this._taintBeforeBatch = undefined;
 
     const results: BetaToolResultBlockParam[] = settled.map((outcome, i) => {
       if (outcome.status === 'fulfilled') return outcome.value;
@@ -3509,6 +3654,10 @@ export class Agent implements IAgent {
     // derive `sourceUntrusted` from the capability denylist (over-marking is the SAFE
     // direction — it routes to pending_review, never to trusted knowledge).
     this._turnToolNames.add(tc.name);
+    // What the conversation had taken in before this call's batch started (see
+    // `_taintBeforeBatch`). Read before the line below arms the latch for this call's own
+    // tool; a call dispatched outside a batch falls back to the state right now.
+    const taintedBeforeThisCall = this._taintBeforeBatch ?? (this._sawUntrustedData || this._conversationSawUntrusted);
     // DK.1 F5: a denylist tool's output persists in context across turns (many do not wrap,
     // so a later marker scan cannot see them) — arm the sticky conversation latch so a
     // deferred `remember` on a later clean turn is still routed to pending_review.
@@ -3676,6 +3825,10 @@ export class Agent implements IAgent {
             is_error: true,
           };
         }
+
+        // Destination gate: a consented secret still goes only where it belongs.
+        const destinationRefusal = await this._gateSecretDestination(tc, secretNames, taintedBeforeThisCall);
+        if (destinationRefusal) return destinationRefusal;
 
         // Consent gate: first use requires user approval
         const unconsented = secretNames.filter(n => !this.secretStore!.hasConsent(n));
