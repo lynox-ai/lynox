@@ -6522,14 +6522,19 @@ export class LynoxHTTPApi {
       missing: [409, 'The entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
       superseded: [409, 'The same two entries were merged again later. Only the newest merge can be taken back.'],
       not_in_effect: [409, 'This merge is no longer in effect — it was taken back already, or the entry was merged elsewhere since.'],
-      // ⚠ This is the wording for when the blocking merge CANNOT be named, and
-      // its first version repeated the very defect this change exists to fix. It
-      // said «Take that newer merge back first; then this one can be taken back»
-      // — but every way the blocking merge goes unnamed is a way it has no usable
-      // ledger, so it cannot be taken back either, and it is not even listed.
-      // Both halves false, in exactly the case the sentence was written for. It
-      // states the dead end now instead of promising a step.
-      chained: [409, 'The entry this merge led to has since been merged into another one, and that newer merge is no longer on record — so this merge can no longer be taken back here.'],
+      // ⚠ The wording for when the blocking merge CANNOT BE NAMED, and TWO
+      // versions of it have now been false — in the one case each was written
+      // for. The first promised a step («Take that newer merge back first; then
+      // this one can be taken back») that does not exist when nothing can be
+      // named. The second stated the dead end but gave a false reason for it:
+      // «that newer merge is no longer on record». A blocking merge left
+      // `applied:false` by `runMerge`'s crash window IS on record — on disk, and
+      // listed by `GET /api/merges` — and answers `not_applied`, so the sentence
+      // contradicted the API's own listing in the opposite direction.
+      //
+      // What the unnamed states share is only that the blocking merge cannot be
+      // taken back. That is what this says, and it says nothing about the record.
+      chained: [409, 'The entry this merge led to has since been merged into another one, and that newer merge cannot be taken back here — so this merge cannot be taken back either.'],
       unavailable: [409, 'This merge moved data rows or conversation links, and that part of the instance is not available right now. Nothing was taken back.'],
       partial: [409, 'The merge was taken back in the contact graph, but data rows or conversation links still point at the merged entry. Taking it back again will not repair that.'],
       failed: [409, 'The merge could not be taken back.'],
@@ -6558,30 +6563,52 @@ export class LynoxHTTPApi {
         // ⚠ `chained` is the one refusal with a NEXT STEP the owner can take, so
         // it is the one that must name its object.
         //
-        // THE ID COMES FIRST AND THE NAME IS CAPPED, and both halves of that are
-        // a correction. The first version put the name first and justified it
-        // with «this sentence is ~200 chars, the cap is 600, so the id survives»
-        // — a one-point sample of an UNBOUNDED quantity. A subject name has no
-        // length limit anywhere: not in the DDL, not in `createSubject`, not on
-        // the paths that write names (entity extraction, CRM import,
-        // `set_thread_context`). Measured through the real route: from a 462-char
-        // name the id is cut off, and from 544 the next step goes too, leaving a
-        // truncated name and no instruction — strictly worse than the table
-        // wording it replaced. Leading with the id makes truncation eat the
-        // decoration instead of the action, and the cap bounds the whole thing.
+        // ⚠ «THEN TRY THIS ONE AGAIN», not «then this merge can be taken back».
+        // The named merge is the LAST link of the chain (see the walk in
+        // `rollbackMergeById`), so in a chain of three it is not the only one in
+        // the way: taking it back shortens the chain, and this merge then names
+        // the new last link. Promising that this one becomes takeable is true for
+        // a two-link chain and false for a longer one, and the shorter promise is
+        // true for every length. The same reason rules out naming which entry the
+        // dup was merged into — that is the next link, not the one named here.
+        //
+        // THE NAME IS CAPPED. The first version justified an uncapped name with
+        // «this sentence is ~200 chars, the cap is 600, so the id survives» — a
+        // one-point sample of an UNBOUNDED quantity. A subject name has no length
+        // limit anywhere: not in the DDL, not in `createSubject`, not on the paths
+        // that write names (entity extraction, CRM import, `set_thread_context`).
+        // The cap is what keeps the sentence under `capForClient`: 47 for the
+        // longest id `isMergeLedgerFileName` admits, ~110 of fixed text and at
+        // most 240 UTF-16 units of capped name is under 400. Its value is pinned
+        // by a test, not by this arithmetic.
+        //
+        // The id still leads, for reading order — the owner's one actionable
+        // datum first — and NOT as a safeguard: with the cap in place no cut can
+        // reach it, and a mutation restoring name-first ordering survives the
+        // suite, which is what a condition that cannot change an answer looks
+        // like. Said plainly here so the next reader does not take it for a
+        // measured defence.
         //
         // The entry's name is the owner's own data on an owner-authenticated
         // route — `GET /api/merges` already returns `canonicalName` for every
         // merge — so naming it discloses nothing the owner cannot already list.
         if (out.reason === 'chained' && out.blocking) {
-          const into = out.blocking.intoName.length > 120
-            ? `${out.blocking.intoName.slice(0, 120)}…`
-            : out.blocking.intoName || 'another entry';
+          // ⚠ `trim()` before the empty check, and code points rather than
+          // UTF-16 units. A name is `TEXT NOT NULL` with no non-empty check, and
+          // `createSubject` adds none, so `''` reaches here — measured. A
+          // whitespace-only name is truthy and would slip past a bare `||` to
+          // print a blank. Slicing units instead of code points cut an astral
+          // character in half and left a lone surrogate, which the owner's client
+          // renders as U+FFFD.
+          const raw = out.blocking.intoName.trim();
+          const chars = [...raw];
+          const into = raw === '' ? 'another entry'
+            : chars.length > 120 ? `${chars.slice(0, 120).join('')}…` : raw;
           errorResponse(
             res,
             409,
-            `Take merge ${out.blocking.id} back first: the entry this one led to has since been merged into ${into}. `
-            + 'After that, this merge can be taken back.',
+            `Take merge ${out.blocking.id} back first: the entry this merge led to has since been `
+            + `merged onward to ${into}. Then try this one again.`,
             'merge_chained',
           );
           return;

@@ -831,6 +831,96 @@ describe('owner rollback of a merge chain A→B→C', () => {
       .toEqual({ ok: false, reason: 'chained', blocking: null });
   });
 
+  it('⭐ unwinds a three-link chain one takeable step at a time', () => {
+    // ⚠ THE DEFECT THIS PINS — the third appearance of one class on this branch:
+    // a refusal naming a step the owner cannot take. The lookup used to read ONE
+    // step ahead and require that step to be in effect. With `A→B, B→C, C→D` the
+    // next link `B→C` is NOT in effect (its own canonical moved on), so nothing
+    // matched and `A→B` answered `blocking: null` — the dead-end wording, while
+    // `C→D` sat on record and was perfectly reversible. Measured before the walk.
+    //
+    // The walk names the LAST link, which is the only merge in the chain whose
+    // canonical still stands and therefore the only one that can be taken back
+    // right now. Every step below is asserted to work, and after each one the
+    // next refusal is asserted to name the NEW last link — so the sequence
+    // terminates instead of pointing at itself. Two merges deep is the fixture
+    // the old filter passed; three is where it failed.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Contoso GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Contoso' });
+    const c = store.createSubject({ kind: 'organization', name: 'Contoso Group' });
+    const d = store.createSubject({ kind: 'organization', name: 'Contoso Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, c, d).ok).toBe(true);
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Contoso GmbH')!;
+    const bc = runs.find(r => r.dupName === 'Contoso')!;
+    const cd = runs.find(r => r.dupName === 'Contoso Group')!;
+    // The fixture's premise: the two inner links are NOT takeable, so a lookup
+    // that stops at the next one has nothing to name.
+    expect(bc.inEffect, 'the middle link is in effect — the fixture is not a chain of three').toBe(false);
+    expect(cd.inEffect, 'the last link should be the one that stands').toBe(true);
+
+    // The oldest merge names the LAST link, not the middle one.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: cd.id, intoName: 'Contoso Holding' } });
+    // …and so does the middle one, which is itself blocked by the same tip.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: cd.id, intoName: 'Contoso Holding' } });
+
+    // Step one: the named merge is genuinely takeable.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, cd.id).ok, 'the named step is not takeable').toBe(true);
+    // Step two: the chain is one shorter, so the middle link is now the tip and
+    // is what the oldest merge names. This is why the owner-facing sentence says
+    // «then try this one again» rather than «then this merge can be taken back»:
+    // at three links the stronger promise is false, and this is the state that
+    // makes it false (`http-api.ts`, the `chained` branch).
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id, intoName: 'Contoso Group' } });
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id).ok).toBe(true);
+    // Step three: nothing is in the way any more.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id).ok, 'the chain never unwinds').toBe(true);
+    expect(store.getSubject(a)!.merged_into).toBeNull();
+    expect(store.getSubject(b)!.merged_into).toBeNull();
+    expect(store.getSubject(c)!.merged_into).toBeNull();
+    expect(store.getSubject(d)!.merged_into).toBeNull();
+  });
+
+  it('⭐ refuses instead of hanging when `merged_into` holds a cycle', () => {
+    // ⚠ The cycle is NOT reachable through the store — `planMerge` refuses a dup
+    // that is already merged — so this writes the damaged state straight into
+    // SQLite, the idiom this repo's other raw-state tests use. The guard is for a
+    // corrupt database, not for a sequence of merges, which is why the fixture
+    // has to be corrupt: a guard whose state no fixture can reach is a guard no
+    // test can defend, and the honest way to defend this one is to damage the row.
+    // `resolveActiveSubject` guards its own `merged_into` walk with the same
+    // visited set, so a cycle is a state this schema already treats as possible.
+    //
+    // ⚠ The mutation this kills does NOT fail an assertion — it never returns.
+    // The walk is synchronous, so without the visited set the event loop never
+    // yields and vitest's own timeout cannot fire; the signature is a hung
+    // worker. That is exactly the failure the guard prevents, so a hang IS the
+    // kill here — recorded that way rather than as an ordinary red test.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Northwind GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Northwind' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    const ab = listMergeRuns(store, sweeps).find(r => r.dupName === 'Northwind GmbH')!;
+
+    // A→B→A. `merged_into` is a self-referencing FK and both rows exist, so
+    // SQLite takes this with `foreign_keys = ON`.
+    const raw = (store as unknown as { db: import('better-sqlite3').Database }).db;
+    raw.prepare('UPDATE subjects SET merged_into = ? WHERE id = ?').run(a, b);
+    expect(store.getSubject(a)!.merged_into, 'the fixture lost the first leg').toBe(b);
+    expect(store.getSubject(b)!.merged_into, 'the fixture is not a cycle').toBe(a);
+
+    // It comes back, and with the honest answer: nothing in this cycle is a
+    // merge that can be taken back, so no step is named.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+  });
+
   it('⭐ a merge ALREADY taken back is not a chain, even if its canonical moved on since', () => {
     // ⚠ `inEffect` is a conjunction and this branch reads only one of its terms.
     // Measured before the guard existed: A→B taken back, then B→C, and asking
