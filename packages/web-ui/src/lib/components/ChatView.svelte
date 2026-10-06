@@ -494,7 +494,6 @@
 	 *  non-iframe renderer; svg still renders in the iframe but needs the marker
 	 *  so the pill reads "SVG" instead of defaulting to "HTML". */
 	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'svg', 'csv', 'tsv', 'json', 'text']);
-	/** Tool calls that get special rendering (not grouped with regular tools) */
 
 	/** Tool call label: returns { action, subject } or null if hidden.
 	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
@@ -3334,7 +3333,7 @@
 						     long token — a tracking URL in a body preview — scrolls the
 						     prompt sideways. -->
 						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
-							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list -->
+							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
 								? renderPromptSegments(pendingPermission.segments)
 								: renderPromptMarkdown(pendingPermission.question)}
