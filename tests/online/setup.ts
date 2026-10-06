@@ -20,9 +20,9 @@ export function getApiKey(): string {
     const configPath = join(homedir(), '.lynox', 'config.json');
     const raw = readFileSync(configPath, 'utf8');
     const config = JSON.parse(raw) as Record<string, unknown>;
-    // `anthropic_api_key` is what the CLI writes today; `api_key` is the legacy
-    // name older configs still carry. Same order and rationale as
-    // tests/eval/knowledge-substrate-provider.ts, which already reads both.
+    // `anthropic_api_key` is the name the eval and bench scripts read, and the one a
+    // developer config may carry instead of `api_key`, the schema field. Same order
+    // as tests/eval/knowledge-substrate-provider.ts.
     for (const field of ['anthropic_api_key', 'api_key']) {
       const value = config[field];
       if (typeof value === 'string' && value.length > 0) return value;
