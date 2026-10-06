@@ -436,7 +436,7 @@ function openCountRefusal(field, visibility) {
     // public-repo-guard names a commit by its short SHA alone, "never by its subject line". The
     // author has their own body in front of them and needs the field, not a quotation.
     `the \`${field}:\` line counts OPEN findings, and this record goes into a PUBLIC repo.`,
-    'A security finding that is not yet closed must not be named in public text — not even its',
+    'A finding that is not yet closed — security or not — must not be named in public text, not even its',
     'existence, which is what that number states. It belongs in the private register row instead.',
     'Write `findings filed privately` (no count), or, if nothing is unresolved, `no findings` /',
     '`<N> findings, all fixed`.',
@@ -882,17 +882,13 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
   // the record, and one smuggled into an UNKNOWN record field (`open: 3`), which nothing rejects
   // today. Refusing unknown fields is a separate claim about the record's shape.
   if (visibility !== 'private') {
-    const securityInPlay = required.has('security') || claimed.has('security') || !!f.security;
     for (const [field, raw] of [['security', f.security], ['review', f.review]]) {
       const value = (raw ?? '').trim();
       if (!value) continue;
-      // `review:` only where security is in play: a review finding is not a security finding, and
-      // two filed CODE defects counted in public break no rule — forbidding those would cost
-      // measurability for nothing. The overlap is where the same findings are both, which a
-      // record says in its own words: "the `2 filed` in `review:` and the `2 filed` in
-      // `security:` are the same two findings, not four." ⚠ Residue, named not solved: a diff that
-      // does not owe the gate whose round files a security finding anyway still counts it.
-      if (field === 'review' && !securityInPlay) continue;
+      // `review:` ALWAYS, not only where security is in play. An earlier cut exempted a review
+      // count when no security gate was named, on the reasoning that an open CODE defect counted in
+      // public breaks no rule. The rule is wider than that: no open gap is named in public text,
+      // security or not. The exemption let a `review: …, 2 filed` record go green on a public PR.
       if (openFiledCount(value) > 0) errors.push(...openCountRefusal(field, visibility));
     }
   }

@@ -1019,7 +1019,8 @@ describe('gate-record — the `review:` evidence line', () => {
     // two tests, which reads as better coverage than it is.
     expect(evaluate({ body: record({ review: '1 Opus round, no findings' }), head: HEAD, files: CODE }).ok).toBe(true);
     expect(evaluate({ body: record({ review: '1 opus round, 5 findings, all fixed.' }), head: HEAD, files: CODE }).ok).toBe(true);
-    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 Fixed, 2 Filed' }), head: HEAD, files: CODE }).ok).toBe(true);
+    // `private`: a `filed` count is refused in a PUBLIC record for its own reason; case is the subject here.
+    expect(evaluate({ body: record({ review: '1 opus round, 5 findings, 3 Fixed, 2 Filed' }), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
   });
 
   it('accepts a model name with a version or a combination, because our rounds mix them', () => {
@@ -1245,25 +1246,20 @@ describe('a PUBLIC record does not count open findings', () => {
     expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
   });
 
-  it('ACCEPTS a `review:` count in public when security is NOT in play — the narrow cut', () => {
-    // ⭐ The discriminator for the whole cut: a review finding is not a security finding. Two filed
-    // CODE defects counted in public break no rule, and forbidding them would cost measurability
-    // for nothing. Without this test the condition could be dropped and the suite stay green.
+  it('REFUSES a `review:` count in public even with NO security gate, line or path', () => {
+    // An earlier cut accepted this ("a review finding is not a security finding"). The rule is that
+    // no open gap is named in public text, security or not, and a `2 filed` here is one.
     const v = evaluate({ body: record({ gates: 'code-review, delta', review: WITH_COUNT }), head: HEAD, files: CODE, visibility: 'public' });
-    expect(v.ok, (v.errors ?? []).join(' ')).toBe(true);
-  });
-
-  it('counts `security` as in play when the record CLAIMS it, not only when the diff owes it', () => {
-    // `securityInPlay` reads both sets. A record that names the gate on a diff with no security
-    // path has still told the reader a security round happened, so its `review:` count carries the
-    // same risk — and without this case the `claimed` half could be dropped and the suite stay
-    // green. (That a claimed gate owes no proof of its own is a separate, registered question.)
-    const v = evaluate({
-      body: record({ gates: 'code-review, security, delta', review: WITH_COUNT }),
-      head: HEAD, files: CODE, visibility: 'public',
-    });
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
+    expect(v.errors.join(' ')).toMatch(/security or not/);
+  });
+
+  it('ACCEPTS the same record with `findings filed privately`, and the count in the private repo', () => {
+    const priv = evaluate({ body: record({ gates: 'code-review, delta', review: '1 opus round, findings filed privately' }), head: HEAD, files: CODE, visibility: 'public' });
+    expect(priv.ok, (priv.errors ?? []).join(' ')).toBe(true);
+    const inPro = evaluate({ body: record({ gates: 'code-review, delta', review: WITH_COUNT }), head: HEAD, files: CODE, visibility: 'private' });
+    expect(inPro.ok, (inPro.errors ?? []).join(' ')).toBe(true);
   });
 
   it('treats `unknown` as public AND says the property was undeterminable', () => {
@@ -1290,21 +1286,6 @@ describe('a PUBLIC record does not count open findings', () => {
       expect(v.ok, JSON.stringify(over)).toBe(false);
       expect(v.errors.join(' ')).toMatch(/counts OPEN findings/);
     }
-  });
-
-  it('counts security as in play when the LINE is there, even unnamed and unowed', () => {
-    // ⛔ Surviving mutant: dropping `|| !!f.security` from `securityInPlay` left every test green,
-    // because the claimed-gate case has the count in `security:` itself — so the security check
-    // fires and the review half is never reached. This is the case that separates them: a
-    // `security:` line with NO count, the gate neither owed nor named, and the number in
-    // `review:`. A security round ran (the line says so), so the review count can be the same
-    // findings.
-    const v = evaluate({
-      body: record({ gates: 'code-review, delta', review: WITH_COUNT, security: 'own round, findings filed privately' }),
-      head: HEAD, files: CODE, visibility: 'public',
-    });
-    expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/the `review:` line counts OPEN findings/);
   });
 
   it('reads the WHOLE field, so the origin free text cannot carry the count', () => {
