@@ -1170,6 +1170,19 @@ export class ApiStore {
   }
 
   /** Get a profile by ID. */
+  /**
+   * `connections.created_at` of a profile's engine.db row, or undefined when the
+   * store runs without engine.db or has no row for it. Read per call by the
+   * http_request resolver to stamp the ledger (see `core/call-connection.ts`).
+   */
+  connectionCreatedAt(id: string): string | undefined {
+    try {
+      return this.connStore?.get(id)?.createdAt;
+    } catch {
+      return undefined;
+    }
+  }
+
   get(id: string): ApiProfile | undefined {
     return this.profiles.get(id);
   }

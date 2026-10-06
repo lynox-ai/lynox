@@ -29,6 +29,7 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { pv } from '../../core/prompt-value.js';
+import { noteCallConnection } from '../../core/call-connection.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -1301,6 +1302,26 @@ function writeRenewalFailure(
   );
 }
 
+/**
+ * Keep the connection this call's host resolves to on the call's ledger row
+ * (`core/call-connection.ts`). The same synchronous lookup the attach below makes,
+ * done first and on its own so it holds whether or not a credential is attached:
+ * a profile without engine-managed auth, or an agent without a vault, still read
+ * from that connection. Nothing from the tool input but the URL's host reaches it,
+ * and the host only selects among profiles the user saved. Outside a tool call (a
+ * bulk run's worker effect) the note is a no-op.
+ */
+function stampResolvedConnection(url: string, apiStore: NonNullable<ToolContext['apiStore']>): void {
+  let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
+  try {
+    profile = apiStore.getByHostname(new URL(url).hostname);
+  } catch {
+    return;
+  }
+  if (!profile) return;
+  noteCallConnection({ id: profile.id, createdAt: apiStore.connectionCreatedAt(profile.id) ?? null });
+}
+
 async function attachEngineManagedAuth(
   url: string,
   headers: Record<string, string>,
@@ -1309,6 +1330,7 @@ async function attachEngineManagedAuth(
 ): Promise<AttachedAuth> {
   const secretStore = agent.secretStore;
   const apiStore = toolContext?.apiStore;
+  if (apiStore) stampResolvedConnection(url, apiStore);
   if (!apiStore || !secretStore) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;

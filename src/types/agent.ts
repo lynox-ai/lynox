@@ -129,6 +129,9 @@ export type ToolCallRecorder = (call: {
   outputJson: string;
   durationMs: number;
   isError: boolean;
+  /** The connection the engine resolved for this call (`core/call-connection.ts`);
+   *  absent when none was resolved. Never taken from tool input. */
+  connection?: { id: string; createdAt: string | null } | undefined;
 }) => void;
 
 /** Four distinct outcomes for an ask_secret prompt:

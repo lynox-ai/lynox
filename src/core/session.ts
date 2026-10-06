@@ -504,6 +504,8 @@ export class Session {
             outputJson: call.outputJson,
             durationMs: call.durationMs,
             sequenceOrder,
+            connectionId: call.connection?.id,
+            connectionCreatedAt: call.connection?.createdAt ?? undefined,
           });
         } catch {
           // Fire-and-forget

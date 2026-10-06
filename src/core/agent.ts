@@ -98,6 +98,8 @@ import { collectVaultKeys } from './api-store.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
+import { runInCallSlot } from './call-connection.js';
+import type { CallSlot, CallConnection } from './call-connection.js';
 
 /**
  * Per-image token estimate for occupancy accounting. Anthropic bills vision by
@@ -3534,7 +3536,7 @@ export class Agent implements IAgent {
    *
    * Swallows sink failures: observability must never break the run it observes.
    */
-  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean): void {
+  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean, connection?: CallConnection | undefined): void {
     if (!this.recordToolCall) return;
     try {
       this.recordToolCall({
@@ -3544,6 +3546,7 @@ export class Agent implements IAgent {
         outputJson,
         durationMs: Math.round(durationMs),
         isError,
+        connection,
       });
       this._recordedToolCalls++;
     } catch { /* fire-and-forget */ }
@@ -3868,6 +3871,8 @@ export class Agent implements IAgent {
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
+    // This call's own slot for the connection the engine resolves (call-connection.ts).
+    const callSlot: CallSlot = {};
     try {
       // Publish the GO's downgrade decision to the instance field synchronously,
       // immediately before the handler reads it. spawn_agent calls
@@ -3878,7 +3883,7 @@ export class Agent implements IAgent {
       this._pendingDowngradeTier = downgradeDecision;
       const rawResult = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : tool.handler(processedInput, this);
+        : runInCallSlot(callSlot, () => tool.handler(processedInput, this));
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching
@@ -3999,7 +4004,7 @@ export class Agent implements IAgent {
         ? null
         : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
       const softMasked = softRaw !== null ? this._ledgerReason(softRaw) : null;
-      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
+      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null, callSlot.connection);
       channels.toolEnd.publish(
         softMasked === null
           ? { name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId }
@@ -4039,7 +4044,7 @@ export class Agent implements IAgent {
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
-      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true);
+      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true, callSlot.connection);
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: ledgerMessage, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
