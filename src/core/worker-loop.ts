@@ -19,7 +19,7 @@ import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '
 import { flattenPrompt } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
-import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
+import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
 // are two, and the move is deliberately NOT made here because it would edit
@@ -92,6 +92,35 @@ const WORKER_MAX_ITERATIONS = 30; // cap agent loops per background task (cost c
 // unattended run. $15 is generous for a legitimate multi-step task yet well under
 // the $50 interactive session ceiling. Doubles as the reservation estimate below.
 const WORKER_MAX_COST_USD = 15;
+/**
+ * The least headroom a scheduled run is started with.
+ *
+ * ⚠ A SETTING, not a measurement, and it prints in the log beside the figure it was
+ * compared against so a reader can judge it.
+ *
+ * ⚠ AND ITS JUSTIFICATION IS NOT WHAT AN EARLIER VERSION OF THIS COMMENT CLAIMED. That
+ * one said a run granted less than this "cannot finish a turn and record it", which has
+ * the mechanism backwards: `CostGuard.recordTurn` books a turn's usage and only THEN
+ * compares against the cap, and nothing checks before the call — so a run always
+ * completes its first turn whatever it was granted, and a cold first turn costs more
+ * than this floor on every model tier in `models.ts` bar the cheapest. The floor does
+ * not separate "can run" from "cannot"; it bounds how small a breach we are willing to
+ * book, and keeps the day's last cents from buying a run that stops immediately.
+ *
+ * A figure derived from the run's resolved model pricing would be the honest version of
+ * this constant. That is filed, not built here.
+ */
+const MIN_VIABLE_RUN_USD = 0.05;
+/**
+ * How often a still-deferred task says so again.
+ *
+ * The admission runs every tick (one minute by default), so logging every deferral
+ * would write 1440 lines a day per task — invisible in the same way silence is. The
+ * first deferral and the resolution are logged immediately; in between, at most one
+ * line per this interval. The `Missed run` log above uses the same shape for the same
+ * reason.
+ */
+const DEFER_RELOG_MS = 10 * 60_000;
 // Hard ceiling on a watch target's response body. The 30s fetch timeout bounds
 // TIME, not BYTES — a hostile/misconfigured watch URL streaming multi-GB within
 // the window would buffer the whole body into memory and OOM the worker. 10 MB
@@ -226,6 +255,13 @@ export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
   private readonly activeTasks = new Map<string, ActiveTask>();
+  /**
+   * Task id → when it was last SAID to be deferred for budget. Drives both halves of
+   * the visibility rule: a task absent from here is at its first deferral and speaks
+   * at once; one present speaks again only after {@link DEFER_RELOG_MS}; and removal
+   * is the transition back, which also speaks once.
+   */
+  private readonly deferredSaidAt = new Map<string, number>();
   /** Names this loop's runs in the lease column; another process's loop has its own. */
   private readonly leaseHolder = randomUUID();
 
@@ -251,6 +287,12 @@ export class WorkerLoop {
       clearInterval(this.timer);
       this.timer = null;
     }
+    // Cleared with the loop. Two reasons, and the second is the one that shows: entries
+    // otherwise outlive the triggers they name for the process lifetime (a deleted or
+    // disabled task leaves one behind), and a task that was deferred before a restart
+    // would SKIP its first-deferral line afterwards — the one line this whole half of the
+    // change exists to produce.
+    this.deferredSaidAt.clear();
     for (const [, active] of this.activeTasks) {
       // Marked BEFORE the abort, which is what settles a parked wait — and on the entry,
       // so the run's own continuation reads it from the object it already captured.
@@ -536,11 +578,76 @@ export class WorkerLoop {
         // atomicity is what closes the parallel-fire race (each task sees the
         // prior reservations instead of the same stale pre-run total).
         const estimate = reservationEstimate(task);
-        const reservation = reservePersistentBudget(estimate);
+        // ⛔ A GRANT, not the worst case — and the run's own cap is lowered to match.
+        //
+        // `reservePersistentBudget` projects a run's WORST CASE onto recorded spend,
+        // deliberately (see its comment), and that is sound WHILE the per-run cap is
+        // smaller than the persistent cap. Nothing checked that precondition, and on a
+        // plan whose daily cap is no larger than `WORKER_MAX_COST_USD` it does not hold:
+        // the projection then tips at the first cent of recorded spend (`0.01 + cap >
+        // cap`) and no scheduled agent task is admitted again until the daily window
+        // rolls. On a plan whose daily cap is SMALLER than the worst case it never fits
+        // at all, so such a task never runs once, from the first tick of the first day.
+        // (The per-plan figures live with the plans, in the control plane, not here.)
+        //
+        // ⛔ THE COUPLING. Granting less than the worst case is only safe because
+        // `capUSD` travels into the run's own `costGuard` below: restoring the constant
+        // there would let the run spend the full worst case against a grant of a few
+        // cents. The two numbers are one decision; whoever unpicks one unpicks both.
+        //
+        // ⚠ AND WHAT THE COUPLING DOES NOT REACH, so nobody reads it as a guarantee it
+        // is not. It bounds THIS agent's own turns, nothing else:
+        //   · the cost guard books a turn and only then compares, so the bound is
+        //     `grant + one turn`, not `grant` (see MIN_VIABLE_RUN_USD);
+        //   · `spawn_agent` children and the in-run `run_workflow` tool carry their own
+        //     budgets and bill the same daily cap — the note at the head of this file
+        //     has always said those two are unbounded;
+        //   · a manual run through `runTriggerNow` reserves nothing at all.
+        // Each is filed. What this change removes is the standstill, not the overshoot.
+        //
+        // Only `run_agent` is couplable: `executeStandard` and `executeWatch` each set a
+        // per-run `costGuard`, so there is a number to lower. `run_workflow` has no
+        // per-run cap of its own — its bound is the per-session ceiling — so it keeps the
+        // worst-case reservation rather than a grant that nothing would enforce. That
+        // leaves the same defect alive for scheduled workflows, which is filed, not fixed.
+        const headroom = persistentBudgetHeadroom();
+        // ⛔ The SESSION ceiling is in the min, and leaving it out was a real hole: the
+        // worker is the one caller that always passes a `costGuard`, and
+        // `Engine.createSession` applies the managed per-run ceiling only when the caller
+        // passed none. So without this term a scheduled run was permitted MORE per run
+        // than the same tenant's interactive chat, on every tier where the session
+        // ceiling is the smaller number. `getSessionCostCeiling` was already imported for
+        // `reservationEstimate`; it is the ceiling a single run cannot pass anyway.
+        const capUSD = task.effect === 'run_agent' && headroom !== null
+          ? Math.min(estimate, headroom, getSessionCostCeiling())
+          : null;
+        const grant = capUSD ?? estimate;
+
+        if (capUSD !== null && capUSD < MIN_VIABLE_RUN_USD) {
+          // ⚠ This branch PREEMPTS the reservation below, which is where the name of the
+          // cap comes from — so without the second sentence the log said "$0.00 of
+          // headroom" and never which cap was exhausted. On a plan whose monthly cap
+          // binds before its daily one that is the difference between "retry after
+          // midnight" and "done for the month", i.e. the same two-states-look-alike
+          // confusion the silence used to cause. `checkPersistentBudget` reads recorded
+          // spend only and is the existing diagnosis for exactly this.
+          const hit = checkPersistentBudget().reason;
+          this.sayBudgetDeferred(
+            task,
+            `$${capUSD.toFixed(2)} of headroom left, under the $${MIN_VIABLE_RUN_USD.toFixed(2)} a run is given at minimum`
+            + (hit === undefined ? '' : ` — ${hit}`),
+          );
+          continue;
+        }
+        const reservation = reservePersistentBudget(grant);
         if (!reservation.allowed) {
-          // Cap would be exceeded by in-flight work — defer to a later tick.
-          // The task stays due (next_run_at untouched) and retries once budget
-          // frees or the daily window resets. No status write → no churn.
+          // Still reachable with a grant, which is why this branch stays: the reservation
+          // recomputes recorded spend, so a write from another process can land between
+          // the headroom read above and this call. The task stays due (next_run_at
+          // untouched) and retries once budget frees or the daily window resets — but it
+          // no longer does so SILENTLY, which is what made "never started" and "hung
+          // scheduler" indistinguishable from outside.
+          this.sayBudgetDeferred(task, reservation.reason ?? 'budget admission refused');
           continue;
         }
         // Taken after the reservation, so a deferred task never holds a lease it does not use.
@@ -549,6 +656,10 @@ export class WorkerLoop {
           releasePersistentBudget(reservation.reservedUSD);
           continue;
         }
+        // AFTER the lease, so the word is true of a task that really proceeds. Said before
+        // it, a task admitted by budget and then refused by the lease wrote "budget freed"
+        // and then a fresh FIRST-deferral line next tick, as if it had never been deferred.
+        this.sayBudgetAdmitted(task);
         if (lease === 'interrupted' && !RESUMES_AFTER_LOSS[task.effect]) {
           // A run the engine lost mid-way is not started again: what it already did — a
           // mail sent, a record written, tokens spent — would happen twice. It is recorded
@@ -573,7 +684,7 @@ export class WorkerLoop {
         // reservation once the task settles, via .finally so it runs even if
         // executeTask's synchronous prologue throws — a leaked reservation would
         // otherwise shrink the tenant's daily headroom for the process lifetime.
-        void this.executeTask(task).finally(() => releasePersistentBudget(reservation.reservedUSD));
+        void this.executeTask(task, capUSD).finally(() => releasePersistentBudget(reservation.reservedUSD));
       }
     } catch {
       // Best-effort — don't crash the loop
@@ -582,7 +693,49 @@ export class WorkerLoop {
     }
   }
 
-  private async executeTask(task: TriggerRecord): Promise<void> {
+  /**
+   * Say that a task was NOT started for budget, without flooding the log.
+   *
+   * ⚠ This is the visible half of the fix, and the reason it is needed: the code this
+   * replaced `continue`d with no output at all, so from outside "the budget refused it"
+   * and "the scheduler is wedged" produced the identical observation — nothing. The
+   * reason string comes from `reservePersistentBudget`, which has always returned one;
+   * nobody read it.
+   *
+   * First deferral, then at most one line per {@link DEFER_RELOG_MS} — not per tick. The
+   * tick is a minute, so speaking every time would write ~1440 lines a day for ONE task,
+   * which buries the line as thoroughly as the silence did.
+   */
+  private sayBudgetDeferred(task: TriggerRecord, reason: string): void {
+    const now = Date.now();
+    const saidAt = this.deferredSaidAt.get(task.id);
+    if (saidAt !== undefined && now - saidAt < DEFER_RELOG_MS) return;
+    const again = saidAt === undefined ? '' : ' (still)';
+    this.deferredSaidAt.set(task.id, now);
+    process.stderr.write(
+      `[lynox:worker] Not started${again}: "${task.title}" (${task.id}) — ${reason}\n`,
+    );
+  }
+
+  /**
+   * The transition back, said once, so a reader sees the deferral END and not only its
+   * start. Called after the lease is held, so "admitted" is a statement about a task that
+   * is actually proceeding — and it says "admitted" rather than "started" because what it
+   * reports is the budget decision, not the run's outcome.
+   */
+  private sayBudgetAdmitted(task: TriggerRecord): void {
+    if (!this.deferredSaidAt.delete(task.id)) return;
+    process.stderr.write(
+      `[lynox:worker] Budget freed: "${task.title}" (${task.id}) is admitted again\n`,
+    );
+  }
+
+  /**
+   * @param capUSD The dollar ceiling the admission reserved for THIS run, or null for the
+   * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
+   * keeps each executor's own constant, so an unreserved run behaves exactly as before.
+   */
+  private async executeTask(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -688,9 +841,9 @@ export class WorkerLoop {
             // change-detection gate first (executeWatch: no change → no spend); any
             // other source runs the agent turn directly (executeStandard).
             if (task.source === 'watch') {
-              await this.executeWatch(task);
+              await this.executeWatch(task, capUSD);
             } else {
-              await this.executeStandard(task);
+              await this.executeStandard(task, capUSD);
             }
             break;
           case 'bulk_apply':
@@ -959,7 +1112,7 @@ export class WorkerLoop {
   }
 
   /** Execute a standard or scheduled task via headless Session. */
-  private async executeStandard(task: TriggerRecord): Promise<void> {
+  private async executeStandard(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
     // §0 A10 — is this run happening BECAUSE a question was answered?
     //
     // The answered row carries both halves the new run needs: the thread the
@@ -984,7 +1137,14 @@ export class WorkerLoop {
       // Per-run cost ceiling: without this an autonomous background task could
       // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
       // stops the agent loop once estimated spend crosses the cap.
-      costGuard: { maxBudgetUSD: WORKER_MAX_COST_USD },
+      //
+      // ⛔ `capUSD` is the admission's GRANT and it must win when there is one. The
+      // admission reserved that amount against the daily cap on the strength of this
+      // line; restoring the bare constant here would let the run spend the full $15 on
+      // a grant of, say, $0.40 — the reservation would then under-count by the
+      // difference and the daily cap would be the thing that breaks. Null means nobody
+      // reserved (a manual run), and then the constant is the only bound there is.
+      costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
     });
     // Cost control: cap agent loop iterations for background tasks
     // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
@@ -1330,9 +1490,47 @@ export class WorkerLoop {
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
     const result = await session.run(prompt, { triggerOrigin: task.source });
-    const truncatedResult = result.length > MAX_TASK_RESULT_CHARS
-      ? result.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
-      : result;
+
+    // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
+    // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
+    // does not throw — so a cap exit arrived here indistinguishable from a finished job
+    // and was recorded as `success`. The cause has been available the whole time;
+    // `worker-loop.ts` never read it. The owner's view therefore said the task ran fine,
+    // which is the worst of the three possible reports: silence would at least not have
+    // been believed.
+    //
+    // ⛔ OFF THE SESSION, not off `session.getAgent()`. The agent is a mutable field that
+    // `run()`'s own prologue replaces, and the auto-compaction it starts just before
+    // returning reaches `_recreateAgent()` synchronously — so the agent found here can be
+    // a fresh one whose stop is `null`, which reads as a clean end. That failure
+    // correlates with long runs, i.e. with the runs most likely to hit a cap.
+    //
+    // The line is `capStopNote`'s, in `eager-persist.ts`, and now exactly: BOTH caps with
+    // tool calls still pending. `budget_cap` alone was too narrow — an iteration-capped
+    // run with pending work is the same unfinished job for a different reason, and the
+    // first version of this code recorded it `success` while claiming to borrow a line
+    // that covers it. A cap that lands on a finished answer stays an ordinary end of
+    // turn; reporting that as a failure would train the reader to ignore the real one.
+    //
+    // ⚠ Not covered, and filed rather than guessed at: `absolute_cap` and `max_tokens`
+    // both report zero pending tools, and whether either is reachable on this path has
+    // not been measured.
+    // `?.()` on the METHOD: this sits in the RESULT path, where a throw is recorded as the
+    // run's own failure — a successful task would be reported failed with a TypeError as
+    // the text the owner reads. The partial-double case is not hypothetical; it is why
+    // this repo states the same rule at `session.ts`'s helper-cost read.
+    const stop = session.getLastRunStop?.() ?? null;
+    const cut = stop === null || stop.pendingToolCount <= 0 ? null
+      : stop.cause === 'budget_cap' ? `cost ceiling of $${(capUSD ?? WORKER_MAX_COST_USD).toFixed(2)}`
+        : stop.cause === 'iteration_cap' ? `turn limit of ${String(WORKER_MAX_ITERATIONS)}`
+          : null;
+    const budgetCut = cut === null ? null : `Stopped at this run's ${cut} with work still pending`;
+    // Composed BEFORE the truncation, so the reason survives a long result rather than
+    // being the thing that gets cut.
+    const reported = budgetCut === null ? result : `${budgetCut}.\n\n${result}`;
+    const truncatedResult = reported.length > MAX_TASK_RESULT_CHARS
+      ? reported.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
+      : reported;
 
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
@@ -1341,15 +1539,27 @@ export class WorkerLoop {
       // paths that can end this run without one — the expiry sweep and this —
       // now agree on the status instead of overwriting each other with different
       // verdicts.
-      taskManager.recordTaskRun(task.id, truncatedResult, questionWentUnanswered ? 'failed' : 'success');
+      //
+      // The ceiling exit joins it on `failed` and for the same reason: the job did not
+      // finish. No new status value — `recordTaskRun`'s union is being extended by other
+      // work in flight, and a value added from here would collide with it.
+      taskManager.recordTaskRun(task.id, truncatedResult, questionWentUnanswered || budgetCut !== null ? 'failed' : 'success');
     }
 
     if (this.notificationRouter.hasChannels()) {
       await this.notificationRouter.notify({
-        title: `\u2713 ${task.title}`,
+        // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
+        // engine itself cut off is the same false report as the `success` status was.
+        //
+        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: the
+        // unanswered-question path above records `failed` and still notifies as a ✓ at
+        // `normal`. That asymmetry is older than this change and no test pins it either
+        // way; whether such a run should notify as a failure is a question about that
+        // path, so it is filed rather than answered by a keystroke here.
+        title: `${budgetCut === null ? '\u2713' : '\u2717'} ${task.title}`,
         body: truncatedResult,
         taskId: task.id,
-        priority: 'normal',
+        priority: budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
         // result instead of a blank new chat (the service worker routes
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
@@ -1525,7 +1735,7 @@ export class WorkerLoop {
    * Only notifies (and runs agent analysis) when content has changed.
    * Uses Node.js crypto.createHash('sha256') for fast comparison.
    */
-  private async executeWatch(task: TriggerRecord): Promise<void> {
+  private async executeWatch(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
     let config: { url?: string; interval_minutes?: number; selector?: string; last_hash?: string };
     try {
       config = task.watch_config ? JSON.parse(task.watch_config) as typeof config : {};
@@ -1590,7 +1800,16 @@ export class WorkerLoop {
       // worker_profile (below) may still override the tier if the user set one.
       model: 'fast',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
-      costGuard: { maxBudgetUSD: WATCH_ANALYSIS_MAX_USD },
+      // ⛔ The grant wins over the constant when the admission made one — same coupling
+      // as in `executeStandard`, same consequence if it is unpicked. A watch's estimate
+      // IS this constant, so `capUSD` is either it or a smaller slice of the headroom.
+      //
+      // ⚠ This path does NOT report a cap exit the way `executeStandard` does, and that
+      // is correct rather than forgotten: `noTools` below suppresses every tool, so the
+      // model cannot emit a tool_use block, so the agent's cap branch never sees pending
+      // work and never reports `budget_cap` or `iteration_cap`. Measured at the agent,
+      // not assumed. If this turn ever gains tools, the report has to come with them.
+      costGuard: { maxBudgetUSD: capUSD ?? WATCH_ANALYSIS_MAX_USD },
     });
     const workerProfile3 = this.engine.getUserConfig().worker_profile;
     if (workerProfile3) {

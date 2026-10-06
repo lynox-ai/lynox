@@ -101,6 +101,11 @@ function makeTaskManager(tasks: TriggerRecord[] = []): TaskManager {
     // tests are about dispatch, and a mock that simply lacked the method used to
     // make every one of them fail for a reason none of them was about.
     getExpiredWaitingTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue([]),
+    // The tick's THIRD query (answered prompts re-arming their trigger). Absent, the
+    // re-arm block threw a TypeError that the surrounding catch wrote to stderr — 45 such
+    // lines in one run of this file — so every case here ran with that half of the tick
+    // dead, including the one named after it.
+    getWaitingTriggers: vi.fn<() => TriggerRecord[]>().mockReturnValue([]),
     endWait: vi.fn<(id: string, to: string) => boolean>().mockReturnValue(false),
     // The run lease (engine.db v16): free by default. The lease itself is tested
     // against a real engine.db in trigger-lease.test.ts.
@@ -120,7 +125,14 @@ function makeSession(result: string | Error = 'Done.'): Session {
   const runFn = result instanceof Error
     ? vi.fn<(task: string) => Promise<string>>().mockRejectedValue(result)
     : vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result);
-  return { sessionId: 'thread-worker-test', run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+  // `getLastRunStop` is on the real Session always, and `executeStandard` reads the run's
+  // ending off it. `null` is a production shape (nothing ran, or the send threw) and the
+  // caller handles it; a double that LACKS the method turns the read into a TypeError
+  // that the task-failure path swallows into the recorded result — every test reaching
+  // that line then reports "is not a function" AS the task's result, which is how this
+  // repair came to be needed in three files at once. Same shape as the `getPromptStore`
+  // note on the engine mock below.
+  return { sessionId: 'thread-worker-test', run: runFn, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined } as unknown as Session;
 }
 
 function makeEngine(opts?: {
@@ -156,9 +168,25 @@ function makeNotificationRouter(hasChannels = true): NotificationRouter {
 // Tests
 // ---------------------------------------------------------------------------
 
+/**
+ * The day the clock and every cost-provider fixture agree on.
+ *
+ * It has to be ONE constant: the spend rows are keyed by `YYYY-MM-DD` and the production
+ * code derives that key from the clock at call time.
+ */
+const FIXED_DAY = '2026-06-15';
+
 describe('WorkerLoop', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    // ⚠ Pinned, and pinned TO THE SAME DAY the fixtures name. `today` below is computed
+    // when this file is COLLECTED, while `computeRecordedSpend` reads the clock per call,
+    // so the two can disagree: a run crossing midnight between them makes today's recorded
+    // spend 0, the headroom the full cap, and every asserted figure wrong — for an hour a
+    // day, with no code change. Measured the hard way: setting the clock here while
+    // leaving `today` on the real date broke all twelve budget cases at once, because the
+    // provider's row was then for a different day than the code was asking about.
+    vi.setSystemTime(new Date(`${FIXED_DAY}T12:00:00Z`));
   });
 
   afterEach(() => {
@@ -267,29 +295,564 @@ describe('WorkerLoop', () => {
     );
   });
 
-  // ---- 2c. daily-cap admission control defers a task (SEC-LC-2) ----
+  // ---- 2c. daily-cap admission: a GRANT, coupled to the run's own cap (SEC-LC-2) ----
 
-  it('defers a due task when its reservation would breach the daily cap', async () => {
-    const today = new Date().toISOString().slice(0, 10);
-    configurePersistentBudget({
-      // $99 recorded, cap $100 → a $15 run_agent reservation projects $114 > $100.
-      costProvider: { getCostByDay: () => [{ day: today, cost_usd: 99, run_count: 10 }] },
-      dailyCapUSD: 100,
+  describe('admission grants the headroom instead of demanding the worst case', () => {
+    const today = FIXED_DAY;
+
+    // ⚠ A queued `mockResolvedValueOnce` that a case never consumes leaks into the NEXT
+    // watch test in this file. Measured, and it is why this is here rather than at the
+    // end of the one case that queues one: mutating the admission so the watch task
+    // DEFERS left the fetch queued and failed an unrelated watch test downstream, which
+    // would attribute a kill to the wrong assertion. Resetting per case keeps a
+    // mutation's kills attributable — the same hand-cleanup this file does for
+    // `mockRunManifest`.
+    afterEach(() => { mockFetchPinned.mockReset(); });
+
+    /** The cap the admission handed the run, read off the session it created. */
+    function grantedCap(engine: Engine): number | undefined {
+      const calls = (engine.createSession as unknown as {
+        mock: { calls: Array<[{ costGuard?: { maxBudgetUSD: number } }?]> };
+      }).mock.calls;
+      return calls[0]?.[0]?.costGuard?.maxBudgetUSD;
+    }
+
+    /** Collect what the loop wrote to stderr, and always put it back. */
+    function captureStderr(): { lines: string[]; restore: () => void } {
+      const lines: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+        lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
+        return true;
+      }) as unknown as typeof process.stderr.write);
+      return { lines, restore: () => { spy.mockRestore(); } };
+    }
+
+    function spend(cost: number): { getCostByDay: () => Array<{ day: string; cost_usd: number; run_count: number }> } {
+      return { getCostByDay: () => [{ day: today, cost_usd: cost, run_count: 1 }] };
+    }
+
+    // ⛔ WHAT THIS BLOCK REPLACED, because the test that stood here asserted the defect.
+    // It configured $99 of $100 spent and expected the task NOT to run — on the stated
+    // reasoning that a $15 worst-case reservation projects $114. True of the arithmetic
+    // and wrong as a requirement: by the same arithmetic a $15 per-run cap under a $15
+    // daily cap refuses EVERY scheduled agent task after the first cent, and where the
+    // daily cap is the SMALLER number it refuses the first one too. A green test said that
+    // was intended. The new rule grants `min(worstCase, headroom, sessionCeiling)` and
+    // lowers the run's own `costGuard` to the same number.
+    //
+    // (The deployment figures that make this bite live with the deployment, in the control
+    // plane. The fixtures below pick numbers that exhibit each case, not real plan caps.)
+
+    it('admits a run the worst case would have refused, capped at the headroom', async () => {
+      // The measured case: $0.22 spent, $15 daily cap. Old code: 0.22 + 15 > 15 → never.
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const tm = makeTaskManager([makeTask()]);
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: tm, session });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.run, 'the run the old projection refused').toHaveBeenCalled();
+      expect(grantedCap(engine)).toBeCloseTo(14.78, 2);
     });
-    const task = makeTask(); // effect run_agent, source cron → $15 estimate
-    const tm = makeTaskManager([task]);
-    const session = makeSession('Done.');
-    const engine = makeEngine({ taskManager: tm, session });
-    const router = makeNotificationRouter();
 
-    const loop = new WorkerLoop(engine, router, 60_000);
-    await loop.tick();
-    await vi.advanceTimersByTimeAsync(0);
+    it('never grants more than the daily cap has left', async () => {
+      // The invariant the grant has to keep, and the reason it is asserted as a SUM
+      // rather than as a number: a fix that simply reserved less — say a fixed $1 — would
+      // pass the case above and break here as soon as the headroom fell under its figure.
+      configurePersistentBudget({ costProvider: spend(14.9), dailyCapUSD: 15 });
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.') });
 
-    // Reservation refused → task never dispatched, schedule left intact to retry.
-    expect(engine.createSession).not.toHaveBeenCalled();
-    expect(session.run).not.toHaveBeenCalled();
-    expect(tm.recordTaskRun).not.toHaveBeenCalled();
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const cap = grantedCap(engine);
+      expect(cap, 'admitted at all').toBeDefined();
+      expect(14.9 + (cap ?? 0), 'recorded spend plus what this run may add').toBeLessThanOrEqual(15);
+    });
+
+    it.each([[3], [2]])('starts at all on a $%s daily cap', async (dailyCapUSD) => {
+      // The small-cap case: nothing spent, and nothing ran either, because the worst case
+      // does not fit under a cap this size — so the projection refused the FIRST task of
+      // the day, every day. A run capped at the whole daily budget is the honest answer
+      // when the budget is smaller than one run's worst case.
+      configurePersistentBudget({ costProvider: spend(0), dailyCapUSD });
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.run).toHaveBeenCalled();
+      expect(grantedCap(engine)).toBe(dailyCapUSD);
+    });
+
+    it('reserves exactly the number it caps the run at', async () => {
+      // ⛔ THE COUPLING, and it is the load-bearing half of the whole change: granting
+      // less than the worst case is only safe because the SAME number becomes the run's
+      // `costGuard`. The identity below is what kills the mutant that restores
+      // `WORKER_MAX_COST_USD` on either cap line — the run would then be allowed to spend
+      // $15 against a $14.78 reservation, and the daily cap, not the run, is what breaks.
+      //
+      // Read while the run is still in flight (a session that never resolves), because
+      // the reservation is released the moment it settles.
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const inFlight = {
+        sessionId: 'thread-worker-test',
+        run: vi.fn(() => new Promise<string>(() => { /* never settles */ })),
+        _recreateAgent: vi.fn(),
+        getAgent: () => null,
+        getLastRunStop: () => null,
+      } as unknown as Session;
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session: inFlight });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getReservedInFlight()).toBeCloseTo(14.78, 2);
+      expect(grantedCap(engine), 'the cap and the reservation are one number').toBe(getReservedInFlight());
+    });
+
+    it('defers below the minimum viable run, and SAYS so', async () => {
+      // $99.98 of $100 leaves under two cents. A run granted that cannot finish a turn
+      // and record it, so deferring is right — but silently was not: the code this
+      // replaced wrote nothing at all, which is why "the budget refused it" and "the
+      // scheduler is wedged" produced the same observation from outside.
+      configurePersistentBudget({ costProvider: spend(99.98), dailyCapUSD: 100 });
+      const tm = makeTaskManager([makeTask()]);
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: tm, session });
+      const { lines, restore } = captureStderr();
+      try {
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        restore();
+      }
+
+      expect(engine.createSession, 'nothing dispatched').not.toHaveBeenCalled();
+      expect(tm.recordTaskRun, 'and the schedule left intact to retry').not.toHaveBeenCalled();
+      const said = lines.join('');
+      expect(said, 'the task is named').toContain('task-1');
+      expect(said, 'the figure it was refused against').toContain('0.05');
+      expect(said).toContain('Not started');
+    });
+
+    it('says a still-deferred task at most once per relog interval, then says it is free', async () => {
+      // The flood this avoids is not hypothetical: the tick is a minute, so one line per
+      // deferral is 1440 a day for ONE task — a line nobody reads is as good as silence,
+      // which is the failure above. Two ticks must produce ONE line; the resolution must
+      // produce one more, so a reader sees the deferral END and not only its start.
+      let cost = 99.98;
+      configurePersistentBudget({
+        costProvider: { getCostByDay: () => [{ day: today, cost_usd: cost, run_count: 1 }] },
+        dailyCapUSD: 100,
+      });
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
+      const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+      const { lines, restore } = captureStderr();
+      try {
+        await loop.tick();
+        await loop.tick();
+        const first = lines.filter((l) => l.includes('Not started')).length;
+        cost = 10; // the day's spend was corrected / the window rolled
+        await loop.tick();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(first, 'two deferrals, one line').toBe(1);
+      } finally {
+        restore();
+      }
+      expect(session.run, 'and it runs once there is headroom again').toHaveBeenCalled();
+      expect(lines.join(''), 'the deferral is reported as over').toContain('Budget freed');
+    });
+
+    it('lowers a WATCH analysis to the headroom too', async () => {
+      // ⛔ FOUND BY A SURVIVING MUTANT, not by design: restoring the constant on
+      // `executeWatch`'s `costGuard` passed all 109 tests. Both run_agent executors set a
+      // per-run cap and both are reached through the same admission, so leaving one of
+      // them unwitnessed meant half the coupling was held by nothing.
+      //
+      // A watch's worst case IS `WATCH_ANALYSIS_MAX_USD` ($0.50), so the grant is either
+      // that or a smaller slice of the headroom — here $0.20 of a $100 cap with $99.80
+      // spent, which is above the viable minimum and therefore admitted.
+      configurePersistentBudget({ costProvider: spend(99.8), dailyCapUSD: 100 });
+      const watchTask = makeTask({
+        source: 'watch',
+        watch_config: JSON.stringify({ url: 'https://watch.test', interval_minutes: 60 }),
+      });
+      const tm = Object.assign(makeTaskManager([watchTask]), { updateWatchConfig: vi.fn() });
+      const analysis = makeSession('The page changed.');
+      const engine = makeEngine({ taskManager: tm, session: analysis });
+      mockFetchPinned.mockResolvedValueOnce(new Response('<html><body><main>Now this</main></body></html>', { status: 200 }));
+
+      await new WorkerLoop(engine, makeNotificationRouter(false), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(analysis.run, 'the analysis ran').toHaveBeenCalled();
+      expect(grantedCap(engine), 'capped at the headroom, not at the $0.50 constant').toBeCloseTo(0.2, 2);
+    });
+
+    it('starts a trigger whose parked question was answered, with the day already spent', async () => {
+      // ⛔ THE SYMPTOM THIS FIX IS A PRECONDITION FOR, measured by the release track on
+      // the candidate: after a restart and an answer to a parked prompt the trigger is due
+      // again — and the tick refused it HERE, at the reservation, for the rest of the day.
+      // On managed, durable wait therefore never resumed its own work.
+      //
+      // ⚠ What this pins and what it does not: it kills no mutant of its own (the
+      // admission is the same code the cases above cover). It is here as the regression
+      // witness for a reported product path, so that whoever tightens the admission next
+      // sees which feature goes dark — which a test named after the arithmetic would not
+      // tell them.
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const answeredStore = {
+        getAnsweredForTrigger: vi.fn(() => ({
+          id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes, send it.',
+        })),
+        releaseTrigger: vi.fn(),
+      } as unknown as PromptStore;
+      const session = makeSession('Report sent.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore: answeredStore });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.run, 'the answered trigger resumed').toHaveBeenCalled();
+      expect(engine.createSession, 'in the thread the question was asked in').toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'thread-parked' }),
+      );
+      const prompt = (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
+      expect(prompt, 'and the answer reached the run').toContain('Yes, send it.');
+    });
+
+    it('never grants more than a single session is allowed to spend', async () => {
+      // ⛔ The third term in the min, and without this case it is a free survivor: in every
+      // other fixture the session ceiling (default $50) is the largest of the three, so
+      // dropping it changes nothing. Here it is the smallest.
+      //
+      // Why it belongs in the min at all: the worker is the one caller that ALWAYS passes
+      // a `costGuard`, and `Engine.createSession` applies the managed per-run ceiling only
+      // when the caller passed none — so without this term a scheduled run was permitted
+      // more per run than the same tenant's interactive chat, on every deployment where
+      // the session ceiling is the smaller number.
+      configurePersistentBudget({ costProvider: spend(0), dailyCapUSD: 100, sessionCapUSD: 4 });
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.run, 'it still runs').toHaveBeenCalled();
+      expect(grantedCap(engine), 'the session ceiling, not the daily headroom').toBe(4);
+    });
+
+    it('two due tasks in one tick cannot both be granted the same headroom', async () => {
+      // ⛔ FOUND BY A SURVIVING MUTANT: hoisting `persistentBudgetHeadroom()` out of the
+      // per-task loop passed every other case in both files, because no test anywhere
+      // dispatched more than ONE due task. The parallel-fire overshoot is the whole reason
+      // the in-flight accumulator exists, and "never exceeds the daily cap" was pinned for
+      // n=1 only.
+      //
+      // $10 of headroom: the first task is granted all of it, the second sees the first
+      // one's reservation and finds nothing left.
+      configurePersistentBudget({ costProvider: spend(5), dailyCapUSD: 15 });
+      const inFlight = (): Session => ({
+        sessionId: 'thread-worker-test',
+        run: vi.fn(() => new Promise<string>(() => { /* never settles */ })),
+        _recreateAgent: vi.fn(),
+        getAgent: () => null,
+        getLastRunStop: () => null,
+      } as unknown as Session);
+      const first = inFlight();
+      const tm = makeTaskManager([makeTask({ id: 'task-a' }), makeTask({ id: 'task-b' })]);
+      const engine = makeEngine({ taskManager: tm, session: first });
+
+      const { lines, restore } = captureStderr();
+      try {
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        restore();
+      }
+
+      expect((engine.createSession as unknown as { mock: { calls: unknown[] } }).mock.calls.length,
+        'exactly one of the two started').toBe(1);
+      expect(getReservedInFlight(), 'and the reservation never exceeds the headroom').toBeCloseTo(10, 2);
+      expect(lines.join(''), 'the second one says why it is waiting').toContain('task-b');
+    });
+
+    it('names the cap that bound it, not only the figure', async () => {
+      // ⛔ The MIN_VIABLE branch PREEMPTS the reservation, which is where the cap's name
+      // comes from — so this message used to read "$0.00 of headroom left" and never say
+      // WHICH cap was exhausted. On a plan whose monthly cap binds before its daily one,
+      // that is the difference between "retry after midnight" and "nothing more this
+      // month", which is the same two-states-look-alike confusion the silence caused.
+      configurePersistentBudget({ costProvider: spend(15), dailyCapUSD: 15 });
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.') });
+      const { lines, restore } = captureStderr();
+      try {
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        restore();
+      }
+      const said = lines.join('');
+      expect(said, 'the remaining headroom').toContain('$0.00');
+      expect(said, 'AND which cap it ran into').toContain('Daily spending cap');
+    });
+
+    it('prints the headroom it measured, not a constant', async () => {
+      // The figure a reader judges the threshold against. `toContain('0.05')` alone pins
+      // the threshold; nothing pinned the other number, so printing a constant — or the
+      // wrong variable — where the remaining headroom belongs survived.
+      configurePersistentBudget({ costProvider: spend(99.98), dailyCapUSD: 100 });
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.') });
+      const { lines, restore } = captureStderr();
+      try {
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      } finally {
+        restore();
+      }
+      expect(lines.join(''), '100 − 99.98, as measured').toContain('$0.02');
+    });
+
+    it('says a still-deferred task again once the relog interval has passed', async () => {
+      // ⛔ The sibling case above runs both ticks in the SAME frozen instant, so
+      // `now - saidAt === 0` and the throttle is satisfied by arithmetic rather than by
+      // its interval. Consequence: a mutant making the throttle PERMANENT survived it —
+      // which turns the visible half of this change back into silence after one line —
+      // and the `(still)` branch was produced by no test at all.
+      configurePersistentBudget({ costProvider: spend(99.98), dailyCapUSD: 100 });
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.') });
+      const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+      const { lines, restore } = captureStderr();
+      try {
+        await loop.tick();
+        vi.setSystemTime(new Date(Date.now() + 10 * 60_000 + 1));
+        await loop.tick();
+      } finally {
+        restore();
+      }
+      const said = lines.filter((l) => l.includes('Not started'));
+      expect(said.length, 'the interval has passed, so it speaks again').toBe(2);
+      expect(said[1], 'and marks the repeat as a repeat').toContain('(still)');
+    });
+
+    it('says nothing at all about budget on an ordinary admitted run', async () => {
+      // `sayBudgetAdmitted`'s early return is the only thing stopping every admitted run
+      // printing "Budget freed" on every tick. Removing it survived both files, because
+      // the cases that capture stderr never admit and the cases that admit never capture.
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
+      const { lines, restore } = captureStderr();
+      try {
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        restore();
+      }
+      expect(session.run, 'it did run').toHaveBeenCalled();
+      expect(lines.join(''), 'and said nothing about a deferral it never had').not.toContain('Budget freed');
+      expect(lines.join('')).not.toContain('Not started');
+    });
+
+    it('a restarted loop speaks again about a task it had already reported', async () => {
+      // `deferredSaidAt` is cleared by `stop()`. Without that, a task deferred before a
+      // restart skips its FIRST-deferral line afterwards — the one line this half of the
+      // change exists to produce — and entries outlive the triggers they name.
+      configurePersistentBudget({ costProvider: spend(99.98), dailyCapUSD: 100 });
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session: makeSession('Done.') });
+      const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+      const { lines, restore } = captureStderr();
+      try {
+        await loop.tick();
+        loop.stop();
+        await loop.tick();
+      } finally {
+        restore();
+      }
+      const said = lines.filter((l) => l.includes('Not started'));
+      expect(said.length, 'twice, and the second is a first line again').toBe(2);
+      expect(said[1], 'not marked as a repeat, because the loop forgot').not.toContain('(still)');
+    });
+
+    it('does not grant a workflow a slice it has no cap to enforce', async () => {
+      // ⛔ `run_workflow` is deliberately NOT couplable: `executePipeline` sets no per-run
+      // `costGuard`, so a lowered reservation would be a number nothing enforces — the
+      // run could spend the session ceiling against a $1 reservation. It therefore keeps
+      // the worst-case projection and defers, exactly as before. This is the witness for
+      // the mutant that drops the `task.effect === 'run_agent'` condition.
+      configurePersistentBudget({ costProvider: spend(99), dailyCapUSD: 100, sessionCapUSD: 50 });
+      const tm = makeTaskManager([makeTask({ effect: 'run_workflow' })]);
+      const engine = makeEngine({ taskManager: tm, session: makeSession('Done.') });
+      const { lines, restore } = captureStderr();
+      try {
+        await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+        await vi.advanceTimersByTimeAsync(0);
+      } finally {
+        restore();
+      }
+
+      // Admitted, it would reach executePipeline and record SOMETHING (a skip for the
+      // null target, or the mock engine's missing getRunHistory). Deferred, nothing.
+      expect(tm.recordTaskRun, 'deferred, so the pipeline path was never entered').not.toHaveBeenCalled();
+      expect(lines.join(''), 'and the refusal carries the cap it came from').toContain('Daily spending cap');
+    });
+  });
+
+  // ---- 2c'. a run that ended ON its ceiling is not reported as a success ----
+
+  describe('the cost-ceiling exit reaches the owner', () => {
+    /**
+     * A session that reports `stop` as the ending of the run it just made.
+     *
+     * ⚠ Through `getLastRunStop`, which is the method the worker reads — NOT through
+     * `getAgent().getLastStop()`. The difference is the point of one of the fixes under
+     * test: the agent behind a session is replaced synchronously by `run()`'s prologue
+     * and by the auto-compaction it starts, so a double built around `getAgent` would
+     * model a path production does not take.
+     */
+    function sessionStoppedAt(stop: { cause: string; pendingToolCount: number }, result = 'Partial findings so far.'): Session {
+      return {
+        sessionId: 'thread-worker-test',
+        run: vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result),
+        _recreateAgent: vi.fn(),
+        getAgent: () => null,
+        getLastRunStop: () => ({ ...stop, pendingTools: ['web_research'], text: result }),
+      } as unknown as Session;
+    }
+
+    it('quotes the GRANT in the ceiling message, not the constant', async () => {
+      // ⛔ Both other ceiling cases configure no budget, so `capUSD` is null and the
+      // message falls through to the worker's constant — which means the whole point of
+      // threading the grant into the MESSAGE was unwitnessed, and replacing
+      // `capUSD ?? WORKER_MAX_COST_USD` with the bare constant survived.
+      configurePersistentBudget({ costProvider: { getCostByDay: () => [{ day: FIXED_DAY, cost_usd: 0.22, run_count: 1 }] }, dailyCapUSD: 15 });
+      const tm = makeTaskManager([makeTask()]);
+      const engine = makeEngine({
+        taskManager: tm,
+        session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }),
+      });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0];
+      expect(call?.[1], 'the ceiling this run actually had').toContain('$14.78');
+      expect(call?.[1], 'and not the constant it would have had unbudgeted').not.toContain('$15.00');
+    });
+
+    it('keeps the reason when the result is long enough to be truncated', async () => {
+      // The reason is composed BEFORE the truncation so it survives a long result rather
+      // than being the thing that gets cut. A mutant that truncates first and prefixes
+      // afterwards produces a recorded string longer than the cap and survived every
+      // other case, because the ceiling cases all use a short result.
+      const tm = makeTaskManager([makeTask()]);
+      const engine = makeEngine({
+        taskManager: tm,
+        session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }, 'x'.repeat(5000)),
+      });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const recorded = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0]?.[1] ?? '';
+      expect(recorded.length, 'still bounded').toBeLessThanOrEqual(4001);
+      expect(recorded, 'and the reason is what survived, not what got cut').toContain('cost ceiling');
+    });
+
+    it('records a budget-capped run as failed, naming the ceiling', async () => {
+      // ⛔ `costGuard` does not throw — it makes the agent stop and RETURN its text. So
+      // the ceiling exit arrived at the recorder indistinguishable from a finished job
+      // and was written as `success`: the owner's view said the task ran fine. The cause
+      // was available the whole time (`Agent.getLastStop()`); this file is the first
+      // caller in the worker.
+      const tm = makeTaskManager([makeTask()]);
+      const router = makeNotificationRouter();
+      const engine = makeEngine({
+        taskManager: tm,
+        session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 2 }),
+      });
+
+      await new WorkerLoop(engine, router, 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0];
+      expect(call?.[2], 'not a success').toBe('failed');
+      expect(call?.[1], 'the ceiling is named').toContain('cost ceiling');
+      expect(call?.[1], 'and the run output is kept, not replaced').toContain('Partial findings so far.');
+      // The notification agrees with the status — a ✓ beside a result the engine cut off
+      // is the same false report the `success` status was.
+      const msg = (router.notify as unknown as { mock: { calls: Array<[NotificationMessage]> } }).mock.calls[0]?.[0];
+      expect(msg?.title).toContain('✗');
+      expect(msg?.priority).toBe('high');
+    });
+
+    it('reports a TURN-capped run too, and says which limit it was', async () => {
+      // ⛔ THIS CASE REPLACES ONE THAT ASSERTED THE DEFECT. The first version of this
+      // suite fed exactly this stop and asserted `success` with no notice, on the stated
+      // ground that only the cost ceiling mattered — while claiming to borrow
+      // `capStopNote`'s line, which covers BOTH caps. An iteration-capped run with tool
+      // calls still pending is the same unfinished job for a different reason, and it is
+      // reachable: `WORKER_MAX_ITERATIONS` is the worker's own limit. A green test said
+      // reporting it as a clean success was intended.
+      const tm = makeTaskManager([makeTask()]);
+      const engine = makeEngine({
+        taskManager: tm,
+        session: sessionStoppedAt({ cause: 'iteration_cap', pendingToolCount: 3 }),
+      });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0];
+      expect(call?.[2]).toBe('failed');
+      expect(call?.[1], 'the limit is named, and it is not the money one').toContain('turn limit');
+      expect(call?.[1], 'a reader must be able to tell the two apart').not.toContain('cost ceiling');
+    });
+
+    it('leaves a true end of turn alone', async () => {
+      // The other side of the condition. `end_turn` is what the agent reports when it
+      // finished by itself — including when the cost guard tripped on a turn that had no
+      // pending tool call, which is the shape `agent.ts` emits instead of `budget_cap`.
+      // Reporting that as a failure would train the reader to ignore the real one.
+      const tm = makeTaskManager([makeTask()]);
+      const engine = makeEngine({
+        taskManager: tm,
+        session: sessionStoppedAt({ cause: 'end_turn', pendingToolCount: 0 }, 'All done.'),
+      });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0];
+      expect(call?.[2]).toBe('success');
+      expect(call?.[1]).toBe('All done.');
+    });
+
+    it('a stop with no pending work is an ordinary end, whatever the cause says', async () => {
+      // ⚠ WHAT THIS PINS, stated precisely because the first version of this suite got it
+      // wrong: `pendingToolCount > 0` is a DEFENSIVE conjunct, not the discriminator.
+      // Measured at `agent.ts`: `budget_cap` is only ever written inside the branch that
+      // requires a non-empty pending list, so `budget_cap` with zero pending is a shape
+      // production does not emit today. The conjunct is kept because the direction of its
+      // failure is the bad one — reporting a FINISHED run as failed — and this case says
+      // so rather than dressing an equivalent mutant up as a kill.
+      const tm = makeTaskManager([makeTask()]);
+      const engine = makeEngine({
+        taskManager: tm,
+        session: sessionStoppedAt({ cause: 'budget_cap', pendingToolCount: 0 }, 'Finished anyway.'),
+      });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const call = (tm.recordTaskRun as unknown as { mock: { calls: Array<[string, string, string]> } }).mock.calls[0];
+      expect(call?.[2]).toBe('success');
+      expect(call?.[1]).toBe('Finished anyway.');
+    });
   });
 
   // ---- 2d. per-effect reservation estimate = each run's true worst case ----
@@ -1766,6 +2329,9 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const session = {
       sessionId: SESSION_ID,
       _recreateAgent: vi.fn(),
+      // See the note on `makeSession`: the run's ending is read off this.
+      getAgent: () => null,
+      getLastRunStop: () => null,
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
       run: vi.fn(async () => {
         // The agent turn asks and PARKS here — exactly where `ask_user` sits,
@@ -1849,6 +2415,9 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const session = {
       sessionId: SESSION_ID,
       _recreateAgent: vi.fn(),
+      // See the note on `makeSession`: the run's ending is read off this.
+      getAgent: () => null,
+      getLastRunStop: () => null,
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
       run: vi.fn(async () => { await body((q) => session.promptUser!(q, ['Yes', 'No'])); return 'Done.'; }),
     };

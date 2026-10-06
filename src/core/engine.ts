@@ -2127,7 +2127,9 @@ export class Engine {
     // Managed interactive (main-chat) sessions get a CP-owned per-run cost ceiling
     // (T-within): the main path otherwise sets no `costGuard`, so one
     // looping run could drain far past the entitlement balance. Defaulted ONLY when
-    // the caller set none (the WorkerLoop's executeStandard passes its own $15) and
+    // the caller set none (the WorkerLoop's executeStandard always passes one — since the
+    // budget admission landed it is the GRANT, often well below the worker's own constant,
+    // so a reader must not take this branch as covering worker runs) and
     // ONLY on managed instances where the CP emits the ceiling env (self-host / BYOK
     // → undefined → unchanged). Ships atomically with the balance mirror
     // (managed-hook.ts) — FB-BOUND-3.

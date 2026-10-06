@@ -88,6 +88,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const session = {
       sessionId: 'thread-park',
       _recreateAgent: vi.fn(),
+      // The real Session always has these, and `executeStandard` reads the run's ending
+      // off `getLastRunStop`. Without the method the read is a TypeError the task-failure
+      // path swallows into the recorded result; `null` is a production shape (nothing ran,
+      // or the send threw) and the caller handles it.
+      getAgent: () => null,
+      getLastRunStop: () => null,
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
       // EVERY dispatch registers itself for the teardown drain, from inside the
       // mock. Registering from the tick's `.then` only ever caught the first: a

@@ -3,6 +3,7 @@ import {
   checkSessionBudget, recordSessionCost, getSessionCost,
   configurePersistentBudget, checkPersistentBudget, resetPersistentBudget,
   reservePersistentBudget, releasePersistentBudget, getReservedInFlight,
+  persistentBudgetHeadroom,
   type CostQueryProvider,
 } from './session-budget.js';
 import type { SessionCounters } from '../types/index.js';
@@ -305,6 +306,55 @@ describe('persistent budget — in-flight reservation (parallel-fire admission c
     const check = checkPersistentBudget();
     expect(check.allowed).toBe(true);
     expect(check.todayCostUSD).toBe(70);
+  });
+
+  // ── persistentBudgetHeadroom: what the WorkerLoop grants a run instead of
+  // demanding its worst case. Its own four properties, pinned here rather than through
+  // the worker, so each one dies on its own line.
+
+  it('headroom is null when nothing is enforced', () => {
+    // No provider configured at all — the caller must be able to tell "no limit" from
+    // "no room", because those are opposite decisions. Zero would mean the second.
+    expect(persistentBudgetHeadroom()).toBeNull();
+  });
+
+  it('headroom is what the TIGHTER of the two caps has left', () => {
+    // Daily leaves $5, monthly leaves $2 → $2. A mutant taking the daily cap alone, or
+    // Math.max instead of Math.min, hands out money the monthly cap does not have.
+    configurePersistentBudget({
+      costProvider: mockProvider([
+        { day: today, cost_usd: 95, run_count: 1 },
+        { day: `${today.slice(0, 8)}01`, cost_usd: 403, run_count: 9 },
+      ]),
+      dailyCapUSD: 100,
+      monthlyCapUSD: 500,
+    });
+    // today 95 of 100 → 5 · month 498 of 500 → 2
+    expect(persistentBudgetHeadroom()).toBeCloseTo(2, 6);
+  });
+
+  it('headroom subtracts what is already reserved in flight', () => {
+    // The tick dispatches every due task synchronously, so without this two tasks are
+    // both granted the same headroom and together overshoot the cap — the exact race
+    // the reservation accumulator exists for.
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 10, run_count: 1 }]),
+      dailyCapUSD: 100,
+    });
+    expect(persistentBudgetHeadroom()).toBe(90);
+    reservePersistentBudget(40);
+    expect(persistentBudgetHeadroom(), 'the second task sees the first one\'s hold').toBe(50);
+  });
+
+  it('headroom never goes negative', () => {
+    // A cap lowered below what was already spent. Negative would read as "owes money" to
+    // a caller that compares it against a minimum, and `min(estimate, -3)` would travel
+    // into a run's cost ceiling as a negative dollar amount.
+    configurePersistentBudget({
+      costProvider: mockProvider([{ day: today, cost_usd: 13, run_count: 1 }]),
+      dailyCapUSD: 10,
+    });
+    expect(persistentBudgetHeadroom()).toBe(0);
   });
 
   it('resetPersistentBudget clears the in-flight accumulator', () => {

@@ -31,6 +31,7 @@ import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectivePro
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
+import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -299,6 +300,8 @@ export class Session {
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
+  /** Set by {@link run} after each non-internal send; read via {@link getLastRunStop}. */
+  private _lastRunStop: SendStop | null = null;
   private _changesetManager: ChangesetManager | null = null;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   private _isCompacting = false;
@@ -1014,8 +1017,22 @@ export class Session {
       }
     }
 
+    // ⛔ CAPTURED BEFORE THE SEND, and the stop is read off THIS object rather than
+    // off `this.agent` afterwards.
+    //
+    // ⚠ Only the STOP read needs this. Sending through `runAgent` instead of `this.agent`
+    // is equivalent — measured as a surviving mutant, and it is: the swap below happens
+    // inside the send, so the two are the same object at the call. It stays for the
+    // reader, not as a fix. `this.agent` is a mutable field and `run()`'s own
+    // prologue replaces it from three places; worse, the auto-compaction this method
+    // kicks off below is fire-and-forget and reaches `_recreateAgent()` SYNCHRONOUSLY
+    // (`_autoCompactIfNeeded` → `compact` → nested `run` → the changeset branch, with
+    // no `await` anywhere in between). So a caller that reads `getAgent().getLastStop()`
+    // after awaiting this method can get a brand-new Agent whose stop is `null`.
+    const runAgent = this.agent;
+    if (runOptions?.internal !== true) this._lastRunStop = null;
     try {
-      const result = await this.agent.send(
+      const result = await runAgent.send(
         userContent,
         {
           suppressTools: runOptions?.noTools === true,
@@ -1024,6 +1041,16 @@ export class Session {
           userMessagePrePersisted: userTurnPrePersisted,
         },
       );
+      // Why and how THIS run ended, kept where the caller can still reach it. The
+      // internal (compaction) run is excluded: it is a different turn against a
+      // different agent, and letting it write here would hand the caller the
+      // summarizer's stop instead of its own.
+      // `?.()` on the METHOD, not just on the object — the same rule this file already
+      // states for the helper-cost read, and for the same measured reason: several suites
+      // and the pipeline path hand `Session` a PARTIAL agent double, and `agent?.m()`
+      // guards only a missing agent. Unguarded, this line throws inside the result path,
+      // where a throw is recorded as the run's own failure.
+      if (runOptions?.internal !== true) this._lastRunStop = runAgent.getLastStop?.() ?? null;
 
       // Clear briefing after first turn — it's one-time context (run history, file diffs, advisor)
       if (!this._briefingConsumed && this.briefing) {
@@ -2570,6 +2597,19 @@ export class Session {
   getBatchIndex(): BatchIndex { return this.engine.getBatchIndex(); }
   getBriefing(): string | undefined { return this.briefing; }
   getAgent(): Agent | null { return this.agent; }
+
+  /**
+   * Why and how the last NON-INTERNAL `run()` on this session ended, or `null`.
+   *
+   * ⚠ Read this rather than `getAgent()?.getLastStop()`. The two are not equivalent and
+   * the difference is not theoretical: `this.agent` is replaced synchronously by
+   * `run()`'s own prologue and by the fire-and-forget auto-compaction `run()` starts
+   * just before returning, so the agent a caller finds afterwards may never have made
+   * the run it is asking about — and its `_lastStop` is then `null`, which reads as
+   * "ended cleanly". The failure is silent and correlates with long runs, i.e. with
+   * exactly the runs whose ending a caller cares about.
+   */
+  getLastRunStop(): SendStop | null { return this._lastRunStop; }
   getChangesetManager(): ChangesetManager | null { return this._changesetManager; }
   getPromptTabs(): ((questions: TabQuestion[]) => Promise<string[]>) | null { return this._promptTabs; }
 

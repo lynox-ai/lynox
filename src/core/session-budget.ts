@@ -199,6 +199,41 @@ export function reservePersistentBudget(estimatedCostUSD: number): PersistentBud
   return { allowed: true, reservedUSD: estimatedCostUSD };
 }
 
+/**
+ * How many dollars are still free under the TIGHTER of the two caps, or `null` when
+ * nothing is enforced (no cost provider, or both caps disabled).
+ *
+ * ⛔ WHY THIS EXISTS, and it is the other half of a documented trade-off rather than a
+ * new idea. {@link reservePersistentBudget} reserves a run's WORST case on purpose —
+ * its own comment says so — and that is right *provided the per-run cap is smaller
+ * than the daily cap*. Nothing checked that precondition, and on a deployment where
+ * the two are equal it does not hold: the projection then tips at the first cent of
+ * recorded spend (`0.01 + cap > cap`), and nothing the background loop schedules is
+ * admitted again until the daily window rolls. Where the daily cap is smaller than the
+ * worst case, it never fits at all. The arithmetic is the whole proof; the deployment
+ * figures that make it bite live with the deployment, not in this file.
+ *
+ * With this, a caller can reserve `min(worstCase, headroom)` instead — but ONLY if it
+ * also lowers the run's own hard cap to the same number, or the run outspends its own
+ * reservation. ⚠ And that bound is `grant + one turn`, not `grant`: `CostGuard`
+ * records a turn before it compares. A caller that needs an exact bound does not have
+ * one here.
+ *
+ * In-flight reservations are subtracted, so two tasks admitted in the same synchronous
+ * tick cannot both be granted the same headroom.
+ */
+export function persistentBudgetHeadroom(): number | null {
+  const spend = computeRecordedSpend();
+  if (!spend) return null;
+  const remaining: number[] = [];
+  if (_dailyCapUSD < Infinity) remaining.push(_dailyCapUSD - spend.todayCost - _reservedInFlightUSD);
+  if (_monthlyCapUSD < Infinity) remaining.push(_monthlyCapUSD - spend.monthCost - _reservedInFlightUSD);
+  if (remaining.length === 0) return null;
+  // Never negative: spend can exceed a cap that was lowered mid-month, and a negative
+  // headroom would read as "owes money" to every caller that compares it.
+  return Math.max(0, Math.min(...remaining));
+}
+
 /** Release a reservation held by {@link reservePersistentBudget}. */
 export function releasePersistentBudget(reservedUSD: number): void {
   if (reservedUSD <= 0) return;
