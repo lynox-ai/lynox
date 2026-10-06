@@ -1307,8 +1307,10 @@ function writeRenewalFailure(
  * (`core/call-connection.ts` says what the stamp does and does not mean). The same
  * synchronous lookup the attach below makes, done first and on its own so it holds
  * whether or not a credential is attached: a profile without engine-managed auth,
- * or an agent without a vault, still talks to that connection. Written before any
- * refusal below, so a refused call carries it too. Nothing from the tool input but the URL's host reaches it,
+ * or an agent without a vault, still talks to that connection. Written before the
+ * attach's own refusals and the handler's later ones, so those calls carry it too;
+ * the handler's earlier refusals (rate limits, a CRLF header) come first and do not.
+ * Nothing from the tool input but the URL's host reaches it,
  * and the host only selects among profiles the user saved. Outside a tool call (a
  * bulk run's worker effect) the note is a no-op.
  */

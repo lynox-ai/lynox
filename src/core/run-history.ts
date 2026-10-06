@@ -1291,7 +1291,8 @@ const MIGRATIONS: string[] = [
   // events, which do not carry the stamp), and every tool other than http_request.
   // `connection_created_at` alone is also NULL on an instance without engine.db.
   // A stamped row means "the URL's host belonged to this profile", written before
-  // the request is sent — refused calls (`output_json` non-empty) carry it too.
+  // the request is sent — a call refused after that point (`output_json` non-empty)
+  // carries it too; one refused earlier (rate limits, a CRLF header) does not.
   // The column is a lower bound; never read it as "everything from connection X".
   //
   // Plaintext, unlike input_json/output_json: a profile id and a timestamp, the same

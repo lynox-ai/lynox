@@ -10,7 +10,9 @@
  * What the stamp means, and what it does not:
  *  - "the request URL's host belongs to this profile". It is written before the
  *    request is sent, so a call refused afterwards (vetted-host refusal, egress
- *    scans, host policy, consent) is stamped too; `is_error` tells those apart.
+ *    scans, host policy, consent) is stamped too; a non-empty `output_json`
+ *    marks those rows. Refusals BEFORE the resolver (rate limits, a CRLF header)
+ *    leave the row unstamped.
  *    It also covers what the call SENT to the connection, not only what it read.
  *  - It is a LOWER bound, not a complete list. A call is unstamped when its host
  *    maps to no profile — including a host variant the profile does not name —
@@ -21,8 +23,8 @@
  *
  * The slot is per CALL, not per agent. Tool dispatch fans out concurrently, so
  * an agent field would be written by whichever call resolved last. The agent
- * opens a slot around exactly one `tool.handler(...)` invocation; everything
- * that handler awaits runs inside it, and nothing outside it can see or fill it.
+ * opens a slot around exactly one tool dispatch (the handler, or the worker
+ * pool's execute); everything that dispatch awaits runs inside it, and nothing outside it can see or fill it.
  *
  * Trust: the only writer is {@link noteCallConnection}, and its only caller is
  * the resolver in `http.ts`, fed by the profile store. No tool input reaches it,
