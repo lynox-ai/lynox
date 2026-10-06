@@ -1064,8 +1064,9 @@ export async function spawnInline(
   // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
   // extended-thinking support — force disabled regardless of step hint to
   // avoid Anthropic 400 "model does not support" errors. Keyed on the EFFECTIVE
-  // model (agentModel): byte-identical to `model` in standard mode, and detects
-  // Haiku on the actual slot model under a cross-provider hybrid tier_set.
+  // model (agentModel): `model` in standard mode unless a profiled caller pinned
+  // the step to its profile model, and the slot model under a cross-provider
+  // hybrid tier_set — so Haiku is detected on whatever actually runs.
   const isHaikuStep = agentModel.includes('haiku');
   let thinking: ThinkingMode;
   if (isHaikuStep) {
