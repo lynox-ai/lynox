@@ -371,7 +371,12 @@ const GATES: Readonly<Record<string, GateEntry>> = {
   // be ACCOUNTED for, otherwise "every gate has a line" is only true of the ones
   // that happened to be shell scripts.
   gitleaks: { kind: 'external', reason: 'third-party binary (`gitleaks protect`), not a script in this repo' },
-  'pattern-scan': { kind: 'external', reason: 'inline shell in lefthook.yml, not a script file' },
+  'pattern-scan': {
+    kind: 'exempt',
+    reason:
+      'stripped, the index is empty: a commit with nothing staged is clean, so 0 is the right answer. The failed-producer door (not a work tree → 2) and the planted/clean cases are covered by tests/secret-pattern-scan.test.ts',
+    expectStrippedExit: 0,
+  },
   typecheck: { kind: 'external', reason: 'inline `tsc` invocation, not a scanning guard' },
   'token-contract': { kind: 'external', reason: 'node .mjs design-token check; its own suite covers it' },
   'shape-contract': { kind: 'external', reason: 'node .mjs design-shape check; its own suite covers it' },
@@ -418,6 +423,7 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
     args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-commits', 'HEAD'],
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
+  'pattern-scan': { cmd: 'bash', args: [join(repoRoot, 'scripts/secret-pattern-scan.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
   'push-lands-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/push-lands-guard.mjs'), 'hook'] },
   'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },
