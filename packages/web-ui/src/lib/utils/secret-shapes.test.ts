@@ -17,6 +17,11 @@ describe('looksLikeSecret — chat input guard', () => {
     ['JWT', 'eyJ' + 'hbGciOiJIUzI1NiJ9' + '.eyJ' + 'zdWIiOiIxMjM0NTY3ODkwIn0' + '.' + 'H'.repeat(20)],
     // A key followed directly by a word character is still a key.
     ['key followed by a word character', 'sk-' + 'I'.repeat(24) + '_old'],
+    // Glued to an identifier in front: `\b` saw no boundary after the `_`.
+    ['key glued to an identifier', 'LYNOX_' + 'sk-' + 'ant-api03-' + 'J'.repeat(24)],
+    ['GitHub token glued to an identifier', 'foo_' + 'ghp_' + 'K'.repeat(34) + '42'],
+    ['key after a JSON escape', 'my key:\\n' + 'sk-' + 'ant-api03-' + 'M'.repeat(24)],
+    ['AWS key with a suffix glued on', 'AKIA' + 'L'.repeat(16) + '_PROD'],
   ])('rejects a pasted %s', (_name, value) => {
     expect(looksLikeSecret(`here it is: ${value} thanks`)).toBe(true);
   });
@@ -24,6 +29,8 @@ describe('looksLikeSecret — chat input guard', () => {
   it.each([
     'Can you summarise last week’s invoices?',
     'see task-abcdefghij1234567890xyz for details',
+    'the risk_test_coverage2026abcdef report',
+    'if has_github_pat_configured then',
     'https://example.com/docs?page=2',
   ])('lets ordinary text through: %s', (text) => {
     expect(looksLikeSecret(text)).toBe(false);
