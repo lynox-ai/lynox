@@ -17,6 +17,8 @@
 // OTP that doesn't match the patterns slips through. The audit log
 // records what was matched + which mode applied so the user can verify.
 
+import { credentialShape } from '../../core/secret-store.js';
+
 export type SensitiveCategory =
   | 'otp_or_2fa'
   | 'password_reset'
@@ -72,12 +74,15 @@ const PASSWORD_RESET_RE = /\b(?:reset\s*(?:your)?\s*password|passwort\s*zurücks
  * SDK error strings.
  */
 export const SECRET_PREFIX_RES: ReadonlyArray<RegExp> = [
-  /\bsk-[A-Za-z0-9_-]{16,}\b/,                  // Anthropic / OpenAI dash-style
+  // The longer `sk-` prefixes first, so a glued key's digit check reads its body, not `ant`/`proj`.
+  credentialShape(String.raw`(?:sk-ant-|sk-(?:proj|svcacct|admin)-|sk-)`, String.raw`[A-Za-z0-9_-]{16,}`),                  // Anthropic / OpenAI dash-style
+  // Keeps `\b`: without `live|test` required, `pk_`/`sk_` after a `_` is usually a table-key
+  // or snake_case name (`gsi1_sk_…`), often with digits, so the glued-key bound would flag it.
   /\b(?:sk|rk|whsec|pk)_(?:(?:live|test|acct)_)?[A-Za-z0-9]{16,}\b/, // Stripe-style underscore keys (live/test/connect-account/webhook-secret)
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/,           // Slack
-  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/,             // GitHub PATs
-  /\bAKIA[0-9A-Z]{16}\b/,                       // AWS access key
-  /\bya29\.[A-Za-z0-9_-]{20,}\b/,               // Google OAuth refresh token
+  credentialShape(String.raw`xox[baprs]-`, String.raw`[A-Za-z0-9-]{10,}`),           // Slack
+  credentialShape(String.raw`gh[pousr]_`, String.raw`[A-Za-z0-9]{16,}`),             // GitHub PATs
+  credentialShape(String.raw`AKIA`, String.raw`[0-9A-Z]{16}`),                       // AWS access key
+  credentialShape(String.raw`ya29\.`, String.raw`[A-Za-z0-9_-]{20,}`),               // Google OAuth refresh token
   /\bBearer\s+\S{8,}\b/,                        // Generic bearer tokens (8+ chars — catches short opaque tokens too)
   /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\b/, // JWT (3 segments)
 ];

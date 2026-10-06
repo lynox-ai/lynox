@@ -625,6 +625,17 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
     expect(maskSecretPatterns('see task-abcdefghij1234567890xyz')).toBe('see task-abcdefghij1234567890xyz');
   });
 
+  // The glued-key lead looks ahead for a digit; it must stay linear on long runs.
+  it('stays linear on long runs — every vendor shape, 300 KB each', () => {
+    const runs = ['_', '_9', '%3D', '\\n', '_sk-ant-', '_ghp_9', '_AKIA'];
+    const started = performance.now();
+    for (const shape of SECRET_SHAPES.filter((s) => s.kind === 'vendor')) {
+      const re = new RegExp(shape.pattern.source, 'g');
+      for (const run of runs) run.repeat(Math.ceil(300_000 / run.length)).replace(re, 'x');
+    }
+    expect(performance.now() - started).toBeLessThan(5_000);
+  }, 60_000);
+
   it('keeps the generic catcher last — short-text callers drop the final entry', () => {
     expect(SECRET_SHAPES[SECRET_SHAPES.length - 1]!.kind).toBe('generic');
     expect(SECRET_SHAPES.filter((s) => s.kind === 'generic')).toHaveLength(1);
@@ -633,5 +644,46 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
   it.each(SECRET_SHAPES.filter((s) => s.kind !== 'generic' && s.kind !== 'egress-wide').map((s) => [s.label]))('masks a %s', (label) => {
     const witness = WITNESS[label]!;
     expect(maskSecretPatterns(`value: ${witness} end`)).not.toContain(witness);
+  });
+
+  // A key glued to an identifier came back whole from an API error (`LYNOX_sk-ant-…`,
+  // 2026-10-06): `\b` counts `_` as part of a word, so there was no boundary to match.
+  // Glued after `_`, a JSON escape or a URL escape, a shape matches when its body carries a
+  // digit, so the witnesses start their body with two.
+  const withDigits = (label: string, w: string): string => {
+    const prefix = w.match(/^(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|[sr]k_(?:live|test)_|github_pat_|gh[pousr]_|AKIA|AIza|xox[bpoasr]-|shp(?:at|ss|pa|ca)_|ya29\.)/)![0];
+    expect(prefix, label).toBeTruthy();
+    return prefix + '42' + w.slice(prefix.length + 2);
+  };
+  it.each(SECRET_SHAPES.filter((s) => s.kind === 'vendor').map((s) => [s.label]))(
+    'masks and detects a %s glued to an identifier or an escape', (label) => {
+      const key = withDigits(label, WITNESS[label]!);
+      for (const text of [`LYNOX_${key}`, `my key:\\n${key}`, `x\\u003e${key}`, `api_key%3D${key}`]) {
+        expect(maskSecretPatterns(`value: ${text} end`), text).not.toContain(key);
+        expect(matchesSecretPattern(text), text).not.toBeNull();
+      }
+    },
+  );
+
+  it.each([
+    'see task-abcdefghij1234567890xyz for details',
+    'the risk_test_coverage2026abcdef report',
+    'a desk_live_dashboard0123456 view',
+    'pip install scikit-learn, then sk-learn',
+    // snake_case names that contain a key prefix after a `_`, with no digit in them
+    'if has_github_pat_configured then',
+    'flag use_ghp_token_for_auth',
+    'field user_ghs_enterprise_url',
+    'love_xoxo-forever-and-ever',
+    // ... and with a digit after the name, which must not count as the key's digit
+    'flag use_ghp_token_for_auth.v2',
+    'use_ghp_token_for_auth-2',
+    'has_github_pat_configured_2fa',
+    'config_' + 'xox' + 'b-token-v2-legacy', // assembled so the commit scan does not read it as a key
+    // a prefix at a normal word start, followed by `_`: the end is still `\b`
+    'the sk_test_integration_suite run',
+  ])('leaves a word that only contains a key prefix alone: %s', (text) => {
+    expect(maskSecretPatterns(text)).toBe(text);
+    expect(matchesSecretPattern(text)).toBeNull();
   });
 });

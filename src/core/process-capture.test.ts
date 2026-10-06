@@ -457,6 +457,18 @@ describe('captureProcess — secret redaction', () => {
     expect(sentPayload()).not.toContain('sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv');
   });
 
+  it('redacts a provider key glued to an identifier', async () => {
+    // Low-entropy bodies, so only the prefix rule can catch these, not the entropy detector.
+    const anthropic = 'sk-' + 'ant-api03-' + 'A'.repeat(24);
+    const github = 'ghp_' + 'B'.repeat(34) + '42';
+    const calls: ToolCallRecord[] = [
+      { id: 'a', run_id: 'r', tool_name: 'http_request', input_json: '{"url":"x"}', output_json: `env LYNOX_${anthropic} and foo_${github}`, duration_ms: 1, sequence_order: 0 },
+    ];
+    await captureProcess('r', 'X', calls, { apiKey: 'k' });
+    expect(sentPayload()).not.toContain(anthropic);
+    expect(sentPayload()).not.toContain(github);
+  });
+
   it('redacts a high-entropy bare token without a known prefix', async () => {
     const secret = 'aZ9kQ2mW8xL4pR7tV3nY6cH1bG5dF0sJ';
     const calls: ToolCallRecord[] = [

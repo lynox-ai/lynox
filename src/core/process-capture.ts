@@ -1,3 +1,4 @@
+import { credentialShape } from './secret-store.js';
 import { randomUUID } from 'node:crypto';
 import { getBetasForProvider, getModelId } from '../types/index.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
@@ -69,11 +70,12 @@ const VALUE_SECRET_PATTERNS: RegExp[] = [
   // Bearer / token auth headers — `Bearer <token>`, `token <token>`.
   /\b(Bearer|token)\s+[A-Za-z0-9\-._~+/]{12,}=*/gi,
   // Slack-style tokens — xoxb-, xoxp-, xapp-, xoxa-, xoxr- …
-  /\bxox[abprs]-[A-Za-z0-9-]{8,}/gi,
+  credentialShape(String.raw`xox[abprs]-`, String.raw`[A-Za-z0-9-]{8,}`, 'gi', ''),
   // JWT shape — three base64url segments separated by dots.
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   // Common provider key prefixes (Anthropic, OpenAI, GitHub, Stripe, Google).
-  /\b(sk-ant-|sk-|ghp_|gho_|ghs_|github_pat_|rk_live_|sk_live_|sk_test_|AIza)[A-Za-z0-9\-_]{12,}/g,
+  // The longer `sk-` prefixes first, so a glued key's digit check reads its body, not `ant`/`proj`.
+  credentialShape(String.raw`(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|ghp_|gho_|ghs_|github_pat_|rk_live_|sk_live_|sk_test_|AIza)`, String.raw`[A-Za-z0-9\-_]{12,}`, 'g', ''),
 ];
 
 /**

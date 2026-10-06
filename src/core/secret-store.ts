@@ -153,17 +153,37 @@ export interface SecretShape {
   readonly pattern: RegExp;
 }
 
+/**
+ * Where a `vendor` shape may start. `\b` alone missed a key glued to an identifier —
+ * `LYNOX_sk-ant-…` came back whole from an API error (2026-10-06) — because `\b` counts `_`
+ * as part of a word. Dropping the bound would match inside ordinary words (`task-…` for the
+ * `sk-` rule, `has_github_pat_configured` after a `_`).
+ *
+ * So a shape starts where `\b` let it start, OR right after `_`, a JSON escape (`\n`,
+ * `\u003e`) or a URL escape (`%3D`) — and then only if the first letters-and-digits run of
+ * its body holds a digit, which a name like `use_ghp_token_for_auth` does not. The end
+ * stays `\b`.
+ * JWTs are not built this way; they keep `\b`.
+ */
+export const CREDENTIAL_GLUE = String.raw`(?<=_|\\[a-z]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})`;
+export function credentialShape(prefix: string, body: string, flags?: string, end = String.raw`\b`): RegExp {
+  return new RegExp(
+    String.raw`(?:(?<![A-Za-z0-9_])` + prefix + '|' + CREDENTIAL_GLUE + prefix + String.raw`(?=[A-Za-z0-9]{0,128}[0-9]))` + body + end,
+    flags,
+  );
+}
+
 export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // Anthropic
-  { label: 'Anthropic API key', kind: 'vendor', pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/ },
+  { label: 'Anthropic API key', kind: 'vendor', pattern: credentialShape(String.raw`sk-ant-`, String.raw`[A-Za-z0-9_-]{20,}`) },
   // OpenAI. Two rules on purpose: the plain `sk-` form is alnum-only, but the
   // prefixed forms (`sk-proj-`, `sk-svcacct-`) carry `-` and `_` INSIDE the
   // token, so the alnum rule stops at the first dash and matches four
   // characters. Measured 2026-08-24: a real `sk-proj-…` key passed the masker
   // untouched while the test fixture (`sk-ant-` + 40×A) was caught — the fixture
   // was the reason it looked covered.
-  { label: 'OpenAI API key', kind: 'vendor', pattern: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}\b/ },
-  { label: 'OpenAI-style API key', kind: 'vendor', pattern: /\bsk-[A-Za-z0-9]{20,}\b/ },
+  { label: 'OpenAI API key', kind: 'vendor', pattern: credentialShape(String.raw`sk-(?:proj|svcacct|admin)-`, String.raw`[A-Za-z0-9_-]{20,}`) },
+  { label: 'OpenAI-style API key', kind: 'vendor', pattern: credentialShape(String.raw`sk-`, String.raw`[A-Za-z0-9]{20,}`) },
   // A credential embedded in a URL's userinfo (`scheme://user:pass@host`).
   // Narrow by construction — it needs the `:`…`@` shape — so it does not touch
   // ordinary URLs, and it catches the database and basic-auth strings that
@@ -184,22 +204,22 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // `redis://cache:6379/0` — none has the `user:pass@` shape this needs).
   { label: 'credential in URL', kind: 'contextual', pattern: /[a-z0-9+.-]{0,32}:\/\/[^\s:@/]+:[^\s:@/]+@/i },
   // Stripe
-  { label: 'Stripe API key', kind: 'vendor', pattern: /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/ },
+  { label: 'Stripe API key', kind: 'vendor', pattern: credentialShape(String.raw`[sr]k_(live|test)_`, String.raw`[A-Za-z0-9]{10,}`) },
   // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
-  { label: 'GitHub token', kind: 'vendor', pattern: /\b(ghp|gho|ghs|ghr|ghu|github_pat)_[A-Za-z0-9_]{10,}\b/ },
+  { label: 'GitHub token', kind: 'vendor', pattern: credentialShape(String.raw`(ghp|gho|ghs|ghr|ghu|github_pat)_`, String.raw`[A-Za-z0-9_]{10,}`) },
   // AWS
-  { label: 'AWS access key', kind: 'vendor', pattern: /\bAKIA[A-Z0-9]{16}\b/ },
+  { label: 'AWS access key', kind: 'vendor', pattern: credentialShape(String.raw`AKIA`, String.raw`[A-Z0-9]{16}`) },
   // Google
-  { label: 'Google API key', kind: 'vendor', pattern: /\bAIza[A-Za-z0-9_-]{35}\b/ },
+  { label: 'Google API key', kind: 'vendor', pattern: credentialShape(String.raw`AIza`, String.raw`[A-Za-z0-9_-]{35}`) },
   // Slack (xoxo + xoxr added — webhook + refresh-token prefixes)
-  { label: 'Slack token', kind: 'vendor', pattern: /\bxox[bpoasr]-[A-Za-z0-9-]{10,}\b/ },
+  { label: 'Slack token', kind: 'vendor', pattern: credentialShape(String.raw`xox[bpoasr]-`, String.raw`[A-Za-z0-9-]{10,}`) },
   // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
   // a Shopify integration flow leaked the prefix into the agent transcript)
-  { label: 'Shopify token', kind: 'vendor', pattern: /\bshp(at|ss|pa|ca)_[A-Fa-f0-9]{20,}\b/ },
+  { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca)_`, String.raw`[A-Fa-f0-9]{20,}`) },
   // JWT (three base64-url segments) — catches OAuth ID tokens etc.
   { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
   // Google OAuth access token
-  { label: 'Google OAuth token', kind: 'vendor', pattern: /\bya29\.[A-Za-z0-9_-]{20,}\b/ },
+  { label: 'Google OAuth token', kind: 'vendor', pattern: credentialShape(String.raw`ya29\.`, String.raw`[A-Za-z0-9_-]{20,}`) },
   // Private key blocks (PEM / OpenSSH) — any key type, not only RSA.
   { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
   // The outbound scan's own wider forms: not word-bounded, and a JWT whose

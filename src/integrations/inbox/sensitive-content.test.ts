@@ -3,6 +3,7 @@ import {
   analyzeSensitiveContent,
   detectSensitiveContent,
   reasonForCategories,
+  scrubErrorMessage,
 } from './sensitive-content.js';
 
 function check(input: { subject?: string; body?: string }): ReturnType<typeof detectSensitiveContent> {
@@ -86,6 +87,23 @@ describe('detectSensitiveContent — password reset', () => {
 });
 
 describe('detectSensitiveContent — secrets', () => {
+  // Glued to an identifier: `\b` saw no boundary after the `_`, so the key went unflagged
+  // and, in scrubErrorMessage, unmasked.
+  it('flags and scrubs a key glued to an identifier', () => {
+    const anthropic = 'sk' + '-ant-api03-' + 'A'.repeat(24);
+    const aws = 'AKIA' + 'B'.repeat(14) + '42';
+    const openai = 'sk-' + 'proj-' + '7Kq' + 'C'.repeat(30);
+    for (const [text, key] of [[`LYNOX_${anthropic}`, anthropic], [`AWS_${aws}`, aws], [`LYNOX_${openai}`, openai]] as const) {
+      expect(check({ subject: 'config', body: `set ${text} here` }).categories, text).toContain('api_key_or_secret');
+      expect(scrubErrorMessage(`failed: ${text}`), text).not.toContain(key);
+    }
+  });
+
+  it('does not flag a word that only contains a key prefix', () => {
+    expect(check({ subject: 'report', body: 'the risk_test_coverage2026abcdefgh and task-abcdefghij1234567890xyz' }).categories)
+      .not.toContain('api_key_or_secret');
+  });
+
   it('flags an Anthropic-style API key', () => {
     // Runtime concat so the fixture does not look like a literal key to scanners.
     const out = check({ subject: 'API key for testing', body: `Use sk${'-'}ant${'-'}api03${'-'}AbCdEfGhIjKlMnOpQrSt` });
