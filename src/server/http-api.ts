@@ -6569,46 +6569,33 @@ export class LynoxHTTPApi {
         // the way: taking it back shortens the chain, and this merge then names
         // the new last link. Promising that this one becomes takeable is true for
         // a two-link chain and false for a longer one, and the shorter promise is
-        // true for every length. The same reason rules out naming which entry the
-        // dup was merged into — that is the next link, not the one named here.
+        // true for every length.
         //
-        // THE NAME IS CAPPED. The first version justified an uncapped name with
-        // «this sentence is ~200 chars, the cap is 600, so the id survives» — a
-        // one-point sample of an UNBOUNDED quantity. A subject name has no length
-        // limit anywhere: not in the DDL, not in `createSubject`, not on the paths
-        // that write names (entity extraction, CRM import, `set_thread_context`).
-        // The cap is what keeps the sentence under `capForClient`: 47 for the
-        // longest id `isMergeLedgerFileName` admits, ~110 of fixed text and at
-        // most 240 UTF-16 units of capped name is under 400. Its value is pinned
-        // by a test, not by this arithmetic.
+        // ⚠ IT NAMES NO ENTRY, and that is the correction a round forced. The
+        // sentence used to end «…has since been merged onward to <name>», with
+        // the name taken from the blocking merge's canonical — and because the
+        // blocking merge is the chain's LAST link, that name is where the data
+        // ENDED UP, not what the entry this merge led to was merged into. The
+        // merge that moved that entry is the middle link, which this refusal
+        // deliberately does not name. So the clause was true at two links and
+        // false at every length from three, i.e. wrong exactly in the case the
+        // walk exists for — the third false clause in this one sentence's
+        // history.
         //
-        // The id still leads, for reading order — the owner's one actionable
-        // datum first — and NOT as a safeguard: with the cap in place no cut can
-        // reach it, and a mutation restoring name-first ordering survives the
-        // suite, which is what a condition that cannot change an answer looks
-        // like. Said plainly here so the next reader does not take it for a
-        // measured defence.
-        //
-        // The entry's name is the owner's own data on an owner-authenticated
-        // route — `GET /api/merges` already returns `canonicalName` for every
-        // merge — so naming it discloses nothing the owner cannot already list.
+        // The clause went rather than growing a second name, and that was the
+        // cheaper half of the choice as well: the cap, the `trim()`, the
+        // code-point slicing and the arithmetic against `capForClient` existed
+        // ONLY to carry a name safely, and all of it left with it. What remains
+        // is bounded by construction — one id, 47 characters at the most that
+        // `isMergeLedgerFileName` admits, plus fixed text. An owner holding the
+        // id can read both of its entries from the `GET /api/merges` row it
+        // belongs to, which already returns them.
         if (out.reason === 'chained' && out.blocking) {
-          // ⚠ `trim()` before the empty check, and code points rather than
-          // UTF-16 units. A name is `TEXT NOT NULL` with no non-empty check, and
-          // `createSubject` adds none, so `''` reaches here — measured. A
-          // whitespace-only name is truthy and would slip past a bare `||` to
-          // print a blank. Slicing units instead of code points cut an astral
-          // character in half and left a lone surrogate, which the owner's client
-          // renders as U+FFFD.
-          const raw = out.blocking.intoName.trim();
-          const chars = [...raw];
-          const into = raw === '' ? 'another entry'
-            : chars.length > 120 ? `${chars.slice(0, 120).join('')}…` : raw;
           errorResponse(
             res,
             409,
-            `Take merge ${out.blocking.id} back first: the entry this merge led to has since been `
-            + `merged onward to ${into}. Then try this one again.`,
+            `Take merge ${out.blocking.id} back first: the entry this merge led to has been merged `
+            + 'onward since. Then try this one again.',
             'merge_chained',
           );
           return;

@@ -6033,11 +6033,17 @@ describe('LynoxHTTPApi', () => {
         expect(refused.status).toBe(409);
         const body = (await refused.json()) as { error: string; code?: string };
 
-        // Each of the three things the owner needs, asserted on its own so a
-        // failure says WHICH one went missing.
+        // Each thing the owner needs, asserted on its own so a failure says
+        // WHICH one went missing.
         expect(body.error, 'the blocking merge id is not in the sentence').toContain(newer.id);
-        expect(body.error, 'the entry the newer merge led to is not named').toContain('Northwind Holding');
         expect(body.error, 'the next step is not stated').toMatch(/take merge .* back first/i);
+        // ⚠ This test used to require the entry name here, and this is a
+        // TWO-link chain, where naming it was true. It is gone because the same
+        // clause was false from three links on — the blocking merge is the last
+        // link, so its canonical is where the chain ends, not what the entry
+        // this merge led to was merged into. Pinning it at length 2 is what let
+        // the clause look defended while being wrong everywhere else.
+        expect(body.error, 'an entry name is back in the sentence').not.toContain('Northwind');
         // …and it must NOT still claim the merge was taken back already, which is
         // the half of the old wording that was false in a chain.
         expect(body.error, 'still says it was taken back already').not.toMatch(/taken back already/i);
@@ -6051,35 +6057,32 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('⭐ keeps the id and the next step when the entry name is enormous', async () => {
-      // ⚠ Subject names have no length limit — not in the DDL, not in
-      // `createSubject`, not on the paths that write them. Measured through this
-      // route before the cap existed: from a 462-character name `capForClient`
-      // (600) cut the merge id off the end of the sentence.
+    it('⭐ names the blocking merge and NO entry, however long the entry names are', async () => {
+      // ⚠ WHAT THIS PINS IS AN ABSENCE, and the absence is the correction. The
+      // sentence used to end «…has since been merged onward to <name>», capped
+      // at 120 code points because subject names are bounded nowhere — not in
+      // the DDL, not in `createSubject`, not on the paths that write them
+      // (entity extraction, CRM import, `set_thread_context`). The name taken
+      // was the blocking merge's canonical, i.e. where the chain ENDS — which is
+      // not what «the entry this merge led to» was merged into. True at two
+      // links, false from three on, so false exactly in the state the chain walk
+      // exists for. With the clause gone, the cap, the `trim()`, the code-point
+      // slicing and the arithmetic against `capForClient` went with it: they
+      // existed only to carry a name safely.
       //
-      // ⚠ This pins the cap's VALUE, not just "some cap exists". The first
-      // version asserted only `not.toContain('x'.repeat(200))`, which any cap
-      // below ~200 satisfies — a mutation moving 120 to 190 survived it. The two
-      // assertions below bracket the cut: 110 x's must be present and 111 must
-      // not, so 119 and 121 both fail. A boundary nobody measures at the boundary
-      // is a boundary that drifts.
-      //
-      // An earlier version of this comment also claimed the instruction was lost
-      // from 544 characters on. That number came from no reading of any sentence
-      // this route produces, and the order it implied was wrong too — recomputed,
-      // the trailing clause goes BEFORE the id, not after. Dropped rather than
-      // corrected: the bracket below is the measurement, and the sentence it
-      // describes has since changed anyway.
+      // The fixture therefore keeps an enormous name and asserts the sentence
+      // does not carry it, so a mutation reinstating the clause fails here
+      // whether or not it caps — pinning the absence rather than a length.
+      // ⚠ A negative assertion is worth nothing without an «it does too» on the
+      // same machinery: the id assertion is that, on the same string from the
+      // same request. The length bound is the second half — nothing unbounded
+      // can reach the sentence any more, and that is checkable rather than
+      // argued.
       await withMergeRoute(async ({ store, dir }) => {
         const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
         const a = store.createSubject({ kind: 'organization', name: 'Adventure GmbH' });
         const b = store.createSubject({ kind: 'organization', name: 'Adventure' });
-        // ⚠ The tail is ASTRAL on purpose. The cap counts CODE POINTS, and with
-        // this fixture the cut falls inside the emoji run: a `slice` over UTF-16
-        // units would take five of them and halve the sixth, leaving a lone
-        // surrogate the owner's client renders as U+FFFD. One fixture therefore
-        // pins both properties — the cap's value and what it counts.
-        const c = store.createSubject({ kind: 'organization', name: `Adventure ${'x'.repeat(100)}${'😀'.repeat(400)}` });
+        const c = store.createSubject({ kind: 'organization', name: `Adventure ${'x'.repeat(900)}` });
         expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
         expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
         const runs = listMergeRuns(store, join(dir, 'sweeps'));
@@ -6089,13 +6092,13 @@ describe('LynoxHTTPApi', () => {
         const refused = await jsonFetch(`/api/merges/${older.id}/rollback`, { method: 'POST', body: '{}' });
         expect(refused.status).toBe(409);
         const body = (await refused.json()) as { error: string; code?: string };
-        expect(body.error, 'the blocking id is not in the sentence at all').toContain(newer.id);
-        expect(body.error, 'the next step was truncated away').toMatch(/take merge .* back first/i);
-        // 10 + 100 + 10 = 120 code points, then the ellipsis.
-        expect(body.error, 'the cap cuts early, or counts UTF-16 units instead of code points')
-          .toContain(`Adventure ${'x'.repeat(100)}${'😀'.repeat(10)}…`);
-        expect(body.error, 'the cap cuts late, or not at all').not.toContain('😀'.repeat(11));
-        expect(body.error, 'the cut left a lone surrogate').not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+        expect(body.error, 'the blocking id is not in the sentence').toContain(newer.id);
+        expect(body.error, 'the next step is not stated').toMatch(/take merge .* back first/i);
+        expect(body.error, 'an entry name is back in the sentence').not.toContain('Adventure');
+        expect(body.error, 'part of a long entry name reached the sentence').not.toContain('x'.repeat(10));
+        // One id (≤47) plus fixed text. 200 leaves room for wording changes and
+        // still fails on anything that reads a name in.
+        expect(body.error.length, 'the sentence grew something unbounded').toBeLessThan(200);
         expect(body.code).toBe('merge_chained');
       });
     });
@@ -6224,11 +6227,15 @@ describe('LynoxHTTPApi', () => {
       //
       // ⚠ THE KNOWN STATE IS SET HERE, and that is the second correction to this
       // test. Its first version read its reference out of `process.env` as it
-      // found it — but the three tests above run the same helper, so with the
-      // defect present that reference was ALREADY the damaged value and the test
-      // agreed with it: the mutation restoring the defect survived. A control
-      // taken from the subject's own aftermath cannot fail. Clearing the key
-      // first is what puts the `undefined` branch under test at all.
+      // found it — but every test above it in this describe runs the same helper,
+      // so with the defect present that reference was ALREADY the damaged value
+      // and the test agreed with it: the mutation restoring the defect survived.
+      // A control taken from the subject's own aftermath cannot fail. Clearing
+      // the key first is what puts the `undefined` branch under test at all.
+      // (The first version of this very comment said «the three tests above» and
+      // was stale on arrival — the same commit added two more. A count of its
+      // own neighbours is a number that goes wrong whenever anyone writes a
+      // test, so it is gone rather than corrected.)
       //
       // It asserts PRESENCE, not value: `toBe(undefined)` alone passes for a key
       // that is present and empty, which is exactly the broken state.
@@ -6244,26 +6251,13 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it('fills in for a blank entry name instead of printing nothing', async () => {
-      // ⚠ `name` is `TEXT NOT NULL` with no non-empty check and `createSubject`
-      // adds none, so an empty name reaches the sentence — measured at the store.
-      // A whitespace-only name is truthy and slipped past the first `||` guard to
-      // print «merged onward to  . Then try…». Trimmed and checked now.
-      await withMergeRoute(async ({ store, dir }) => {
-        const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
-        const a = store.createSubject({ kind: 'organization', name: 'Litware GmbH' });
-        const b = store.createSubject({ kind: 'organization', name: 'Litware' });
-        const c = store.createSubject({ kind: 'organization', name: '   ' });
-        expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
-        expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
-        const older = listMergeRuns(store, join(dir, 'sweeps')).find((m) => m.dupName === 'Litware GmbH')!;
-
-        const refused = await jsonFetch(`/api/merges/${older.id}/rollback`, { method: 'POST', body: '{}' });
-        const body = (await refused.json()) as { error: string };
-        expect(body.error, 'the blank went straight into the sentence').toContain('merged onward to another entry.');
-        expect(body.error, 'a blank is still in the sentence').not.toMatch(/onward to\s{2,}/);
-      });
-    });
+    // ⚠ A test «fills in for a blank entry name instead of printing nothing»
+    // stood here. It is gone with the name clause, not skipped: an empty or
+    // whitespace-only subject name (`TEXT NOT NULL` with no non-empty check,
+    // `createSubject` adds none — measured at the store) could reach the
+    // sentence only while the sentence read a name. It carries no entry name at
+    // all now, so there is nothing for a blank to show up in, and keeping a
+    // fixture for it would conserve the surface the fix removed.
 
     it('lists a merge without its detail rows, takes it back once, and answers in fixed words', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-merge-route-'));

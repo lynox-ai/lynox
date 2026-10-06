@@ -818,7 +818,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // Positive control: while it IS applied, the refusal names it — so the
     // assertion below is about `applied` and not about the chain stopping.
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
-      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id, intoName: 'Woodgrove Holding' } });
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id } });
 
     const ledger = join(sweeps, `${bc.id}.json`);
     writeFileSync(ledger, JSON.stringify({ ...JSON.parse(readFileSync(ledger, 'utf-8')), applied: false }));
@@ -864,10 +864,10 @@ describe('owner rollback of a merge chain A→B→C', () => {
 
     // The oldest merge names the LAST link, not the middle one.
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
-      .toEqual({ ok: false, reason: 'chained', blocking: { id: cd.id, intoName: 'Contoso Holding' } });
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: cd.id } });
     // …and so does the middle one, which is itself blocked by the same tip.
     expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id))
-      .toEqual({ ok: false, reason: 'chained', blocking: { id: cd.id, intoName: 'Contoso Holding' } });
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: cd.id } });
 
     // Step one: the named merge is genuinely takeable.
     expect(rollbackMergeById(store, null, threadStore, sweeps, cd.id).ok, 'the named step is not takeable').toBe(true);
@@ -877,7 +877,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // at three links the stronger promise is false, and this is the state that
     // makes it false (`http-api.ts`, the `chained` branch).
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
-      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id, intoName: 'Contoso Group' } });
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id } });
     expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id).ok).toBe(true);
     // Step three: nothing is in the way any more.
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id).ok, 'the chain never unwinds').toBe(true);
@@ -888,12 +888,24 @@ describe('owner rollback of a merge chain A→B→C', () => {
   });
 
   it('⭐ refuses instead of hanging when `merged_into` holds a cycle', () => {
-    // ⚠ The cycle is NOT reachable through the store — `planMerge` refuses a dup
-    // that is already merged — so this writes the damaged state straight into
-    // SQLite, the idiom this repo's other raw-state tests use. The guard is for a
-    // corrupt database, not for a sequence of merges, which is why the fixture
-    // has to be corrupt: a guard whose state no fixture can reach is a guard no
-    // test can defend, and the honest way to defend this one is to damage the row.
+    // ⚠ The cycle is NOT reachable through the store, and the guard that stops
+    // it is worth naming correctly: to build `A→B, B→A` you merge A into B and
+    // then B into A, and on that second call the DUP is B, whose `merged_into` is
+    // null — so `planMerge`'s dup check passes. What refuses it is the line
+    // after, `if (canonical.merged_into)` (`subject-store.ts:1589`), because the
+    // canonical A is already merged into B. (An earlier version of this comment
+    // credited the dup check. Both lines are two apart and either reading looks
+    // right from the outcome, which is exactly why the outcome is not evidence
+    // for the mechanism.) `executeMerge` is public and re-checks owner, kind and
+    // repoint targets but NOT `merged_into` — its only two callers,
+    // `runMerge` here and `mergeSubjects`, both plan and execute in one breath,
+    // so no shipped caller gets past the plan.
+    //
+    // So this writes the damaged state straight into SQLite, the idiom this
+    // repo's other raw-state tests use. The guard is for a corrupt database, not
+    // for a sequence of merges, which is why the fixture has to be corrupt: a
+    // guard whose state no fixture can reach is a guard no test can defend, and
+    // the honest way to defend this one is to damage the row.
     // `resolveActiveSubject` guards its own `merged_into` walk with the same
     // visited set, so a cycle is a state this schema already treats as possible.
     //
@@ -919,6 +931,69 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // merge that can be taken back, so no step is named.
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
       .toEqual({ ok: false, reason: 'chained', blocking: null });
+  });
+
+  it('⭐ does not name a step this instance could not carry out either', () => {
+    // ⚠ `inEffect && applied` does NOT establish «takeable», and naming a step
+    // the owner cannot take is the one defect this refusal exists to remove. A
+    // ledger that moved thread anchors (or data rows) answers `unavailable` when
+    // the store holding them is absent — the same precondition this very
+    // function applies to its own subject a few lines further down. A degraded
+    // instance is the reachable case; nothing has to be corrupt.
+    //
+    // `partial` and `failed` are deliberately NOT covered: they are outcomes of
+    // attempting a rollback rather than preconditions that can be read first,
+    // and «then try this one again» is the clause that carries them. Said here
+    // so the next round does not read this test as claiming more than it does.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Fabrikam GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Fabrikam' });
+    const c = store.createSubject({ kind: 'organization', name: 'Fabrikam Holding' });
+    anchorThread(threadStore, 't-chain', b);
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Fabrikam GmbH')!;
+    const bc = runs.find(r => r.dupName === 'Fabrikam')!;
+    // The fixture's premise, asserted rather than assumed: the blocking ledger
+    // really does carry an anchor, so the store check has something to bite on.
+    expect(bc.threadRows, 'the blocking ledger moved no thread anchors').toBeGreaterThan(0);
+
+    // Positive control on the same machinery — WITH the store it IS named, so
+    // the absences below are the store checks and not some unrelated filter.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id } });
+
+    // ── the thread-anchor half ──
+    // Without the thread store, no step is offered…
+    expect(rollbackMergeById(store, null, null, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+    // …and this is what the owner would have been sent into.
+    expect(rollbackMergeById(store, null, null, sweeps, bc.id))
+      .toEqual({ ok: false, reason: 'unavailable' });
+
+    // ── the data-row half, which needs its OWN witness ──
+    // ⚠ A mutation dropping the `dataStore` term survived a version of this test
+    // that only exercised thread anchors: two stores, two terms, two witnesses.
+    // A conjunction of n conditions needs n fixtures that each fail for one.
+    //
+    // The rows are injected into the ledger rather than produced by a real
+    // `DataStore`: this `setup()` has none, and the term reads «the ledger moved
+    // rows AND the store is absent», which is exactly what this writes. The
+    // record's shape is what `readMergeLedger` validates — an array whose every
+    // element has an `ids` array.
+    const bcPath = join(sweeps, `${bc.id}.json`);
+    const ledger = JSON.parse(readFileSync(bcPath, 'utf-8')) as { dataStore: unknown[] };
+    ledger.dataStore = [{ collection: 'invoices', column: 'client', ids: [1, 2] }];
+    writeFileSync(bcPath, JSON.stringify(ledger));
+    expect(listMergeRuns(store, sweeps).find(r => r.id === bc.id)?.dataStoreRows,
+      'the injected rows did not survive the ledger reader — this half is untested').toBe(2);
+
+    // The thread store is PRESENT here, so only the data term can bite.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id))
+      .toEqual({ ok: false, reason: 'unavailable' });
   });
 
   it('⭐ a merge ALREADY taken back is not a chain, even if its canonical moved on since', () => {
@@ -970,7 +1045,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({
       ok: false,
       reason: 'chained',
-      blocking: { id: live.id, intoName: 'Tailspin Holding' },
+      blocking: { id: live.id },
     });
   });
 
@@ -1002,7 +1077,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({
       ok: false,
       reason: 'chained',
-      blocking: { id: bd.id, intoName: 'Contoso Holding' },
+      blocking: { id: bd.id },
     });
   });
 
@@ -1023,7 +1098,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // Positive control: WITH the ledger the refusal names it. Without this the
     // assertion below would also hold if the chain stopped being detected.
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
-      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id, intoName: 'ACME Holding' } });
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id } });
 
     rmSync(join(sweeps, `${bc.id}.json`));
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
@@ -1053,7 +1128,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({
       ok: false,
       reason: 'chained',
-      blocking: { id: bc.id, intoName: 'ACME Holding' },
+      blocking: { id: bc.id },
     });
     // Nothing moved: the chain stands as it was, C still carries what both merges brought.
     expect(store.getSubject(a)!.merged_into).toBe(b);

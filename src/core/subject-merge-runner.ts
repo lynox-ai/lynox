@@ -351,10 +351,20 @@ export type MergeRollbackRefusal =
  * stops at this boundary by design.
  */
 export interface MergeRollbackBlocker {
-  /** The newer merge's run id — what the owner can actually act on. */
+  /**
+   * The newer merge's run id — what the owner can actually act on, and now the
+   * ONLY field. It used to carry the blocking merge's canonical name too, for a
+   * clause reading «the entry this merge led to has since been merged onward to
+   * <name>». That clause was FALSE from three links on: the blocking merge is
+   * the chain's LAST link, so its canonical is where the data ended up, not what
+   * the entry this merge led to was merged into — the merge that moved that
+   * entry is the middle one, which the refusal deliberately does not name.
+   * True at length 2, false at every length ≥3, i.e. wrong exactly in the case
+   * the walk was built for. The name went rather than the sentence growing a
+   * second one: `GET /api/merges` already returns both ends of every merge, so
+   * an owner holding the id can read the names from the row it belongs to.
+   */
   readonly id: string;
-  /** The entry that newer merge led to, for the sentence. */
-  readonly intoName: string;
 }
 
 /**
@@ -440,56 +450,73 @@ export function rollbackMergeById(
     // is walked down a chain of any length by steps that each work.
     //
     // `merged_into` is single-valued, so there is exactly one path to follow.
+    //
+    // ⚠ The FIRST step cannot be absent, and that is a consequence, not an
+    // assumption: control reaches here with `stillStands` true, both rows
+    // non-null (the `missing` guard above) and `inEffect` false — and `inEffect`
+    // is `dup.merged_into === canonicalId && canonical !== null &&
+    // canonical.merged_into === null`, so the third term is the one that failed.
+    // The early return is therefore for the TYPE, and that is the point: an
+    // earlier version carried a nullable `edge` and a `tip === null ? [] :`
+    // guard instead, which no test could defend (a mutation deleting it survived
+    // the whole suite) and whose comment named the one cause that CANNOT produce
+    // null. A branch the compiler forbids beats a branch nothing exercises.
+    const firstOnward = store.getSubject(file.entry.canonicalId)?.merged_into ?? null;
+    if (firstOnward === null) return { ok: false, reason: 'not_in_effect' };
+    let edge = { dup: file.entry.canonicalId, canonical: firstOnward };
     // `seen` is not decoration: the column is a self-referencing FK with no check
     // against a cycle, and a corrupt one would hang the request, not refuse it.
-    let edge: { dup: string; canonical: string } | null = null;
-    const seen = new Set<string>([file.entry.dupId]);
-    let cursor = file.entry.canonicalId;
-    while (!seen.has(cursor)) {
-      seen.add(cursor);
-      const onward = store.getSubject(cursor)?.merged_into ?? null;
+    // It also makes the walk finite without a hop cap — every iteration either
+    // breaks or adds an id to a set drawn from a finite table.
+    const seen = new Set<string>([file.entry.dupId, edge.dup]);
+    while (!seen.has(edge.canonical)) {
+      seen.add(edge.canonical);
+      const onward = store.getSubject(edge.canonical)?.merged_into ?? null;
       if (onward === null) break;
-      edge = { dup: cursor, canonical: onward };
-      cursor = onward;
+      edge = { dup: edge.canonical, canonical: onward };
     }
-    // `const` so the narrowing survives into the filter closure. Null means the
-    // canonical has no `merged_into` after all, which contradicts reaching here;
-    // it falls to the unnamed wording rather than asserting it cannot happen.
     const tip = edge;
-    // ⚠ FILTER AND REQUIRE EXACTLY ONE, not `find`. Not for ordering — `readAll`
-    // sorts by id and already marks every superseded ledger of a pair — but
-    // because `find` SILENTLY PICKS when several match, and «which merge blocks»
-    // is the one thing this refusal exists to answer. A guess is worse than no
-    // answer: the owner would go and take back a merge that is not the obstacle.
+    // ⚠ Matching the tip's DUP is the whole graph half of the filter; also
+    // matching its canonical would be a condition that cannot change an answer,
+    // and such a condition is one no test can defend. `merged_into` is
+    // single-valued and `tip.dup` points at `tip.canonical` by construction of
+    // the walk, so an in-effect ledger with that dup has that canonical.
     //
-    // ⚠ Matching the tip's DUP is the whole filter; also matching its canonical
-    // would be a condition that cannot change an answer, and such a condition is
-    // one no test can defend. `merged_into` is single-valued and `tip.dup` points
-    // at `tip.canonical` by construction of the walk, so an in-effect ledger with
-    // that dup has that canonical. (An earlier version of this block carried the
-    // redundant half; it was removed for this reason and is not coming back.)
+    // ⚠ EVERY OTHER TERM EXISTS TO MAKE THE NAMED STEP ONE THE OWNER CAN TAKE,
+    // because that is the single thing this refusal is for. Each has its own
+    // refusal on the other side, and naming a merge that answers one of them
+    // would be two API answers pointing at each other with no way out:
+    //   · `applied` — `inEffect` is a pure GRAPH predicate and never looks at
+    //     whether the ledger finished. `runMerge` has a documented crash window
+    //     leaving exactly this state (ledger `applied:false`, graph change
+    //     committed, a satellite store throwing before the applied stamp), and
+    //     that merge answers `not_applied`.
+    //   · the store check — a ledger that moved data rows or thread anchors
+    //     answers `unavailable` when the store that holds them is absent, which
+    //     is the same precondition this function applies to its own subject a
+    //     few lines down. Degraded instances are the reachable case.
+    // `partial` and `failed` are deliberately NOT covered: they are outcomes of
+    // attempting a rollback, not preconditions that can be read beforehand, and
+    // «then try this one again» is the clause that carries them.
     //
-    // The count check is not redundant, and that is measured: with it, dropping
-    // `inEffect` turns the two ledgers of a pair-merged-twice into «no id» and a
-    // test sees it; with a plain `find` the same mutation picks the newest match,
-    // which happens to be the right one, and passes unnoticed.
-    // ⚠ `applied` as well as `inEffect`, and the pair of them is the point.
-    // `inEffect` is a pure GRAPH predicate and never looks at whether the ledger
-    // completed. `runMerge` has a documented crash window that leaves exactly
-    // this state: ledger written `applied:false`, the graph change committed, a
-    // satellite store throwing before the applied-stamp rewrite. Naming such a
-    // merge sends the owner to a route that answers «This merge did not complete,
-    // so there is nothing to take back» — two API answers pointing at each other
-    // with no way out. Measured on this tree before the guard existed.
-    const candidates = tip === null ? [] : readAll(store, sweepsDir).filter(
-      (r) => r.file.entry.dupId === tip.dup && r.view.inEffect && r.view.applied,
+    // ⚠ AND REQUIRE EXACTLY ONE. Its value is second-order and worth stating
+    // plainly: the set is provably of size ≤ 1 (the dedupe in `readAll` clears
+    // `inEffect` on all but the newest ledger of a pair, and `merged_into` is
+    // single-valued, so there is no fork), and a mutation of the count ALONE
+    // therefore survives the suite. What it buys is that dropping `inEffect`
+    // becomes observable: that mutation admits both ledgers of a
+    // pair-merged-twice, the count turns them into «no id», and a test sees it —
+    // whereas a plain pick would take the newest match, which happens to be the
+    // right one, and pass unnoticed. It is a discriminator for a neighbouring
+    // mutation, not a guard against an ambiguous match the schema forbids.
+    const candidates = readAll(store, sweepsDir).filter(
+      (r) => r.file.entry.dupId === tip.dup
+        && r.view.inEffect && r.view.applied
+        && !(r.file.dataStore.length > 0 && !dataStore)
+        && !((r.file.threadAnchors?.length ?? 0) > 0 && !threadStore),
     );
     const blocking = candidates.length === 1 ? candidates[0]! : null;
-    return {
-      ok: false,
-      reason: 'chained',
-      blocking: blocking ? { id: blocking.view.id, intoName: blocking.view.canonicalName } : null,
-    };
+    return { ok: false, reason: 'chained', blocking: blocking ? { id: blocking.view.id } : null };
   }
   if ((file.dataStore.length > 0 && !dataStore) || ((file.threadAnchors?.length ?? 0) > 0 && !threadStore)) {
     return { ok: false, reason: 'unavailable' };
