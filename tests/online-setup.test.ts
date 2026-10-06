@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getApiKey, hasApiKey } from './setup.js';
+import { getApiKey, hasApiKey } from './online/setup.js';
 
 describe('getApiKey reads the config fallback', () => {
   let home = '';
