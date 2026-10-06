@@ -30,37 +30,16 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { TIER_PRESETS } from '../../src/core/tier-presets.js';
-import type { TierSlot } from '../../src/types/index.js';
+import { FIREWORKS_HOST, pinnedSlots } from './preset-slots.js';
 
 const FIREWORKS_KEY = process.env['FIREWORKS_API_KEY'];
 
-/** Every distinct (endpoint, model) a preset pins, with the presets that pin it. */
-function pinnedSlots(): Array<{ modelId: string; baseUrl: string; presets: string[] }> {
-  const byKey = new Map<string, { modelId: string; baseUrl: string; presets: Set<string> }>();
-  for (const [presetName, preset] of Object.entries(TIER_PRESETS)) {
-    for (const slot of Object.values(preset.tier_set) as Array<TierSlot | undefined>) {
-      if (!slot?.model_id || !slot.api_base_url) continue;
-      const key = `${slot.api_base_url}::${slot.model_id}`;
-      const entry = byKey.get(key) ?? { modelId: slot.model_id, baseUrl: slot.api_base_url, presets: new Set<string>() };
-      entry.presets.add(presetName);
-      byKey.set(key, entry);
-    }
-  }
-  return [...byKey.values()].map(e => ({ modelId: e.modelId, baseUrl: e.baseUrl, presets: [...e.presets].sort() }));
-}
-
-const FIREWORKS_HOST = 'api.fireworks.ai';
 const slots = pinnedSlots();
 const fireworksSlots = slots.filter(s => s.baseUrl.includes(FIREWORKS_HOST));
 
-// Not `describe.skip` on an empty list: zero pinned slots would mean the presets
-// stopped pinning anything, which is itself worth failing on.
+// That the presets pin at least one Fireworks slot is checked offline, in
+// tests/online-guards.test.ts: an empty list here would skip silently.
 describe('preset slots are served by their provider', () => {
-  it('the presets pin at least one Fireworks-hosted slot', () => {
-    expect(fireworksSlots.length).toBeGreaterThan(0);
-  });
-
   const runFireworks = FIREWORKS_KEY ? describe : describe.skip;
 
   runFireworks('Fireworks', () => {

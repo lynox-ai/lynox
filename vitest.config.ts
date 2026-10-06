@@ -1,5 +1,10 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
+import { ONLINE_TESTS_GLOB, onlineTestsSkipReason } from './scripts/vitest-online-opt-in.js';
+
+// Printed, not silent: a run that leaves the online tests out says so and says how to include them.
+const onlineSkip = onlineTestsSkipReason(process.env);
+if (onlineSkip !== null) console.log(onlineSkip);
 
 export default defineConfig({
   // The svelte compiler lets a test import a Svelte 5 rune module (`*.svelte.ts`,
@@ -12,6 +17,7 @@ export default defineConfig({
   plugins: [svelte()],
   test: {
     include: ['src/**/*.test.ts', 'tests/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
+    exclude: [...configDefaults.exclude, ...(onlineSkip !== null ? [ONLINE_TESTS_GLOB] : [])],
     globalSetup: ['./scripts/vitest-global-setup.ts'],
     testTimeout: 10_000,
     pool: 'forks',

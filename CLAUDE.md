@@ -16,7 +16,7 @@ pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
 npx vitest run       # ~330 test files (src + tests/)
-npx vitest run tests/online/  # 17 test files (real API)
+LYNOX_ONLINE=1 npx vitest run tests/online/  # real API calls; skipped without LYNOX_ONLINE=1
 
 # Web UI (@lynox-ai/web-ui)
 cd packages/web-ui && pnpm run dev        # standalone dev server (needs Engine running: `lynox` or `lynox --http-api`)
@@ -100,7 +100,7 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 ## Testing
 
 ~310 co-located *.test.ts in src/, ~20 in tests/ (integration + security + smoke).
-Online tests in tests/online/ (real Haiku API).
+Online tests in tests/online/ (real provider APIs) run only with `LYNOX_ONLINE=1`; without it the run prints why it left them out.
 Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
 
 ## Git

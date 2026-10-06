@@ -3,7 +3,7 @@
  *
  * Requires MISTRAL_API_KEY env var. Skipped if not set.
  *
- * Run: MISTRAL_API_KEY=... npx vitest run tests/online/openai-provider.test.ts
+ * Run: LYNOX_ONLINE=1 MISTRAL_API_KEY=... npx vitest run tests/online/openai-provider.test.ts
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';

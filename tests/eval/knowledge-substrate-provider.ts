@@ -129,8 +129,8 @@ export function resolveReplayProvider(
     throw new Error(`LYNOX_KNOWLEDGE_PROVIDER="${forced}" is not a known provider (expected: anthropic | mistral | proxy)`);
   }
 
-  // BOTH spellings — see the header. `api_key` stays as a fallback for older
-  // configs; `anthropic_api_key` is what the CLI writes today.
+  // BOTH spellings — see the header. `api_key` is the schema field; a config can
+  // carry `anthropic_api_key` instead, and nothing in src/ writes that name.
   const anthropicKey = pickKey(env.ANTHROPIC_API_KEY, fromCfg('anthropic_api_key'), fromCfg('api_key'));
   const mistralKey = pickKey(env.MISTRAL_API_KEY, fromCfg('mistral_api_key'));
 
