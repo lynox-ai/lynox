@@ -33,32 +33,52 @@ export function injectPrintScaffold(html: string): string {
   const script =
     '<scr' + 'ipt>window.addEventListener("load",function(){setTimeout(function(){window.print();},200);});' +
     'window.addEventListener("afterprint",function(){window.close();});</scr' + 'ipt>';
-  // ONE insertion, at a STRUCTURALLY determined position — not two pattern
-  // matches. `html` here is already sanitized, and a regex over sanitized HTML
-  // can match inside an attribute VALUE: until the 2025 serializer change
-  // (Chromium 138, Firefox 140, WebKit 26) `innerHTML` returned `<` and `>` raw
-  // in attributes, so a `</body>` an artifact put in a `title=` survived into
-  // the string and `replace(/<\/body>/i, …)` hit THAT one first. Measured, by
-  // feeding the old serializer's output in directly and re-parsing: a payload of
-  // `<p title="</body> ><img src=/nope onerror=…>">` yielded a live `<img>`, and
-  // the scaffold's own script went missing — the insertion had landed inside the
-  // attribute. (Via `</head>` it stays inert; I checked that separately rather
-  // than assuming the two behaved alike.)
+  // ONE append, at the END — no pattern match over sanitized HTML, and no
+  // insertion OFFSET either. Both halves of that cost a measurement.
   //
-  // `lastIndexOf` cannot be fooled the same way: the real `</body>` closes the
-  // document, so any occurrence inside an attribute is necessarily BEFORE it.
-  // The style rides along at the same point instead of going into `<head>` — a
-  // `<style>` element is valid in body, and that removes the second match
-  // entirely rather than hardening it.
+  // The pattern match came first. `html` is already sanitized, and a regex over
+  // sanitized HTML can match inside an attribute VALUE: until the 2025
+  // serializer change (Chromium 138, Firefox 140, WebKit 26) `innerHTML`
+  // returned `<` and `>` raw in attributes, so a `</body>` an artifact put in a
+  // `title=` survived into the string and `replace(/<\/body>/i, …)` hit THAT one
+  // first. Measured by feeding the old serializer's output in directly and
+  // re-parsing: `<p title="</body> ><img src=/nope onerror=…>">` yielded a live
+  // `<img>`, and the scaffold's own script went MISSING — the insertion had
+  // landed inside the attribute. (Via `</head>` it stays inert; checked
+  // separately rather than assumed to behave alike.)
+  //
+  // Taking the LAST `</body>` instead looked like the fix and was not, twice:
+  //   · an index taken from `html.toLowerCase()` and applied to `html` is off by
+  //     however much the lowercasing grew. `'İ'` (U+0130) lowercases to TWO code
+  //     units — the only BMP code point that does — so ordinary Turkish text
+  //     (`İstanbul`) shifted the offset. Measured in a browser over two, three
+  //     and five of them: the insertion split an end tag, no `<style>` element
+  //     was produced, and the print CSS appeared as visible text.
+  //   · "a `</body>` inside an attribute is necessarily BEFORE the real one"
+  //     holds only if a real one EXISTS. For a bare fragment carrying a fake
+  //     `</body>` in a `title=`, the last match IS the fake and the breakout is
+  //     back. Both callers below happen to produce a real `</body>`, so this was
+  //     a precondition the function neither stated nor enforced — exploitable,
+  //     and reachable only by a caller nobody has written yet.
+  //
+  // Appending needs no offset, so none of that applies. Measured in Chrome
+  // through a blob URL, i.e. the production path: with the scaffold after
+  // `</html>` the `<style>` is in the document, its `@page` is a live
+  // `CSSPageRule`, the script runs, and nothing shows as text — identical on
+  // every count to inserting before `</body>`. The parser reprocesses a start
+  // tag found after the document using the in-body rules, which is why.
   //
   // The rule, the same one `utils/external-links.ts` holds: do not pattern-match
-  // over sanitized HTML. Here the whole document is handed to a blob URL, so
-  // there are no nodes to mutate — a single structural offset is the form that
-  // rule takes at this site.
-  const closeBody = html.toLowerCase().lastIndexOf('</body>');
-  return closeBody < 0
-    ? `${html}${style}${script}`
-    : `${html.slice(0, closeBody)}${style}${script}${html.slice(closeBody)}`;
+  // over sanitized HTML. Here the whole document goes to a blob URL, so there
+  // are no nodes to mutate — appending is the form that rule takes at this site.
+  //
+  // ⚠ One deliberate behaviour change. The print styles are now LAST in document
+  // order, so at equal specificity they beat the artifact's own CSS instead of
+  // losing to it. That is the direction we want — `@page` margins and
+  // break-inside hygiene are the whole point of the scaffold — but it IS a
+  // change: an artifact that deliberately set `break-inside: auto` no longer
+  // wins that tie.
+  return `${html}${style}${script}`;
 }
 
 /** Open a built print document in a new window. False if the popup was blocked. */

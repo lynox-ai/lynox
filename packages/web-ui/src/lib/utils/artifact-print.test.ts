@@ -30,6 +30,21 @@ function injectAsPatternMatch(html: string): string {
 	return out;
 }
 
+/**
+ * The shape that REPLACED the pattern match, and was also wrong — kept because
+ * it is the only way to show why. For a full document it is safe: the real
+ * `</body>` closes the document, so a fake one in an attribute is necessarily
+ * before it. For a bare FRAGMENT there is no real one, the last match IS the
+ * fake, and the breakout is back. Two tests below use exactly that difference.
+ */
+function injectAsLastBodyOffset(html: string): string {
+	const style = '<style>@page{margin:1.5cm}</style>';
+	const script = '<scr' + 'ipt>window.addEventListener("load",function(){window.print();});</scr' + 'ipt>';
+	const closes = [...html.matchAll(/<\/body>/gi)];
+	const at = closes.length > 0 ? (closes[closes.length - 1]?.index ?? -1) : -1;
+	return at < 0 ? `${html}${style}${script}` : `${html.slice(0, at)}${style}${script}${html.slice(at)}`;
+}
+
 /** How many of the attacker's marker elements a document really contains. */
 function liveMarkers(html: string): number {
 	const { document } = parseHTML(html);
@@ -67,14 +82,24 @@ describe('injectPrintScaffold — the breakout it used to allow', () => {
 });
 
 describe('injectPrintScaffold', () => {
-	it('puts the @page style and the print script into a full document, before the body closes', () => {
+	it('puts the @page style and the print script into a full document, after it', () => {
+		// ⚠ TWO ASSERTIONS HERE CHANGED DIRECTION, and the requirement did not.
+		// They used to read `indexOf('@page') < lastIndexOf('</body>')`, i.e.
+		// "inside the body" — which was a PROXY for "the rule applies". The
+		// scaffold is now appended, so the proxy is false while the requirement
+		// holds: measured in Chrome through a blob URL, an appended `<style>` is
+		// in the document, its `@page` is a live `CSSPageRule`, and the script
+		// runs. What is pinned here is presence and position-at-the-end, because
+		// that is what the code promises; whether `@page` APPLIES is a browser
+		// fact this suite cannot evaluate and must not pretend to.
 		const out = injectPrintScaffold('<html><head><title>X</title></head><body><p>Hi</p></body></html>');
 		expect(out).toContain('@page{margin:1.5cm}');
-		expect(out.indexOf('@page')).toBeLessThan(out.lastIndexOf('</body>'));
-		expect(out.indexOf('window.print()')).toBeLessThan(out.lastIndexOf('</body>'));
-		// Original content preserved.
+		expect(out.indexOf('@page')).toBeGreaterThan(out.lastIndexOf('</body>'));
+		expect(out.indexOf('window.print()')).toBeGreaterThan(out.lastIndexOf('</body>'));
+		// Original content preserved, and the document is untouched up to its end.
 		expect(out).toContain('<p>Hi</p>');
 		expect(out).toContain('<title>X</title>');
+		expect(out.startsWith('<html><head><title>X</title></head><body><p>Hi</p></body></html>')).toBe(true);
 	});
 
 	it('auto-prints and closes after printing', () => {
@@ -97,10 +122,72 @@ describe('injectPrintScaffold', () => {
 		expect((out.match(/window\.print\(\)/g) ?? []).length).toBe(1);
 	});
 
-	it('is case-insensitive about the closing body tag', () => {
-		// `lastIndexOf` is case-sensitive; the search runs over a lowercased copy
-		// so an artifact written with `</BODY>` is not treated as a fragment.
+	it('does not care how the closing body tag is cased', () => {
+		// This test used to pin a case-INSENSITIVE search, and that requirement
+		// is gone rather than satisfied: there is no search. It stays because the
+		// behaviour it protects is still a requirement — an artifact written with
+		// `</BODY>` gets a working scaffold — and because a reader finding the
+		// old name in the history should find the answer here.
 		const out = injectPrintScaffold('<HTML><BODY><p>x</p></BODY></HTML>');
-		expect(out.indexOf('window.print()')).toBeLessThan(out.toLowerCase().lastIndexOf('</body>'));
+		expect(out).toContain('@page{margin:1.5cm}');
+		expect((out.match(/window\.print\(\)/g) ?? []).length).toBe(1);
+		expect(out).toContain('<p>x</p>');
+	});
+});
+
+describe('injectPrintScaffold — the precondition the offset shape smuggled in', () => {
+	/**
+	 * The finding this block exists for. Replacing the pattern match with "the
+	 * LAST `</body>`" rested on an argument that is true only for a DOCUMENT:
+	 * the real `</body>` closes it, so any fake one in an attribute is before it.
+	 * A bare FRAGMENT has no real `</body>` — the last match IS the fake, and the
+	 * insertion goes back inside the attribute.
+	 *
+	 * Neither shipped caller can reach it: `printHtmlDocument` sanitizes with
+	 * `WHOLE_DOCUMENT: true` and `printMarkdownDocument` wraps its body in a
+	 * full document, so both always produce a real `</body>`. That is exactly
+	 * what made it worth fixing rather than noting — the function is exported and
+	 * said nothing about needing one, so the next caller would have paid for it.
+	 */
+	const FRAGMENT_WITH_FAKE_CLOSE =
+		'<p title="</body> ><img src=/nope onerror=alert(1)>">ok</p>';
+
+	it('⭐ a fragment carrying a fake `</body>` yields no live markup', () => {
+		// Two positive controls, and they are not the same control: the pattern
+		// match breaks on this payload, and so does the offset shape that
+		// replaced it. If either stops breaking, this test says so rather than
+		// passing for nothing.
+		expect(
+			liveMarkers(injectAsPatternMatch(FRAGMENT_WITH_FAKE_CLOSE)),
+			'the pattern match no longer breaks on this payload',
+		).toBe(1);
+		expect(
+			liveMarkers(injectAsLastBodyOffset(FRAGMENT_WITH_FAKE_CLOSE)),
+			'the offset shape no longer breaks on this payload — the finding is gone',
+		).toBe(1);
+
+		expect(liveMarkers(injectPrintScaffold(FRAGMENT_WITH_FAKE_CLOSE))).toBe(0);
+	});
+
+	it('shows why the offset shape passed review: on a DOCUMENT it is safe', () => {
+		// The discriminator. Without this the test above reads as "the offset
+		// shape was simply broken", which is not what happened — it was correct
+		// for every input anyone fed it, and wrong for one nobody had written yet.
+		const asDocument =
+			'<html><head><title>t</title></head><body>'
+			+ '<p title="</body> ><img src=/nope onerror=alert(1)>">ok</p>'
+			+ '</body></html>';
+		expect(liveMarkers(injectAsPatternMatch(asDocument))).toBe(1);
+		expect(liveMarkers(injectAsLastBodyOffset(asDocument))).toBe(0);
+		expect(liveMarkers(injectPrintScaffold(asDocument))).toBe(0);
+	});
+
+	it('still injects exactly one working scaffold into that fragment', () => {
+		// Absence of the attack is not presence of the feature — the same second
+		// symptom the document case pins one describe up.
+		const out = injectPrintScaffold(FRAGMENT_WITH_FAKE_CLOSE);
+		expect((out.match(/window\.print\(\)/g) ?? []).length).toBe(1);
+		expect(out).toContain('@page{margin:1.5cm}');
+		expect(out.startsWith(FRAGMENT_WITH_FAKE_CLOSE)).toBe(true);
 	});
 });
