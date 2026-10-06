@@ -1,10 +1,8 @@
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsparser from '@typescript-eslint/parser';
+import svelte from 'eslint-plugin-svelte';
 
-/**
- * One rule set for the engine and the web UI's TypeScript. The web UI's `.svelte` files are not
- * linted: that needs `eslint-plugin-svelte`, which this repo does not carry.
- */
+/** One rule set for the engine and the web UI, `.ts` and `<script lang="ts">` alike. */
 const RULES = {
   // Type safety
   '@typescript-eslint/no-explicit-any': 'error',
@@ -59,6 +57,43 @@ export default [
       '@typescript-eslint': tseslint,
     },
     rules: RULES,
+  },
+  {
+    // In active rework elsewhere; linted once that lands.
+    ignores: ['packages/web-ui/src/lib/components/MarkdownRenderer.svelte'],
+  },
+  // The web UI's components: the plugin's recommended set, then the same rules as above on their
+  // scripts. Several classes are `warn`, and `warn` does not fail the lint: those are visible here,
+  // not enforced (one row tracks the floating promises).
+  ...svelte.configs.recommended.map((c) => ({ ...c, files: ['packages/web-ui/src/**/*.svelte'] })),
+  {
+    files: ['packages/web-ui/src/**/*.svelte'],
+    languageOptions: {
+      parserOptions: {
+        parser: tsparser,
+        projectService: true,
+        extraFileExtensions: ['.svelte'],
+        tsconfigRootDir: `${import.meta.dirname}/packages/web-ui`,
+      },
+    },
+    plugins: {
+      '@typescript-eslint': tseslint,
+    },
+    rules: {
+      ...RULES,
+      // Measured: no `kit.paths.base` in the web UI's svelte.config, and nothing mounts the UI
+      // under a prefix (the engine serves it at the root). `resolve()` would change no link.
+      'svelte/no-navigation-without-resolve': 'off',
+      // Each `{@html}` carries a disable line naming where its value comes from.
+      'svelte/no-at-html-tags': 'error',
+      // Visible, not enforced:
+      '@typescript-eslint/no-floating-promises': 'warn',
+      'svelte/require-each-key': 'warn',
+      'svelte/prefer-svelte-reactivity': 'warn',
+      'svelte/prefer-writable-derived': 'warn',
+      // Whether a `svelte-ignore` is needed is the Svelte compiler's call, not this plugin's.
+      'svelte/no-unused-svelte-ignore': 'warn',
+    },
   },
   {
     // ⚠ STRICTER THAN THE REPO, FOR ONE FILE. The repo allows `console.warn` everywhere.

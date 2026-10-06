@@ -51,7 +51,7 @@
 	const brokerAvailable = $derived(getGoogleStatus()?.broker_available === true);
 	/** A managed tenant that brought its OWN client — the D12 switch-back case. */
 	const canSwitchToManaged = $derived(
-		brokerAvailable && !isBroker && getGoogleStatus()?.client_source != null,
+		brokerAvailable && !isBroker && (getGoogleStatus()?.client_source ?? null) !== null,
 	);
 
 	/** The destructive switch-back is parked here until the user confirms it. */

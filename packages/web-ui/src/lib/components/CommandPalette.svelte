@@ -209,7 +209,7 @@
 				<div role="listbox" id="cmd-listbox" aria-label={t('cmd.placeholder')}>
 					{#each groups as group}
 						<p role="presentation" class="px-4 pt-2 pb-1 text-[10px] font-mono uppercase tracking-widest text-text-subtle">{group}</p>
-						{#each filtered.filter((i) => i.group === group) as item, i}
+						{#each filtered.filter((i) => i.group === group) as item}
 							{@const globalIdx = filtered.indexOf(item)}
 							<button
 								role="option"

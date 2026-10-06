@@ -34,5 +34,6 @@
 	aria-label={ariaLabel}
 	aria-hidden={ariaLabel ? undefined : true}
 >
+	<!-- eslint-disable-next-line svelte/no-at-html-tags -- `path` is read from the static `icons` map in ./icons.ts by a typed name, never from data -->
 	{@html path}
 </svg>

@@ -36,10 +36,8 @@
 		cancelQueue,
 		removeQueuedMessage,
 		takeFollowUp,
-		getSessionModel,
 		getContextBudget,
 		getCompactionOffer,
-		getContextWindow,
 		getPendingChangeset,
 		getChangesetLoading,
 		submitChangesetReview,
@@ -59,7 +57,6 @@
 		reviewKnowledge,
 		type FileAttachment,
 		type UsageInfo,
-		type ContextBudget,
 		type ToolCallInfo,
 		type ChatMessage,
 	} from '../stores/chat.svelte.js';
@@ -83,7 +80,6 @@
 	import { SECRET_SHAPES, looksLikeSecret } from '../utils/secret-shapes.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
-	import { isIosSafari } from '../utils/ios-safari.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
@@ -498,8 +494,6 @@
 	 *  non-iframe renderer; svg still renders in the iframe but needs the marker
 	 *  so the pill reads "SVG" instead of defaulting to "HTML". */
 	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'svg', 'csv', 'tsv', 'json', 'text']);
-	/** Tool calls that get special rendering (not grouped with regular tools) */
-	const SPECIAL_TOOLS = new Set(['plan_task']);
 
 	/** Tool call label: returns { action, subject } or null if hidden.
 	 *  Logic lives in `utils/tool-call-label.ts` so the per-tool rules
@@ -663,7 +657,6 @@
 	// drop goes through the same addFile() path as the paperclip + paste.
 	let isDragging = $state(false);
 	let recording = $state(false);
-	let promptAnswer = $state('');
 	let selectedOptions = $state<string[]>([]);
 	// Clear the multi-select working set whenever the ACTIVE prompt changes, so a
 	// selection from a prompt that was replaced without a click (server timeout →
@@ -1278,7 +1271,6 @@
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
 		selectedOptions = [];
-		promptAnswer = '';
 		replyPermission(answer);
 	}
 
@@ -1404,7 +1396,6 @@
 		}
 	});
 
-	const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 	function handlePaste(e: ClipboardEvent) {
 		const items = e.clipboardData?.items;
@@ -1638,7 +1629,6 @@
 	const retryStatus = $derived(getRetryStatus());
 	const isOffline = $derived(getIsOffline());
 	const ready = $derived(hasApiKey !== false);
-	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
 	const compactionOffer = $derived(getCompactionOffer());
 	/**
@@ -1648,7 +1638,6 @@
 	 * below for why the difference is load-bearing.
 	 */
 	const offerPct = $derived(ctxBudget?.budgetPercent ?? ctxBudget?.usagePercent);
-	const ctxWindow = $derived(getContextWindow());
 	const compacting = $derived(getIsCompacting());
 
 	async function handleCompactClick() {
@@ -3096,6 +3085,7 @@
 			{#if chatError}
 				<div role="alert" class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger flex items-center justify-between gap-3">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
+					<!-- eslint-disable-next-line svelte/no-at-html-tags -- chatError is HTML-escaped right here before the one link substitution, which keeps http(s) and relative URLs only -->
 					<span class="flex-1">{@html chatError
 						.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 						.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m: string, text: string, url: string) => {
@@ -3343,13 +3333,14 @@
 						     long token — a tracking URL in a body preview — scrolls the
 						     prompt sideways. -->
 						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
+							<!-- eslint-disable-next-line svelte/no-at-html-tags -- renderPromptSegments/renderPromptMarkdown (utils/prompt-markdown.ts): marked with escaping overrides, then DOMPurify with a pinned tag/attribute list; segment values are spliced in afterwards, HTML-escaped -->
 							{@html pendingPermission.segments
 								? renderPromptSegments(pendingPermission.segments)
 								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
-						{#if promptSecondsLeft != null}
+						{#if promptSecondsLeft !== null && promptSecondsLeft !== undefined}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
 						{#if !isPermissionGuard && !isDeepConsent}

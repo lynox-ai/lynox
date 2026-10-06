@@ -50,8 +50,8 @@
 	}
 
 	function formatElapsed(step: PipelineStepInfo): string {
-		if (step.durationMs != null) return `${(step.durationMs / 1000).toFixed(1)}s`;
-		if (step.elapsed != null) return `${step.elapsed}s`;
+		if (step.durationMs !== null && step.durationMs !== undefined) return `${(step.durationMs / 1000).toFixed(1)}s`;
+		if (step.elapsed !== null && step.elapsed !== undefined) return `${step.elapsed}s`;
 		return '';
 	}
 
