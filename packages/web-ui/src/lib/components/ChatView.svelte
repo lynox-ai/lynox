@@ -100,6 +100,7 @@
 	import { currentQuote, currentGreeting, startWallClock } from '../stores/wall-clock.svelte.js';
 	import { createMicSession, MicSessionReleased } from '../utils/mic-session.js';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { copyWithToast } from '../utils/clipboard.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled } from '../stores/autospeak.svelte.js';
@@ -721,7 +722,7 @@
 	}
 
 	function handleSecretCancel() {
-		cancelSecret();
+		void cancelSecret(); /* never rejects; a dismissal that does not arrive brings the prompt back */
 		secretValue = '';
 		secretConsented = false;
 	}
@@ -767,7 +768,7 @@
 	}
 
 	function handleMailConnectCancel() {
-		cancelMailConnect();
+		void cancelMailConnect(); /* never rejects; a dismissal that does not arrive brings the prompt back */
 		mailPassword = '';
 		mailConsented = false;
 		mailSubmitting = false;
@@ -1232,7 +1233,7 @@
 
 			// v2: persist partial progress so a reconnect restores the batch.
 			if (batchMode === 'v2' && batchTabsPromptId) {
-				postTabProgress(batchTabsPromptId, batchAnswers.map(a => a || null));
+				void postTabProgress(batchTabsPromptId, batchAnswers.map(a => a || null)); /* catches; progress is advisory */
 			}
 
 			// Find next unanswered
@@ -1246,7 +1247,7 @@
 					batchFocusIdx = firstEmpty;
 				} else {
 					// All filled — submit all
-					submitBatch();
+					void submitBatch(); /* never rejects; a reply that does not arrive is reported */
 				}
 			}
 			return;
@@ -1271,7 +1272,7 @@
 			approvalInflightTimer = setTimeout(() => { approvalInflight = null; approvalInflightTimer = null; }, 6000);
 		}
 		selectedOptions = [];
-		replyPermission(answer);
+		void replyPermission(answer); /* never rejects; a reply that does not arrive is reported */
 	}
 
 	/** Toggle an option in/out of the multi-select working set. */
@@ -1302,7 +1303,7 @@
 		// observer approach below removes that race for legacy engines.
 		for (let idx = 0; idx < batchAnswers.length; idx++) {
 			const prevPromptId = getPendingPermission()?.promptId;
-			replyPermission(batchAnswers[idx]!);
+			void replyPermission(batchAnswers[idx]!); /* never rejects; a reply that does not arrive is reported */
 			if (idx + 1 < batchAnswers.length) {
 				const arrived = await waitForNextPrompt(prevPromptId);
 				if (!arrived) break; // tool errored or completed early — stop sending
@@ -1413,7 +1414,7 @@
 	}
 
 
-	$effect(() => { checkApiKey(); });
+	$effect(() => { void checkApiKey(); /* catches and sets its state */ });
 
 	// Clear answered stack when streaming fully ends (not between sequential prompts)
 	$effect(() => { if (!isStreaming && !pendingPermission && answeredPrompts.length > 0) answeredPrompts = []; });
@@ -1786,7 +1787,7 @@
 		if (slashRoute) {
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
-			goto(slashRoute);
+			void goto(slashRoute); /* a navigation; nothing to report if a later one supersedes it */
 			return;
 		}
 
@@ -1965,7 +1966,7 @@
 			handleSend();
 		}
 		if (e.key === 'Escape' && isStreaming) {
-			abortRun();
+			void abortRun(); /* never rejects; a stop that does not arrive is reported */
 		}
 	}
 
@@ -2317,7 +2318,7 @@
 			{@render speakButton(msgKey, msgContent)}
 			{#if !hasArtifact}
 				<button
-					onclick={() => { navigator.clipboard.writeText(msgContent); addToast(t('common.copied'), 'success', 1500); }}
+					onclick={() => { void copyWithToast(msgContent); }}
 					class="text-text-subtle hover:text-text transition-colors p-1 rounded-[var(--radius-sm)] hover:bg-bg-muted"
 					title={t('common.copy')}
 					aria-label={t('common.copy')}
@@ -2346,7 +2347,7 @@
 				{#if tps !== null}<dt class="text-text-subtle/60">{t('diagnostics.throughput')}</dt><dd>{tps} tok/s</dd>{/if}
 				{#if usage.runId}
 					<dt class="text-text-subtle/60">{t('diagnostics.run_id')}</dt>
-					<dd><button class="hover:text-text transition-colors underline decoration-dotted" title={t('common.copy')} onclick={() => { navigator.clipboard.writeText(usage.runId ?? ''); addToast(t('common.copied'), 'success', 1500); }}>{usage.runId.slice(0, 8)}…</button></dd>
+					<dd><button class="hover:text-text transition-colors underline decoration-dotted" title={t('common.copy')} onclick={() => { void copyWithToast(usage.runId ?? ''); }}>{usage.runId.slice(0, 8)}…</button></dd>
 				{/if}
 			</dl>
 		</details>
@@ -2703,7 +2704,7 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) { sendMessage(userText); msg.failed = false; } else { navigator.clipboard.writeText(userText); addToast(t('common.copied'), 'success', 1500); } }}
+							onclick={() => { if (msg.failed) { sendMessage(userText); msg.failed = false; } else { void copyWithToast(userText); } }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
@@ -3072,7 +3073,7 @@
 					<span class="flex-1">{retryStatus.reason === 'busy' ? t('chat.busy_wait') : t('chat.retry').replace('{attempt}', String(retryStatus.attempt)).replace('{max}', String(retryStatus.maxAttempts))}</span>
 					{#if retryStatus.reason === 'busy' && retryStatus.attempt >= 10}
 						<button
-							onclick={() => { abortRun(); addToast(t('chat.busy_aborted'), 'info', 3000); }}
+							onclick={() => { void abortRun(); /* never rejects; the wait ends locally either way, a failed request is reported */ addToast(t('chat.busy_aborted'), 'info', 3000); }}
 							class="shrink-0 rounded-[var(--radius-sm)] border border-warning/40 bg-warning/20 px-2.5 py-1 text-xs font-medium hover:bg-warning/30 transition-colors"
 							title={t('chat.busy_cancel_title')}
 						>
@@ -3253,7 +3254,7 @@
 						if (!batchAnswers[i]) batchAnswers[i] = '__dismissed__';
 					}
 					batchAnswers = [...batchAnswers];
-					submitBatch();
+					void submitBatch(); /* never rejects; a reply that does not arrive is reported */
 				}}
 					class="w-full text-center rounded-[var(--radius-sm)] px-3 py-1.5 text-xs text-text-subtle hover:text-text hover:bg-bg-muted transition-all mt-1"
 				>{t('chat.dismiss')}</button>
@@ -3270,7 +3271,7 @@
 						<span class="text-text-subtle flex-1">{ap.question}</span>
 						<span class="text-accent-text font-medium">{ap.answer}</span>
 						<button
-							onclick={() => { abortRun(); answeredPrompts = []; addToast(t('chat.retry_hint'), 'info'); }}
+							onclick={() => { void abortRun().then((stopped) => { if (stopped) { answeredPrompts = []; addToast(t('chat.retry_hint'), 'info'); } }); /* never rejects; a stop that does not arrive is reported instead */ }}
 							class="text-text-subtle hover:text-accent-text transition-colors shrink-0 p-1.5"
 							title={t('chat.edit_answer')}
 						>
@@ -3450,7 +3451,7 @@
 							type="password"
 							bind:value={secretValue}
 							bind:this={secretInputEl}
-							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
+							onkeydown={(e) => { if (e.key === 'Enter') void handleSecretSave(); /* never rejects; submitSecret reports the outcome */ }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
 							aria-label={t('chat.secret_title')}
 							placeholder={pendingSecret.name}
@@ -3507,7 +3508,7 @@
 							type="password"
 							bind:value={mailPassword}
 							bind:this={mailInputEl}
-							onkeydown={(e) => { if (e.key === 'Enter') handleMailConnectSave(); }}
+							onkeydown={(e) => { if (e.key === 'Enter') void handleMailConnectSave(); /* never rejects; submitMailConnect reports the outcome */ }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
 							aria-label={t('chat.mail_connect_password_placeholder')}
 							placeholder={t('chat.mail_connect_password_placeholder')}
