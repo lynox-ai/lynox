@@ -4385,6 +4385,41 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
   // 'flag ON + non-direct provider (custom) → full flat set, NO tool-search
   // tool, NO defer_loading, NO advanced-tool-use beta' (~line 2596) — no
   // duplicate needed.
+
+  describe('the provider web_search fallback', () => {
+    // web_search is added when no web_research is registered. A caller that removes a
+    // disabled web_research from the list before building the Agent must not get the search
+    // back through that fallback; nor may an excluded web_search be added.
+    const namesFor = async (tools: ToolEntry[], excludeTools?: string[]): Promise<Array<string | undefined>> => {
+      mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools,
+        ...(excludeTools ? { excludeTools } : {}),
+        toolContext: createToolContext({ lazy_tools_enabled: false }),
+      });
+      await agent.send('hi');
+      return streamRequestOf(agent).tools.map((t) => t.name);
+    };
+
+    it('is withheld when web_research is excluded and already removed from the list', async () => {
+      expect(await namesFor([makeTool('bash')], ['web_research'])).not.toContain('web_search');
+    });
+
+    it('is withheld when web_search itself is excluded', async () => {
+      expect(await namesFor([makeTool('bash')], ['web_search'])).not.toContain('web_search');
+    });
+
+    it('is still added with nothing excluded and no web_research registered', async () => {
+      // The control: without it, a change that dropped the fallback altogether would pass
+      // both cases above.
+      expect(await namesFor([makeTool('bash')])).toContain('web_search');
+    });
+
+    it('is not added when web_research is registered, excluded or not', async () => {
+      expect(await namesFor([makeTool('bash'), makeTool('web_research')])).not.toContain('web_search');
+      expect(await namesFor([makeTool('bash'), makeTool('web_research')], ['web_research'])).not.toContain('web_search');
+    });
+  });
 });
 
 describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
