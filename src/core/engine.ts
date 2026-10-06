@@ -249,7 +249,9 @@ export class Engine {
   /**
    * Monotonic counter incremented every time the LLM client is rebuilt via
    * `_recreateClient` — covers `reloadUserConfig`, `reloadCredentials`,
-   * `setApiKey`, and any other path that swaps the underlying client. Long-
+   * `setApiKey`, and any other path that swaps the underlying client — and by
+   * `reloadUserConfig` on any other config change, since the Session builds its
+   * Agent from the config as well (tool toggles among it). Long-
    * lived Sessions snapshot this at Agent-build time and re-create their
    * Agent on the next `run()` if the engine's version has advanced. Without
    * it, a provider/credential change propagates to the engine but the
@@ -482,6 +484,14 @@ export class Engine {
         await initLLMProvider(newProvider);
       }
       this._recreateClient();
+    } else if (JSON.stringify(candidateConfig) !== JSON.stringify(prevConfig)) {
+      // Any other change still has to reach open sessions. A Session builds its Agent from this
+      // config — the tools it may use (`disabled_tools`), its prompt, its context window — and
+      // rebuilds only when `_configVersion` moves, which `_recreateClient` does for credential
+      // changes alone. Without this, switching a tool off in Tool Toggles left it usable in every
+      // open thread until something else rebuilt the agent. Compared as a whole rather than by a
+      // list of fields: a field the build starts reading later is covered without an edit here.
+      this._configVersion++;
     }
     // Tear down / bring up Bugsink on toggle transition. Without this, the
     // GDPR opt-out the Settings → Privacy toggle promises wouldn't hold —
@@ -616,8 +626,8 @@ export class Engine {
   }
 
   /**
-   * Snapshot of the LLM-client version Sessions compare against to detect
-   * a credential/provider swap that happened after their Agent was built.
+   * Snapshot Sessions compare against to detect a client swap or a config
+   * change that happened after their Agent was built.
    * See `_configVersion` for the full rationale.
    */
   getConfigVersion(): number {

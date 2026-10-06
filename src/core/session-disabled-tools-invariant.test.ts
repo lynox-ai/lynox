@@ -52,8 +52,9 @@ vi.mock('./agent.js', () => ({
     this.abort = vi.fn();
     // @ts-expect-error mock constructor
     this.getMessages = vi.fn().mockReturnValue([]);
-    // @ts-expect-error mock constructor
-    this.loadMessages = vi.fn();
+    // @ts-expect-error mock constructor — like the real one, ASSIGNS the latch from history. The
+    // history here holds no untrusted marker (the post-compaction case), so it lands on false.
+    this.loadMessages = vi.fn(function (this: { conversationSawUntrusted: boolean }) { this.conversationSawUntrusted = false; });
     // @ts-expect-error mock constructor
     this.setContinuationPrompt = vi.fn();
     // @ts-expect-error mock constructor
@@ -78,6 +79,12 @@ vi.mock('./agent.js', () => ({
     this.memory = null;
     // @ts-expect-error mock constructor
     this.tools = [];
+    // @ts-expect-error mock constructor — read by Session.run after a turn
+    this.getEstimatedOccupancyTokens = vi.fn().mockReturnValue(0);
+    // @ts-expect-error mock constructor — the sticky taint latch a rebuild must carry
+    this.conversationSawUntrusted = false;
+    // @ts-expect-error mock constructor
+    this.restoreConversationTaint = vi.fn(function (this: { conversationSawUntrusted: boolean }) { this.conversationSawUntrusted = true; });
   }),
 }));
 
@@ -352,6 +359,7 @@ vi.mock('./config.js', async () => {
 });
 
 import { Engine } from './engine.js';
+import type { Session } from './session.js';
 import { Agent } from './agent.js';
 
 // === Helpers ===
@@ -628,3 +636,102 @@ describe('captureFallback wiring: SessionOptions → agentOverrides → Agent', 
       .toMatch(/captureFallback:\s*true/);
   });
 });
+
+describe('a Tool Toggles change reaches an open session', () => {
+  // A session rebuilds its Agent only when the engine's config version moves. The toggle used to
+  // leave it in place: the next turn of an open thread still ran on an agent that had the tool.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegister.mockReturnThis();
+    currentUserConfig = {};
+  });
+
+  it('the next turn after disabling a tool runs on an agent that excludes it', async () => {
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('first');
+    expect(lastAgentExcludeTools()).not.toContain('web_research');
+
+    currentUserConfig = { disabled_tools: ['web_research'] };
+    await engine.reloadUserConfig();
+    await session.run('second');
+    expect(lastAgentExcludeTools()).toContain('web_research');
+  });
+
+  it('rebuilds on a change to another field the agent is built from, not only disabled_tools', async () => {
+    // The session reads more than the tool list when it builds the agent (context window, prompt
+    // shape, memory flags). The whole config is compared, so any of them takes effect.
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('first');
+    const before = agentCtor.mock.calls.length;
+
+    currentUserConfig = { disabled_tools: [], max_context_window_tokens: 200_000 };
+    await engine.reloadUserConfig();
+    await session.run('second');
+    expect(agentCtor.mock.calls.length).toBe(before + 1);
+  });
+
+  it('keeps the conversation taint latch across the rebuild a toggle triggers', async () => {
+    // A rebuild is one Settings save away, in the middle of a thread that may have read
+    // untrusted content. The latch arms the durable-write gate, and history alone cannot
+    // re-derive it after a compaction, a workflow or a spawn.
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('first');
+    const instances = (Agent as unknown as { mock: { instances: Array<{ conversationSawUntrusted: boolean }> } }).mock.instances;
+    instances.at(-1)!.conversationSawUntrusted = true; // the thread has read untrusted content
+
+    currentUserConfig = { disabled_tools: ['web_research'] };
+    await engine.reloadUserConfig();
+    await session.run('second');
+    expect(lastAgentExcludeTools()).toContain('web_research'); // it did rebuild
+    expect(instances.at(-1)!.conversationSawUntrusted).toBe(true);
+  });
+
+  it.each([
+    ['setModel', (s: Session) => { s.setModel('fast'); }],
+    ['setEffort', (s: Session) => { s.setEffort('high'); }],
+    ['setThinking', (s: Session) => { s.setThinking({ type: 'adaptive' }); }],
+    ['reloadUserConfig', async (s: Session) => { await s.reloadUserConfig(); }],
+  ] as const)('keeps the taint latch across a %s rebuild too', async (_name, rebuild) => {
+    // Every rebuild that keeps the conversation goes through one helper; each entry point is
+    // pinned on its own, so a site that went back to a bare rebuild fails here.
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    const instances = (Agent as unknown as { mock: { instances: Array<{ conversationSawUntrusted: boolean }> } }).mock.instances;
+    const before = instances.length;
+    instances.at(-1)!.conversationSawUntrusted = true;
+
+    await rebuild(session);
+    expect(instances.length).toBeGreaterThan(before); // it did rebuild
+    expect(instances.at(-1)!.conversationSawUntrusted).toBe(true);
+  });
+
+  it('does not taint a clean thread on that rebuild', async () => {
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('first');
+    const instances = (Agent as unknown as { mock: { instances: Array<{ conversationSawUntrusted: boolean }> } }).mock.instances;
+
+    currentUserConfig = { disabled_tools: ['web_research'] };
+    await engine.reloadUserConfig();
+    await session.run('second');
+    expect(lastAgentExcludeTools()).toContain('web_research');
+    expect(instances.at(-1)!.conversationSawUntrusted).toBe(false);
+  });
+
+  it('a reload that changes nothing does not rebuild the agent', async () => {
+    // The control: without it, a version bump on every reload would pass the case above.
+    const engine = await createEngineWithDisabledTools(['mail_send']);
+    const session = engine.createSession();
+    await session.run('first');
+    const before = agentCtor.mock.calls.length;
+
+    currentUserConfig = { disabled_tools: ['mail_send'] };
+    await engine.reloadUserConfig();
+    await session.run('second');
+    expect(agentCtor.mock.calls.length).toBe(before);
+  });
+});
+
