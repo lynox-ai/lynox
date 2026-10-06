@@ -852,9 +852,12 @@ export function oauthFetchTokenWouldSwapDelegatedAccess(
  * than quoted as-is — a name that is not a name is a fact worth stating, and
  * stating it is cheaper than reasoning about what prose can do inside quotes.
  *
- * This is NOT what keeps such a value away from the model: the model-facing 401
- * reminder interpolates nothing but the profile id. This is for the operator's
- * line, where the harm is a misleading name rather than an instruction.
+ * It is written for the operator's line, where the harm is a misleading name, but
+ * it is not only there: in `attachEngineManagedAuth`, the bearer/header 401 hint
+ * and the refusals print vault-key names through it too, and the model reads those.
+ * There a value that does not fit becomes `<unprintable>` rather than a line of its
+ * own (http.test.ts, "a profile-authored key name with line breaks is not printed
+ * into the 401 hint"). The other 401 hints use `safeToken` (see below).
  */
 function shapedForLog(value: unknown, pattern: RegExp, max: number): string {
   if (typeof value !== 'string') return `<non-string: ${typeof value}>`;
