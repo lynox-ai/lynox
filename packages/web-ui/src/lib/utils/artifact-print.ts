@@ -33,9 +33,32 @@ export function injectPrintScaffold(html: string): string {
   const script =
     '<scr' + 'ipt>window.addEventListener("load",function(){setTimeout(function(){window.print();},200);});' +
     'window.addEventListener("afterprint",function(){window.close();});</scr' + 'ipt>';
-  let out = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `${style}</head>`) : `${style}${html}`;
-  out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, `${script}</body>`) : `${out}${script}`;
-  return out;
+  // ONE insertion, at a STRUCTURALLY determined position — not two pattern
+  // matches. `html` here is already sanitized, and a regex over sanitized HTML
+  // can match inside an attribute VALUE: until the 2025 serializer change
+  // (Chromium 138, Firefox 140, WebKit 26) `innerHTML` returned `<` and `>` raw
+  // in attributes, so a `</body>` an artifact put in a `title=` survived into
+  // the string and `replace(/<\/body>/i, …)` hit THAT one first. Measured, by
+  // feeding the old serializer's output in directly and re-parsing: a payload of
+  // `<p title="</body> ><img src=/nope onerror=…>">` yielded a live `<img>`, and
+  // the scaffold's own script went missing — the insertion had landed inside the
+  // attribute. (Via `</head>` it stays inert; I checked that separately rather
+  // than assuming the two behaved alike.)
+  //
+  // `lastIndexOf` cannot be fooled the same way: the real `</body>` closes the
+  // document, so any occurrence inside an attribute is necessarily BEFORE it.
+  // The style rides along at the same point instead of going into `<head>` — a
+  // `<style>` element is valid in body, and that removes the second match
+  // entirely rather than hardening it.
+  //
+  // The rule, the same one `utils/external-links.ts` holds: do not pattern-match
+  // over sanitized HTML. Here the whole document is handed to a blob URL, so
+  // there are no nodes to mutate — a single structural offset is the form that
+  // rule takes at this site.
+  const closeBody = html.toLowerCase().lastIndexOf('</body>');
+  return closeBody < 0
+    ? `${html}${style}${script}`
+    : `${html.slice(0, closeBody)}${style}${script}${html.slice(closeBody)}`;
 }
 
 /** Open a built print document in a new window. False if the popup was blocked. */
