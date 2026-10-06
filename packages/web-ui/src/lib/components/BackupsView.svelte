@@ -2,7 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { pickBackupConfig, type BackupConfigFields } from '../backup-config.js';
+	import { pickBackupConfig, fetchBackupConfig, type BackupConfigFields } from '../backup-config.js';
 
 	interface Backup { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
@@ -18,6 +18,7 @@
 	// Backup settings (loaded from config)
 	let config = $state<Config>({});
 	let configLoading = $state(true);
+	let configError = $state('');
 	let saving = $state(false);
 	let saved = $state(false);
 
@@ -34,18 +35,12 @@
 
 	async function loadConfig() {
 		configLoading = true;
-		try {
-			const res = await fetch(`${getApiBase()}/config`);
-			if (!res.ok) throw new Error();
-			// GET returns the user config plus response-only fields (managed,
-			// capabilities, locks, *_configured). Both directions go through
-			// pickBackupConfig so a save re-sends neither those (the schema is
-			// strict and would 400) nor a key this view has no control for —
-			// see the docblock in backup-config.ts for why that second half
-			// matters under a merging PUT.
-			const body = (await res.json()) as Config;
-			config = pickBackupConfig(body);
-		} catch { /* ignore — settings just won't be editable */ }
+		configError = '';
+		// Both directions go through pickBackupConfig (see backup-config.ts). On a failed read the
+		// form stays hidden: shown with defaults, a save would overwrite the real settings.
+		const loaded = await fetchBackupConfig(getApiBase());
+		if (loaded) config = loaded;
+		else configError = t('common.load_failed');
 		configLoading = false;
 	}
 
@@ -104,7 +99,7 @@
 		return `${(bytes / 1048576).toFixed(1)} MB`;
 	}
 
-	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* a failure leaves the settings read-only, by design */ });
+	$effect(() => { void loadBackups(); /* catches and sets its error */ void loadConfig(); /* never rejects; a failed read hides the settings and shows an error */ });
 
 	const inputClass = 'w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none';
 	const cardClass = 'rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4';
@@ -180,7 +175,9 @@
 	{/if}
 
 	<!-- Backup Settings -->
-	{#if !configLoading}
+	{#if configError}
+		<p role="alert" class="mt-8 text-sm text-danger">{configError}</p>
+	{:else if !configLoading}
 		<h2 class="text-xs font-mono uppercase tracking-widest text-text-subtle mt-8 mb-3">{t('backups.settings')}</h2>
 
 		<div class="space-y-4">

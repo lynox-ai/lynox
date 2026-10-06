@@ -44,3 +44,18 @@ export function pickBackupConfig(src: BackupConfigFields): BackupConfigFields {
 		backup_retention_days: src.backup_retention_days,
 	};
 }
+
+/**
+ * Read the backup settings, or `null` when they could not be read. Never rejects. A view must not
+ * fall back to defaults on `null`: an editable form showing defaults would let a save overwrite the
+ * real settings with values the user never saw.
+ */
+export async function fetchBackupConfig(apiBase: string): Promise<BackupConfigFields | null> {
+	try {
+		const res = await fetch(`${apiBase}/config`);
+		if (!res.ok) return null;
+		return pickBackupConfig((await res.json()) as BackupConfigFields);
+	} catch {
+		return null;
+	}
+}

@@ -89,6 +89,8 @@
 		if (full) {
 			openedFromChat = fromChat;
 			selected = full;
+		} else {
+			addToast(t('common.load_failed'), 'error');
 		}
 	}
 
@@ -222,7 +224,7 @@
 						role="button"
 						tabindex="0"
 						onclick={() => openArtifact(artifact)}
-						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openArtifact(artifact); /* getArtifact resolves null on failure, never rejects */ } }}
+						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void openArtifact(artifact); /* never rejects; a failed open is reported */ } }}
 					>
 						<div class="flex items-start gap-3">
 							<span class="text-accent-text text-lg mt-0.5 opacity-60">{typeIcon(artifact.type)}</span>
