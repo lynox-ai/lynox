@@ -64,7 +64,7 @@ export default [
   },
   // The web UI's components: the plugin's recommended set, then the same rules as above on their
   // scripts. Several classes are `warn`, and `warn` does not fail the lint: those are visible here,
-  // not enforced (one row tracks the floating promises).
+  // not enforced.
   ...svelte.configs.recommended.map((c) => ({ ...c, files: ['packages/web-ui/src/**/*.svelte'] })),
   {
     files: ['packages/web-ui/src/**/*.svelte'],
@@ -87,12 +87,19 @@ export default [
       // Each `{@html}` carries a disable line naming where its value comes from.
       'svelte/no-at-html-tags': 'error',
       // Visible, not enforced:
-      '@typescript-eslint/no-floating-promises': 'warn',
       'svelte/require-each-key': 'warn',
       'svelte/prefer-svelte-reactivity': 'warn',
       'svelte/prefer-writable-derived': 'warn',
       // Whether a `svelte-ignore` is needed is the Svelte compiler's call, not this plugin's.
       'svelte/no-unused-svelte-ignore': 'warn',
+    },
+  },
+  {
+    // Floating promises are an error in every component except this one, which is still being
+    // worked through; a file joins the rule as soon as it is clean, so nothing slides back.
+    files: ['packages/web-ui/src/lib/components/ChatView.svelte'],
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'warn',
     },
   },
   {

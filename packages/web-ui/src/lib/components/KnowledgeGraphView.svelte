@@ -2,6 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { getApiBase } from '../config.svelte.js';
+	import { fetchEntityRelations } from '../api/kg-entity.js';
+	import { addToast } from '../stores/toast.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 
 	interface Entity { id: string; canonicalName: string; entityType: string; aliases: string[]; description: string; mentionCount: number; firstSeenAt: string; lastSeenAt: string; }
@@ -93,12 +95,10 @@
 
 	async function selectEntity(e: Entity) {
 		selected = e;
-		try {
-			const res = await fetch(`${getApiBase()}/kg/entities/${e.id}`);
-			if (!res.ok) throw new Error(`${res.status}`);
-			const data = (await res.json()) as { entity: Entity; relations: Relation[] };
-			relations = data.relations;
-		} catch { relations = []; }
+		// A failed read must not look like an entity without relations.
+		const loaded = await fetchEntityRelations<Relation>(getApiBase(), e.id);
+		relations = loaded ?? [];
+		if (loaded === null) addToast(t('common.load_failed'), 'error');
 	}
 
 	async function loadGraph() {
@@ -196,7 +196,7 @@
 	}
 
 	function handleGraphNodeClick(entity: Entity) {
-		selectEntity(entity);
+		void selectEntity(entity); /* never rejects; a failed read is reported, not shown as no relations */
 	}
 
 	// Dynamic type filters — derived from actual entities
@@ -249,13 +249,13 @@
 		return typeHues[t] ?? 'var(--color-text-subtle)';
 	}
 
-	$effect(() => { loadEntities(); });
+	$effect(() => { void loadEntities(); /* catches and sets its error */ });
 
 	$effect(() => {
-		if (viewMode === 'graph' && !graphLoaded && !graphLoading) loadGraph();
+		if (viewMode === 'graph' && !graphLoaded && !graphLoading) void loadGraph(); /* catches and sets its error */
 	});
 
-	function handleSearch() { loadEntities(); }
+	function handleSearch() { void loadEntities(); /* catches and sets its error */ }
 </script>
 
 <div class="p-6 max-w-5xl mx-auto">
@@ -393,12 +393,12 @@
 
 		<!-- Dynamic type filters -->
 		<div class="flex gap-1.5 mb-4 flex-wrap">
-			<button onclick={() => { typeFilter = ''; loadEntities(); }}
+			<button onclick={() => { typeFilter = ''; void loadEntities(); /* catches and sets its error */ }}
 				class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === '' ? 'bg-accent/10 text-accent-text border border-accent/30' : 'text-text-muted hover:text-text border border-transparent'}">
 				{t('kg.all')}
 			</button>
 			{#each availableTypes() as typ}
-				<button onclick={() => { typeFilter = typ; loadEntities(); }}
+				<button onclick={() => { typeFilter = typ; void loadEntities(); /* catches and sets its error */ }}
 					class="rounded-full px-3 py-1 text-xs transition-all {typeFilter === typ ? 'border border-current/30' : 'text-text-muted hover:text-text border border-transparent'}"
 					style={typeFilter === typ ? typeStyle(typ).replace(/15%/, '22%') : ''}>
 					<span class="inline-block h-1.5 w-1.5 rounded-full mr-1" style="background: {svgColor(typ)};"></span>{typ}

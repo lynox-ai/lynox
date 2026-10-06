@@ -19,7 +19,7 @@
 		loading = false;
 	}
 
-	$effect(() => { loadData(); });
+	$effect(() => { void loadData(); /* catches and sets its error */ });
 
 	// Get daily time series for a metric (sorted chronologically)
 	function getDailySeries(name: string): Metric[] {

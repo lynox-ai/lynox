@@ -277,7 +277,7 @@
 	}
 
 	function handleFilterChange() {
-		loadRuns();
+		void loadRuns(); /* catches and sets its error */
 	}
 
 	function exportCSV() {
@@ -345,7 +345,7 @@
 	}
 
 	$effect(() => {
-		loadRuns();
+		void loadRuns(); /* catches and sets its error */
 	});
 </script>
 

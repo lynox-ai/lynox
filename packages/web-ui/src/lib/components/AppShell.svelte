@@ -412,7 +412,7 @@
 	onActiveThreadRemoved(() => {
 		newChat();
 		void loadThreads();
-		goto('/app');
+		void goto('/app'); /* a navigation; nothing to report if a later one supersedes it */
 	});
 
 	// Auto-refresh threads when tab regains focus (cross-device sync)
@@ -550,7 +550,7 @@
 			<!-- New Chat -->
 			<div class="px-2 mb-2">
 				<button
-					onclick={() => { newChat(); void loadThreads(); sidebarOpen = false; if ($page.url.pathname !== '/app') goto('/app'); }}
+					onclick={() => { newChat(); void loadThreads(); sidebarOpen = false; if ($page.url.pathname !== '/app') void goto('/app'); /* a navigation; nothing to report if a later one supersedes it */ }}
 					class="w-full rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover transition-all flex items-center gap-2 {railExpanded ? 'justify-start' : 'md:justify-center md:px-2'}"
 					title={t('nav.new_chat')}
 					aria-label={t('nav.new_chat')}
@@ -678,7 +678,7 @@
 														type="text"
 														bind:value={renameValue}
 														onblur={() => commitRename(thread.id)}
-														onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') commitRename(thread.id); if (e.key === 'Escape') cancelRename(); }}
+														onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter') void commitRename(thread.id); /* renameThread reports a failure itself and never rejects */ if (e.key === 'Escape') cancelRename(); }}
 														class="flex-1 px-2 py-1.5 text-sm bg-bg border border-accent/40 rounded-[var(--radius-sm)] outline-none text-text"
 														use:focusOnMount
 													/>

@@ -115,7 +115,7 @@
 								class="flex-1 rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm font-mono outline-none focus:border-border-hover"
 							/>
 							<button
-								onclick={() => { if (getSearxngUrl().trim()) checkSearxng(getSearxngUrl().trim().replace(/\/+$/, '')); }}
+								onclick={() => { if (getSearxngUrl().trim()) void checkSearxng(getSearxngUrl().trim().replace(/\/+$/, '')); /* the search store catches and reports unhealthy */ }}
 								disabled={!getSearxngUrl().trim() || isSearxngChecking()}
 								class="rounded-[var(--radius-sm)] border border-border px-3 py-2 text-sm text-text-muted hover:text-text hover:border-border-hover disabled:opacity-50"
 							>

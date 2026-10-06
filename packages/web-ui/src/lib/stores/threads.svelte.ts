@@ -134,12 +134,18 @@ export async function renameThread(id: string, title: string): Promise<void> {
 	const prev = threads.find((t) => t.id === id)?.title;
 	const thread = threads.find((t) => t.id === id);
 	if (thread) thread.title = title;
-	const res = await fetch(`${getApiBase()}/threads/${id}`, {
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ title }),
-	});
-	if (!res.ok) {
+	// A request that never got an answer is a failed rename too: the optimistic title is taken
+	// back and the user is told, the same as for a refused one. This never rejects.
+	let ok = false;
+	try {
+		const res = await fetch(`${getApiBase()}/threads/${id}`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ title }),
+		});
+		ok = res.ok;
+	} catch { /* reported below */ }
+	if (!ok) {
 		if (thread && (prev !== null && prev !== undefined)) thread.title = prev;
 		addToast(t('threads.error_rename'), 'error');
 	}

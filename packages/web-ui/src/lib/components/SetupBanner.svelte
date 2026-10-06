@@ -258,7 +258,7 @@
 	}
 
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && canSave && step === 'credentials') saveCredentials();
+		if (e.key === 'Enter' && canSave && step === 'credentials') void saveCredentials(); /* reports its own errors in the banner */
 		if (e.key === 'Escape') dismiss();
 	}
 

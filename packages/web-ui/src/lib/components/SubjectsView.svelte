@@ -103,7 +103,7 @@
 		void goto('/app');
 	}
 
-	function handleSearch() { loadSubjects(); }
+	function handleSearch() { void loadSubjects(); /* listSubjects resolves null on failure and the view sets its error */ }
 
 	function timelineDate(entry: SubjectTimelineEntry): string {
 		return fmtDate(entry.occurredAt);

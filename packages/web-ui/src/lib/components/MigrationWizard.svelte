@@ -63,7 +63,7 @@
 	);
 
 	$effect(() => {
-		loadPreview();
+		void loadPreview(); /* the migration store catches and sets its error */
 
 		// Check URL parameters (checkout return flow)
 		if (typeof window !== 'undefined') {
@@ -81,7 +81,7 @@
 	function handleManualStart() {
 		if (!canStartManual) return;
 		setTarget(manualUrl, manualToken);
-		startMigration();
+		void startMigration(); /* the migration store catches and sets its error */
 	}
 
 	function handleCheckout(plan: 'hosted' | 'managed') {

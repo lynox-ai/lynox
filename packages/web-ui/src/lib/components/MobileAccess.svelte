@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { encode } from 'uqr';
 	import { t } from '../i18n.svelte.js';
-	import { addToast } from '../stores/toast.svelte.js';
+	import { copyWithToast } from '../utils/clipboard.js';
 	import { invalidateAll } from '$app/navigation';
 
 	let { hasSecret = false, linkCode = '' }: { hasSecret: boolean; linkCode: string } = $props();
@@ -39,10 +39,8 @@
 	}
 
 	function copyUrl() {
-		if (loginUrl) {
-			navigator.clipboard.writeText(loginUrl);
-			addToast(t('common.copied'), 'success', 1500);
-		}
+		// copyWithToast reports success or failure itself and never rejects.
+		if (loginUrl) void copyWithToast(loginUrl);
 	}
 </script>
 

@@ -11,7 +11,7 @@
 	let success = $state(false);
 
 	$effect(() => {
-		checkShouldShow();
+		void checkShouldShow(); /* an unreachable control plane just shows no prompt */
 	});
 
 	async function checkShouldShow() {

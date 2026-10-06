@@ -117,11 +117,11 @@
 	}
 
 	$effect(() => {
-		loadContacts();
-		checkDeals();
+		void loadContacts(); /* catches and sets its error */
+		void checkDeals(); /* a failure only keeps the deals tab hidden */
 	});
 
-	$effect(() => { if (tab === 'deals') loadDeals(); });
+	$effect(() => { if (tab === 'deals') void loadDeals(); /* catches and sets its error */ });
 
 	function parseTags(tags: unknown): string[] {
 		if (Array.isArray(tags)) return tags;
@@ -142,7 +142,7 @@
 		{#if hasDeals}
 			<div class="flex gap-1">
 				<button onclick={() => tab = 'contacts'} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'contacts' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.title')}</button>
-				<button onclick={() => { tab = 'deals'; loadDeals(); }} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'deals' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.deals')}</button>
+				<button onclick={() => { tab = 'deals'; void loadDeals(); /* catches and sets its error */ }} class="rounded-[var(--radius-sm)] px-3 py-1.5 text-sm {tab === 'deals' ? 'bg-accent/10 text-accent-text' : 'text-text-muted hover:text-text'}">{t('crm.deals')}</button>
 			</div>
 		{/if}
 		<button onclick={createInChat} class="ml-auto rounded-[var(--radius-sm)] bg-accent/10 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/15">+ {t('crm.create_in_chat')}</button>

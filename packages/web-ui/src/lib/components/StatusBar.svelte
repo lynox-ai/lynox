@@ -271,7 +271,7 @@
 
 	function startPolling() {
 		if (pollInterval) return;
-		poll();
+		void poll(); /* every request inside is caught; the bar keeps its last state */
 		pollInterval = setInterval(poll, 30_000);
 	}
 

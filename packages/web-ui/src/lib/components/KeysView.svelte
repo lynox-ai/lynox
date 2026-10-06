@@ -80,7 +80,7 @@
 	}
 
 	function onEditKeydown(e: KeyboardEvent, name: string) {
-		if (e.key === 'Enter' && editValue.trim()) commitEdit(name);
+		if (e.key === 'Enter' && editValue.trim()) void commitEdit(name); /* catches and sets its error */
 		if (e.key === 'Escape') cancelEdit();
 	}
 
@@ -96,7 +96,7 @@
 	}
 
 	$effect(() => {
-		loadSecrets();
+		void loadSecrets(); /* catches and sets its error */
 	});
 </script>
 
