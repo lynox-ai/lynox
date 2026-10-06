@@ -30,7 +30,7 @@
 	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, formatContextWindow, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
-	import { isManaged, cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';

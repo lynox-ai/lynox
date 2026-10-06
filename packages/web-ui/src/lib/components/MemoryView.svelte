@@ -120,11 +120,6 @@
 		editing = false;
 	}
 
-	function startEdit() {
-		editContent = content ?? '';
-		editing = true;
-	}
-
 	async function saveEdit() {
 		saving = true;
 		error = '';

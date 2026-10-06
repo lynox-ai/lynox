@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { getContext, isPinned, togglePin, closePanel } from '../stores/context-panel.svelte.js';
-	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 
