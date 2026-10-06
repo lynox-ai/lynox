@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
-	import { externalizeLinksInDom, wrapTablesInDom } from '$lib/utils/external-links.js';
+	import { renderSanitizedMarkdown } from '../utils/markdown-render.js';
 	import { codeToHtml } from 'shiki';
 	import { goto } from '$app/navigation';
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
-	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
+	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
@@ -26,39 +26,7 @@
 
 	let highlightedHtml = $state('');
 
-	/**
-	 * Sanitise, then do the link and table work on NODES, then serialise ONCE.
-	 *
-	 * The two passes used to be string rewrites running after
-	 * `DOMPurify.sanitize` — `/<a\b[^>]*>/` and `/<table\b[^>]*>/` — and a regex
-	 * over sanitized HTML can match into an attribute value. On an engine whose
-	 * `innerHTML` serialiser still returns `<` and `>` raw inside attributes
-	 * (everything before Chromium 138 / Firefox 140 / WebKit 26; an iOS ≤ 18
-	 * device is the realistic population), a sanitized `title="x>…"` let the
-	 * match end inside the attribute, and the replacement's own quote terminated
-	 * it while its `>` closed the tag. See `utils/external-links.ts` for the
-	 * measurement and the rule.
-	 *
-	 * `RETURN_DOM_FRAGMENT` keeps the whole thing in one parse: DOMPurify hands
-	 * back nodes it has already cleaned, the passes mutate those nodes, and the
-	 * single serialisation at the end is the first time this becomes a string
-	 * again. A raw `>` in an attribute survives that round trip as part of the
-	 * attribute, which is exactly what it should be.
-	 */
-	function renderMarkdown(src: string): string {
-		const html = marked.parse(repairCodeFences(fixMarkdownPreprocessing(src)), { async: false }) as string;
-		const fragment = DOMPurify.sanitize(html, { RETURN_DOM_FRAGMENT: true });
-		externalizeLinksInDom(fragment);
-		wrapTablesInDom(fragment);
-		// `ownerDocument` rather than the ambient `document`: the fragment belongs
-		// to DOMPurify's own document, and a container from a different one cannot
-		// adopt it.
-		const holder = (fragment.ownerDocument ?? document).createElement('div');
-		holder.appendChild(fragment);
-		return holder.innerHTML;
-	}
-
-	const baseHtml = $derived(renderMarkdown(content));
+	const baseHtml = $derived(renderSanitizedMarkdown(content));
 
 	function decodeEntities(str: string): string {
 		return str

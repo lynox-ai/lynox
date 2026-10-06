@@ -21,10 +21,18 @@
  *
  * Measured, not argued, with the old serializer's output fed in as a string and
  * the result re-parsed: the link rewrite and the table rewrite each turn
- * `title="x><img src=/nope onerror=…>"` into a real `<img>`. The suite could
- * never see it, because `linkedom` and a current browser both escape the `>`
- * — which is why the witness feeds the old output DIRECTLY instead of going
- * through a parser.
+ * `title="x><img src=/nope onerror=…>"` into a real `<img>`.
+ *
+ * ⚠ The witness feeds that output in DIRECTLY rather than building it through a
+ * parser, and the reason this comment used to give for that was false. It said
+ * `linkedom` and a current browser both escape the `>`, so the suite could never
+ * see the breakout. Measured: a current browser does escape it — `linkedom` does
+ * NOT. `setAttribute('title', 'a></body>…')` serialises back with a RAW `>`, so
+ * a payload built through linkedom would reproduce this defect perfectly well,
+ * and the suite was never blind to it. The literal stays for a better reason
+ * than the one claimed: it pins what the OLD BROWSER emitted, which is the input
+ * that was actually dangerous, rather than depending on a test library happening
+ * to agree with it.
  *
  * ## The rule this file exists to hold
  *
@@ -33,9 +41,11 @@
  * attribute; it only becomes markup when a second pass inserts a quote.
  *
  * The module path did not move even though the file now holds a table pass too:
- * `markdown-link-affordance.test.ts` pins the renderer's import of
- * `$lib/utils/external-links.js`, and renaming a module inside a security fix is
- * the kind of change that hides in one.
+ * renaming a module inside a security fix is the kind of change that hides in
+ * one. Its importer did move — the pipeline that calls these passes is now
+ * `utils/markdown-render.ts`, and `utils/markdown-render.test.ts` is what pins
+ * the import. (This paragraph named `markdown-link-affordance.test.ts` until
+ * that stopped being true.)
  */
 
 /**
