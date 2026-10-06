@@ -12,6 +12,7 @@
 	import { deckFrameHeight } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
+	import { substituteRenderedFences } from '../utils/fence-substitution.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 
@@ -581,11 +582,7 @@
 				}
 			})
 		);
-		let result = html;
-		for (const { original, result: replacement } of results) {
-			if (original) result = result.replace(original, replacement);
-		}
-		return result;
+		return substituteRenderedFences(html, results);
 	}
 
 	/*
