@@ -4900,4 +4900,19 @@ describe('the connection a call went through is stamped by the resolver, not the
     });
     expect(stamp).toBeUndefined();
   });
+
+  it('(a) on a profile\'s host, a different connection named by the model does not replace the stamp', async () => {
+    const { ApiStore } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    store.register({ id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'the host owner' });
+    store.register({ id: 'crm', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'the connection the model names' });
+    testCtx.apiStore = store;
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    const stamp = await stampOf({
+      url: 'https://api.shop.example/v1/orders?connection_id=crm&host=api.crm.example',
+      headers: { 'X-Lynox-Connection': 'crm', Host: 'api.crm.example' },
+    });
+    expect(stamp?.id).toBe('shop');
+  });
 });

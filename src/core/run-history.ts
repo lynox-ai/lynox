@@ -1285,9 +1285,18 @@ const MIGRATIONS: string[] = [
   // NULL means UNKNOWN, not "no connection". Every row written before v54 is NULL
   // and is not backfilled: the host is in `input_json`, but which profile owned it
   // then is not recorded anywhere, and guessing from today's profiles would write a
-  // claim the data cannot carry. After v54, NULL still also covers calls that
-  // resolved no profile, pipeline-step calls (written by runner.ts, which does not
-  // carry the stamp) and calls on an instance without engine.db.
+  // claim the data cannot carry. After v54, NULL still also covers calls whose host
+  // resolved no profile (incl. a host variant the profile does not name, and a host
+  // two profiles share), pipeline-step calls (written by runner.ts from stream
+  // events, which do not carry the stamp), and every tool other than http_request.
+  // `connection_created_at` alone is also NULL on an instance without engine.db.
+  // A stamped row means "the URL's host belonged to this profile", written before
+  // the request is sent — refused calls (`output_json` non-empty) carry it too.
+  // The column is a lower bound; never read it as "everything from connection X".
+  //
+  // Plaintext, unlike input_json/output_json: a profile id and a timestamp, the same
+  // values engine.db already holds in plaintext, and a future delete has to select
+  // on them.
   //
   // A SOFT reference across files (`connections` is in engine.db): no FK, no
   // ON DELETE, so the value outlives the connection row — the point of keeping it.

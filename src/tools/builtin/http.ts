@@ -1304,10 +1304,11 @@ function writeRenewalFailure(
 
 /**
  * Keep the connection this call's host resolves to on the call's ledger row
- * (`core/call-connection.ts`). The same synchronous lookup the attach below makes,
- * done first and on its own so it holds whether or not a credential is attached:
- * a profile without engine-managed auth, or an agent without a vault, still read
- * from that connection. Nothing from the tool input but the URL's host reaches it,
+ * (`core/call-connection.ts` says what the stamp does and does not mean). The same
+ * synchronous lookup the attach below makes, done first and on its own so it holds
+ * whether or not a credential is attached: a profile without engine-managed auth,
+ * or an agent without a vault, still talks to that connection. Written before any
+ * refusal below, so a refused call carries it too. Nothing from the tool input but the URL's host reaches it,
  * and the host only selects among profiles the user saved. Outside a tool call (a
  * bulk run's worker effect) the note is a no-op.
  */

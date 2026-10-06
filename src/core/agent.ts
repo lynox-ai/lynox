@@ -3881,9 +3881,9 @@ export class Agent implements IAgent {
       // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
       // never reads the field, so this is a no-op for it.
       this._pendingDowngradeTier = downgradeDecision;
-      const rawResult = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
+      const rawResult = runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : runInCallSlot(callSlot, () => tool.handler(processedInput, this));
+        : tool.handler(processedInput, this));
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching

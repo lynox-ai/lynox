@@ -80,7 +80,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
-import { noteCallConnection } from './call-connection.js';
+import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -2592,17 +2592,25 @@ describe('Agent', () => {
         expect(call?.connection?.id).toBe('shop');
       });
 
-      it('(a) a connection named in the tool input reaches no stamp', async () => {
+      it('opens the slot around the worker-pool path too', async () => {
+        // A pooled tool running in-process would otherwise inherit an enclosing
+        // call's slot (e.g. the parent spawn_agent's) and stamp THAT call.
         const recorded: Stamped[] = [];
-        const tool = makeTool('plain_tool', vi.fn().mockResolvedValue('ok'));
+        const tool = makeTool('pooled_tool', vi.fn().mockResolvedValue('unused'));
+        const workerPool = {
+          isWorkerSafe: (name: string) => name === 'pooled_tool',
+          execute: vi.fn(async () => { noteCallConnection({ id: 'pooled-conn', createdAt: null }); return 'ok'; }),
+          shutdown: async () => {},
+        };
         mockProcess
-          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-p', name: 'plain_tool', input: { connection: { id: 'shop', createdAt: null }, connection_id: 'shop' } }]))
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-w', name: 'pooled_tool', input: {} }]))
           .mockResolvedValueOnce(endTurnResponse('done'));
-        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as Stamped); } });
-        await agent.send('go');
-        const call = recorded.find(c => c.toolName === 'plain_tool');
-        expect(call).toBeDefined();
-        expect(call!.connection).toBeUndefined();
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], workerPool, recordToolCall: (c) => { recorded.push(c as Stamped); } });
+        const outer: CallSlot = {};
+        await runInCallSlot(outer, () => agent.send('go'));
+        expect(workerPool.execute).toHaveBeenCalled();
+        expect(recorded.find(c => c.toolName === 'pooled_tool')?.connection?.id).toBe('pooled-conn');
+        expect(outer.connection, 'the enclosing slot must not take the pooled call\'s stamp').toBeUndefined();
       });
     });
 

@@ -96,6 +96,10 @@ describe('connection stamp — persistence and identity', () => {
   });
 
   it('(b) the stamp on a ledger row survives deleting the connection', () => {
+    // What this pins is the write path and the column's independence: the ledger
+    // (history.db) and connections (engine.db) are separate files, so no FK or
+    // cascade can exist between them. A future purge of ledger rows on connection
+    // delete, done in another layer, would not be caught here.
     const { store, history } = setup();
     store.save(profile('shop'));
     const createdAt = store.connectionCreatedAt('shop')!;
@@ -119,7 +123,9 @@ describe('connection stamp — persistence and identity', () => {
     expect(call!.connection_created_at).toBeNull();
   });
 
-  it('(c) a connection deleted and set up again under the same id gets a different stamp', () => {
+  it('(c) a connection deleted and set up again under the same id gets a different stamp — once a second has passed', () => {
+    // `age` stands in for elapsed time. Inside the same second the pair is
+    // identical (datetime('now') resolution); that gap is named in call-connection.ts.
     const { engine, store } = setup();
     store.save(profile('shop'));
     age(engine, 'shop');
