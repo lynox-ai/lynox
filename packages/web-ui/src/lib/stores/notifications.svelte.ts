@@ -47,7 +47,7 @@ export function initNotifications(): void {
   permission = Notification.permission;
 
   // Check existing subscription
-  navigator.serviceWorker.ready.then(async (reg) => {
+  void navigator.serviceWorker.ready.then(async (reg) => {
     const sub = await reg.pushManager.getSubscription();
     subscribed = sub !== null;
   });

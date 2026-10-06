@@ -47,7 +47,7 @@ export function estimateCost(
  * is already lost on the wire), see `formatCostCents`.
  */
 export function formatCost(usd: number | null | undefined): string {
-	if (usd == null || usd === 0) return '-';
+	if ((usd === null || usd === undefined) || usd === 0) return '-';
 	if (usd < 0.01) return `$${usd.toFixed(4)}`;
 	return `$${usd.toFixed(2)}`;
 }
@@ -63,7 +63,7 @@ export function formatCost(usd: number | null | undefined): string {
  * - ≥ 1 cent → '$X.YY'
  */
 export function formatCostCents(cents: number | null | undefined): string {
-	if (cents == null) return '-';
+	if (cents === null || cents === undefined) return '-';
 	if (cents === 0) return '$0.00';
 	if (cents < 1) return '< $0.01';
 	const d = Math.floor(cents / 100);
@@ -73,7 +73,7 @@ export function formatCostCents(cents: number | null | undefined): string {
 
 /** Duration formatting: ms → human-readable. */
 export function formatDuration(ms: number | null | undefined): string {
-	if (ms == null || ms === 0) return '-';
+	if ((ms === null || ms === undefined) || ms === 0) return '-';
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
 	return `${(ms / 60_000).toFixed(1)}m`;

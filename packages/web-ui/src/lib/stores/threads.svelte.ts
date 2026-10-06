@@ -140,7 +140,7 @@ export async function renameThread(id: string, title: string): Promise<void> {
 		body: JSON.stringify({ title }),
 	});
 	if (!res.ok) {
-		if (thread && prev != null) thread.title = prev;
+		if (thread && (prev !== null && prev !== undefined)) thread.title = prev;
 		addToast(t('threads.error_rename'), 'error');
 	}
 }
