@@ -7,6 +7,23 @@
 #
 # Allowlist (deliberate fixed-light or fixed-dark surfaces with rationale):
 #   - utils/artifact-print.ts                     (print stylesheet, always white paper)
+#   - utils/artifact-frame.ts                     (iframe srcdoc theme colours — see below)
+#
+# ⚠ TWO HONEST NOTES ABOUT THAT LAST ENTRY, because its first version overstated:
+#
+#   1. The rationale is a CHOICE, not an impossibility. A CSS-variable BINDING
+#      cannot cross into a sandboxed srcdoc, but the VALUE can — read it at the
+#      call site with `getComputedStyle(document.documentElement)
+#      .getPropertyValue('--color-…')` and pass it in, exactly as the theme is
+#      passed in today. The literals stay because keeping the theme→colour
+#      mapping inside one exported function is what makes that mapping testable;
+#      "structurally unavailable" was the wrong word for it.
+#   2. This allowlist is a `grep -vE` over path substrings with NO line or
+#      surface scoping, so every entry exempts its WHOLE file forever. The
+#      per-surface notes above ("mermaid PNG export") describe intent, not what
+#      the script enforces. `artifact-frame.ts` now owns the artifact frame's
+#      entire head, so it is the file most likely to grow colour — worth knowing
+#      when the next hex lands there and nothing complains.
 #   - MarkdownRenderer.svelte mermaid PNG export  (asset-export decision)
 #   - MarkdownRenderer.svelte html2canvas         (asset-export decision)
 #   - KnowledgeGraphView.svelte typeHues          (categorical mid-tone palette, AA on both themes)
@@ -33,6 +50,7 @@ ALLOWLIST=(
   "packages/web-ui/src/app.css"
   "packages/web-ui/src/lib/components/MarkdownRenderer.svelte"
   "packages/web-ui/src/lib/utils/artifact-print.ts"
+  "packages/web-ui/src/lib/utils/artifact-frame.ts"
   "packages/web-ui/src/lib/components/KnowledgeGraphView.svelte"
   "packages/web-ui/src/lib/components/SubjectsView.svelte"
   "packages/web-ui/src/lib/components/MobileAccess.svelte"

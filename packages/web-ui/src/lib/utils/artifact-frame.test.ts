@@ -1,37 +1,436 @@
 import { describe, it, expect } from 'vitest';
-import { isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview, ARTIFACT_FIT_SCRIPT, clearArtifactFitStyles } from './artifact-frame.js';
+import { DOMParser as LinkedomDOMParser, parseHTML } from 'linkedom';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+import {
+	isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview,
+	injectIntoArtifactFrame, buildArtifactBubbleFrame, hasOwnDocument, bringsOwnStyling,
+	ARTIFACT_CSP, ARTIFACT_FIT_CODE,
+	clearArtifactFitStyles,
+} from './artifact-frame.js';
 import type { ArtifactFitStyle } from './artifact-frame.js';
 
+/**
+ * ⚠ `injectIntoArtifactFrame` parses with the platform's `DOMParser`. Node has
+ * none, so linkedom's stands in — and the two DIVERGE on shapes this suite
+ * touches, which is why every assertion below is written against structure the
+ * two agree on.
+ *
+ * Measured, linkedom 0.18.12 vs Chrome:
+ *
+ *   `<div>frag</div>`            DIV as documentElement (content kept, head and
+ *                                body lazily created INSIDE it) vs html/head/body
+ *   `<body>x</body>`             BODY as documentElement vs HTML
+ *   `<head><title>t</title></head>`  HEAD as documentElement vs HTML
+ *
+ * An earlier version of this note said the content was "dropped" and that the
+ * engines "agree on the document case". Both were wrong: the content survives,
+ * and the disagreement reaches `<body>`-only and `<head>`-only inputs, which the
+ * production predicate routes into the PARSE branch. So a future test on one of
+ * those gets a wrong answer here — and, by this file's own warning, the repair
+ * would go into the production code.
+ */
+globalThis.DOMParser = LinkedomDOMParser as unknown as typeof globalThis.DOMParser;
+
+/**
+ * The shape this change removed — `injectArtifactPreview`'s, reproduced for its
+ * foil.
+ *
+ * ⚠ NOT "verbatim", and the distinction matters for an uppercase payload: TWO
+ * shapes were removed, and `MarkdownRenderer`'s used `/<head[^>]*>/` with **no
+ * `i` flag** plus a case-sensitive `.replace('</body>', …)`. This foil models the
+ * `i`-flagged one. Both payloads below are lowercase, so the controls hold for
+ * either — an uppercase-tag payload would not.
+ */
+function injectAsPatternMatch(html: string, headExtra: string, script: string): string {
+	const viewport = /name=["']viewport["']/i.test(html)
+		? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
+	const head = `${headExtra}${viewport}`;
+	let out = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, `$&${head}`) : `${head}${html}`;
+	out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, `${script}</body>`) : `${out}${script}`;
+	return out;
+}
+
+/** Parse a built srcdoc and inspect it as a DOCUMENT, not as a string. */
+const asDoc = (html: string) => parseHTML(html).document;
+
+describe('hasOwnDocument', () => {
+	// ⭐ ONE predicate decides parse-vs-wrap AND which head content an artifact
+	// gets. It used to be two that disagreed, so this is tested directly rather
+	// than through its two consumers.
+	it('⭐ accepts a document tag and rejects a look-alike', () => {
+		for (const yes of [
+			'<html><head></head><body>x</body></html>',
+			'<HTML><BODY>x</BODY></HTML>',
+			'<html\n lang="de"><body>x</body></html>',
+			'<head><title>t</title></head>',
+			'<body>x</body>',
+		]) {
+			expect(hasOwnDocument(yes), `should be a document: ${yes}`).toBe(true);
+		}
+		for (const no of [
+			'<div>frag</div>',
+			'<p>text</p>',
+			// ⚠ These are why the character class is `[\s>]` and not nothing: a
+			// custom element or a longer tag name must NOT read as a document.
+			'<htmlx>x</htmlx>',
+			'<header>x</header>',
+			'<bodyguard>x</bodyguard>',
+			'<svg viewBox="0 0 1 1"></svg>',
+		]) {
+			expect(hasOwnDocument(no), `should NOT be a document: ${no}`).toBe(false);
+		}
+	});
+});
+
+describe('injectIntoArtifactFrame — the policy is not a parameter', () => {
+	/**
+	 * ⭐ THE POINT, and it is structural rather than asserted.
+	 *
+	 * The policy used to arrive through the caller's `headHtml`. A mutation round
+	 * then passed `''` from either call site — the inline bubble losing its CSP,
+	 * the gallery losing its entire CSP — and the whole suite stayed green,
+	 * because the only coverage was a source-text search for the call. These
+	 * tests exist so that the property has a witness at all; the function owning
+	 * the policy is what makes the mutant impossible rather than merely caught.
+	 */
+	it('⭐ a caller that passes NO extra head still gets the policy', () => {
+		for (const html of ['<html><head></head><body>x</body></html>', '<div>frag</div>']) {
+			const out = injectIntoArtifactFrame(html, '', 'void 0;');
+			const doc = asDoc(out);
+			const meta = doc.querySelector('meta[http-equiv="Content-Security-Policy"]');
+			expect(meta, `no policy for ${html}`).not.toBeNull();
+			expect(meta?.getAttribute('content')).toContain("default-src 'none'");
+			expect(meta?.getAttribute('content')).toContain("connect-src 'none'");
+		}
+	});
+
+	it('⭐ the policy is the FIRST head element, because it governs what follows', () => {
+		// ⚠ WITH a non-empty `extraHead`, which is the only version of this that
+		// can fail. Passing `''` made the mutation "put the policy after the
+		// extras" an identity, so the assertion satisfied itself — and the
+		// production bubble path always passes extras. A control that cannot
+		// distinguish the two orders is not a control.
+		const out = injectIntoArtifactFrame(
+			'<html><head><title>T</title></head><body>x</body></html>',
+			'<style>p{color:red}</style>',
+			'void 0;',
+		);
+		const head = asDoc(out).head;
+		expect(head.firstElementChild?.getAttribute('http-equiv')).toBe('Content-Security-Policy');
+		// …and the extras really are present, or the order above is about nothing.
+		expect(head.querySelector('style'), 'the extras never arrived').not.toBeNull();
+	});
+
+	it('refuses a script body that would break out of its own element', () => {
+		// `script` is a RAW TEXT element: its children serialise unescaped, so a
+		// `</script` closes it and the rest becomes live markup. Both shipped
+		// callers pass module constants; this guard is for the next one.
+		expect(() => injectIntoArtifactFrame(
+			'<html><head></head><body>x</body></html>', '', 'a</script><img src=/nope>',
+		)).toThrow(/script/i);
+		// …and the same body is refused on the wrap branch, which interpolates it.
+		expect(() => injectIntoArtifactFrame('<div>f</div>', '', 'a</ScRiPt >x')).toThrow(/script/i);
+	});
+
+	it('emits a doctype on both branches', () => {
+		// The one thing the parse branch ADDS that the input may not have had, and
+		// it is user-visible: this output is also what the artifact's download and
+		// save actions hand over.
+		for (const html of ['<html><head></head><body>x</body></html>', '<div>frag</div>']) {
+			expect(injectIntoArtifactFrame(html, '', 'void 0;').startsWith('<!DOCTYPE html>')).toBe(true);
+		}
+	});
+});
+
+describe('injectIntoArtifactFrame — the breakout it used to allow', () => {
+	// The artifact author controls this markup completely. `/<head[^>]*>/` does
+	// not fail to match here — it matches TRUNCATED, up to the raw `>` inside the
+	// attribute value, so the insertion lands INSIDE the attribute.
+	const HEAD_PAYLOAD = '<html><head data-x="a>b"><title>T</title></head><body>hi</body></html>';
+
+	it('⭐ puts the CSP meta in the document instead of into a head ATTRIBUTE', () => {
+		// Positive control for the payload: the shape this replaced produces NO
+		// meta element on it. If that ever stops being true the payload has gone
+		// stale and this says so, instead of passing for nothing.
+		const foil = asDoc(injectAsPatternMatch(HEAD_PAYLOAD, ARTIFACT_CSP, '<script>void 0;</script>'));
+		expect(
+			foil.querySelectorAll('meta[http-equiv]').length,
+			'the payload no longer suppresses the meta, so this test proves nothing',
+		).toBe(0);
+
+		const out = asDoc(injectIntoArtifactFrame(HEAD_PAYLOAD, '', ARTIFACT_FIT_CODE));
+		expect(out.querySelectorAll('meta[http-equiv]').length).toBe(1);
+		expect(out.head.firstElementChild?.getAttribute('http-equiv')).toBe('Content-Security-Policy');
+	});
+
+	it('⭐ keeps the artifact\'s own head attribute intact', () => {
+		// The second symptom: the old shape ate the attribute it landed in.
+		// Absence of the attack is not the same as presence of the content.
+		const out = asDoc(injectIntoArtifactFrame(HEAD_PAYLOAD, '', ARTIFACT_FIT_CODE));
+		expect(out.head.getAttribute('data-x')).toBe('a>b');
+		expect(out.querySelector('title')?.textContent).toBe('T');
+		expect(out.body.textContent).toContain('hi');
+	});
+
+	// A `</body>` inside an attribute, earlier than the real one. A string
+	// `.replace` takes the FIRST occurrence, so the script went in there.
+	const BODY_PAYLOAD = '<html><head></head><body><p title="</body>">x</p></body></html>';
+
+	it('⭐ appends the script as an element, not into an attribute', () => {
+		// ⚠ This asserts the BRANCH first. A mutation that widened the predicate
+		// routed this payload into the WRAP branch, where the assertions below
+		// hold trivially — so the witness passed without the parse branch ever
+		// running on it.
+		expect(hasOwnDocument(BODY_PAYLOAD), 'this payload no longer takes the parse branch').toBe(true);
+
+		// Positive control: the old shape mangles the attribute it lands in.
+		const foil = asDoc(injectAsPatternMatch(BODY_PAYLOAD, ARTIFACT_CSP, '<script>void 0;</script>'));
+		expect(
+			foil.querySelector('p')?.getAttribute('title'),
+			'the payload no longer breaks the old replace, so this test proves nothing',
+		).not.toBe('</body>');
+
+		const out = asDoc(injectIntoArtifactFrame(BODY_PAYLOAD, '', ARTIFACT_FIT_CODE));
+		expect(out.querySelector('p')?.getAttribute('title')).toBe('</body>');
+		expect(out.body.lastElementChild?.tagName).toBe('SCRIPT');
+		expect(out.body.lastElementChild?.textContent).toBe(ARTIFACT_FIT_CODE);
+	});
+});
+
+describe('buildArtifactBubbleFrame', () => {
+	// ⭐ These exist because the head used to be composed at the component's call
+	// site and a mutant emptied it with the suite green. Composition is behind an
+	// exported function now, so the same mutation dies here.
+	const DOC = '<html><head></head><body><p>x</p></body></html>';
+	const FRAGMENT = '<div>frag</div>';
+	// ⚠ The input where the two predicates DISAGREE, and the one the previous
+	// round had no fixture for: it has a document tag (so it is parsed) but no
+	// `<html>` (so its author expressed no styling intent). Collapsing the two
+	// questions into one took the theme colours and the charset away from exactly
+	// this class — measured in Chrome as `rgba(0,0,0,0)` on `rgb(0,0,0)` where it
+	// had been the dark theme, with the missing charset reaching the user's
+	// downloaded file. Both fixtures above classify identically under either
+	// predicate, which is why nothing could see it.
+	const BODY_ONLY = '<body><p>x</p></body>';
+
+	// ⚠ These assert on `box-sizing:border-box` and on light-vs-dark DIFFERING,
+	// not on hex literals. The colours are deliberate fixed values — an iframe
+	// srcdoc does not inherit the parent's CSS variables, so a token is
+	// structurally unavailable across that boundary — and `hex-guard` fails any
+	// web-ui file outside its allowlist. Writing the expected colour here would
+	// have put this test on that list for no gain: a theme that is ignored
+	// produces IDENTICAL output for both values, which is the property.
+	const FRAGMENT_MARKER = 'box-sizing:border-box';
+
+	it('⭐ gives a document artifact the overflow fix and NOT our colours', () => {
+		// An artifact that brought its own document owns its styling — forcing our
+		// background onto it is the defect, and dropping the overflow fix stops a
+		// wide document being pannable on a phone.
+		const withHead = buildArtifactBubbleFrame(DOC, 'dark', 'void 0;');
+		expect(withHead, 'the overflow fix is gone').toContain('overflow-x:auto');
+		expect(withHead, 'our default styling was forced onto a document artifact').not.toContain(FRAGMENT_MARKER);
+		// …and the bare injector does NOT carry the overflow fix, so the assertion
+		// above is about what this function adds rather than about the injector.
+		expect(injectIntoArtifactFrame(DOC, '', 'void 0;')).not.toContain('overflow-x:auto');
+	});
+
+	it('⭐ gives a fragment our styling, a charset and the overflow fix', () => {
+		const out = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
+		expect(out, 'a fragment lost our default styling').toContain(FRAGMENT_MARKER);
+		expect(out, 'a fragment lost its charset').toContain('<meta charset="utf-8">');
+		expect(out, 'a fragment lost the overflow fix').toContain('overflow-x:auto');
+	});
+
+	it('⭐ honours the theme it is given', () => {
+		// The one value the module cannot know. A mutant that ignores it is a
+		// light artifact in a dark app, or the reverse — and it shows up as the
+		// two outputs becoming identical.
+		const light = buildArtifactBubbleFrame(FRAGMENT, 'light', 'void 0;');
+		const dark = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
+		// ⚠ The MAPPING, not just a difference — two earlier versions were each
+		// one bit short. `light !== dark` passes when only the background is
+		// pinned, because the text colour still varies. Comparing each
+		// declaration separately fixed that and still passed when light and dark
+		// were SWAPPED: a light app rendering a dark artifact, measured as a
+		// survivor. Luminance is the property, and reading it out of the output
+		// needs no colour literal in this file — which `hex-guard` would refuse.
+		//
+		// ⚠ The property name is anchored on `;` or `{`. Unanchored, `color:`
+		// also matches inside `background-color:` and would silently measure a
+		// different declaration if the style string ever grows one.
+		const decl = (out: string, prop: string) => new RegExp(`[;{]${prop}:([^;}]+)`).exec(out)?.[1] ?? '';
+		const luminance = (hex: string): number => {
+			const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+			if (!m) return Number.NaN;
+			const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h ?? '', 16) / 255);
+			return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
+		};
+		const lbg = luminance(decl(light, 'background'));
+		const dbg = luminance(decl(dark, 'background'));
+		const lfg = luminance(decl(light, 'color'));
+		const dfg = luminance(decl(dark, 'color'));
+		for (const [name, v] of [['light bg', lbg], ['dark bg', dbg], ['light fg', lfg], ['dark fg', dfg]] as const) {
+			expect(Number.isNaN(v), `${name} is not a readable colour — the probe lost its subject`).toBe(false);
+		}
+		expect(lbg, 'the LIGHT theme no longer has the lighter background').toBeGreaterThan(dbg);
+		expect(lfg, 'the LIGHT theme no longer has the darker text').toBeLessThan(dfg);
+	});
+
+	it('⭐ a <body>-only artifact is parsed but still gets our styling', () => {
+		expect(hasOwnDocument(BODY_ONLY), 'it should be parsed').toBe(true);
+		expect(bringsOwnStyling(BODY_ONLY), 'it brought no styling intent').toBe(false);
+		const out = buildArtifactBubbleFrame(BODY_ONLY, 'dark', 'void 0;');
+		expect(out, 'a <body>-only artifact lost our default styling').toContain(FRAGMENT_MARKER);
+		expect(out, 'a <body>-only artifact lost its charset').toContain('<meta charset="utf-8">');
+	});
+
+	it('⭐ the charset declaration stays inside the first 1024 bytes', () => {
+		// An HTML encoding declaration is only honoured if it serialises within
+		// the first 1024 bytes, and the policy now sits in front of it — the
+		// charset moved from byte 27 to byte 388 when this module took the head
+		// over. The margin is real but finite, and the constant in front of it is
+		// one the module's own comments anticipate changing.
+		const out = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
+		const at = out.indexOf('<meta charset="utf-8">');
+		expect(at, 'no charset declaration at all').toBeGreaterThan(-1);
+		expect(at + '<meta charset="utf-8">'.length).toBeLessThan(1024);
+	});
+
+	it('still gets the policy and the viewport, which it does not compose either', () => {
+		for (const html of [DOC, FRAGMENT]) {
+			const out = buildArtifactBubbleFrame(html, 'dark', 'void 0;');
+			expect(out).toContain('Content-Security-Policy');
+			expect(out).toContain('width=device-width');
+		}
+	});
+});
+
 describe('injectArtifactPreview', () => {
-	it('injects head extras + a default viewport + the fit script into a full doc', () => {
-		const out = injectArtifactPreview('<html><head><title>T</title></head><body>hi</body></html>', '<meta name="csp">');
-		expect(out).toContain('<meta name="csp">');
-		expect(out).toContain('width=device-width');
-		expect(out).toContain(ARTIFACT_FIT_SCRIPT);
-		// head extras go inside <head>, the script before </body>
-		expect(out.indexOf('<meta name="csp">')).toBeLessThan(out.indexOf('</head>'));
-		expect(out.indexOf(ARTIFACT_FIT_SCRIPT)).toBeLessThan(out.indexOf('</body>'));
+	it('injects the policy + a default viewport + the fit script into a full doc', () => {
+		const out = asDoc(injectArtifactPreview('<html><head><title>T</title></head><body>hi</body></html>'));
+		expect(out.head.querySelectorAll('meta[http-equiv]').length).toBe(1);
+		expect(out.head.querySelector('meta[name="viewport"]')?.getAttribute('content')).toContain('width=device-width');
+		expect(out.body.lastElementChild?.tagName).toBe('SCRIPT');
+		expect(out.body.lastElementChild?.textContent).toBe(ARTIFACT_FIT_CODE);
+		expect(out.querySelector('title')?.textContent).toBe('T');
+	});
+
+	it('⭐ finds the artifact\'s viewport whatever its CASE, and never overrides it', () => {
+		// ⚠ THE REGRESSION THIS PINS, and it took two mistakes at once. The
+		// detector was `meta[name="viewport"]`, and CSS attribute-value matching
+		// is case-SENSITIVE where the regex it replaced was not. On its own that
+		// would only have added a second meta — harmless, because two resolve
+		// later-wins and the artifact's comes later. But the same change APPENDED
+		// ours instead of prepending it, so ours won. Measured in Chrome at 390px
+		// with `content="width=500"`: the artifact alone lays out at 500, through
+		// the appending shape at 390.
+		const out = asDoc(injectArtifactPreview(
+			'<html><head><meta name="Viewport" content="width=500"></head><body>x</body></html>',
+		));
+		expect(out.querySelectorAll('meta[name="viewport" i]').length, 'a second viewport was added').toBe(1);
+		expect(out.querySelector('meta[name="viewport" i]')?.getAttribute('content')).toBe('width=500');
+	});
+
+	it('⭐ puts its own viewport BEFORE the artifact\'s head content', () => {
+		// The position is what makes a missed detection harmless: ours loses to
+		// anything the artifact declares later. Appending inverted that.
+		const out = asDoc(injectArtifactPreview('<html><head><style>p{color:red}</style></head><body>x</body></html>'));
+		const kids = [...out.head.children];
+		const viewportAt = kids.findIndex((e) => e.getAttribute('name') === 'viewport');
+		const styleAt = kids.findIndex((e) => e.tagName === 'STYLE');
+		expect(viewportAt, 'no viewport was added').toBeGreaterThan(-1);
+		expect(styleAt, 'the fixture lost its style element').toBeGreaterThan(-1);
+		expect(viewportAt, 'our viewport now comes after the artifact\'s own head content').toBeLessThan(styleAt);
+	});
+
+	it('sees a viewport the artifact put in its BODY', () => {
+		// Chrome honours one there, measured — so the detector looks at the whole
+		// document, not only at `<head>`.
+		const out = asDoc(injectArtifactPreview('<html><head></head><body><meta name="viewport" content="width=480">x</body></html>'));
+		expect(out.querySelectorAll('meta[name="viewport" i]').length).toBe(1);
+		expect(out.querySelector('meta[name="viewport" i]')?.getAttribute('content')).toBe('width=480');
 	});
 
 	it('does NOT add a second viewport when the artifact already declares one', () => {
-		const out = injectArtifactPreview('<html><head><meta name="viewport" content="width=600"></head><body>x</body></html>', '<meta name="csp">');
-		expect(out.match(/name=["']viewport["']/gi)?.length).toBe(1);
-		expect(out).toContain('width=600');
+		const out = asDoc(injectArtifactPreview('<html><head><meta name="viewport" content="width=600"></head><body>x</body></html>'));
+		expect(out.querySelectorAll('meta[name="viewport"]').length).toBe(1);
+		expect(out.querySelector('meta[name="viewport"]')?.getAttribute('content')).toBe('width=600');
 	});
 
-	it('handles a bare fragment (no <head>/<body>)', () => {
-		const out = injectArtifactPreview('<div>frag</div>', '<meta name="csp">');
-		expect(out.startsWith('<meta name="csp">')).toBe(true);
+	it('⭐ still adds a viewport to an artifact that merely DOCUMENTS one', () => {
+		// ⚠ The regression this pins. The condition used to be a regex over the
+		// RAW MARKUP, so a tutorial artifact with `name="viewport"` inside a
+		// `<code>` block counted as declaring one and got NO viewport — laying out
+		// at the desktop fallback width on a phone. The condition now asks the
+		// parsed document for the ELEMENT, which cannot make that mistake.
+		const tutorial = '<html><head></head><body><code>&lt;meta name="viewport" content="width=device-width"&gt;</code></body></html>';
+		const out = asDoc(injectArtifactPreview(tutorial));
+		expect(out.head.querySelector('meta[name="viewport"]')?.getAttribute('content')).toContain('width=device-width');
+	});
+
+	it('handles a bare fragment (no html/head/body) without parsing it', () => {
+		// ⚠ This path is deliberately NOT parsed — see the note at the top of this
+		// file for the measured reason. It is asserted as a string here because
+		// linkedom cannot be trusted to re-parse a fragment-derived document.
+		const out = injectArtifactPreview('<div>frag</div>');
+		expect(out).toContain(ARTIFACT_CSP);
 		expect(out).toContain('width=device-width');
-		expect(out.endsWith(ARTIFACT_FIT_SCRIPT)).toBe(true);
+		expect(out).toContain('<div>frag</div>');
+		expect(out).toContain(ARTIFACT_FIT_CODE);
+		expect(out.indexOf(ARTIFACT_CSP)).toBeLessThan(out.indexOf('<div>frag</div>'));
 	});
 
 	it('the fit script sets viewport width to the content width (fit-to-width), not device-width', () => {
 		// It must set width=<cw> + initial-scale=dev/cw so a wide doc fits the phone
 		// natively with pinch-zoom — never reset to device-width (would re-clip).
-		expect(ARTIFACT_FIT_SCRIPT).toContain('width="+cw+"');
-		expect(ARTIFACT_FIT_SCRIPT).toContain('initial-scale="+s');
-		expect(ARTIFACT_FIT_SCRIPT).toContain('cw>dev+4');
+		expect(ARTIFACT_FIT_CODE).toContain('width="+cw+"');
+		expect(ARTIFACT_FIT_CODE).toContain('initial-scale="+s');
+		expect(ARTIFACT_FIT_CODE).toContain('cw>dev+4');
+		// It is CODE, not markup: it goes in as a script element's textContent.
+		expect(ARTIFACT_FIT_CODE.includes('<script')).toBe(false);
+	});
+});
+
+describe('both frame paths route through it', () => {
+	/**
+	 * ⚠ A SOURCE ASSERTION, and a weak one on purpose — it is no longer the only
+	 * thing standing between a caller and the frame's head. The structural fix is
+	 * that NOTHING about the head is composed at a call site any more: the policy,
+	 * the viewport, the default colours and the overflow fix are all owned by
+	 * exported functions, which the tests above run. This only notices that a
+	 * component stopped calling in at all, which is a loud absence.
+	 *
+	 * That ordering is the lesson of this change. A mutation round emptied the
+	 * head string a component used to build and nothing failed, because the only
+	 * pin available at a `.svelte` call site is a spelling — "the second argument
+	 * is this identifier" — and this change had already deleted three assertions
+	 * of exactly that shape. Moving the composition behind an exported function
+	 * was what made the mutant die, not a better search.
+	 */
+	it('the inline bubble and the fullscreen preview both call it', () => {
+		const renderer = readFileSync(
+			fileURLToPath(new URL('../components/MarkdownRenderer.svelte', import.meta.url)),
+			'utf-8',
+		);
+		expect(renderer, 'MarkdownRenderer no longer calls buildArtifactBubbleFrame').toContain('buildArtifactBubbleFrame(');
+		const gallery = readFileSync(
+			fileURLToPath(new URL('../components/ArtifactsView.svelte', import.meta.url)),
+			'utf-8',
+		);
+		expect(gallery, 'ArtifactsView no longer imports the shared injector').toContain("from '../utils/artifact-frame.js'");
+		expect(gallery, 'ArtifactsView no longer calls the shared injector').toContain('injectArtifactFit(');
+	});
+
+	it('⭐ neither component keeps its own copy of the policy', () => {
+		// The two `CSP_META` constants had already drifted (`default-src 'none'`
+		// versus `'unsafe-inline'`). One owner, and nothing to drift from.
+		for (const f of ['MarkdownRenderer.svelte', 'ArtifactsView.svelte']) {
+			const src = readFileSync(fileURLToPath(new URL(`../components/${f}`, import.meta.url)), 'utf-8');
+			expect(src, `${f} declares its own Content-Security-Policy again`)
+				.not.toMatch(/http-equiv="Content-Security-Policy"/);
+		}
 	});
 });
 

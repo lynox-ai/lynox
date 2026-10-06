@@ -9,7 +9,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
 	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
-	import { deckFrameHeight } from '../utils/artifact-frame.js';
+	import { deckFrameHeight, buildArtifactBubbleFrame } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { substituteRenderedFences } from '../utils/fence-substitution.js';
@@ -139,7 +139,6 @@
 		return { title: '', clean: code };
 	}
 
-	const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src 'none'">`;
 
 	/** Detect whether an artifact fence body is explicitly typed as markdown. */
 	function isMarkdownArtifact(code: string): boolean {
@@ -226,24 +225,17 @@
 		// inherit into the iframe document. Read the theme at render time and
 		// inject matching styles. Theme-flip invalidates richCache (downstream
 		// $effect on getResolvedTheme) so srcdoc is regenerated.
-		const theme = getResolvedTheme();
-		const bg = theme === 'light' ? '#ffffff' : '#0a0a1a';
-		const fg = theme === 'light' ? '#0b0b14' : '#e8e8f0';
-		const defaultStyles = `<style>body{background:${bg};color:${fg};font-family:system-ui,-apple-system,sans-serif;margin:0;padding:1rem}*{box-sizing:border-box}</style>`;
-		// overflow-x:auto (not hidden) so a wide document (e.g. an A4-print HTML
-		// artifact) can be PANNED on mobile instead of being clipped off-screen.
-		const overflowFix = `<style>html,body{overflow-x:auto;max-width:100vw;scrollbar-width:none;-ms-overflow-style:none}html::-webkit-scrollbar,body::-webkit-scrollbar{display:none}</style>`;
-		let fullHtml: string;
-		if (clean.includes('<html')) {
-			// Inject a viewport meta if the artifact's own <html> lacks one, so it
-			// lays out for the device width on mobile instead of desktop-wide.
-			const viewportMeta = /name=["']viewport["']/i.test(clean)
-				? '' : '<meta name="viewport" content="width=device-width,initial-scale=1">';
-			fullHtml = clean.replace(/<head[^>]*>/, `$&${CSP_META}${viewportMeta}${overflowFix}`);
-			fullHtml = fullHtml.includes('</body>') ? fullHtml.replace('</body>', `${RESIZE_SCRIPT}</body>`) : fullHtml + RESIZE_SCRIPT;
-		} else {
-			fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${CSP_META}${defaultStyles}${overflowFix}</head><body>${clean}${RESIZE_SCRIPT}</body></html>`;
-		}
+		// ⚠ NOTHING about the frame's head is composed here any more — not the
+		// policy, not the viewport, not the default colours or the overflow fix.
+		// A mutation round emptied the head string this used to build and nothing
+		// failed, because the only pin available at a component call site is a
+		// spelling. `buildArtifactBubbleFrame` owns the whole head and is
+		// exported, so the same mutation dies on a behavioural assertion.
+		//
+		// The theme is the one thing that module cannot know. It is a value, not
+		// a concern that can be dropped. `utils/artifact-frame.ts` holds the
+		// measurement and the reason.
+		const fullHtml = buildArtifactBubbleFrame(clean, getResolvedTheme(), RESIZE_CODE);
 		const encoded = btoa(unescape(encodeURIComponent(fullHtml)));
 		const escaped = fullHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 		const displayTitle = title || 'Artifact';
@@ -319,7 +311,14 @@
 	// load, so each ResizeObserver tick only re-reads scrollHeight/innerHeight
 	// instead of re-walking the whole DOM. (String backslashes are doubled so the
 	// emitted srcdoc carries a valid `\d`/`\b` regex literal.)
-	const RESIZE_SCRIPT = '<script>(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0,bw=document.body?document.body.scrollWidth:0;parent.postMessage({type:"lynox-resize",h:sh,w:Math.max(document.documentElement.scrollWidth,bw),deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()</' + 'script>';
+	/**
+	 * The resize script's CODE, not a markup string. It is inserted as a
+	 * `script` element's `textContent` (see `injectIntoArtifactFrame`), so the
+	 * `</` + `script>` split that used to keep the surrounding markup from
+	 * terminating early is no longer needed — and neither is a second copy of
+	 * this code for the fragment case.
+	 */
+	const RESIZE_CODE = '(function(){var vu=null;function st(){var t="",i,s=document.getElementsByTagName("style");for(i=0;i<s.length;i++)t+=s[i].textContent||"";var e=document.querySelectorAll("[style]");for(i=0;i<e.length;i++)t+=e[i].getAttribute("style")||"";return t}function hasVU(){if(vu===null){try{vu=/(?:^|[^\\d.])100(?:vh|dvh|svh|lvh)\\b/i.test(st())}catch(x){vu=false}}return vu}function s(){var sh=document.documentElement.scrollHeight,vh=window.innerHeight||0,bw=document.body?document.body.scrollWidth:0;parent.postMessage({type:"lynox-resize",h:sh,w:Math.max(document.documentElement.scrollWidth,bw),deck:hasVU()&&vh>0&&sh<=vh+8},"*")}window.addEventListener("message",function(e){if(e.data==="lynox-measure")s()});window.addEventListener("load",function(){s();setTimeout(s,300);setTimeout(s,1500)});if(typeof ResizeObserver!=="undefined")new ResizeObserver(s).observe(document.documentElement);s()})()';
 
 	// ── Event delegation ─────────────────────────────────────
 
