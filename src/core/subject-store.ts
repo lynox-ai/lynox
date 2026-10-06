@@ -388,6 +388,14 @@ export function unionAliases(existingJson: string, forms: readonly string[]): { 
   return { json: added.length > 0 ? JSON.stringify(list) : existingJson, added };
 }
 
+/** A column set with its money pair completed: an edited amount carries its currency and the
+ *  other way round, so the two never part (see {@link restoreDetailColumns}). */
+function withMoneyPair(kind: string, cols: string[]): string[] {
+  const pair = DETAIL_MONEY_PAIRS[kind];
+  if (!pair || !(cols.includes(pair.amount) || cols.includes(pair.currency))) return cols;
+  return [...cols, ...[pair.amount, pair.currency].filter(c => !cols.includes(c))];
+}
+
 /** `list` without `forms`, case-insensitively — the inverse of one {@link unionAliases}. */
 function withoutForms(list: readonly string[], forms: readonly string[]): string[] {
   const drop = new Set(forms.map(f => f.toLowerCase()));
@@ -1842,7 +1850,7 @@ export class SubjectStore {
           // both entries), the dup gets its before-image back. A row deleted since is not
           // resurrected on the canonical.
           const dupWas = entry.detail.dupRow;
-          const editedCols = rowNow ? cols.filter(c => !same(c, rowNow[c], dupWas[c])) : [];
+          const editedCols = rowNow ? withMoneyPair(entry.kind, cols.filter(c => !same(c, rowNow[c], dupWas[c]))) : [];
           if (rowNow && editedCols.length === 0) {
             db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(dupId, canonicalId);
           } else {
@@ -1916,18 +1924,15 @@ export class SubjectStore {
   /**
    * The cell comparison a rollback uses for one detail table: the stored value, except for a
    * column encrypted at rest, where the plaintext decides — the cipher takes a fresh IV per
-   * write, so two stored strings can carry one value. A string the cipher cannot read is
-   * compared as stored.
+   * write, so two stored strings can carry one value. `EngineDb.dec` hands back unchanged what
+   * it cannot read (a plain string, a value written without a key), so such a cell is compared
+   * as stored.
    */
   private _sameDetailCell(table: string): SameDetailCell {
     const encrypted = DETAIL_ENCRYPTED_COLS[table];
     return (col, a, b) => {
       if (encrypted?.has(col) && typeof a === 'string' && typeof b === 'string') {
-        try {
-          return this.engine.dec(a) === this.engine.dec(b);
-        } catch {
-          return a === b;
-        }
+        return this.engine.dec(a) === this.engine.dec(b);
       }
       return sameCell(a, b);
     };

@@ -718,10 +718,34 @@ describe('SubjectStore.rollbackMerge — a chain, and edits made after the merge
     expect(store.rollbackMerge(xb.entry).ok).toBe(true);
     expect(store.getPersonDetail(a)!.email).toBe('a@x.com');
     expect(store.getPersonDetail(x)!.phone).toBe('+41 79 999');
+    // B carries nothing of either dup. What can remain in this order is a row holding only the
+    // table default: the first reversal re-created B's row with the column X had filled, and the
+    // second then found the default `type` where the merge had put A's — judged as an edit and
+    // kept. No value is lost; reversed newest first, B ends with no row at all.
     const bNow = store.getPersonDetail(b);
     expect(bNow?.email ?? null).toBeNull();
     expect(bNow?.phone ?? null).toBeNull();
     expect(bNow?.role ?? null).toBeNull();
+    expect(bNow === null || bNow.type === 'contact').toBe(true);
+    engine.close();
+  });
+
+  it('a moved-over money pair re-priced after the merge keeps its currency on the canonical', () => {
+    const { store, engine, db } = makeStore();
+    const canon = store.createSubject({ kind: 'product', name: 'Widget' });
+    const dup = store.createSubject({ kind: 'product', name: 'Widget v2' });
+    db.prepare("INSERT INTO products (subject_id, price_cents, currency) VALUES (?, 5000, 'EUR')").run(dup);   // canonical has no row
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const row = (id: string): { price_cents: number | null; currency: string | null } | undefined =>
+      db.prepare('SELECT price_cents, currency FROM products WHERE subject_id = ?').get(id) as { price_cents: number | null; currency: string | null } | undefined;
+    expect(row(canon)).toEqual({ price_cents: 5000, currency: 'EUR' });
+    db.prepare('UPDATE products SET price_cents = 6000 WHERE subject_id = ?').run(canon);
+
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    expect(row(canon)).toEqual({ price_cents: 6000, currency: 'EUR' });
+    expect(row(dup)).toEqual({ price_cents: 5000, currency: 'EUR' });
     engine.close();
   });
 
