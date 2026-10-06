@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 import {
 	isViewportDeck, deckFrameHeight, computeFitZoom, injectArtifactPreview,
-	injectIntoArtifactFrame, buildArtifactBubbleFrame, hasOwnDocument, ARTIFACT_CSP, ARTIFACT_FIT_CODE,
+	injectIntoArtifactFrame, buildArtifactBubbleFrame, hasOwnDocument, bringsOwnStyling,
+	ARTIFACT_CSP, ARTIFACT_FIT_CODE,
 	clearArtifactFitStyles,
 } from './artifact-frame.js';
 import type { ArtifactFitStyle } from './artifact-frame.js';
@@ -106,8 +107,20 @@ describe('injectIntoArtifactFrame — the policy is not a parameter', () => {
 	});
 
 	it('⭐ the policy is the FIRST head element, because it governs what follows', () => {
-		const out = injectIntoArtifactFrame('<html><head><title>T</title></head><body>x</body></html>', '', 'void 0;');
-		expect(asDoc(out).head.firstElementChild?.getAttribute('http-equiv')).toBe('Content-Security-Policy');
+		// ⚠ WITH a non-empty `extraHead`, which is the only version of this that
+		// can fail. Passing `''` made the mutation "put the policy after the
+		// extras" an identity, so the assertion satisfied itself — and the
+		// production bubble path always passes extras. A control that cannot
+		// distinguish the two orders is not a control.
+		const out = injectIntoArtifactFrame(
+			'<html><head><title>T</title></head><body>x</body></html>',
+			'<style>p{color:red}</style>',
+			'void 0;',
+		);
+		const head = asDoc(out).head;
+		expect(head.firstElementChild?.getAttribute('http-equiv')).toBe('Content-Security-Policy');
+		// …and the extras really are present, or the order above is about nothing.
+		expect(head.querySelector('style'), 'the extras never arrived').not.toBeNull();
 	});
 
 	it('refuses a script body that would break out of its own element', () => {
@@ -192,6 +205,15 @@ describe('buildArtifactBubbleFrame', () => {
 	// exported function now, so the same mutation dies here.
 	const DOC = '<html><head></head><body><p>x</p></body></html>';
 	const FRAGMENT = '<div>frag</div>';
+	// ⚠ The input where the two predicates DISAGREE, and the one the previous
+	// round had no fixture for: it has a document tag (so it is parsed) but no
+	// `<html>` (so its author expressed no styling intent). Collapsing the two
+	// questions into one took the theme colours and the charset away from exactly
+	// this class — measured in Chrome as `rgba(0,0,0,0)` on `rgb(0,0,0)` where it
+	// had been the dark theme, with the missing charset reaching the user's
+	// downloaded file. Both fixtures above classify identically under either
+	// predicate, which is why nothing could see it.
+	const BODY_ONLY = '<body><p>x</p></body>';
 
 	// ⚠ These assert on `box-sizing:border-box` and on light-vs-dark DIFFERING,
 	// not on hex literals. The colours are deliberate fixed values — an iframe
@@ -227,19 +249,53 @@ describe('buildArtifactBubbleFrame', () => {
 		// two outputs becoming identical.
 		const light = buildArtifactBubbleFrame(FRAGMENT, 'light', 'void 0;');
 		const dark = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
-		// ⚠ EACH declaration separately. `light !== dark` is too weak: pinning
-		// only the background leaves the text colour still varying, so the two
-		// outputs differ and a half-ignored theme survives. Measured — that is
-		// exactly what the first version of this assertion let through.
-		const decl = (out: string, prop: string) => new RegExp(`${prop}:([^;}]+)`).exec(out)?.[1] ?? '';
-		for (const prop of ['background', 'color']) {
-			const l = decl(light, prop);
-			const d = decl(dark, prop);
-			// Both non-empty first, or `not.toBe` would pass on two absences.
-			expect(l, `no ${prop} declaration in the light output`).not.toBe('');
-			expect(d, `no ${prop} declaration in the dark output`).not.toBe('');
-			expect(l, `${prop} no longer follows the theme`).not.toBe(d);
+		// ⚠ The MAPPING, not just a difference — two earlier versions were each
+		// one bit short. `light !== dark` passes when only the background is
+		// pinned, because the text colour still varies. Comparing each
+		// declaration separately fixed that and still passed when light and dark
+		// were SWAPPED: a light app rendering a dark artifact, measured as a
+		// survivor. Luminance is the property, and reading it out of the output
+		// needs no colour literal in this file — which `hex-guard` would refuse.
+		//
+		// ⚠ The property name is anchored on `;` or `{`. Unanchored, `color:`
+		// also matches inside `background-color:` and would silently measure a
+		// different declaration if the style string ever grows one.
+		const decl = (out: string, prop: string) => new RegExp(`[;{]${prop}:([^;}]+)`).exec(out)?.[1] ?? '';
+		const luminance = (hex: string): number => {
+			const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+			if (!m) return Number.NaN;
+			const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h ?? '', 16) / 255);
+			return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
+		};
+		const lbg = luminance(decl(light, 'background'));
+		const dbg = luminance(decl(dark, 'background'));
+		const lfg = luminance(decl(light, 'color'));
+		const dfg = luminance(decl(dark, 'color'));
+		for (const [name, v] of [['light bg', lbg], ['dark bg', dbg], ['light fg', lfg], ['dark fg', dfg]] as const) {
+			expect(Number.isNaN(v), `${name} is not a readable colour — the probe lost its subject`).toBe(false);
 		}
+		expect(lbg, 'the LIGHT theme no longer has the lighter background').toBeGreaterThan(dbg);
+		expect(lfg, 'the LIGHT theme no longer has the darker text').toBeLessThan(dfg);
+	});
+
+	it('⭐ a <body>-only artifact is parsed but still gets our styling', () => {
+		expect(hasOwnDocument(BODY_ONLY), 'it should be parsed').toBe(true);
+		expect(bringsOwnStyling(BODY_ONLY), 'it brought no styling intent').toBe(false);
+		const out = buildArtifactBubbleFrame(BODY_ONLY, 'dark', 'void 0;');
+		expect(out, 'a <body>-only artifact lost our default styling').toContain(FRAGMENT_MARKER);
+		expect(out, 'a <body>-only artifact lost its charset').toContain('<meta charset="utf-8">');
+	});
+
+	it('⭐ the charset declaration stays inside the first 1024 bytes', () => {
+		// An HTML encoding declaration is only honoured if it serialises within
+		// the first 1024 bytes, and the policy now sits in front of it — the
+		// charset moved from byte 27 to byte 388 when this module took the head
+		// over. The margin is real but finite, and the constant in front of it is
+		// one the module's own comments anticipate changing.
+		const out = buildArtifactBubbleFrame(FRAGMENT, 'dark', 'void 0;');
+		const at = out.indexOf('<meta charset="utf-8">');
+		expect(at, 'no charset declaration at all').toBeGreaterThan(-1);
+		expect(at + '<meta charset="utf-8">'.length).toBeLessThan(1024);
 	});
 
 	it('still gets the policy and the viewport, which it does not compose either', () => {
@@ -259,6 +315,42 @@ describe('injectArtifactPreview', () => {
 		expect(out.body.lastElementChild?.tagName).toBe('SCRIPT');
 		expect(out.body.lastElementChild?.textContent).toBe(ARTIFACT_FIT_CODE);
 		expect(out.querySelector('title')?.textContent).toBe('T');
+	});
+
+	it('⭐ finds the artifact\'s viewport whatever its CASE, and never overrides it', () => {
+		// ⚠ THE REGRESSION THIS PINS, and it took two mistakes at once. The
+		// detector was `meta[name="viewport"]`, and CSS attribute-value matching
+		// is case-SENSITIVE where the regex it replaced was not. On its own that
+		// would only have added a second meta — harmless, because two resolve
+		// later-wins and the artifact's comes later. But the same change APPENDED
+		// ours instead of prepending it, so ours won. Measured in Chrome at 390px
+		// with `content="width=500"`: the artifact alone lays out at 500, through
+		// the appending shape at 390.
+		const out = asDoc(injectArtifactPreview(
+			'<html><head><meta name="Viewport" content="width=500"></head><body>x</body></html>',
+		));
+		expect(out.querySelectorAll('meta[name="viewport" i]').length, 'a second viewport was added').toBe(1);
+		expect(out.querySelector('meta[name="viewport" i]')?.getAttribute('content')).toBe('width=500');
+	});
+
+	it('⭐ puts its own viewport BEFORE the artifact\'s head content', () => {
+		// The position is what makes a missed detection harmless: ours loses to
+		// anything the artifact declares later. Appending inverted that.
+		const out = asDoc(injectArtifactPreview('<html><head><style>p{color:red}</style></head><body>x</body></html>'));
+		const kids = [...out.head.children];
+		const viewportAt = kids.findIndex((e) => e.getAttribute('name') === 'viewport');
+		const styleAt = kids.findIndex((e) => e.tagName === 'STYLE');
+		expect(viewportAt, 'no viewport was added').toBeGreaterThan(-1);
+		expect(styleAt, 'the fixture lost its style element').toBeGreaterThan(-1);
+		expect(viewportAt, 'our viewport now comes after the artifact\'s own head content').toBeLessThan(styleAt);
+	});
+
+	it('sees a viewport the artifact put in its BODY', () => {
+		// Chrome honours one there, measured — so the detector looks at the whole
+		// document, not only at `<head>`.
+		const out = asDoc(injectArtifactPreview('<html><head></head><body><meta name="viewport" content="width=480">x</body></html>'));
+		expect(out.querySelectorAll('meta[name="viewport" i]').length).toBe(1);
+		expect(out.querySelector('meta[name="viewport" i]')?.getAttribute('content')).toBe('width=480');
 	});
 
 	it('does NOT add a second viewport when the artifact already declares one', () => {

@@ -140,23 +140,48 @@ export const ARTIFACT_CSP =
 	'font-src https://fonts.gstatic.com; img-src * data: blob:; connect-src \'none\'">';
 
 /**
- * Does this markup bring its own document structure?
+ * Is there a document tag here that we would have to insert INTO?
  *
- * ONE predicate for TWO decisions that used to be made separately: whether to
- * parse or to wrap, and which head content the artifact gets. They disagreed —
- * `MarkdownRenderer` asked `clean.includes('<html')` for the head choice while
- * this module asked for a document TAG — so `<body>x</body>` got the fragment's
- * default styling inside a parsed document, and `<htmlx>x</htmlx>` got the
- * document head (no charset, no default styling) inside a wrapper we built. Two
- * predicates for one question is two answers.
+ * This answers the PARSE-OR-WRAP question and nothing else. Its errors are both
+ * safe, which is why a regex is enough: a false positive (the text `<head `
+ * inside an attribute) only means we parse markup that did not need parsing, and
+ * a false negative means there was no document tag to insert into.
  *
- * Its errors are both safe, which is why a regex is enough: a false positive
- * (the text `<head ` inside an attribute) only means we parse a document that
- * did not need parsing, and a false negative means there was no document tag to
- * insert into.
+ * ⛔ AN EARLIER VERSION OF THIS COMMENT CLAIMED IT WAS "ONE PREDICATE FOR TWO
+ * DECISIONS", and that was wrong — it is the headline claim of the commit that
+ * made it, and it caused a regression. The second decision is `bringsOwnStyling`
+ * below; the two questions genuinely differ, and the input that shows it is
+ * `<body>x</body>`. Collapsing them took the theme colours and the charset away
+ * from such artifacts: measured in Chrome, `<body><p>x</p></body>` rendered
+ * `rgba(0,0,0,0)` on `rgb(0,0,0)` where it had rendered the dark theme, and the
+ * missing charset reached the user's downloaded `.html` file too.
+ *
+ * The lesson is not "two predicates are fine". It is that the sameness was
+ * asserted, never measured — the two fixtures in the test classify identically
+ * under both, so nothing could see the difference.
  */
 export function hasOwnDocument(html: string): boolean {
 	return /<(?:html|head|body)[\s>]/i.test(html);
+}
+
+/**
+ * Did the artifact bring a STYLED document of its own — one whose author decided
+ * what it looks like?
+ *
+ * A different question from `hasOwnDocument`, and the distinction is the whole
+ * point: `<body><p>x</p></body>` has a tag to insert into, so it is parsed, but
+ * its author expressed no styling intent, so it still needs our background and
+ * our charset. An `<html>` element is what carries that intent.
+ *
+ * ⚠ Its false-positive direction is NOT safe in the way `hasOwnDocument`'s is: a
+ * fragment whose text happens to contain `<html ` would be denied our defaults
+ * and render black-on-white inside a dark app. That is the reason it asks for
+ * `<html` specifically rather than for any document tag — the narrower the
+ * pattern, the rarer the accident — and the reason it is a visible failure
+ * rather than a silent one.
+ */
+export function bringsOwnStyling(html: string): boolean {
+	return /<html[\s>]/i.test(html);
 }
 
 /**
@@ -243,6 +268,21 @@ export function injectIntoArtifactFrame(html: string, extraHead: string, scriptC
 	// parameters; it is immune for `extraHead` (a template's "in template"
 	// insertion mode contains it) and NOT for `scriptCode`. Both shipped callers
 	// pass module constants, so this guard is for the next one.
+	//
+	// ⚠ And the next one should know where the throw LANDS. In the gallery it
+	// fails loudly, in the template. In the inline bubble it does not: the call
+	// sits inside a `try` whose `catch` handles only the mermaid case, so for an
+	// artifact the block falls back to its placeholder and stays there — a silent
+	// failure, which is the opposite of what a guard is for. Refusing the input
+	// is still right; the bubble's `catch` is what would have to change, and that
+	// is a different file's decision.
+	//
+	// ⚠ It is deliberately over-broad. `a</scriptx>b` and `a<!--<script>b` do NOT
+	// terminate the element (the parser's double-escaped state), and this rejects
+	// them anyway. Measured in Chrome: `a</script >b`, `a</script/>b`,
+	// `a</script\tb` and `a</SCRIPT>b` all DO terminate it, and the pattern
+	// catches all four — so the false-negative set is empty and the false-positive
+	// set is markup nobody writes in a frame script.
 	if (/<\/script/i.test(scriptCode)) {
 		throw new Error('artifact frame: scriptCode may not contain `</script` — it would break out of the element');
 	}
@@ -255,6 +295,26 @@ export function injectIntoArtifactFrame(html: string, extraHead: string, scriptC
 			+ `<scr` + `ipt>${scriptCode}</scr` + `ipt></body></html>`;
 	}
 	const doc = new DOMParser().parseFromString(html, 'text/html');
+	// ⚠ The viewport default is decided BEFORE the prepend and goes in WITH it, so
+	// it lands ahead of the artifact's own head content. Both halves of that were
+	// wrong in the first version of this function and both were regressions:
+	//
+	//   · it asked `meta[name="viewport"]`, and CSS attribute-value matching is
+	//     case-SENSITIVE where the regex it replaced was not, so `name="Viewport"`
+	//     was missed;
+	//   · and it APPENDED, where the regex-based version prepended.
+	//
+	// Separately each looks harmless. Together they invert the failure mode: two
+	// viewport metas resolve later-wins, so a missed detection used to mean the
+	// artifact's own still won, and appending made ours win instead. Measured in
+	// Chrome at 390px with `name="Viewport" content="width=500"`: the artifact
+	// alone reports clientWidth 500, through the previous shape 501, through the
+	// appending shape 390 — the frame overriding the artifact's declared layout.
+	//
+	// The selector is case-insensitive now AND the position makes a miss harmless
+	// again, which is the property worth having: a detector that can only fail
+	// one way.
+	const needsViewport = doc.querySelector('meta[name="viewport" i]') === null;
 	// A template so `headHtml` can carry several elements and still arrive as
 	// NODES rather than as text.
 	//
@@ -266,20 +326,8 @@ export function injectIntoArtifactFrame(html: string, extraHead: string, scriptC
 	// showed the copy unnecessary had run under linkedom, whose NodeList is not
 	// live at all and could not have failed either way.
 	const holder = doc.createElement('template');
-	holder.innerHTML = headHtml;
+	holder.innerHTML = `${headHtml}${needsViewport ? VIEWPORT_META : ''}`;
 	doc.head.prepend(...holder.content.childNodes);
-	// The viewport default is decided on the ELEMENT, not on a regex over the raw
-	// markup. ⚠ That regex was the defect: `/name=["']viewport["']/i` matches the
-	// literal TEXT, so an artifact that merely DOCUMENTS a viewport meta — a
-	// tutorial snippet with `&lt;meta name="viewport" …&gt;` in a `<code>` block —
-	// counted as declaring one and got NO viewport, laying out at the desktop
-	// fallback width. Asking the parsed document cannot make that mistake.
-	if (!doc.querySelector('meta[name="viewport"]')) {
-		const viewport = doc.createElement('meta');
-		viewport.setAttribute('name', 'viewport');
-		viewport.setAttribute('content', 'width=device-width,initial-scale=1');
-		doc.head.append(viewport);
-	}
 	const script = doc.createElement('script');
 	script.textContent = scriptCode;
 	doc.body.appendChild(script);
@@ -323,16 +371,17 @@ function fragmentDefaults(theme: 'light' | 'dark'): string {
  * the resolved theme. A mutant can pass the wrong one — and that is a VALUE a
  * test can pin, not a whole concern it can drop.
  *
- * An artifact that brought its own document owns its styling, so it gets the
- * overflow fix and nothing else. `hasOwnDocument` decides that, the same
- * predicate that decides parse-vs-wrap.
+ * An artifact that brought its own `<html>` owns its styling, so it gets the
+ * overflow fix and nothing else. `bringsOwnStyling` decides that — NOT the
+ * parse-vs-wrap predicate, which an earlier version of this reused and thereby
+ * stripped the defaults from every `<body>`-only artifact.
  */
 export function buildArtifactBubbleFrame(
 	html: string,
 	theme: 'light' | 'dark',
 	scriptCode: string,
 ): string {
-	const extra = hasOwnDocument(html)
+	const extra = bringsOwnStyling(html)
 		? OVERFLOW_FIX
 		: `<meta charset="utf-8">${fragmentDefaults(theme)}${OVERFLOW_FIX}`;
 	return injectIntoArtifactFrame(html, extra, scriptCode);
