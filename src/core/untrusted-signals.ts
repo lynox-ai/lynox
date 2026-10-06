@@ -60,6 +60,13 @@ export type UntrustedCause = 'none' | 'marker' | 'external-tool' | 'conversation
  * `conversation` last, since it is true for every later turn once anything tainted the
  * thread and would otherwise mask the more specific causes.
  */
+export function describeTurnUntrusted(signals: UntrustedSignals): UntrustedCause {
+  if (signals.sawUntrustedData === true) return 'marker';
+  if (signals.sawExternalContentTool === true) return 'external-tool';
+  if (signals.conversationSawUntrusted === true) return 'conversation';
+  return 'none';
+}
+
 /**
  * Read a cause stored as text back into an {@link UntrustedCause}. Absent means the writer had
  * taken in nothing (`none`). Any other value that is not a known cause reads as `conversation`:
@@ -68,11 +75,4 @@ export type UntrustedCause = 'none' | 'marker' | 'external-tool' | 'conversation
 export function storedUntrustedCause(value: string | null | undefined): UntrustedCause {
   if (value === undefined || value === null || value === '' || value === 'none') return 'none';
   return value === 'marker' || value === 'external-tool' || value === 'conversation' ? value : 'conversation';
-}
-
-export function describeTurnUntrusted(signals: UntrustedSignals): UntrustedCause {
-  if (signals.sawUntrustedData === true) return 'marker';
-  if (signals.sawExternalContentTool === true) return 'external-tool';
-  if (signals.conversationSawUntrusted === true) return 'conversation';
-  return 'none';
 }

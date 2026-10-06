@@ -413,7 +413,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
           scheduleCron: input.schedule,
           ...(pipelineParams !== undefined ? { pipelineParams } : {}),
           // The run this task starts has no session of its own; it inherits what this one
-          // had taken in, so a step that hands a secret to a tool is judged as it would be here.
+          // had taken in, so a step's durable write carries the trust it would carry here.
           ...(createdUntrusted !== 'none' ? { createdUntrusted } : {}),
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';

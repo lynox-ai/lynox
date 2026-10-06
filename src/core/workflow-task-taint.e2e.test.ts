@@ -33,6 +33,7 @@ import { TaskManager } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
 import { createToolContext } from './tool-context.js';
 import { deriveTurnUntrusted } from './untrusted-signals.js';
+import { SecretStore } from './secret-store.js';
 import { taskCreateTool } from '../tools/builtin/task.js';
 import { storePipeline, _resetPipelineStore } from '../tools/builtin/pipeline.js';
 import { _resetTenantInvariantForTests } from './saved-workflow-runner.js';
@@ -80,6 +81,7 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
     try { engineDb.close(); } catch { /* closed */ }
     history.close();
     rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   function workflow(id: string, tools: string[]): PlannedPipeline {
@@ -105,11 +107,18 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
     } as unknown as IAgent;
   }
 
+  /** Built at runtime, so no key-shaped literal sits in the source. */
+  const tokenValue = ['pin', 'value', String(Date.now())].join('-');
+
   async function createAndRun(workflowId: string, tainted: boolean): Promise<void> {
     const out = await taskCreateTool.handler(
       { title: `task ${String(tainted)}`, assignee: 'lynox', workflow_id: workflowId, schedule: '0 9 * * 1' }, creator(tainted),
     );
     expect(out).toContain('Workflow task created');
+    vi.stubEnv('LYNOX_SECRET_SERVICE_TOKEN', tokenValue);
+    const secretStore = new SecretStore();
+    secretStore.recordConsent('SERVICE_TOKEN'); // the worst case: already consented
+    expect(secretStore.resolve('SERVICE_TOKEN')).toBe(tokenValue);
     const task = tm.listTriggers().find((t) => t.title === `task ${String(tainted)}`)!;
     const engine = {
       getTaskManager: () => tm,
@@ -119,7 +128,9 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       getToolContext: () => ({ tools: [memoryStore, httpRequest] }),
       getMemory: () => null,
       getRunHistory: () => history,
-      getSecretStore: () => null,
+      // A REAL store that resolves the reference: if the headless run ever threads the
+      // engine's store into its steps, the pin below sees the resolved value and fails.
+      getSecretStore: () => secretStore,
       escalateToUser: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
@@ -151,5 +162,6 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       .mockResolvedValueOnce(endTurn('done'));
     await createAndRun('wf-http', false);
     expect(JSON.stringify(seen.httpInput)).toContain('secret:SERVICE_TOKEN');
+    expect(JSON.stringify(seen.httpInput)).not.toContain(tokenValue);
   });
 });
