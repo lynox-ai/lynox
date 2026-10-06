@@ -660,6 +660,93 @@ describe('SubjectStore.rollbackMerge — a chain, and edits made after the merge
     engine.close();
   });
 
+  it('a moved-over row with ONE column edited since: the canonical keeps that column only, the dup gets its row back', () => {
+    const { store, engine } = makeStore('vault-key-123');
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    store.setPersonDetail(dup, { email: 'dup@x.com', phone: '+41 79 000' });
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    store.setPersonDetail(canon, { role: 'CEO' });   // the only edit; email + phone are still the dup's
+
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    const c = store.getPersonDetail(canon)!;
+    expect(c.role).toBe('CEO');
+    expect(c.email ?? null).toBeNull();             // the dup's contact data is not left on the canonical
+    expect(c.phone ?? null).toBeNull();
+    const d = store.getPersonDetail(dup)!;
+    expect(d.email).toBe('dup@x.com');
+    expect(d.phone).toBe('+41 79 000');
+    engine.close();
+  });
+
+  it('a value re-saved unchanged after the merge is not an edit: the filled column goes back to empty', () => {
+    // email/phone are encrypted with a fresh IV per write — the same plaintext saved again is a
+    // different stored string, and a comparison on the stored value would call that an edit.
+    const { store, engine } = makeStore('vault-key-123');
+    const dup = store.createSubject({ kind: 'person', name: 'Ada' });
+    const canon = store.createSubject({ kind: 'person', name: 'Dr. Ada Lovelace' });
+    store.setPersonDetail(canon, { email: 'canon@x.com' });
+    store.setPersonDetail(dup, { email: 'dup@x.com', phone: '+41 79 000' });
+    const res = store.mergeSubjects(dup, canon);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    store.setPersonDetail(canon, { phone: '+41 79 000' });   // re-asserts the value the merge filled in
+
+    expect(store.rollbackMerge(res.entry).ok).toBe(true);
+    expect(store.getPersonDetail(canon)!.phone ?? null).toBeNull();
+    expect(store.getPersonDetail(canon)!.email).toBe('canon@x.com');
+    expect(store.getPersonDetail(dup)!.phone).toBe('+41 79 000');
+    engine.close();
+  });
+
+  it('two merges into one canonical, reversed oldest first, leave nothing of either dup on it', () => {
+    const { store, engine } = makeStore('vault-key-123');
+    const a = store.createSubject({ kind: 'person', name: 'A. Lovelace' });
+    const x = store.createSubject({ kind: 'person', name: 'Ada L.' });
+    const b = store.createSubject({ kind: 'person', name: 'Ada Lovelace' });
+    store.setPersonDetail(a, { email: 'a@x.com' });
+    store.setPersonDetail(x, { phone: '+41 79 999' });
+    const ab = store.mergeSubjects(a, b);   // A's row moves over (B had none)
+    const xb = store.mergeSubjects(x, b);   // X's phone fills B's empty column
+    expect(ab.ok && xb.ok).toBe(true);
+    if (!ab.ok || !xb.ok) return;
+    expect(store.getPersonDetail(b)).toMatchObject({ email: 'a@x.com', phone: '+41 79 999' });
+
+    expect(store.rollbackMerge(ab.entry).ok).toBe(true);
+    expect(store.rollbackMerge(xb.entry).ok).toBe(true);
+    expect(store.getPersonDetail(a)!.email).toBe('a@x.com');
+    expect(store.getPersonDetail(x)!.phone).toBe('+41 79 999');
+    const bNow = store.getPersonDetail(b);
+    expect(bNow?.email ?? null).toBeNull();
+    expect(bNow?.phone ?? null).toBeNull();
+    expect(bNow?.role ?? null).toBeNull();
+    engine.close();
+  });
+
+  it('a chain of three reversed in the middle is refused at both older ledgers', () => {
+    const { store, engine } = makeStore();
+    const a = store.createSubject({ kind: 'organization', name: 'Acme GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Acme' });
+    const c = store.createSubject({ kind: 'organization', name: 'ACME Holding' });
+    const d = store.createSubject({ kind: 'organization', name: 'ACME Group' });
+    const ab = store.mergeSubjects(a, b);
+    const bc = store.mergeSubjects(b, c);
+    const cd = store.mergeSubjects(c, d);
+    expect(ab.ok && bc.ok && cd.ok).toBe(true);
+    if (!ab.ok || !bc.ok || !cd.ok) return;
+    expect(store.rollbackMerge(bc.entry).ok).toBe(false);   // C is merged into D
+    expect(store.rollbackMerge(ab.entry).ok).toBe(false);   // B is merged into C
+    expect(store.getSubject(a)!.merged_into).toBe(b);
+    expect(store.getSubject(b)!.merged_into).toBe(c);
+    expect(store.getSubject(c)!.merged_into).toBe(d);
+    expect(store.rollbackMerge(cd.entry).ok).toBe(true);
+    expect(store.rollbackMerge(bc.entry).ok).toBe(true);
+    expect(store.rollbackMerge(ab.entry).ok).toBe(true);
+    engine.close();
+  });
+
   it('a money pair edited after the merge is kept as one — the currency does not go back alone', () => {
     const { store, engine, db } = makeStore();
     const canon = store.createSubject({ kind: 'product', name: 'Widget' });

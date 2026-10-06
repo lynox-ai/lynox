@@ -399,6 +399,21 @@ function sameCell(a: unknown, b: unknown): boolean {
   return (a ?? null) === (b ?? null);
 }
 
+/** How two cells of one detail column are compared: `sameCell` on the stored value, or through
+ *  the cipher for a column encrypted at rest (see {@link SubjectStore.rollbackMerge}). */
+type SameDetailCell = (col: string, a: unknown, b: unknown) => boolean;
+
+/**
+ * The detail columns written through `EngineDb.enc` (`setPersonDetail`, `setOrganizationDetail`).
+ * The cipher takes a fresh IV per write, so the same plaintext saved twice is two different
+ * stored strings: "edited since the merge" has to be judged on the plaintext there, or a value
+ * merely re-asserted after a merge would count as an edit and the rollback would keep it.
+ */
+const DETAIL_ENCRYPTED_COLS: Record<string, ReadonlySet<string>> = {
+  people:        new Set(['email', 'phone']),
+  organizations: new Set(['vat_id']),
+};
+
 /**
  * The detail row a merge leaves on the canonical, computed from the two before-images the
  * way `executeMerge`'s SQL computes it: per column the canonical's value, the dup's where the
@@ -426,9 +441,10 @@ export function coalesceDetailRow(
  */
 export function restoreDetailColumns(
   kind: string, cols: readonly string[], rowNow: Record<string, unknown>, afterMerge: Record<string, unknown>, before: Record<string, unknown>,
+  same: SameDetailCell = (_c, a, b) => sameCell(a, b),
 ): Record<string, unknown> {
   const pair = DETAIL_MONEY_PAIRS[kind];
-  const edited = (c: string): boolean => !sameCell(rowNow[c], afterMerge[c]);
+  const edited = (c: string): boolean => !same(c, rowNow[c], afterMerge[c]);
   const out: Record<string, unknown> = {};
   for (const c of cols) {
     const keep = pair && (c === pair.amount || c === pair.currency)
@@ -1818,20 +1834,34 @@ export class SubjectStore {
         const rowNow = (db.prepare(`SELECT * FROM "${def.table}" WHERE subject_id = ?`).get(canonicalId) as Record<string, unknown> | undefined) ?? null;
         const insCols = ['subject_id', ...cols];
         const insertDup = db.prepare(`INSERT OR REPLACE INTO "${def.table}" (${insCols.map(c => `"${c}"`).join(', ')}) VALUES (${insCols.map(() => '?').join(', ')})`);
+        const same = this._sameDetailCell(def.table);
         if (entry.detail.dupRow && !entry.detail.canonicalRow) {
-          // was a repoint → move it back to the dup — unless it was edited since: then the
-          // canonical keeps the edited row and the dup gets its before-image back, nothing lost.
-          if (rowNow && cols.every(c => sameCell(rowNow[c], entry.detail!.dupRow![c]))) {
+          // was a repoint: the dup's row moved over whole, the canonical had none. Untouched
+          // since → it moves back whole. Edited since → the canonical keeps ONLY the columns it
+          // edited (the rest were the dup's and go back with the dup's row, so no value sits on
+          // both entries), the dup gets its before-image back. A row deleted since is not
+          // resurrected on the canonical.
+          const dupWas = entry.detail.dupRow;
+          const editedCols = rowNow ? cols.filter(c => !same(c, rowNow[c], dupWas[c])) : [];
+          if (rowNow && editedCols.length === 0) {
             db.prepare(`UPDATE "${def.table}" SET subject_id = ? WHERE subject_id = ?`).run(dupId, canonicalId);
           } else {
-            insertDup.run(dupId, ...cols.map(c => entry.detail!.dupRow![c] ?? null));
+            if (rowNow) {
+              db.prepare(`DELETE FROM "${def.table}" WHERE subject_id = ?`).run(canonicalId);
+              const keep = editedCols.filter(c => (rowNow[c] ?? null) !== null);
+              if (keep.length > 0) {
+                db.prepare(`INSERT INTO "${def.table}" (${['subject_id', ...keep].map(c => `"${c}"`).join(', ')}) VALUES (${['subject_id', ...keep].map(() => '?').join(', ')})`)
+                  .run(canonicalId, ...keep.map(c => rowNow[c]));
+              }
+            }
+            insertDup.run(dupId, ...cols.map(c => dupWas[c] ?? null));
           }
         } else if (entry.detail.dupRow && entry.detail.canonicalRow) {
           // was a COALESCE+delete → restore canonical's columns where they still hold the merge's
           // result, keep the ones edited since, re-insert dup's row.
           if (rowNow) {
             const afterMerge = coalesceDetailRow(entry.kind, cols, entry.detail.canonicalRow, entry.detail.dupRow);
-            const restored = restoreDetailColumns(entry.kind, cols, rowNow, afterMerge, entry.detail.canonicalRow);
+            const restored = restoreDetailColumns(entry.kind, cols, rowNow, afterMerge, entry.detail.canonicalRow, same);
             const setC = cols.map(c => `"${c}" = ?`).join(', ');
             db.prepare(`UPDATE "${def.table}" SET ${setC} WHERE subject_id = ?`).run(...cols.map(c => restored[c] ?? null), canonicalId);
           }
@@ -1881,6 +1911,26 @@ export class SubjectStore {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * The cell comparison a rollback uses for one detail table: the stored value, except for a
+   * column encrypted at rest, where the plaintext decides — the cipher takes a fresh IV per
+   * write, so two stored strings can carry one value. A string the cipher cannot read is
+   * compared as stored.
+   */
+  private _sameDetailCell(table: string): SameDetailCell {
+    const encrypted = DETAIL_ENCRYPTED_COLS[table];
+    return (col, a, b) => {
+      if (encrypted?.has(col) && typeof a === 'string' && typeof b === 'string') {
+        try {
+          return this.engine.dec(a) === this.engine.dec(b);
+        } catch {
+          return a === b;
+        }
+      }
+      return sameCell(a, b);
+    };
   }
 
   private _mergeAliases(row: SubjectRow, forms: string[]): void {
