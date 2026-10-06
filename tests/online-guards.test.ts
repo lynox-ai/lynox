@@ -11,7 +11,7 @@ import { join, relative, resolve } from 'node:path';
 import { LAZY_DEFERRED_TOOLS } from '../src/core/agent.js';
 import { catalogEntryKey } from '../src/core/llm/catalog.js';
 import { CASES } from './online/lazy-tool-cases.js';
-import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, PRESETS_UNDER_TEST } from './online/provider-presets.js';
+import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, MODEL_ENV, PRESETS_UNDER_TEST } from './online/provider-presets.js';
 import { FIREWORKS_HOST, pinnedSlots } from './online/preset-slots.js';
 
 describe('lazy-tool-reachability matrix coverage', () => {
@@ -47,7 +47,15 @@ describe('preset slots coverage', () => {
  * but with NO credentials — empty environment, empty HOME — and every test must skip. A test
  * that PASSES there needed no provider, so it is an offline check, and inside tests/online/ it
  * would run nowhere by default. Move it here (or next to the code it guards).
+ *
+ * A local runtime is a provider too, and needs no key: on a machine with Ollama up, the loopback
+ * preset cases would pass. So each loopback runtime is pointed at a model nobody serves, and its
+ * preflight skips. The list comes from the suite's own maps, not from here.
  */
+const UNSERVED_MODEL = 'lynox-online-sweep-unserved-model';
+const loopbackModelEnv = Object.fromEntries(
+  Object.keys(LOOPBACK_DEFAULT_MODEL).map(k => [MODEL_ENV[k]!, UNSERVED_MODEL]),
+);
 describe('tests/online/ holds only tests that need a provider', () => {
   const root = resolve(__dirname, '..');
   let scratch = '';
@@ -59,7 +67,7 @@ describe('tests/online/ holds only tests that need a provider', () => {
   beforeAll(() => {
     scratch = mkdtempSync(join(tmpdir(), 'lynox-online-sweep-'));
     const out = join(scratch, 'report.json');
-    const env = { PATH: process.env['PATH'] ?? '', HOME: scratch, TMPDIR: scratch, LYNOX_ONLINE: '1' };
+    const env = { PATH: process.env['PATH'] ?? '', HOME: scratch, TMPDIR: scratch, LYNOX_ONLINE: '1', ...loopbackModelEnv };
     try {
       execFileSync(join(root, 'node_modules', '.bin', 'vitest'), ['run', 'tests/online/', '--reporter=json', `--outputFile=${out}`], {
         cwd: root, env, stdio: 'ignore',
@@ -70,6 +78,13 @@ describe('tests/online/ holds only tests that need a provider', () => {
 
   afterAll(() => {
     rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it('pins every loopback runtime to the unserved model (a runtime without an override env would stay reachable)', () => {
+    for (const k of Object.keys(LOOPBACK_DEFAULT_MODEL)) {
+      expect(MODEL_ENV[k], `${k} has no model override env`).toBeTruthy();
+      expect(loopbackModelEnv[MODEL_ENV[k]!]).toBe(UNSERVED_MODEL);
+    }
   });
 
   it('collected the online suite at all (else an empty run would pass the next check)', () => {

@@ -57,7 +57,7 @@ import type { ContentBlockParam } from '@anthropic-ai/sdk/resources/beta/message
 import { Agent } from '../../src/core/agent.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import { catalogEntryKey } from '../../src/core/llm/catalog.js';
-import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, PRESETS_UNDER_TEST } from './provider-presets.js';
+import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, MODEL_ENV, PRESETS_UNDER_TEST } from './provider-presets.js';
 import type { ToolEntry } from '../../src/types/index.js';
 
 /** How long we give an endpoint to say "I'm here" before skipping its case. */
@@ -83,16 +83,6 @@ interface PresetCase {
    */
   apiKey: string | undefined;
 }
-
-const MODEL_ENV: Record<string, string> = {
-  ollama:    'OLLAMA_TEST_MODEL',
-  lmstudio:  'LMSTUDIO_TEST_MODEL',
-  vllm:      'VLLM_TEST_MODEL',
-  localai:   'LOCALAI_TEST_MODEL',
-  groq:      'GROQ_TEST_MODEL',
-  together:  'TOGETHER_TEST_MODEL',
-  fireworks: 'FIREWORKS_TEST_MODEL',
-};
 
 /**
  * Can this case actually run? Two distinct preconditions, and conflating them

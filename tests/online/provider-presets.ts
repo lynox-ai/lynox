@@ -20,6 +20,17 @@ export const LOOPBACK_DEFAULT_MODEL: Record<string, string> = {
   localai:  'qwen2.5-7b-instruct',
 };
 
+/** Env var that overrides the test model per preset. */
+export const MODEL_ENV: Record<string, string> = {
+  ollama:    'OLLAMA_TEST_MODEL',
+  lmstudio:  'LMSTUDIO_TEST_MODEL',
+  vllm:      'VLLM_TEST_MODEL',
+  localai:   'LOCALAI_TEST_MODEL',
+  groq:      'GROQ_TEST_MODEL',
+  together:  'TOGETHER_TEST_MODEL',
+  fireworks: 'FIREWORKS_TEST_MODEL',
+};
+
 /**
  * Every catalog entry that pins an endpoint and is not a native provider — i.e.
  * exactly the presets whose tool-calling is unproven. Derived from the catalog
