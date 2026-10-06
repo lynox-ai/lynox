@@ -1322,7 +1322,15 @@ function stampResolvedConnection(url: string, apiStore: NonNullable<ToolContext[
     return;
   }
   if (!profile) return;
-  noteCallConnection({ id: profile.id, createdAt: apiStore.connectionCreatedAt(profile.id) ?? null });
+  // Observability must never break the request it observes: a store that cannot
+  // answer `created_at` still yields the id, with the timestamp unknown.
+  let createdAt: string | null = null;
+  try {
+    createdAt = apiStore.connectionCreatedAt(profile.id) ?? null;
+  } catch {
+    createdAt = null;
+  }
+  noteCallConnection({ id: profile.id, createdAt });
 }
 
 async function attachEngineManagedAuth(

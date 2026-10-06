@@ -4915,4 +4915,21 @@ describe('the connection a call went through is stamped by the resolver, not the
     });
     expect(stamp?.id).toBe('shop');
   });
+
+  it('a store that cannot answer created_at neither breaks the request nor loses the id', async () => {
+    // A store without `connectionCreatedAt` (a narrow stub, or one whose read throws)
+    // must not turn a working request into a failed one.
+    const profile = { id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'stub' };
+    testCtx.apiStore = {
+      getByHostname: (h: string) => (h === 'api.shop.example' ? profile : undefined),
+      getHostConflict: () => undefined,
+      connectionCreatedAt: () => { throw new Error('store unavailable'); },
+    } as never;
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    const slot: CallSlot = {};
+    const result = await runInCallSlot(slot, () => handler({ url: 'https://api.shop.example/v1/orders' }, makeAgent()));
+    expect(result).toContain('HTTP 200');
+    expect(slot.connection).toEqual({ id: 'shop', createdAt: null });
+  });
 });
