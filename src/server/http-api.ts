@@ -6514,6 +6514,13 @@ export class LynoxHTTPApi {
       missing: [409, 'The entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
       superseded: [409, 'The same two entries were merged again later. Only the newest merge can be taken back.'],
       not_in_effect: [409, 'This merge is no longer in effect — it was taken back already, or the entry was merged elsewhere since.'],
+      // ⚠ The chain case used to answer with `not_in_effect`, where BOTH halves of
+      // that sentence are wrong: nothing was taken back, and the entry was not
+      // merged *elsewhere* — the entry this merge LED TO was merged onward. The
+      // owner's next step was missing entirely. This is the wording for when the
+      // newer merge cannot be named (its ledger is past the 90-day retention);
+      // the route builds a richer one when it can.
+      chained: [409, 'The entry this merge led to has since been merged into another one. Take that newer merge back first; then this one can be taken back.'],
       unavailable: [409, 'This merge moved data rows or conversation links, and that part of the instance is not available right now. Nothing was taken back.'],
       partial: [409, 'The merge was taken back in the contact graph, but data rows or conversation links still point at the merged entry. Taking it back again will not repair that.'],
       failed: [409, 'The merge could not be taken back.'],
@@ -6539,8 +6546,30 @@ export class LynoxHTTPApi {
       const { rollbackMergeById } = await import('../core/subject-merge-runner.js');
       const out = rollbackMergeById(stores.store, stores.dataStore, stores.threadStore, join(getLynoxDir(), 'sweeps'), params['id']!);
       if (!out.ok) {
+        // ⚠ `chained` is the one refusal with a NEXT STEP the owner can take, so
+        // it is the one that must name its object. The runner hands up the newer
+        // merge; the table's wording covers only the case where it cannot.
+        //
+        // The entry's name is the owner's own data on an owner-authenticated
+        // route, so naming it here discloses nothing new. Measured for the two
+        // filters every error passes: `maskForClient` masks credential shapes and
+        // stored secret values, not names, and `capForClient` cuts at 600 chars
+        // where this sentence is ~200 — the longest existing refusal is 158. The
+        // id therefore survives, which matters because it is the actionable half.
+        if (out.reason === 'chained' && out.blocking) {
+          errorResponse(
+            res,
+            409,
+            `The entry this merge led to has since been merged into ${out.blocking.intoName}. `
+            + `Take that newer merge back first — its id is ${out.blocking.id} — then this one can be taken back.`,
+            'merge_chained',
+          );
+          return;
+        }
         const [code, msg] = MERGE_REFUSALS[out.reason] ?? [409, 'Refused.'];
-        errorResponse(res, code, msg);
+        // The same code rides the no-blocker wording, so a client branches on the
+        // category rather than on whether the sentence happened to carry an id.
+        errorResponse(res, code, msg, out.reason === 'chained' ? 'merge_chained' : undefined);
         return;
       }
       jsonResponse(res, 200, { merge: out.view });

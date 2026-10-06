@@ -335,7 +335,27 @@ export function listMergeRuns(store: SubjectStore, sweepsDir: string): MergeRunV
 
 /** Why a rollback did not happen, in a fixed vocabulary — the store's own reasons name ids. */
 export type MergeRollbackRefusal =
-  | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'unavailable' | 'partial' | 'failed';
+  | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'chained'
+  | 'unavailable' | 'partial' | 'failed';
+
+/**
+ * The newer merge that has to be taken back before a `chained` one can be.
+ *
+ * `not_in_effect` used to carry this case, and the owner-facing sentence for it
+ * says the merge «was taken back already, or the entry was merged elsewhere
+ * since». In a chain BOTH halves are wrong — nothing was taken back, and the
+ * entry was not merged *elsewhere*: the entry this merge LED TO was merged
+ * onward. The one thing the owner needs, which merge to take back first, was
+ * not in the sentence at all, because the refusal is a category and the store's
+ * own message («…has since been merged into C. Reverse that newer merge first»)
+ * stops at this boundary by design.
+ */
+export interface MergeRollbackBlocker {
+  /** The newer merge's run id — what the owner can actually act on. */
+  readonly id: string;
+  /** The entry that newer merge led to, for the sentence. */
+  readonly intoName: string;
+}
 
 /**
  * Take one merge back for its owner. Refuses up front what the store would refuse, or get
@@ -351,7 +371,14 @@ export type MergeRollbackRefusal =
  */
 export function rollbackMergeById(
   store: SubjectStore, dataStore: DataStore | null, threadStore: ThreadStore | null, sweepsDir: string, id: string,
-): { ok: true; view: MergeRunView } | { ok: false; reason: MergeRollbackRefusal } {
+):
+  | { ok: true; view: MergeRunView }
+  | { ok: false; reason: Exclude<MergeRollbackRefusal, 'chained'> }
+  // ⚠ `blocking` is NULLABLE on purpose. The newer merge's ledger can be gone —
+  // the 90-day retention removes it — and the refusal still has to work then.
+  // Without the ledger there is no id to point at, so the sentence drops to the
+  // shape without one rather than the route inventing a link.
+  | { ok: false; reason: 'chained'; blocking: MergeRollbackBlocker | null } {
   const record = readAll(store, sweepsDir).find((r) => r.view.id === id);
   if (!record) return { ok: false, reason: 'not_found' };
   const { view, file } = record;
@@ -360,7 +387,39 @@ export function rollbackMergeById(
     return { ok: false, reason: 'missing' };
   }
   if (view.superseded) return { ok: false, reason: 'superseded' };
-  if (!view.inEffect) return { ok: false, reason: 'not_in_effect' };
+  if (!view.inEffect) {
+    // WHY is it not in effect? `inEffect` is a conjunction and collapsing it to
+    // one category threw that away. The canonical having been merged onward is
+    // the chain case, and it is the only one with a next step the owner can take.
+    const canonical = store.getSubject(file.entry.canonicalId);
+    const onward = canonical?.merged_into ?? null;
+    if (onward === null) return { ok: false, reason: 'not_in_effect' };
+    // ⚠ FILTER AND REQUIRE EXACTLY ONE, not `find`. Not for ordering — `readAll`
+    // sorts by id and already marks every superseded ledger of a pair — but
+    // because `find` SILENTLY PICKS when several match, and «which merge blocks»
+    // is the one thing this refusal exists to answer. A guess is worse than no
+    // answer: the owner would go and take back a merge that is not the obstacle.
+    //
+    // ⚠ `inEffect` is the WHOLE condition, and a first version added a redundant
+    // second one (the pair must be exactly canonical→onward). It cannot
+    // discriminate: `merged_into` is single-valued, so a ledger whose dup is this
+    // canonical can only be in effect if its own canonical IS `onward`. Removed —
+    // a condition that cannot change an answer is a condition no test can defend.
+    //
+    // The count check is not redundant, and that is measured: with it, dropping
+    // `inEffect` turns the two ledgers of a pair-merged-twice into «no id» and a
+    // test sees it; with a plain `find` the same mutation picks the newest match,
+    // which happens to be the right one, and passes unnoticed.
+    const candidates = readAll(store, sweepsDir).filter(
+      (r) => r.file.entry.dupId === file.entry.canonicalId && r.view.inEffect,
+    );
+    const blocking = candidates.length === 1 ? candidates[0]! : null;
+    return {
+      ok: false,
+      reason: 'chained',
+      blocking: blocking ? { id: blocking.view.id, intoName: blocking.view.canonicalName } : null,
+    };
+  }
   if ((file.dataStore.length > 0 && !dataStore) || ((file.threadAnchors?.length ?? 0) > 0 && !threadStore)) {
     return { ok: false, reason: 'unavailable' };
   }

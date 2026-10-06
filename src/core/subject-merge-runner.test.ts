@@ -797,6 +797,95 @@ describe('owner rollback of a merge chain A→B→C', () => {
     dirs.length = 0;
   });
 
+  it('⭐ falls back to «no id» when the same pair was merged twice, rather than guessing', () => {
+    // The ambiguity the `inEffect` condition exists for: B→D done, taken back,
+    // done again leaves TWO ledgers for that exact pair. `readAll` marks the
+    // older one superseded and not in effect, so exactly one candidate stands —
+    // and dropping that condition makes it two, which must answer «no id» rather
+    // than name whichever one came first.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Tailspin GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Tailspin' });
+    const d = store.createSubject({ kind: 'organization', name: 'Tailspin Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, d).ok).toBe(true);
+    const first = listMergeRuns(store, sweeps).find(r => r.canonicalName === 'Tailspin Holding')!;
+    expect(rollbackMergeById(store, null, threadStore, sweeps, first.id).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, d).ok).toBe(true);
+
+    const runs = listMergeRuns(store, sweeps);
+    const bdLedgers = runs.filter(r => r.dupName === 'Tailspin' && r.canonicalName === 'Tailspin Holding');
+    expect(bdLedgers.length, 'the fixture does not have two ledgers for the pair').toBe(2);
+    expect(bdLedgers.filter(r => r.inEffect).length, 'exactly one of them should stand').toBe(1);
+    const live = bdLedgers.find(r => r.inEffect)!;
+
+    const ab = runs.find(r => r.dupName === 'Tailspin GmbH')!;
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({
+      ok: false,
+      reason: 'chained',
+      blocking: { id: live.id, intoName: 'Tailspin Holding' },
+    });
+  });
+
+  it('⭐ names the merge that actually blocks, not an older one already taken back', () => {
+    // ⚠ The `inEffect` filter on the lookup survived a mutation with two merges,
+    // because there was only one candidate either way. This is the fixture where
+    // it decides: B carries TWO ledgers as the merged-away side — B→C, taken back
+    // since, and B→D, standing. Naming B→C would send the owner to undo a merge
+    // that is already undone.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Contoso GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Contoso' });
+    const c = store.createSubject({ kind: 'organization', name: 'Contoso Group' });
+    const d = store.createSubject({ kind: 'organization', name: 'Contoso Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    const bc = listMergeRuns(store, sweeps).find(r => r.canonicalName === 'Contoso Group')!;
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, d).ok).toBe(true);
+
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Contoso GmbH')!;
+    const bd = runs.find(r => r.canonicalName === 'Contoso Holding')!;
+    // Both B-ledgers exist; only one is in effect. That is the discriminator.
+    expect(runs.filter(r => r.dupName === 'Contoso').length, 'the fixture lost one of the two B ledgers').toBe(2);
+    expect(bd.inEffect).toBe(true);
+    expect(runs.find(r => r.id === bc.id)!.inEffect).toBe(false);
+
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({
+      ok: false,
+      reason: 'chained',
+      blocking: { id: bd.id, intoName: 'Contoso Holding' },
+    });
+  });
+
+  it('⭐ still refuses a chain when the newer ledger is gone, without inventing a link', () => {
+    // The 90-day retention removes a ledger. The refusal still has to work then,
+    // and the one thing it must NOT do is name a merge the owner cannot act on.
+    // `blocking: null` is what carries the route to its wording without an id.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Acme GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Acme' });
+    const c = store.createSubject({ kind: 'organization', name: 'ACME Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Acme GmbH')!;
+    const bc = runs.find(r => r.dupName === 'Acme')!;
+
+    // Positive control: WITH the ledger the refusal names it. Without this the
+    // assertion below would also hold if the chain stopped being detected.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id, intoName: 'ACME Holding' } });
+
+    rmSync(join(sweeps, `${bc.id}.json`));
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+    // …and the graph is untouched, which is the point of refusing at all.
+    expect(store.getSubject(a)!.merged_into).toBe(b);
+    expect(store.getSubject(b)!.merged_into).toBe(c);
+  });
+
   it('refuses the older ledger while its canonical is merged away, and takes both back in order', () => {
     const { dir, sweeps, store, threadStore } = setup();
     const a = store.createSubject({ kind: 'organization', name: 'Acme GmbH' });
@@ -810,7 +899,15 @@ describe('owner rollback of a merge chain A→B→C', () => {
     expect(ab.inEffect).toBe(false);
     expect(bc.inEffect).toBe(true);
 
-    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({ ok: false, reason: 'not_in_effect' });
+    // ⭐ The refusal NAMES the newer merge now. It used to be `not_in_effect`,
+    // whose owner-facing sentence says the merge «was taken back already, or the
+    // entry was merged elsewhere since» — in a chain neither half is true, and
+    // the one thing the owner needs (take B→C back first) was not in it.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id)).toEqual({
+      ok: false,
+      reason: 'chained',
+      blocking: { id: bc.id, intoName: 'ACME Holding' },
+    });
     // Nothing moved: the chain stands as it was, C still carries what both merges brought.
     expect(store.getSubject(a)!.merged_into).toBe(b);
     expect(store.getSubject(b)!.merged_into).toBe(c);
