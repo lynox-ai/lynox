@@ -20,8 +20,12 @@ export function getApiKey(): string {
     const configPath = join(homedir(), '.lynox', 'config.json');
     const raw = readFileSync(configPath, 'utf8');
     const config = JSON.parse(raw) as Record<string, unknown>;
-    if (typeof config['api_key'] === 'string' && config['api_key'].length > 0) {
-      return config['api_key'];
+    // `anthropic_api_key` is the name the eval and bench scripts read, and the one a
+    // developer config may carry instead of `api_key`, the schema field. Same order
+    // as tests/eval/knowledge-substrate-provider.ts.
+    for (const field of ['anthropic_api_key', 'api_key']) {
+      const value = config[field];
+      if (typeof value === 'string' && value.length > 0) return value;
     }
   } catch { /* config not found */ }
 
