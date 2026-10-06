@@ -342,6 +342,16 @@ describe('approval checks (§7 g)', () => {
     expect([...state.values()].filter((v) => v.startsWith('w'))).toHaveLength(3);
   });
 
+  it('counts a write that failed against the approved maximum: it may have reached its target', async () => {
+    const { runId, initial } = recordMemoryRun(25);
+    approve(runId, { maxTargets: 3 });
+    const mem = memory(initial, new Set(['k000']));
+    const { writer, writes } = counting(mem.writer);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('halted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
+    expect([...writes.keys()]).toEqual(['k000', 'k001', 'k002']);
+  });
+
   it('refuses maxTargets outside 1..writing targets', async () => {
     const { runId } = recordMemoryRun(3);
     const checksum = ledger.computeChecksum(runId)!;
@@ -447,8 +457,6 @@ describe('stop at ~80 % and resume (§7 c)', () => {
   // The interleaving above, forced: while this loop writes its first target, a second loop
   // writes and records the rest, so the approved maximum (here the default: every target)
   // is reached with targets still on this loop's stale list.
-  // MUTATION: drop the `listPending(...).length === 0` exit before the maxTargets halt →
-  // a fully written run ends halted instead of done.
   it('a run finished by another loop at the approved maximum closes as done, not halted', async () => {
     const { runId, initial } = recordMemoryRun(3);
     approve(runId);
@@ -471,6 +479,31 @@ describe('stop at ~80 % and resume (§7 c)', () => {
     expect(ledger.getStatus(runId)!.haltReason).toBeNull();
     expect(ledger.getStatus(runId)!.phase).toBe('done');
     expect(ledger.getStatus(runId)!.applied).toBe(3);
+  });
+
+  // As above, but the other loop leaves a target it never sent to (a conflict) on this loop's
+  // stale list, which the maximum then makes this loop pass over.
+  // MUTATION: halt on the maximum without first asking whether `listPending(...)` still holds
+  // a target → a fully recorded run ends halted instead of done.
+  it('a run another loop finished closes as done even when this loop passed a target over at the maximum', async () => {
+    const { runId, initial } = recordMemoryRun(3);
+    approve(runId, { maxTargets: 2 });
+    const { writer: inner } = memory(initial);
+    const writer: TargetWriter = {
+      read: (key) => inner.read(key),
+      async write(key, after) {
+        if (key === 'k000') {
+          expect(ledger.claimTarget(runId, 1, Date.now())).toBe(true);
+          ledger.recordFailed(runId, 1, 'conflict');
+          expect(ledger.claimTarget(runId, 2, Date.now())).toBe(true);
+          ledger.recordApplied({ id: runId, kind: 'apply', sourceRunId: null }, 2, 'ok');
+        }
+        return inner.write(key, after);
+      },
+    };
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(out.status, JSON.stringify(out)).toBe('done');
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null, applied: 2 });
   });
 });
 

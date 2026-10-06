@@ -331,7 +331,9 @@ const WRITING_CHANGES = "('update','create','delete')";
  * source wrote. The undo reads it before writing, like every target, and finds out.
  */
 function undoEligible(external: boolean): string {
-  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND (applied_at IS NOT NULL${external ? " OR error = 'write_failed'" : ''})`;
+  // `write_sent`, not `error = 'write_failed'`: a resume clears the error, and a retry that
+  // then meets a conflict leaves no error of that kind, while the first write may stand.
+  return `undone_at IS NULL AND change IN ${WRITING_CHANGES} AND (applied_at IS NOT NULL${external ? ' OR write_sent = 1' : ''})`;
 }
 
 /** Per-target undo class, derived from what is there: creating is compensatable,
@@ -1137,6 +1139,24 @@ export class BulkLedger {
     };
   }
 
+  /**
+   * How many different targets of the run may have received its write verb: written, or
+   * sent to whatever came back. What an approval for N targets bounds.
+   */
+  sentCount(runId: string): number {
+    return (this.engineDb.getDb().prepare(
+      'SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND (applied_at IS NOT NULL OR write_sent = 1)',
+    ).get(runId) as { n: number }).n;
+  }
+
+  /** Whether this target may already have received the run's write verb — a retry of it
+   *  sends the verb to no new target. */
+  wasSent(runId: string, seq: number): boolean {
+    return this.engineDb.getDb().prepare(
+      'SELECT 1 FROM bulk_targets WHERE run_id = ? AND seq = ? AND (applied_at IS NOT NULL OR write_sent = 1)',
+    ).get(runId, seq) !== undefined;
+  }
+
   /** Writing targets not yet applied, failed or taken back, in seq order. */
   listPending(runId: string): number[] {
     return (this.engineDb.getDb().prepare(
@@ -1201,6 +1221,15 @@ export class BulkLedger {
         ).run(at, run.sourceRunId, run.id, seq);
       }
     })();
+  }
+
+  /**
+   * Mark that the run's write verb is about to go out to this target. Set before the request,
+   * never cleared: whatever the answer — a failure, a redirect, none because the loop died —
+   * the target may hold the write from here on.
+   */
+  markSent(runId: string, seq: number): void {
+    this.engineDb.getDb().prepare('UPDATE bulk_targets SET write_sent = 1 WHERE run_id = ? AND seq = ?').run(runId, seq);
   }
 
   /** Give a claimed target back unwritten, for a loop that stops before writing it. */

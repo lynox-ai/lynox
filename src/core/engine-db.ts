@@ -877,6 +877,17 @@ const MIGRATIONS: string[] = [
   // EXISTS: tests that rewind past v16 keep the table.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (17);
    CREATE INDEX IF NOT EXISTS idx_bulk_runs_source ON bulk_runs(source_run_id);`,
+
+  // v18 (bulk write sent): whether a target's write verb may have reached it — set just
+  // before the request goes out, and never cleared. `error` cannot carry it: a resume clears
+  // every retryable error, a redirect or a crash leaves none, and the target then looked as
+  // if nothing had been sent to it. Two rules read it: an approval for N targets bounds how
+  // many DIFFERENT targets receive the verb, not how many writes landed; and an undo takes
+  // back every target that may hold a write. Backfilled from the failures still recorded
+  // that may follow a write; one a resume already cleared is not recoverable from this table.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (18);
+   ALTER TABLE bulk_targets ADD COLUMN write_sent INTEGER NOT NULL DEFAULT 0;
+   UPDATE bulk_targets SET write_sent = 1 WHERE error IN ('write_failed', 'redirect');`,
 ];
 
 /**
