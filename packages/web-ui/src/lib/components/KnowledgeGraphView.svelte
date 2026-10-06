@@ -2,6 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { getApiBase } from '../config.svelte.js';
+	import { fetchEntityRelations } from '../api/kg-entity.js';
+	import { addToast } from '../stores/toast.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 
 	interface Entity { id: string; canonicalName: string; entityType: string; aliases: string[]; description: string; mentionCount: number; firstSeenAt: string; lastSeenAt: string; }
@@ -93,12 +95,10 @@
 
 	async function selectEntity(e: Entity) {
 		selected = e;
-		try {
-			const res = await fetch(`${getApiBase()}/kg/entities/${e.id}`);
-			if (!res.ok) throw new Error(`${res.status}`);
-			const data = (await res.json()) as { entity: Entity; relations: Relation[] };
-			relations = data.relations;
-		} catch { relations = []; }
+		// A failed read must not look like an entity without relations.
+		const loaded = await fetchEntityRelations<Relation>(getApiBase(), e.id);
+		relations = loaded ?? [];
+		if (loaded === null) addToast(t('common.load_failed'), 'error');
 	}
 
 	async function loadGraph() {
@@ -196,7 +196,7 @@
 	}
 
 	function handleGraphNodeClick(entity: Entity) {
-		void selectEntity(entity); /* a failure shows no relations */
+		void selectEntity(entity); /* never rejects; a failed read is reported, not shown as no relations */
 	}
 
 	// Dynamic type filters — derived from actual entities

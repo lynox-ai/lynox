@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { pickBackupConfig, type BackupConfigFields } from './backup-config.js';
 
@@ -86,7 +86,10 @@ describe('BackupsView wiring', () => {
 	});
 
 	it('routes both config directions through the projection', () => {
-		expect(src.match(/pickBackupConfig\(/g) ?? []).toHaveLength(2);
+		// The save projects here; the read goes through fetchBackupConfig, which projects
+		// (witnessed below: a response-only key does not survive the read).
+		expect(src.match(/pickBackupConfig\(/g) ?? []).toHaveLength(1);
+		expect(src.match(/fetchBackupConfig\(/g) ?? []).toHaveLength(1);
 	});
 
 	// ⚠ There is no "the file must not contain pattern X" assertion here, and the
@@ -100,5 +103,23 @@ describe('BackupsView wiring', () => {
 	it('has no control that writes backup_schedule', () => {
 		expect(src).not.toContain('backup_schedule');
 		expect(src).not.toContain('backup-schedule');
+	});
+});
+
+describe('fetchBackupConfig', () => {
+	afterEach(() => { vi.unstubAllGlobals(); });
+
+	it('resolves null, not defaults, when the request fails or is refused', async () => {
+		const { fetchBackupConfig } = await import('./backup-config.js');
+		vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+		await expect(fetchBackupConfig('/api')).resolves.toBeNull();
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 500 })));
+		await expect(fetchBackupConfig('/api')).resolves.toBeNull();
+	});
+
+	it('returns only the two backup keys when the read works', async () => {
+		const { fetchBackupConfig } = await import('./backup-config.js');
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ backup_retention_days: 7, backup_encrypt: true, managed: true }), { status: 200 })));
+		await expect(fetchBackupConfig('/api')).resolves.toEqual({ backup_retention_days: 7, backup_encrypt: true });
 	});
 });
