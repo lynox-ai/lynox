@@ -1827,6 +1827,25 @@ describe('Engine + Session (Orchestrator)', () => {
         }
       });
 
+      it('the watch-analysis shape (a fast-tier session, then the worker profile) runs the profile\'s model', async () => {
+        // worker-loop's watch analysis creates the session with `model: 'fast'` and then
+        // applies the worker profile. On the `efficient` preset fast is a Fireworks id.
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { fast: { provider: 'fireworks', model_id: 'accounts/fireworks/models/deepseek-v4p1-flash' } } });
+        try {
+          const session = engine.createSession({ model: 'fast' });
+          vi.mocked(Agent).mockClear();
+          session._recreateAgent({ profile: 'worker' });
+          const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+          expect(cfg.apiBaseURL).toBe('https://api.mistral.ai/v1');
+          expect(cfg.model).toBe('ministral-14b-2512');
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
       it('CONTROL: without a profile the tier decides, exactly as before', async () => {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await engine.init();
