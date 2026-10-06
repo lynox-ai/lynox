@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
  *
  * There is no component renderer in this package's tests, so a source assertion
  * is the only instrument for a Svelte template — the same reasoning, and the
- * same file, as `secret-prompt-frame.test.ts`. To keep this from being a string
- * count it pins the ORDER of the render pipeline, which is the part that
- * carries a security consequence, and the ABSENCE of the style that caused the
- * complaint.
+ * same file, as `secret-prompt-frame.test.ts`. What is left in here is the
+ * TEMPLATE half: the ABSENCE of the style that caused the complaint, and the
+ * presence of the one that answers it. The render pipeline's own assertions
+ * moved to `utils/markdown-render.test.ts` when the pipeline became a module —
+ * see the note below.
  */
 const RENDERER = readFileSync(
 	fileURLToPath(new URL('./MarkdownRenderer.svelte', import.meta.url)),
@@ -19,27 +20,30 @@ const RENDERER = readFileSync(
 
 describe('MarkdownRenderer link affordance', () => {
 	/**
-	 * ⭐ THE POINT, and the reason a plain "is it called?" check is not enough:
-	 * the rewrite adds attributes to anchors, so it must run on markup the
-	 * sanitizer has already cleaned. Running it BEFORE `DOMPurify.sanitize`
-	 * would mean decorating tags that are not yet known to be anchors, and the
-	 * sanitizer could then strip or reshape what was just added.
+	 * ⚠ THREE TESTS MOVED OUT OF THIS FILE, and this note is here so a reader who
+	 * remembers them does not conclude the requirements were dropped. Names as
+	 * they read NOW, because a note whose point is findability has to be greppable:
+	 *
+	 *   · "⭐ sanitizes to a DOM fragment and mutates nodes, never a string"
+	 *     → became "⭐ asks the sanitizer for NODES, which is what makes the
+	 *       passes node passes" — and it is now an OBSERVED call option rather
+	 *       than a string found in the source.
+	 *   · "runs no string replace inside the sanitized pipeline"
+	 *     → became "⭐ keeps a raw `>` in an attribute inside that attribute —
+	 *       the string rewrite did not". The old one asserted on source text; the
+	 *       new one runs the pipeline and measures the breakout.
+	 *   · "imports the helper it calls" → the component no longer imports the
+	 *     passes, the pipeline does, so the assertion followed the import and the
+	 *     witnesses above cover that the passes actually run.
+	 *
+	 * All three now live in `utils/markdown-render.test.ts`. The reason for the
+	 * move is NOT that the regex slice they used was broken — for this shape a
+	 * de-indented function makes the slice empty, which its own guard caught. It
+	 * is that the property turned out to be RUNNABLE once the pipeline was
+	 * importable, and a witness beats an assertion about text.
+	 *
+	 * What stays here is what is genuinely about the component's template.
 	 */
-	it('⭐ externalizes links AFTER DOMPurify has sanitized, never before', () => {
-		const pipeline = RENDERER.match(/wrapTables\([\s\S]*?\)\s*\)?\s*\n?\s*\)/)?.[0] ?? '';
-		expect(pipeline).toContain('externalizeLinks');
-		const sanitizeAt = pipeline.indexOf('DOMPurify.sanitize');
-		const externalizeAt = pipeline.indexOf('externalizeLinks');
-		expect(sanitizeAt).toBeGreaterThan(-1);
-		expect(externalizeAt).toBeGreaterThan(-1);
-		// `externalizeLinks(DOMPurify.sanitize(...))` — the sanitize call sits
-		// INSIDE, so it appears later in the source text.
-		expect(sanitizeAt).toBeGreaterThan(externalizeAt);
-	});
-
-	it('imports the helper it calls', () => {
-		expect(RENDERER).toContain("from '$lib/utils/external-links.js'");
-	});
 
 	/**
 	 * ⭐ The complaint itself. `prose-a:no-underline` left a link distinguishable

@@ -33,9 +33,74 @@ export function injectPrintScaffold(html: string): string {
   const script =
     '<scr' + 'ipt>window.addEventListener("load",function(){setTimeout(function(){window.print();},200);});' +
     'window.addEventListener("afterprint",function(){window.close();});</scr' + 'ipt>';
-  let out = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `${style}</head>`) : `${style}${html}`;
-  out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, `${script}</body>`) : `${out}${script}`;
-  return out;
+  // ONE append, at the END — no pattern match over sanitized HTML, and no
+  // insertion OFFSET either. Both halves of that cost a measurement.
+  //
+  // The pattern match came first. `html` is already sanitized, and a regex over
+  // sanitized HTML can match inside an attribute VALUE: until the 2025
+  // serializer change (Chromium 138, Firefox 140, WebKit 26) `innerHTML`
+  // returned `<` and `>` raw in attributes, so a `</body>` an artifact put in a
+  // `title=` survived into the string and `replace(/<\/body>/i, …)` hit THAT one
+  // first. Measured by feeding the old serializer's output in directly and
+  // re-parsing: `<p title="</body> ><img src=/nope onerror=…>">` yielded a live
+  // `<img>`, and the scaffold's own script went MISSING — the insertion had
+  // landed inside the attribute. (Via `</head>` it stays inert; checked
+  // separately rather than assumed to behave alike.)
+  //
+  // Taking the LAST `</body>` instead looked like the fix and was not, twice:
+  //   · an index taken from `html.toLowerCase()` and applied to `html` is off by
+  //     however much the lowercasing grew. `'İ'` (U+0130) lowercases to TWO code
+  //     units — the only BMP code point that does — so ordinary Turkish text
+  //     (`İstanbul`) shifted the offset. Measured in a browser over two, three
+  //     and five of them: the insertion split an end tag, no `<style>` element
+  //     was produced, and the print CSS appeared as visible text.
+  //   · "a `</body>` inside an attribute is necessarily BEFORE the real one"
+  //     holds only if a real one EXISTS. For a bare fragment carrying a fake
+  //     `</body>` in a `title=`, the last match IS the fake and the breakout is
+  //     back. Both callers below happen to produce a real `</body>`, so this was
+  //     a precondition the function neither stated nor enforced — exploitable,
+  //     and reachable only by a caller nobody has written yet.
+  //
+  // Appending needs no offset, so none of that applies. Measured in Chrome
+  // through a blob URL, i.e. the production path: with the scaffold after
+  // `</html>` the `<style>` is in the document, its `@page` is a live
+  // `CSSPageRule`, the script runs, and nothing shows as text — identical on
+  // every count to inserting before `</body>`. The parser reprocesses a start
+  // tag found after the document using the in-body rules, which is why.
+  //
+  // The rule, the same one `utils/external-links.ts` holds: do not pattern-match
+  // over sanitized HTML. Here the whole document goes to a blob URL, so there
+  // are no nodes to mutate — appending is the form that rule takes at this site.
+  //
+  // ⚠ APPEND HAS ITS OWN PRECONDITION, and saying it has none would repeat the
+  // mistake this change fixed. It is that `html` must not END in a parser state
+  // that swallows trailing markup. Measured in Chrome via a blob URL, the
+  // scaffold is lost after an unterminated comment, an open `<textarea>`, an
+  // unclosed `<title>`, a `<frameset>` document, an open attribute, and — worst,
+  // because it reproduces the exact symptom the offset shape had — after
+  // `<plaintext>`, where the print CSS appears as visible text. After an
+  // unclosed `<style>` the script still runs but `@page` never becomes a rule.
+  //
+  // The difference from the precondition this replaced is that NO SANITIZED
+  // INPUT can violate it, and that is checked rather than hoped: DOMPurify's
+  // default allowlist strips `plaintext`, `xmp`, `noembed`, `noframes`,
+  // `frameset` and CDATA outright, closes `textarea`/`title`/`style`/`template`,
+  // and drops an unterminated comment — every `WHOLE_DOCUMENT` output probed
+  // ends `</body></html>`. `printMarkdownDocument` wraps its body in a fixed
+  // template. It is also not a regression: none of those inputs contains
+  // `</body>`, so the offset shape fell through to the same append and failed
+  // identically.
+  //
+  // ⚠ And the CASCADE claim here used to name the wrong comparison. Measured in
+  // Chrome under `emulateMedia({media:'print'})`, computed `break-inside` on a
+  // `<tr>`: against the shape this directly replaces there is NO change, because
+  // inserting before `</body>` already made the scaffold the last `<style>` in
+  // document order. The print styles winning a specificity tie is true only
+  // against the ORIGINAL pattern-match shape, which put them in `<head>`. The one
+  // arrangement where append and offset differ — the artifact's own `<style>`
+  // sitting between `</body>` and `</html>` — cannot occur, because the parser
+  // hoists it into the body before the scaffold is appended.
+  return `${html}${style}${script}`;
 }
 
 /** Open a built print document in a new window. False if the popup was blocked. */

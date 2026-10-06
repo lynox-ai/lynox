@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
-	import { externalizeLinks } from '$lib/utils/external-links.js';
+	import { renderSanitizedMarkdown } from '../utils/markdown-render.js';
 	import { codeToHtml } from 'shiki';
 	import { goto } from '$app/navigation';
 	import { saveArtifact } from '../stores/artifacts.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { getResolvedTheme, type ResolvedTheme } from '../stores/theme.svelte.js';
-	import { fixMarkdownPreprocessing, repairCodeFences } from '../utils/markdown-preprocess.js';
+	import { fixMarkdownPreprocessing } from '../utils/markdown-preprocess.js';
 	import { deckFrameHeight } from '../utils/artifact-frame.js';
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
@@ -26,14 +26,7 @@
 
 	let highlightedHtml = $state('');
 
-	// Wrap <table> elements in a scrollable container for wide tables.
-	function wrapTables(html: string): string {
-		return html.replace(/<table\b[^>]*>/g, '<div class="table-wrap">$&').replace(/<\/table>/g, '</table></div>');
-	}
-
-	const baseHtml = $derived(
-		wrapTables(externalizeLinks(DOMPurify.sanitize(marked.parse(repairCodeFences(fixMarkdownPreprocessing(content)), { async: false }) as string)))
-	);
+	const baseHtml = $derived(renderSanitizedMarkdown(content));
 
 	function decodeEntities(str: string): string {
 		return str
