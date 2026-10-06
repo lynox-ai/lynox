@@ -298,7 +298,12 @@ function readAll(store: SubjectStore, sweepsDir: string): MergeRunRecord[] {
         id, createdAt: file.createdAt, kind,
         dupName: dup?.name ?? '', canonicalName: canonical?.name ?? '',
         applied: file.applied !== false,
-        inEffect: dup?.merged_into === canonicalId && canonical !== null,
+        // In effect only while the canonical still stands on its own. After a chain A→B, then
+        // B→C, the canonical of the older ledger is itself merged away: its aliases and A's rows
+        // sit on C now, so reversing A→B from here would un-archive A while C keeps what that
+        // merge moved — data split, reported as success. The newer merge is reversed first; the
+        // store refuses such a ledger on its own too (`rollbackMerge`).
+        inEffect: dup?.merged_into === canonicalId && canonical !== null && canonical.merged_into === null,
         superseded: false,
         dataStoreRows: file.dataStore.reduce((n, r) => n + r.ids.length, 0),
         threadRows: file.threadAnchors?.length ?? 0,
