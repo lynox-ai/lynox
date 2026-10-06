@@ -2151,3 +2151,41 @@ describe('a step agent joins the caller\'s abort scope', () => {
     expect(scope.members.size, 'and is released when the step ends').toBe(0);
   });
 });
+
+describe('spawnViaAgent — tool_gates reach the tools the agent runs', () => {
+  // `wrapWithGate` has its own tests above; this covers the CALL: that a gated name in
+  // `step.tool_gates` actually reaches the tool list handed to the Agent. A name the step cannot
+  // wrap is refused before the run starts, in `runner.ts`, and tested there.
+  const execute = vi.fn().mockResolvedValue('sent');
+  const agentDef: AgentDef = {
+    name: 'gate-agent', version: '1', defaultTier: 'balanced', systemPrompt: 'do it',
+    tools: [
+      { name: 'http_request', description: 'd', input_schema: { type: 'object', properties: {} }, execute },
+      { name: 'read_file', description: 'd', input_schema: { type: 'object', properties: {} }, execute: vi.fn().mockResolvedValue('read') },
+    ],
+  };
+  const order: string[] = [];
+  const gate = {
+    submit: vi.fn().mockImplementation(async () => { order.push('submit'); return 'approval-1'; }),
+    waitForDecision: vi.fn().mockResolvedValue({ status: 'approved' }),
+  } as never;
+  const toolsHandedToAgent = (): ToolEntry[] => {
+    const calls = vi.mocked(Agent).mock.calls;
+    return (calls[calls.length - 1]![0] as unknown as { tools: ToolEntry[] }).tools;
+  };
+
+  it('asks the gate before the gated tool runs, and only for the gated tool', async () => {
+    order.length = 0;
+    execute.mockImplementation(async () => { order.push('execute'); return 'sent'; });
+    const step: ManifestStep = { id: 'g-step', agent: 'gate-agent', runtime: 'agent', tool_gates: ['http_request'] };
+    await spawnViaAgent(step, agentDef, {}, mockConfig, gate, 'run-1');
+
+    const tools = toolsHandedToAgent();
+    await tools.find((t) => t.definition.name === 'http_request')!.handler({}, {} as never);
+    expect(order).toEqual(['submit', 'execute']);
+
+    order.length = 0;
+    await tools.find((t) => t.definition.name === 'read_file')!.handler({}, {} as never);
+    expect(order).toEqual([]);
+  });
+});
