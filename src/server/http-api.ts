@@ -797,8 +797,18 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
  * prose. For a message that is entirely uncontrolled the caller asks for more —
  * see the SSE error path, which also caps the length.
  */
-function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: capForClient(maskForClient(message)) });
+function errorResponse(res: ServerResponse, status: number, message: string, code?: string): void {
+  // ⭐ `code` is for the refusals a CLIENT has to tell apart. Two 409s on the same route
+  // can need opposite next moves from the owner — wait, or go and answer a question — and
+  // a view cannot read a sentence. It rides here rather than in a second response shape so
+  // that masking and capping stay in one place: a route that wrote `{ code, error }` by
+  // hand skipped both, and left a template the next author copies with an interpolated
+  // string in it. Omitted by default, so the 264 existing callers are unchanged and a
+  // client's default branch keeps its meaning.
+  jsonResponse(res, status, {
+    error: capForClient(maskForClient(message)),
+    ...(code !== undefined ? { code } : {}),
+  });
 }
 
 /**
@@ -6312,6 +6322,24 @@ export class LynoxHTTPApi {
       const outcome = await workerLoop.runTriggerNow(params['id']!);
       if (!outcome.ok) {
         if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
+        // Its own answer, not "already running": the run exists and is waiting for the
+        // owner. Answering the question is what moves it; starting a second run would
+        // strand the first question.
+        //
+        // ⛔ THE CODE IS WHAT CARRIES IT, not the prose. The only caller of this route
+        // shows a fixed string for every 409 and never reads the body, so the first
+        // version of this branch composed a sentence the owner could not be shown — the
+        // UI still said "already running", which is the answer this exists to replace.
+        // `code` is what the view switches on; the `error` text is for a caller that has
+        // no view.
+        if (outcome.reason === 'awaiting_answer') {
+          // Through `errorResponse` like every other refusal: it is the one place a
+          // client-facing message is masked and capped, and a second shape that writes
+          // `{ code, error }` by hand is a template the next author copies with an
+          // interpolated string in it. The `code` is what the view switches on.
+          errorResponse(res, 409, 'This task is waiting for your answer — answer its question instead of starting it again', 'awaiting_answer');
+          return;
+        }
         errorResponse(res, 404, 'Trigger not found'); return;
       }
       jsonResponse(res, 202, { started: true });

@@ -653,6 +653,31 @@ export class PromptStore {
   }
 
   /**
+   * The question a trigger is still waiting on, if there is one.
+   *
+   * ⛔ WHY THIS EXISTS RATHER THAN A `status === 'waiting'` TEST ON THE TRIGGER. That
+   * status is a CORRELATE of "has an open question" and it is wrong in both directions.
+   * Wrong-positive: if `endTriggerWait` throws — its catch is swallowed, and its own
+   * sibling comment names SQLITE_BUSY and schema drift as the live causes — the trigger
+   * stays `waiting` while the prompt is already `answered` and its pointer released. No
+   * sweep re-arms it, so a guard built on the status locks the owner out of the one
+   * recovery they had, for up to the 24-hour TTL, while telling them to answer a question
+   * that is gone. Wrong-negative: the park write is also swallowed and is skipped
+   * entirely when the row's deadline cannot be read back, so a pending question can point
+   * at a trigger that is NOT `waiting` — which a status test cannot see at all.
+   *
+   * `trigger_id` plus `status = 'pending'` is the thing itself.
+   */
+  getPendingForTrigger(triggerId: string): PendingPromptRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT * FROM pending_prompts WHERE trigger_id = ? AND status = 'pending'
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(triggerId) as PendingPromptRow | undefined;
+  }
+
+  /**
    * Detach a prompt from its trigger — the answer has been handed to a run and
    * is that trigger's business no longer.
    *

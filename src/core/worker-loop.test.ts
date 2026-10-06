@@ -140,6 +140,8 @@ function makeEngine(opts?: {
     // wiring under test handles it by returning the canonical skip marker.
     getPromptStore: vi.fn(() => ps),
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
   } as unknown as Engine;
 }
 
@@ -685,6 +687,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager([makeTask()])),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getPromptStore: vi.fn(() => null),
       createSession: vi.fn(() => {
         // Return a proxy that captures promptUser assignment
@@ -798,6 +803,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => tm),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -846,6 +854,9 @@ describe('WorkerLoop', () => {
       getTaskManager: vi.fn(() => tm),
       createSession: vi.fn(() => session),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({})), // truthy → executePipeline reaches the null-target skip
     } as unknown as Engine;
     const router = makeNotificationRouter(false);
@@ -889,6 +900,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -950,6 +964,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1043,6 +1060,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1109,6 +1129,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1158,6 +1181,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1389,6 +1415,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools: [] })),
@@ -1561,6 +1590,9 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+    // The park masks the question for the OFF-BOX copy, so this method is on the path now.
+    getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
@@ -1770,7 +1802,7 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
   /** Build a task whose agent turn is scripted by `body`, and start it. Unlike
    *  `park()` this does not wait for a prompt row — the point of the deadline
    *  tests is what happens when there is none yet. */
-  async function startTask(taskTimeoutMs: number, body: (p: (q: string) => Promise<string>) => Promise<void>): Promise<{ store: PromptStore; router: NotificationRouter }> {
+  async function startTask(taskTimeoutMs: number, body: (p: (q: string) => Promise<string>) => Promise<void>): Promise<{ store: PromptStore; router: NotificationRouter; manager: TaskManager }> {
     const store = makeRealStore();
     const session = {
       sessionId: SESSION_ID,
@@ -1778,8 +1810,9 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
       run: vi.fn(async () => { await body((q) => session.promptUser!(q, ['Yes', 'No'])); return 'Done.'; }),
     };
+    const manager = makeTaskManager([makeTask()]);
     const engine = makeEngine({
-      taskManager: makeTaskManager([makeTask()]),
+      taskManager: manager,
       session: session as unknown as Session,
       promptStore: store,
     });
@@ -1787,7 +1820,7 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const loop = new WorkerLoop(engine, router, 60_000, taskTimeoutMs);
     closers.unshift(() => { loop.stop(); });
     await loop.tick();
-    return { store, router };
+    return { store, router, manager };
   }
 
   const settle = async (pred: () => boolean, ms = 4_000): Promise<void> => {
@@ -1800,12 +1833,39 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
   // deadline never arms, so the two together pin both directions.
   it('fires the execution deadline when compute — not a human — spends the budget', async () => {
     let answer: string | undefined;
-    const { store, router } = await startTask(50, async (ask) => { // 50ms, floored to 1s
+    const { store, router, manager } = await startTask(50, async (ask) => { // 50ms, floored to 1s
       await new Promise((r) => setTimeout(r, 1_300)); // burn it COMPUTING
       answer = await ask('Allow?');
     });
     await settle(() => answer !== undefined);
     expect(answer).toBe('__dismissed__');
+    // ⭐ AND THE DECISION THIS PINS, which is the other half of what the deadline is
+    // FOR. The question "should the deadline end a run that is COMPUTING?" was open, and
+    // the answer is no — taken deliberately, on a measurement that points away from it:
+    // the longest run past the five-minute default on a production instance SUCCEEDED
+    // (the reading is quoted once, at the NOTE ON REACH in `worker-loop.ts`). So the
+    // deadline ends a WAIT and pre-empts a later one; the computation runs to its own
+    // end. This assertion is what makes that falsifiable rather than merely described:
+    // the run reached `recordTaskRun` on its own, and `timeout` — the word a deadline
+    // that killed the computation would write — is not what it was recorded as.
+    //
+    // ⚠ Do not "fix" this by wiring the deadline to `session.abort()`, not even behind a
+    // flag that is off: a prepared-but-disabled branch is a default nobody decided. The
+    // owner's explicit stop is the route that ends a computing run.
+    const recordCalls = (manager.recordTaskRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    await settle(() => recordCalls.length > 0);
+    // ⚠ THE CALL FIRST. `settle` polls and returns without throwing, so with no record
+    // at all the index below is `undefined` and `not.toBe('timeout')` passes — the
+    // assertion was green against a loop that skipped `recordTaskRun` entirely.
+    expect(recordCalls.length, 'the run has to have been recorded for the word to mean anything').toBeGreaterThan(0);
+    // ⛔ THE RESULT, not the status word, is what discriminates. A deadline wired to end
+    // the computation would abort the controller, and that produces an `AbortError` —
+    // recorded `failed`, exactly like today's unanswered-question ending, so the status
+    // assertion alone survives that mutation. (`timeout` is only written for an error
+    // NAMED `TimeoutError`, which nothing on this path produces.) The run's own output is
+    // the thing a killed computation cannot produce.
+    expect(recordCalls[0]?.[1], 'the computation ran to its own end').toBe('Done.');
+    expect(recordCalls[0]?.[2], 'a deadline must not be recorded as the end of the run').not.toBe('timeout');
     expect(store.getPending(SESSION_ID)).toBeUndefined();
     // And no question was PUSHED. This is the assertion that distinguishes
     // "refused before the side effects" from "inserted, aborted, then drained":
@@ -1857,18 +1917,47 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     await loop.tick();
     await settle(() => parked !== undefined);
     expect(parked).toBe('__dismissed__');
+    // ⛔ THE NEGATIVE CONTROL FOR THE TEARDOWN FIX, and it was missing: this test only
+    // ever asserted the dismissal, so "never drain, on any path" passed the whole file.
+    // Two tests then pinned "do not drain at teardown" and NOTHING pinned "drain when
+    // it is not a teardown" — including the alternative the fix argues against (keying
+    // the skip on `outcome.status === 'aborted'`), which also survived. A run that
+    // FAILED is not a teardown: its question is over, and the row must not keep the
+    // session's slot or stay answerable with no waiter.
+    const drained = store.getPending(SESSION_ID);
+    expect(drained, 'a failing run still drains its question').toBeUndefined();
   });
 
-  // 12 — an abort DRAINS the row. Without it the row stays `pending`, keeps this
-  // session's slot in the partial unique index, and the agent's next ask_user
-  // throws PromptConflictError — plus it stays answerable with no waiter.
-  it('expires the row when the wait is aborted, freeing the session slot', async () => {
+  // 12 — a TEARDOWN leaves the row alone, and the cancellation happens anyway.
+  //
+  // ⛔ THIS TEST ASSERTED THE OPPOSITE, and the reversal is the W2-13 fix rather than a
+  // loosening. `stop()` is what `Engine.shutdown()` calls first, and the history DB is
+  // closed LAST — so draining here succeeded, and a question the product promises will
+  // survive the restart it is waiting across was destroyed by the restart. The old
+  // assertions are now the defect, which is why they are gone rather than relaxed.
+  //
+  // ⚠ The reason the drain was added is still real, and still served: the row keeps this
+  // session's slot in the partial unique index, so a next `ask_user` could collide. Test
+  // 13 below shows why that cannot bite here — the already-aborted pre-check refuses the
+  // second question BEFORE the insert, so the slot is never consulted.
+  //
+  // ⭐ And the drain is NOT gone for the other causes: test 11 two screens up ("releases
+  // a parked question when the run fails") drives the same abort from a FAILING RUN,
+  // where `tearingDown` is false, and still asserts the row is drained. That test is the
+  // positive twin of this one; a fix that silenced the drain everywhere would fail it.
+  it('a TEARDOWN leaves the question standing, and still cancels the wait', async () => {
     const { store, loop, answered } = await park();
     const promptId = store.getPending(SESSION_ID)!.id;
     loop.stop();
+    // The cancellation is unchanged: the agent is released with the marker, promptly.
     await expect(answered).resolves.toBe('__dismissed__');
-    expect(store.getById(promptId)!.status).toBe('expired');
-    expect(store.getPending(SESSION_ID)).toBeUndefined(); // slot is free again
+    // What changed: the row is still answerable, and still points at its trigger, which
+    // is what the next process reads to re-arm the run.
+    expect(store.getById(promptId)!.status).toBe('pending');
+    expect(store.getById(promptId)!.trigger_id).not.toBeNull();
+    // The slot stays held, deliberately — see above. Asserted rather than left implicit,
+    // because it is the cost of this fix and a reader should meet it here.
+    expect(store.getPending(SESSION_ID)?.id).toBe(promptId);
   });
 
   // 13 — after stop(), a SECOND question must be refused, not parked. Found by
@@ -1905,7 +1994,12 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     loop.stop();
     await settle(() => second !== undefined);
     expect(second).toBe('__dismissed__');
-    expect(store.getPending(SESSION_ID)).toBeUndefined();
+    // ⚠ The row is STILL THERE after `stop()` since W2-13 (a teardown leaves the
+    // question for the next process), so the slot is held — and the refusal above
+    // happens anyway, which is the point: the already-aborted pre-check answers before
+    // the insert, so nothing ever consults the slot. This assertion used to read
+    // `toBeUndefined()` and was pinning the drain, not the refusal.
+    expect(store.getPending(SESSION_ID)).toBeDefined();
     // THE assertion that pins the guard. The three other fixes mask its absence
     // between them: with `active` captured the second wait gets a real, already
     // aborted signal and settles at once, and the drain then removes the row —
@@ -1920,18 +2014,31 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     );
   });
 
-  // 14 — the drain must not be able to break the cancellation it is cleaning up
-  // after. `Engine.shutdown()` stops the loop and later closes the history DB,
-  // so `expirePrompt` can land on a closed handle. The wait has already settled
-  // by then, so a throw would not re-park it — it would reject `promptUser`,
-  // turning a clean cancellation into a failed tool call. Mutation: drop the
-  // try/catch → this FAILS (the settle poll times out and the answer is
-  // undefined); it does not hang.
+  // 14 — the drain must not be able to break the cancellation it is cleaning up after.
+  // ⚠ Its original motivating case — `Engine.shutdown()` closing the history DB under the
+  // drain — is RETRACTED inside the test below: a teardown no longer drains at all. What
+  // remains, and what the swallowed catch names, is SQLITE_BUSY and schema drift on the
+  // path that does drain: a failing run. A throw there would reject `promptUser` and turn
+  // a clean cancellation into a failed tool call. Mutation: drop the try/catch → this
+  // FAILS (the settle poll times out and the answer is undefined); it does not hang.
   it('still settles the wait when the drain throws', async () => {
+    // ⛔ RE-DRIVEN, not re-pointed. This used to cancel with `stop()`, which after W2-13
+    // does not drain at all — so the throwing `expirePrompt` was never called and the
+    // test passed without exercising anything. A failing RUN reaches the same abort with
+    // `tearingDown` false, which is where the drain lives now and where a throw can
+    // still reject `promptUser` and turn a clean cancellation into a failed tool call.
+    // (`Engine.shutdown()` closing the DB under the drain is no longer the motivating
+    // case for the same reason, but SQLITE_BUSY and schema drift are, and the swallowed
+    // catch names them.)
     const real = makeRealStore();
+    // Counted, because the previous version of this test asserted the row was not
+    // `expired` — which is equally true when `expirePrompt` was never CALLED, i.e. it
+    // passed in exactly the case it claimed to catch. The count is the only thing that
+    // distinguishes "ran and threw" from "never ran".
+    let drainCalls = 0;
     const store = new Proxy(real, {
       get(t, prop, r) {
-        if (prop === 'expirePrompt') return () => { throw new Error('database connection is not open'); };
+        if (prop === 'expirePrompt') return () => { drainCalls++; throw new Error('database connection is not open'); };
         return Reflect.get(t, prop, r) as unknown;
       },
     }) as PromptStore;
@@ -1940,7 +2047,11 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       sessionId: SESSION_ID,
       _recreateAgent: vi.fn(),
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
-      run: vi.fn(async () => { answer = await session.promptUser!('Allow?', ['Yes', 'No']); return 'Done.'; }),
+      run: vi.fn(async () => {
+        void (async () => { answer = await session.promptUser!('Allow?', ['Yes', 'No']); })();
+        await new Promise((r) => setTimeout(r, 60)); // let the row land, then fail the run
+        throw new Error('boom');
+      }),
     };
     const engine = makeEngine({
       taskManager: makeTaskManager([makeTask()]),
@@ -1951,9 +2062,10 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     closers.unshift(() => { loop.stop(); });
     await loop.tick();
     await settle(() => real.getPending(SESSION_ID) !== undefined);
-    loop.stop();
     await settle(() => answer !== undefined);
     expect(answer).toBe('__dismissed__');
+    // The drain really was attempted, which is what makes the swallow meaningful.
+    expect(drainCalls, 'the throwing drain has to have RUN for this test to mean anything').toBeGreaterThan(0);
   });
 
   // 8 — the TTL is INHERITED, not merely available. The store having a 24h

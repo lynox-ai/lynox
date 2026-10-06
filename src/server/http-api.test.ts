@@ -5889,6 +5889,67 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(404);
     });
 
+    // ── Run now, and the two different 409s ──────────────────────────────────
+    //
+    // ⚠ THE FIRST TESTS THIS ROUTE HAS EVER HAD, measured: `grep -rn "api/triggers"`
+    // over `src/` and `tests/` found zero hits in any test file (positive control:
+    // `api/tasks` finds two). The route is `/api/triggers/:id/run`, which is the same
+    // object under its other name, so it sits beside the task routes.
+    //
+    // The engine override is inline rather than a shared helper: the one idiom in this
+    // file for it (around line 1478) is written out at its use site too, and a helper
+    // scoped to another describe would not compile here.
+    //
+    // ⛔ What they pin is the DISCRIMINATION. Both refusals are 409, and the branch that
+    // distinguishes them is new — without it a trigger parked on a question answers
+    // "already running", which is a true-ish sentence about a run that is not running
+    // and tells the owner nothing about the question waiting for them. Delete the branch
+    // and an existing trigger gets a 404, which is worse than what it replaced.
+    // ⚠ AND THIS BLOCK REPAYS ITS OWN RATE-LIMIT SPEND. The per-IP window is 600
+    // requests / 60 s and every request in this file comes from 127.0.0.1, so the whole
+    // file shares ONE bucket — and it already sits within ten requests of the ceiling.
+    // Measured: these two cases alone made a `GET /api/oauth/callback` test several
+    // thousand lines below fail with `expected 429 to be 200`. A SNAPSHOT and restore,
+    // not a `clear()`: clearing the whole window would hand a later describe 300-odd
+    // requests of headroom it is not supposed to have, which would hide a regression in
+    // the limit itself. The general problem is filed; the fix is the harness's (a fresh
+    // server per describe), not this route's.
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
+    async function withLoop(runTriggerNow: () => Promise<unknown>, body: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow });
+      try { await body(); } finally { engineRef['getWorkerLoop'] = orig; }
+    }
+
+    it('POST /api/triggers/:id/run carries a CODE for the waiting case, not just a sentence', async () => {
+      await withLoop(() => Promise.resolve({ ok: false, reason: 'awaiting_answer' }), async () => {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code?: string; error?: string };
+        // The code is what the view switches on; the sentence is for a caller with no view.
+        expect(body.code).toBe('awaiting_answer');
+        expect(body.error).toContain('answer its question');
+      });
+    });
+
+    it('POST /api/triggers/:id/run still answers plain 409 for a run that IS in flight', async () => {
+      await withLoop(() => Promise.resolve({ ok: false, reason: 'already_running' }), async () => {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code?: string; error?: string };
+        // No code: the view's default branch is the right one here, and a code would
+        // make this case look like the other.
+        expect(body.code).toBeUndefined();
+        expect(body.error).toContain('already running');
+      });
+    });
+
     it('POST /api/tasks stamps confirmedAt on the created row (human consent path)', async () => {
       await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Immediate', assignee: 'lynox' }) });
       // the human HTTP create route supplies confirmedAt; the agent task_create tool never does.

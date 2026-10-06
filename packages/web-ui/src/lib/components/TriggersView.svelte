@@ -133,7 +133,13 @@
 			if (res.status === 202) {
 				addToast(t('triggers.run_started'), 'success');
 			} else if (res.status === 409) {
-				addToast(t('triggers.run_already'), 'info');
+				// ⛔ TWO different 409s, and telling the owner the wrong one is what this
+				// branch is for. "Already running" is true for a run in flight; a trigger
+				// PARKED on a question is also refused, and there the owner's next move is
+				// to answer it — a sentence they never saw while this branch showed one
+				// fixed string and never read the body.
+				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
+				addToast(t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer' : 'triggers.run_already'), 'info');
 			} else {
 				addToast(t('triggers.run_failed'), 'error');
 			}

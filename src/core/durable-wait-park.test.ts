@@ -50,6 +50,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     sessionRunArgs: () => unknown[][];
     /** The options each `createSession` was called with. */
     sessionOpts: () => Array<{ sessionId?: string } | undefined>;
+    /** The same engine, so a test can build a SECOND loop over the same stores —
+     *  which is what "after the restart" means when the process does not actually
+     *  restart. A second `tick()` on the FIRST loop would not do: it is the object
+     *  whose in-memory state the restart is supposed to lose. */
+    engine: Engine;
+    router: NotificationRouter;
   }
 
   /** A worker loop whose single trigger's run asks one question and waits.
@@ -58,7 +64,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[] }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -91,7 +97,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       run: vi.fn(() => {
         const turn = (async () => {
           // The agent turn: one `ask_user`, then whatever the answer was.
-          const answering = session.promptUser!('Which client?', ['Acme', 'Globex']);
+          const answering = session.promptUser!(opts?.question ?? 'Which client?', ['Acme', 'Globex']);
           // Give the closure a turn to insert + park before the test looks.
           await new Promise(r => setImmediate(r));
           promptId = prompts.getPending(session.sessionId)?.id;
@@ -123,10 +129,17 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       // simply LACKED the method made `executeStandard` throw before it ever
       // dispatched, and the only symptom was a test timing out waiting for a
       // run that never started.
+      // A real deterministic effect for the Run-now positive control: without it
+      // `executeBackup` throws on its first line ("getBackupManager is not a function"),
+      // so the control drained an instant failure while its comment claimed a backup.
+      getBackupManager: () => ({
+        createBackup: () => Promise.resolve({ success: true, path: '/tmp/none.db', duration_ms: 1 }),
+        pruneBackups: () => { /* noop */ },
+      }),
       getSecretStore: () => opts?.secretValues
         ? ({ maskAll: (t: string) => maskSecretsAndPatterns(t, opts.secretValues!) } as unknown as ReturnType<Engine['getSecretStore']>)
         : null,
-      getUserConfig: () => ({}),
+      getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
       escalateToUser: () => null,
     } as unknown as Engine;
 
@@ -170,7 +183,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const run = loop.tick();
 
     return {
-      loop, history, prompts, manager, parked, run,
+      loop, history, prompts, manager, parked, run, engine, router,
       promptIdOf: () => promptId,
       dispatches: () => session.run.mock.calls.length,
       sessionRunArgs: () => session.run.mock.calls as unknown[][],
@@ -245,6 +258,35 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
   });
 
   // ── T2 / A8 / A11: what the park writes ──────────────────────────────────
+
+  it('the question is masked where it LEAVES the box, and not where the owner reads it', async () => {
+    // ⛔ THREE CONSUMERS, TWO OF WHICH NEED THE MASK. The question is model-authored from
+    // the run's context — files, mail, the data store — and the notification is the one
+    // that leaves the machine: the escalation channel puts it in an email body and the
+    // web-push payload carries it. The same string was already masked for the MODEL, on
+    // the stated reasoning that an `ask_user` exchange is where someone pastes an API
+    // key; the off-box path had no mask at all, which is the half of that judgement that
+    // was wrong.
+    //
+    // ⚠ And the stored row is deliberately NOT masked: the owner reads it on their own
+    // machine, through their own UI, and masking it would cost them the question's detail
+    // to protect them from themselves. Masking at the source would have taken it with it,
+    // which is why this test asserts both directions.
+    // ⚠ Deliberately NOT key-shaped. The mask is driven by the vault's own VALUES, so any
+    // string exercises it — and a realistic `sk-live-…` literal is a finding to gitleaks
+    // (measured: it refused the commit, correctly). A test that has to look like a
+    // credential to work would be a test that cannot be committed.
+    const secret = 'vault-value-that-must-not-leave-the-box';
+    const h = makeHarness({ secretValues: [secret], question: `Use ${secret} for the call?` });
+    await h.parked;
+
+    const sent = vi.mocked(h.router.notify).mock.calls[0]?.[0] as { body?: string; inquiry?: { question?: string } } | undefined;
+    expect(sent?.body, 'the notification body leaves the box').not.toContain(secret);
+    expect(sent?.body).toContain('***');
+    expect(sent?.inquiry?.question, 'and so does the inquiry payload').not.toContain(secret);
+    // The owner's own copy keeps its detail.
+    expect(h.prompts.getById(h.promptIdOf()!)?.question).toContain(secret);
+  });
 
   it('T2 — the prompt row carries the trigger that raised it', async () => {
     const h = makeHarness();
@@ -743,6 +785,229 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     recorded.mockRestore();
   });
 
+  it('W2-13 — a GRACEFUL SHUTDOWN leaves the question standing, and its answer makes the trigger DUE again', async () => {
+    // ⛔ WHY THIS IS THE COMMON PATH AND NOT A CORNER. `Engine.shutdown()` calls
+    // `WorkerLoop.stop()` FIRST and `runHistory.close()` much later, with awaits in between
+    // (an in-flight inbox rebootstrap, the inbox runtime, every shutdown hook — the
+    // managed billing hook is registered whenever the tier env var is set). So the abort
+    // settles this wait and the continuation runs while the database is still OPEN: the
+    // prompt was expired, its trigger pointer released and the trigger un-parked, all
+    // successfully. On managed that is every deploy, and the product states the opposite
+    // promise — the question "must survive the restart it is waiting across".
+    //
+    // ⚠ The barrier is `last_run_at`, not a sleep: it is written after the turn returns,
+    // which is after the closure's `finally` — the very block under test. Waiting for
+    // the ROW's absence of change would be waiting for nothing, which passes against any
+    // implementation.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+    expect(h.history.getTrigger('trg-1')?.status, 'the fixture must really be parked').toBe('waiting');
+
+    h.loop.stop();
+    await waitUntil('the aborted wait to unwind through its finally',
+      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    // ── what the next process needs to find
+    //
+    // ⛔ FIRST: the run did not report SUCCESS. The teardown branch sets
+    // `questionWentUnanswered`, which is the only thing standing between this path and
+    // a `success` record — and deleting that line passed every other test in both
+    // files. §0 A7 ("a run whose question went unanswered does NOT report success") is
+    // the invariant the whole arc started from, and the new branch had to re-earn it.
+    expect(h.history.getTrigger('trg-1')?.last_run_status).not.toBe('success');
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');
+    // The POINTER is the half a reader would not think to check, and it is the half the
+    // resume path reads: `getAnsweredForTrigger` finds nothing once it is released.
+    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    const parkedAfter = h.history.getTrigger('trg-1');
+    expect(parkedAfter?.status).toBe('waiting');
+    expect(parkedAfter?.waiting_until).toBeTruthy();
+
+    // ── the restart: a new loop over the same stores, and the answer arrives
+    expect(h.prompts.answerUser(promptId, 'Acme'),
+      'an expired row cannot be answered — this is false if the shutdown drained it').toBe(true);
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    await next.tick();
+
+    // ⚠ DUE, which is as far as this reaches: whether the run then starts depends on
+    // the lease, which a SIGKILLed process holds for up to its TTL after the last
+    // heartbeat (this harness reaches its `finally`, so the lease is free here). And the
+    // question's own bound is wall-clock from the ask — 24 hours, downtime included, no
+    // grace period — so a long enough outage has the boot sweep collect it first.
+    const revived = h.history.getTrigger('trg-1');
+    expect(revived?.status).toBe('open');
+    expect(revived?.waiting_until).toBeUndefined();
+    expect(new Date(revived!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
+    next.stop();
+  });
+
+  it('W2-13 — "Run now" refuses a trigger that is still waiting, instead of starting a SECOND run', async () => {
+    // ⛔ THE DEFECT THE TEARDOWN FIX MADE REACHABLE. `runTriggerNow` guards on
+    // `activeTasks` and the lease, and after a restart the map is empty and the lease
+    // frees 15 minutes after the last heartbeat — while the trigger now stays `waiting`
+    // by design. A second run then mints a FRESH session id, so the per-session unique
+    // index does not collide: the trigger ends up with two pending prompts, the second
+    // park overwrites the `waiting_until` that bounded the first, and the second run's
+    // `finally` un-parks the trigger — leaving the first question collectable by
+    // neither sweep (it has a pointer; its trigger is no longer `waiting`) for its full
+    // 24-hour TTL.
+    //
+    // `stop()` here IS the restart, as far as this guard can tell: it clears the map and
+    // leaves the row waiting, which is exactly the state the next process boots into.
+    const h = makeHarness();
+    await h.parked;
+    h.loop.stop();
+    await waitUntil('the teardown to unwind', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+    expect(h.history.getTrigger('trg-1')?.status, 'the fixture must be in the state the fix creates').toBe('waiting');
+
+    // ⛔ And the REASON, not just the refusal. Without the check this does NOT fall
+    // through to a polite `already_running` — measured: it returns `{ok:true}` and starts
+    // the second run, because the dying run's own `finally` released the lease. (An
+    // earlier version of this comment said the lease would catch it, which is the shape
+    // of a bound that sounds reassuring and is not there.)
+    await expect(h.loop.runTriggerNow('trg-1')).resolves.toEqual({ ok: false, reason: 'awaiting_answer' });
+    // ⛔ AND THE REFUSAL TOOK NO LEASE. The guard sits before `takeLease` on purpose:
+    // `claimLease` writes `lease_holder`/`lease_until` unless the lease is held, and
+    // nothing releases one taken by a call that then refused — so the trigger would be
+    // withheld from `getDueTriggers` for up to the lease TTL, including from the sweep
+    // that re-arms it once its answer lands.
+    //
+    // ⚠ Observed through a SECOND CLAIMANT, because `lease_until` is a column on the
+    // triggers table and NOT a field on the record: an earlier version of this assertion
+    // read `getTrigger(...)?.lease_until`, which is always `undefined`, so it passed
+    // against a guard moved below the lease. Found by mutating that move — which is what
+    // a mutation round is for.
+    expect(
+      h.manager.claimLease('trg-1', 'a-different-holder', new Date(Date.now() + 60_000).toISOString(), new Date().toISOString()),
+      'a refusal that took the lease would answer `held` here',
+    ).not.toBe('held');
+
+    // THE POSITIVE CONTROL, or the check above would be satisfied by refusing
+    // everything. On a SECOND trigger that is not waiting, and a deterministic effect
+    // rather than an agent turn: dispatching `trg-1` again would mint a session with the
+    // same id as the parked one and collide on the per-session unique index — the test
+    // would then fail on its own fixture, with the error of the defect one test up.
+    h.history.insertTrigger({
+      id: 'trg-2', title: 'Nightly backup', source: 'cron', effect: 'backup',
+      scheduleCron: '0 3 * * *', nextRunAt: '2026-01-01T03:00:00.000Z',
+    });
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    const control = await next.runTriggerNow('trg-2');
+    expect(control, 'a trigger that is not waiting still runs on request').toEqual({ ok: true });
+    // Drained before teardown closes the handles: the dispatch is fire-and-forget, and
+    // a run still unwinding when sqlite closes raises a rejection belonging to no test.
+    await waitUntil('the control run to finish', () => next.activeTaskCount === 0);
+    next.stop();
+  });
+
+  it('W2-13 — a teardown that RACES a committed answer keeps the pointer, so the answer survives', async () => {
+    // ⛔ THE ONE STATE WHERE THE RELEASE GUARD HAS AN EFFECT, and it needs no race to
+    // win: `answerUser` commits synchronously, `settle()` only queues a microtask, and
+    // `stop()` is synchronous throughout — so answering and stopping in the same tick
+    // puts the answer in the row and the teardown flag up before the continuation runs.
+    // Without the guard the release takes (the row is `answered`, not `pending`, so its
+    // SQL no longer refuses) and the answer is discarded: the next process finds no
+    // pointer and never re-arms the run.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+
+    expect(h.prompts.answerUser(promptId, 'Acme')).toBe(true);
+    h.loop.stop();
+    await waitUntil('the run to unwind', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+
+    // The EFFECT, not the call: the pointer is still there, so the next process can find
+    // the answer and re-arm.
+    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    expect(h.prompts.getAnsweredForTrigger('trg-1')?.id).toBe(promptId);
+  });
+
+  it('W2-13 — a trigger COMPLETED while parked is startable, and its orphan question is settled', async () => {
+    // ⛔ THE MIRROR OF THE STATE ABOVE, and the first version of the guard locked the
+    // owner out of it. `complete`/`update` take a trigger out of `waiting` through
+    // `updateFields` and touch `pending_prompts` not at all — the bypass
+    // `TriggerStore.endWait`'s docblock names — so a pending row can point at a trigger
+    // that is no longer waiting. A guard that asked only the ROW refused there: for 24
+    // hours, "Run now" told the owner to answer a question no view surfaces, on a
+    // trigger they had just completed.
+    //
+    // ⛔ And the orphan has to be SETTLED, not stepped over: nothing else collects it.
+    // The boot sweep spares any row with a live pointer, the expiry and answer-rearm
+    // passes iterate `waiting` triggers only, and `expireOld` waits for its own 24-hour
+    // clock. Until then it holds the thread's slot in the partial unique index, so the
+    // next `ask_user` in that chat throws — uncaught on that path. Before the teardown
+    // fix a deploy drained it; now it survives, which is what makes this a repair.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+
+    // What the owner's "complete" does to a parked trigger, through the real path.
+    //
+    // ⚠ And then the process goes away. In the SAME process `activeTasks` still holds the
+    // run, so Run-now is refused as `already_running` whatever this guard does — the
+    // lockout only bites in the next process, which is also the only place the surviving
+    // row can be found. A fixture that skipped the restart would have passed against the
+    // guard it is meant to catch.
+    h.manager.complete('trg-1');
+    h.loop.stop();
+    await waitUntil('the first run to release its lease', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+    expect(h.history.getTrigger('trg-1')?.status, 'out of waiting').not.toBe('waiting');
+    expect(h.prompts.getPendingForTrigger('trg-1')?.id, 'with its question orphaned').toBe(promptId);
+
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    await expect(next.runTriggerNow('trg-1')).resolves.toEqual({ ok: true });
+    // THE REPAIR, asserted on the ORPHAN by id rather than on "no pending row": the
+    // hand-started run parks on a question of its own, so there IS one again — and an
+    // assertion that counted rows would have failed for the right reason by accident.
+    expect(h.prompts.getById(promptId)?.status, 'the orphan is settled on the way through').toBe('expired');
+
+    next.stop();
+    await waitUntil('the hand-started run to unwind', () => next.activeTaskCount === 0);
+  });
+
+  it('W2-13 — a trigger stuck `waiting` with no open question is still startable by hand', async () => {
+    // ⛔ THE REGRESSION THE FIRST VERSION OF THAT GUARD SHIPPED, and it is the reason the
+    // guard now asks the PROMPT STORE instead of the trigger's status. `endTriggerWait`
+    // has a swallowed catch — its own sibling comment names SQLITE_BUSY and schema drift
+    // — and when it fails the trigger stays `waiting` while the prompt is already
+    // `answered` and its pointer released. Then: the answered-re-arm sweep finds nothing
+    // (no pointer), the expiry sweep skips it (`waiting_until` is 24h out), and
+    // `recordTaskRun` cannot write its status either (it withholds for a parked row). So
+    // "Run now" was the only way forward — and a guard keyed on `waiting` took it away
+    // for up to 24 hours while the refusal told the owner to answer a question that was
+    // answered and consumed.
+    //
+    // A recovery path must not be blocked by the state it exists to recover from.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+
+    // The stuck state, built the way it arises. The order matters: the answer lands and
+    // its pointer is consumed, then the process goes away — so the trigger is left
+    // `waiting` (the teardown deliberately does not un-park) with nothing open against
+    // it, which is the shape a swallowed `endTriggerWait` failure also produces.
+    //
+    // ⚠ And the first process really has to be GONE, not just stopped: its run holds the
+    // trigger's lease until `executeTask`'s `finally`, so without waiting for it the
+    // second call is refused by the LEASE and the test would pass against any guard.
+    expect(h.prompts.answerUser(promptId, 'Acme')).toBe(true);
+    expect(h.prompts.releaseTrigger(promptId)).toBe(true);
+    h.loop.stop();
+    await waitUntil('the first run to release its lease', () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
+    expect(h.history.getTrigger('trg-1')?.status, 'the fixture is in the stuck state').toBe('waiting');
+    expect(h.prompts.getPendingForTrigger('trg-1'), 'and nothing is open any more').toBeUndefined();
+
+    const next = new WorkerLoop(h.engine, h.router, 60_000);
+    await expect(next.runTriggerNow('trg-1')).resolves.toEqual({ ok: true });
+
+    // The hand-started run asks its own question and parks on it — which is the forward
+    // progress this test is about, and also why it cannot simply be drained: nothing
+    // would ever answer it. `stop()` ends that wait the way a shutdown does.
+    next.stop();
+    await waitUntil('the hand-started run to unwind', () => next.activeTaskCount === 0);
+  });
+
   it('A10 — an answer makes a parked trigger due again', async () => {
     const h = makeHarness();
     await h.parked;
@@ -754,6 +1019,27 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(after?.status).toBe('open');
     expect(after?.waiting_until).toBeUndefined();
     expect(new Date(after!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('A10 — a long answer is CAPPED before it reaches the autonomous turn', async () => {
+    // ⛔ THE ONE CONSUMER OF AN ANSWER THAT HAD NO BOUND. The live tool-result path
+    // truncates at `max_tool_result_chars`; this path composed the stored string
+    // verbatim, and `answerUser` stores what the request body carried — bounded only by
+    // the 30 MB body cap. The teardown fix promotes this path from the crash-only one to
+    // the every-deploy one, so the missing bound became the ordinary case.
+    const h = makeHarness({ maxToolResultChars: 40 });
+    await h.parked;
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'G'.repeat(500));
+
+    await h.loop.tick();   // re-arms it
+    await h.loop.tick();   // dispatches it
+    await waitUntil('the second run to start', () => h.dispatches() >= 2);
+
+    const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
+    expect(secondPrompt).toContain('[truncated]');
+    // The bound itself, not just the marker: the answer's own text is cut to the cap, so
+    // a 500-character reply cannot carry 500 characters into the turn.
+    expect(secondPrompt).not.toContain('G'.repeat(60));
   });
 
   it('A10 — the re-armed run is told the question AND the answer', async () => {
@@ -774,7 +1060,14 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // be told the answer was the question and the question was the answer, with
     // every test green.
     expect(secondPrompt).toMatch(/<asked>\s*Which client\?\s*<\/asked>/);
-    expect(secondPrompt).toMatch(/<answer>\s*Globex\s*<\/answer>/);
+    expect(secondPrompt).toMatch(/<answer>[\s\S]*?Globex[\s\S]*?<\/answer>/);
+    // ⛔ AND THE FRAME CARRIES A DO-NOT-FOLLOW LINE. The answer is the owner's own text,
+    // so wrapping it as untrusted data would be false — but it reaches an AUTONOMOUS
+    // turn's strongest prompt position, and `renderFence` deadens only the payload's own
+    // closing tag (its docblock says a payload that opens a DIFFERENT engine frame passes
+    // through). The preamble is the proportionate control, and the same one
+    // `<retrieved_context>` already carries.
+    expect(secondPrompt).toContain('not as instructions');
     // And the answer is claimed exactly once — a later scheduled run must not be
     // handed the same reply again.
     expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();
@@ -917,17 +1210,30 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(secondPrompt).toContain('Which password?');
   });
 
-  it('a question whose settle FAILED keeps its pointer through the teardown', async () => {
-    // Driven, not restated. Calling `releaseTrigger` directly and asserting
-    // `false` is satisfied by a stub that always returns false; what has to hold
-    // is that the real abort path cannot orphan a row.
+  it('a teardown does not even TRY to drain the row, and the pointer survives it', async () => {
+    // ⛔ THIS TEST MOVED WITH THE BEHAVIOUR, and the old version is why the move has to
+    // be written down. It used to drive a FAILING settle: `stop()` aborted the wait, the
+    // abort branch called `expirePrompt` — throwing here, exactly as its swallowed catch
+    // anticipates (it names SQLITE_BUSY and schema drift) — and the `finally` then
+    // detached the row unconditionally, so the claim was that a pointer survives even
+    // that. W2-13 makes the teardown path skip the drain entirely, which leaves the
+    // throwing settle UNREACHABLE from `stop()` — `stop()` is the only thing that aborts
+    // a parked wait today, measured: one production caller, `Engine.shutdown()`.
     //
-    // The scenario: `stop()` aborts the wait, the closure's abort branch drains
-    // its row with `expirePrompt` — which throws here, exactly as the swallowed
-    // catch there anticipates (it names SQLITE_BUSY and schema drift) — and then
-    // the `finally` runs its unconditional detach. The row is still `pending` and
-    // still answerable, so it must keep its pointer or no run can ever be handed
-    // its answer, which is what §0 A2 keeps the pointer for.
+    // Two things would have been wrong to do instead. Re-aiming only the BARRIER: the
+    // old one waited for the trigger to leave `waiting`, which no longer happens, so it
+    // timed out — but fixing the wait and keeping the scenario leaves a spy that never
+    // fires standing in for a guarantee. And deleting the test: the pointer-orphan
+    // question is real, it just has a different answer now.
+    //
+    // So the claim is what holds and is still worth pinning: at teardown the drain is
+    // NOT ATTEMPTED and the pointer is kept. The throwing spy stays as a belt — if the
+    // code ever tries again, it both throws and is counted.
+    //
+    // ⚠ FOR WHOEVER ADDS A SECOND ABORT CAUSE (an owner's explicit stop of a running
+    // task): the drain becomes reachable again on THAT path, and with it the question
+    // this test used to ask. It will need its own case; this one will not cover it,
+    // because `tearingDown` is false there by design.
     const h = makeHarness();
     await h.parked;
     const promptId = h.promptIdOf()!;
@@ -936,17 +1242,31 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const settleFails = vi.spyOn(h.prompts, 'expirePrompt').mockImplementation(() => {
       throw new Error('database is locked');
     });
+    // ⚠ A CALL assertion here, because against a row the teardown leaves `pending` the
+    // release is a no-op by its own SQL — there is no effect in THIS state to observe.
+    // The state where the effect is real (a teardown racing a committed answer) has its
+    // own test below, which asserts the effect; an earlier version of this comment
+    // claimed that race could not be sequenced, which was wrong.
+    const detach = vi.spyOn(h.prompts, 'releaseTrigger');
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     h.loop.stop();
-    await waitUntil('the aborted run to finish', () => h.dispatches() > 0 && h.history.getTrigger('trg-1')?.status !== 'waiting');
+    // The barrier is the RUN finishing, not the trigger being un-parked: the un-park is
+    // the thing under test and waiting for it would be waiting for the defect.
+    await waitUntil('the aborted run to finish',
+      () => h.dispatches() > 0 && (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
 
     // Read the state, THEN restore, THEN assert — a failing assertion must not
     // leave stderr stubbed for the rest of the file.
     const row = h.prompts.getById(promptId);
+    const drainAttempts = settleFails.mock.calls.length;
+    const detachAttempts = detach.mock.calls.length;
     settleFails.mockRestore();
+    detach.mockRestore();
     stderr.mockRestore();
-    expect(row?.status, 'the settle really did fail').toBe('pending');
+    expect(drainAttempts, 'a teardown must not drain the question it is leaving behind').toBe(0);
+    expect(detachAttempts, 'nor detach it from the trigger that will need it').toBe(0);
+    expect(row?.status).toBe('pending');
     expect(row?.trigger_id).toBe('trg-1');
   });
 
