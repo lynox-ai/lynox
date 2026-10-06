@@ -797,6 +797,40 @@ describe('owner rollback of a merge chain A→B→C', () => {
     dirs.length = 0;
   });
 
+  it('⭐ does not name a blocking merge that never completed', () => {
+    // ⚠ `inEffect` is a pure GRAPH predicate and says nothing about whether the
+    // ledger finished. `runMerge` has a documented crash window that leaves
+    // exactly this state — ledger written `applied:false`, graph change
+    // committed, a satellite store throwing before the applied stamp. Naming
+    // such a merge sent the owner to a route answering «This merge did not
+    // complete, so there is nothing to take back»: two API answers pointing at
+    // each other with no way out.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Woodgrove GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Woodgrove' });
+    const c = store.createSubject({ kind: 'organization', name: 'Woodgrove Holding' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Woodgrove GmbH')!;
+    const bc = runs.find(r => r.dupName === 'Woodgrove')!;
+
+    // Positive control: while it IS applied, the refusal names it — so the
+    // assertion below is about `applied` and not about the chain stopping.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: { id: bc.id, intoName: 'Woodgrove Holding' } });
+
+    const ledger = join(sweeps, `${bc.id}.json`);
+    writeFileSync(ledger, JSON.stringify({ ...JSON.parse(readFileSync(ledger, 'utf-8')), applied: false }));
+
+    // The merge it would have named answers «did not complete» — that is the
+    // dead end the guard exists to avoid pointing at.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id))
+      .toEqual({ ok: false, reason: 'not_applied' });
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+  });
+
   it('⭐ a merge ALREADY taken back is not a chain, even if its canonical moved on since', () => {
     // ⚠ `inEffect` is a conjunction and this branch reads only one of its terms.
     // Measured before the guard existed: A→B taken back, then B→C, and asking
@@ -820,7 +854,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
       .toEqual({ ok: false, reason: 'not_in_effect' });
   });
 
-  it('⭐ falls back to «no id» when the same pair was merged twice, rather than guessing', () => {
+  it('⭐ names the live ledger when the same pair was merged twice, not the stale one', () => {
     // The ambiguity the `inEffect` condition exists for: B→D done, taken back,
     // done again leaves TWO ledgers for that exact pair. `readAll` marks the
     // older one superseded and not in effect, so exactly one candidate stands —

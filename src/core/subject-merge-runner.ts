@@ -374,10 +374,17 @@ export function rollbackMergeById(
 ):
   | { ok: true; view: MergeRunView }
   | { ok: false; reason: Exclude<MergeRollbackRefusal, 'chained'> }
-  // ⚠ `blocking` is NULLABLE on purpose. The newer merge's ledger can be gone —
-  // the 90-day retention removes it — and the refusal still has to work then.
-  // Without the ledger there is no id to point at, so the sentence drops to the
-  // shape without one rather than the route inventing a link.
+  // ⚠ `blocking` is NULLABLE on purpose, and the reason first given for it was
+  // WRONG: «the 90-day retention removes it». `pruneExpiredLedgers` keeps the
+  // newest ledger in the directory and deletes older ones, and in a chain the
+  // blocking ledger is by construction the newer — so any prune that removed it
+  // removed this one first. That state is unreachable through retention.
+  //
+  // It is reachable other ways: a `createdAt` the prune cannot parse (it keeps
+  // what `Date.parse` rejects, while `readMergeLedger` only wants a string), a
+  // hand-deleted file, an import whose source had already pruned. The type is
+  // right; only the story was. And when it happens the newer merge cannot be
+  // taken back AT ALL, which the wording has to say rather than promise a step.
   | { ok: false; reason: 'chained'; blocking: MergeRollbackBlocker | null } {
   const record = readAll(store, sweepsDir).find((r) => r.view.id === id);
   if (!record) return { ok: false, reason: 'not_found' };
@@ -391,16 +398,22 @@ export function rollbackMergeById(
     // WHY is it not in effect? `inEffect` is a conjunction and collapsing it to
     // one category threw that away. The canonical having been merged onward is
     // the chain case, and it is the only one with a next step the owner can take.
-    const canonical = store.getSubject(file.entry.canonicalId);
-    const onward = canonical?.merged_into ?? null;
-    // ⚠ BOTH terms of the conjunction, not one. `inEffect` is false either
-    // because this merge no longer stands, or because its canonical moved on.
-    // Reading only the second answered `chained` for a merge that was ALREADY
-    // taken back and whose canonical happened to merge onward afterwards — and
-    // «take that newer merge back first» is then plainly wrong advice: this one
-    // is already undone, and taking the newer one back changes nothing about it.
+    // ⚠ ONE term decides it, and working out WHICH took two corrections.
+    //
+    // First I read only «the canonical moved on», which answered `chained` for a
+    // merge that was ALREADY taken back and whose canonical merged onward
+    // afterwards — «take that newer merge back first» is plainly wrong advice
+    // there, since this one is already undone.
+    //
+    // Then I added the other term as a disjunct and called both load-bearing.
+    // They are not: here `dup` and `canonical` are non-null, so `!inEffect` means
+    // `dup.merged_into !== canonicalId ∨ canonical.merged_into !== null`. If the
+    // merge still stands, the left side is false, so the right side holds — the
+    // canonical HAS moved on. `stillStands` alone is exact, and a mutation that
+    // dropped the second disjunct survived every test, which is what a condition
+    // that cannot change an answer looks like.
     const stillStands = store.getSubject(file.entry.dupId)?.merged_into === file.entry.canonicalId;
-    if (!stillStands || onward === null) return { ok: false, reason: 'not_in_effect' };
+    if (!stillStands) return { ok: false, reason: 'not_in_effect' };
     // ⚠ FILTER AND REQUIRE EXACTLY ONE, not `find`. Not for ordering — `readAll`
     // sorts by id and already marks every superseded ledger of a pair — but
     // because `find` SILENTLY PICKS when several match, and «which merge blocks»
@@ -417,8 +430,16 @@ export function rollbackMergeById(
     // `inEffect` turns the two ledgers of a pair-merged-twice into «no id» and a
     // test sees it; with a plain `find` the same mutation picks the newest match,
     // which happens to be the right one, and passes unnoticed.
+    // ⚠ `applied` as well as `inEffect`, and the pair of them is the point.
+    // `inEffect` is a pure GRAPH predicate and never looks at whether the ledger
+    // completed. `runMerge` has a documented crash window that leaves exactly
+    // this state: ledger written `applied:false`, the graph change committed, a
+    // satellite store throwing before the applied-stamp rewrite. Naming such a
+    // merge sends the owner to a route that answers «This merge did not complete,
+    // so there is nothing to take back» — two API answers pointing at each other
+    // with no way out. Measured on this tree before the guard existed.
     const candidates = readAll(store, sweepsDir).filter(
-      (r) => r.file.entry.dupId === file.entry.canonicalId && r.view.inEffect,
+      (r) => r.file.entry.dupId === file.entry.canonicalId && r.view.inEffect && r.view.applied,
     );
     const blocking = candidates.length === 1 ? candidates[0]! : null;
     return {
