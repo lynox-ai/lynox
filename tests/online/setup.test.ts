@@ -31,7 +31,7 @@ describe('getApiKey reads the config fallback', () => {
     writeFileSync(join(home, '.lynox', 'config.json'), JSON.stringify(fields));
   }
 
-  it('reads anthropic_api_key, the name current configs carry', () => {
+  it('reads anthropic_api_key, the name the eval and bench scripts read', () => {
     config({ anthropic_api_key: 'from-anthropic-field' });
     expect(getApiKey()).toBe('from-anthropic-field');
   });
