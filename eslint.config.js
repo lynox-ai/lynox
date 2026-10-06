@@ -95,8 +95,8 @@ export default [
     },
   },
   {
-    // Floating promises are an error in every component except this one, which is still being
-    // worked through; a file joins the rule as soon as it is clean, so nothing slides back.
+    // Floating promises are an error in every component except this one: its remaining ones
+    // start a chat turn, whose failure handling is being reworked on its own.
     files: ['packages/web-ui/src/lib/components/ChatView.svelte'],
     rules: {
       '@typescript-eslint/no-floating-promises': 'warn',

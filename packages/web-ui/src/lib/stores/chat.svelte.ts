@@ -2124,7 +2124,10 @@ export async function replyPermission(answer: string): Promise<void> {
 	if (!sessionId) return;
 	const promptId = pendingPermission?.promptId;
 	pendingPermission = null;
-	await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply`, { answer, promptId });
+	// The prompt is gone from the screen either way; an answer that did not arrive is said aloud.
+	if (!await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply`, { answer, promptId })) {
+		addToast(t('chat.error_connection'), 'error', 6000);
+	}
 }
 
 /** One-shot reply for a multi-question tabs prompt. Answers are ordered to
@@ -2134,7 +2137,9 @@ export async function replyPermissionTabs(answers: string[]): Promise<void> {
 	const promptId = pendingTabsPrompt?.promptId;
 	if (!promptId) return;
 	pendingTabsPrompt = null;
-	await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, { promptId, answers });
+	if (!await postReplyWithRetry(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, { promptId, answers })) {
+		addToast(t('chat.error_connection'), 'error', 6000);
+	}
 }
 
 /** Optionally persist partial answers so a mid-batch reconnect restores
@@ -2150,10 +2155,11 @@ export async function postTabProgress(promptId: string, partial: (string | null)
 	} catch { /* best-effort */ }
 }
 
-/** POST a reply with a single retry on transient network error. The server
- * is idempotent for repeat promptIds (returns 200 with `idempotent: true`),
- * so retrying is safe. */
-async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<void> {
+/** POST a reply with a single retry on a network error or 5xx. The server is idempotent for
+ *  repeat promptIds (returns 200 with `idempotent: true`), so retrying is safe. Resolves false
+ *  only when the server could not be reached or failed twice; any other answer is the server's
+ *  final word. Never rejects. */
+async function postReplyWithRetry(url: string, body: Record<string, unknown>): Promise<boolean> {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
 			const res = await fetch(url, {
@@ -2162,21 +2168,25 @@ async function postReplyWithRetry(url: string, body: Record<string, unknown>): P
 				body: JSON.stringify(body),
 			});
 			// 2xx or expected terminal states (410 expired, 404 stale) are all "done".
-			if (res.ok || res.status === 404 || res.status === 410) return;
+			if (res.ok || res.status === 404 || res.status === 410) return true;
 			// 5xx → retry once
-			if (res.status >= 500 && attempt === 0) {
-				await new Promise(r => setTimeout(r, 500));
-				continue;
+			if (res.status >= 500) {
+				if (attempt === 0) {
+					await new Promise(r => setTimeout(r, 500));
+					continue;
+				}
+				return false;
 			}
-			return;
+			return true;
 		} catch {
 			if (attempt === 0) {
 				await new Promise(r => setTimeout(r, 500));
 				continue;
 			}
-			return;
+			return false;
 		}
 	}
+	return false;
 }
 
 /** Result of a vault write attempt — distinguishes the three failure modes
@@ -2242,13 +2252,25 @@ export async function submitSecret(name: string, value: string): Promise<SecretS
 
 export async function cancelSecret(): Promise<void> {
 	if (!sessionId || !pendingSecretPrompt) return;
-	const promptId = pendingSecretPrompt.promptId;
+	const dismissed = pendingSecretPrompt;
+	const promptId = dismissed.promptId;
+	const sid = sessionId;
 	pendingSecretPrompt = null;
-	await fetch(`${getApiBase()}/sessions/${sessionId}/secret-saved`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ status: 'canceled', promptId }),
-	});
+	let arrived = false;
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ status: 'canceled', promptId }),
+		});
+		arrived = res.status < 500;
+	} catch { /* not arrived */ }
+	if (arrived) return;
+	// The run would wait on this prompt until it expires (hours): say so, and bring the card back
+	// so the dismissal can be tried again, unless the user has moved to another thread or a new
+	// prompt has taken its place.
+	if (sessionId === sid && pendingSecretPrompt === null) pendingSecretPrompt = dismissed;
+	addToast(t('chat.error_connection'), 'error', 6000);
 }
 
 export function getPendingSecretPrompt() {
@@ -2320,13 +2342,25 @@ export async function submitMailConnect(password: string): Promise<MailConnectSu
 
 export async function cancelMailConnect(): Promise<void> {
 	if (!sessionId || !pendingMailConnect) return;
-	const promptId = pendingMailConnect.promptId;
+	const dismissed = pendingMailConnect;
+	const promptId = dismissed.promptId;
+	const sid = sessionId;
 	pendingMailConnect = null;
-	await fetch(`${getApiBase()}/sessions/${sessionId}/mail-connected`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ status: 'canceled', promptId }),
-	});
+	let arrived = false;
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sid}/mail-connected`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ status: 'canceled', promptId }),
+		});
+		arrived = res.status < 500;
+	} catch { /* not arrived */ }
+	if (arrived) return;
+	// The run would wait on this prompt until it expires (hours): say so, and bring the card back
+	// so the dismissal can be tried again, unless the user has moved to another thread or a new
+	// prompt has taken its place.
+	if (sessionId === sid && pendingMailConnect === null) pendingMailConnect = dismissed;
+	addToast(t('chat.error_connection'), 'error', 6000);
 }
 
 export function getPendingMailConnect() {
@@ -2419,8 +2453,10 @@ export async function checkPendingPrompt(): Promise<void> {
 	}
 }
 
-export async function abortRun(): Promise<void> {
-	if (!sessionId) return;
+/** Stop the current run. Resolves false when the stop request could not be sent (it may still
+ *  have reached the server); never rejects. */
+export async function abortRun(): Promise<boolean> {
+	if (!sessionId) return false;
 	// Cancel the 409 "busy" poll first (synchronous) so the loop stops
 	// re-POSTing /run before the server /abort round-trip even begins.
 	_queuePollController?.abort();
@@ -2429,11 +2465,20 @@ export async function abortRun(): Promise<void> {
 	// may end the stream (terminal-less) before this fetch resolves, and the
 	// run's own cleanup then reads this flag.
 	_userStopEpoch = streamEpoch;
-	await fetch(`${getApiBase()}/sessions/${sessionId}/abort`, { method: 'POST' });
+	try {
+		await fetch(`${getApiBase()}/sessions/${sessionId}/abort`, { method: 'POST' });
+	} catch {
+		// The request failed, but it may have reached the server with only the answer lost, so the
+		// stamp stays: reading a stopped run's end as a dropped turn could send it again. Keep the
+		// run's state so the user can stop it again, and say so.
+		addToast(t('chat.error_connection'), 'error', 6000);
+		return false;
+	}
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
 	streamingToolPhase = null;
+	return true;
 }
 
 let isCompacting = $state(false);
