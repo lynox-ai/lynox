@@ -913,6 +913,7 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
     expect(agentConfig['activeScopes']).toEqual(scopes);
   });
 
+
   it('spawnInline leaves secretStore and scopes undefined when none supplied (backward-compat)', async () => {
     const step: ManifestStep = { id: 'no-creds', agent: 'no-creds', runtime: 'inline', task: 'no secret' };
     await spawnInline(step, {}, mockConfig, mockParentTools);
@@ -2080,5 +2081,73 @@ describe('wrapWithGate — the approval wrapper is transparent to a ToolSoftFail
       // a wrapper that returned its input untouched, which would gate nothing.
       expect(wrapped.handler, `${name} must wrap the handler`).not.toBe(original.handler);
     }
+  });
+});
+
+// Its own describe, because a failure here used to read as a secret-store regression:
+// these cases were living under `secretStore propagation …` for no reason but proximity,
+// and a test's address is part of what it tells the next reader.
+describe('a step agent joins the caller\'s abort scope', () => {
+  // ⚠ The two lines are NOT both load-bearing here, and saying so is the point — an earlier
+  // version of this comment implied they were.
+  //
+  // `vi.clearAllMocks()` is required, measured: these cases read `Agent.mock.calls[0]`, so
+  // without it they assert against the config of whichever test ran last in the file. Under
+  // the old host describe they inherited its clear; moving them out made both fail with
+  // `abortScope: undefined` — a stale call, not a missing field.
+  //
+  // `mockGetRole` is unreachable for these two cases: every `getRole` call in the module under
+  // test is gated on `step.role`, and neither case sets one. It stays because `clearAllMocks`
+  // does NOT reset an implementation — measured, against `resetAllMocks`, which does — so a
+  // `mockReturnValue` set by an earlier test survives into this describe. The day a case here
+  // declares a role, it would silently inherit that role and pass for the wrong reason. That
+  // is the fail-open direction, which is worth a line at zero present occurrences.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it.each([
+    ['spawnInline', async (scope: { members: Set<{ abort: () => void }> }) => {
+      const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'inline', task: 'tidy up tasks' };
+      await spawnInline(
+        step, {}, mockConfig, mockParentTools,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, scope,
+      );
+    }],
+    ['spawnViaAgent', async (scope: { members: Set<{ abort: () => void }> }) => {
+      const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'agent', task: 'tidy up tasks' };
+      const agentDef: AgentDef = { id: 'scoped-abort', name: 'scoped-abort', systemPrompt: 'do it', tools: [] };
+      await spawnViaAgent(
+        step, agentDef, {}, mockConfig, undefined, 'run-1',
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        scope,
+      );
+    }],
+  ])('a STEP agent registers in the scope its caller supplied, and inherits it (%s)', async (_name, drive) => {
+    // ⛔ BOTH EXECUTORS, because this file's own rule for the taint wiring is that the two
+    // paths cannot diverge — and a mutation round proved the point: mutating only the
+    // first of the two registration sites left the other's test green, so a one-path test
+    // would have read as coverage for both.
+    //
+    // `Session.abort()` aborts the members of its own agent's scope; a workflow step
+    // lands there only if these functions put it there. It used to land in a MODULE-LEVEL
+    // set, so any session's abort killed every step agent in the process — including
+    // other background runs', whose triggers then re-fire through the backoff.
+    //
+    // Two assertions, because either alone passes a wrong implementation: not registering
+    // leaves the set empty (a stop reaches nothing), and registering without passing the
+    // scope on leaves anything the STEP spawns unreachable.
+    const scope = { members: new Set<{ abort: () => void }>() };
+    let sizeDuringRun = -1;
+    mockSend.mockImplementationOnce(async () => { sizeDuringRun = scope.members.size; return 'done'; });
+
+    await drive(scope);
+
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(sizeDuringRun, 'the step is in the caller\'s scope while it runs').toBe(1);
+    expect(agentConfig['abortScope'], 'and the agent carries it, so its own children land there').toBe(scope);
+    expect(scope.members.size, 'and is released when the step ends').toBe(0);
   });
 });

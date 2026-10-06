@@ -45,15 +45,10 @@ export function resetSessionSpawnCost(counters: import('../../types/index.js').S
   counters.costUSD = 0;
 }
 
-/** Active child agents — aborted when parent is interrupted. */
-const activeChildAgents = new Set<Agent>();
-
-/** Abort all running child agents (called from orchestrator abort). */
-export function abortSpawnedAgents(): void {
-  for (const child of activeChildAgents) {
-    child.abort();
-  }
-}
+// The module-level `activeChildAgents` set and `abortSpawnedAgents()` are GONE. They made
+// one session's abort reach every child in the process; a child now registers in the
+// scope it inherited from its parent, and `Session.abort()` reaches exactly that. See
+// `AbortScope` in `types/config.ts` for why the scope rides on the agent.
 
 /**
  * Map the child's `send()` outcome onto the `runs.stop_reason` column. Until
@@ -853,6 +848,11 @@ async function executeThinker(
     name: spec.name,
     model,
     systemPrompt,
+    // ⛔ INHERITED, and this line is the transitive half of the scoping: the child
+    // registers in the PARENT's scope below, and by carrying that same scope it makes
+    // its own children land there too — so a session's abort reaches the whole chain.
+    // Without it a grandchild is reachable by nothing, which is the one failure the
+    // module-wide set it replaces could not have had.
     tools,
     thinking,
     effort,
@@ -887,6 +887,7 @@ async function executeThinker(
     // above so the runs row records the same provider. Rationale in
     // `resolveSpawnChildProviderConfig`.
     ...childProviderCfg,
+
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
@@ -944,6 +945,17 @@ async function executeThinker(
     // sites across thirteen modules, and putting the sentence in any one tool
     // would leave the other thirteen exactly as they are.
     ...promptCallbacksWithOrigin(parentAgent, spec),
+    // ⛔ AFTER BOTH SPREADS. The first version of this line sat above
+    // `...childProviderCfg` and the second below it but above this one — and the argument
+    // is the same for either: a key added to one of those sources later would rebind the
+    // child's scope, and a child in the wrong scope is a child a stop cannot reach. Both
+    // sources are closed literals today, so this is ordering that keeps a future edit
+    // from mattering rather than a live fix.
+    //
+    // Inherited, which is the transitive half of the scoping: the child registers in the
+    // PARENT's scope below, and by carrying that same scope it makes its own children
+    // land there too. Without it a grandchild is reachable by nothing.
+    abortScope: parentAgent.abortScope,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.
@@ -969,8 +981,9 @@ async function executeThinker(
   try {
     childAgent = new Agent(agentConfig);
     // Track child for abort propagation (added inside try so a ctor throw
-    // doesn't leave a half-constructed agent in the active set).
-    activeChildAgents.add(childAgent);
+    // doesn't leave a half-constructed agent in the active set). The PARENT's scope —
+    // which the child's config inherited above, so its own children land here too.
+    parentAgent.abortScope.members.add(childAgent);
 
     // DK.1 F5/S8: a child spawned from a tainted parent inherits the taint for durable writes.
     // A prompt-injected parent's `spec.task`/`context` can carry an injected `remember(pin:true)`;
@@ -1082,8 +1095,9 @@ async function executeThinker(
     // Mark the child run failed/aborted so the cost cap and history UI don't
     // show it as still-running. Fires for BOTH ctor failures (childAgent
     // undefined, no spend yet) and send failures (childAgent constructed,
-    // partial spend possible — CostGuard tracks per-turn). An abort (parent
-    // stopped → abortSpawnedAgents) now THROWS RunAbortedError instead of
+    // partial spend possible — CostGuard tracks per-turn). An abort (the parent's own
+    // stop reaching this child through its session's abort scope) now THROWS
+    // RunAbortedError instead of
     // returning '' (which mis-recorded the child 'completed'); mark it 'aborted'
     // — an intentional interruption, not a failure.
     const childAborted = err instanceof RunAbortedError;
@@ -1126,7 +1140,17 @@ async function executeThinker(
     }
     throw err;
   } finally {
-    if (childAgent) activeChildAgents.delete(childAgent);
+    // `?.` here and NOT at the register site above, deliberately. This runs in a
+    // `finally`: a throw replaces whatever the catch was rethrowing, so the child's real
+    // failure is lost and the message points at bookkeeping.
+    //
+    // ⛔ The register site keeps its hard dereference, and softening THIS one is why that
+    // matters more than it did: making `IAgent.abortScope` optional now produces exactly
+    // ONE compile error, at that line. Measured — before this `?.` there were two, so the
+    // hardness up there is no longer one of a redundant pair but the only thing holding
+    // the required-ness. (An earlier version of this comment said "one of exactly two",
+    // which was the count from before the line it sits on.)
+    if (childAgent) parentAgent.abortScope?.members.delete(childAgent);
     // One place for all three exits. The success and failure branches above
     // each read the same snapshot for their own bookkeeping; reporting it here
     // means an abort — which takes neither branch's `return` — is still counted.

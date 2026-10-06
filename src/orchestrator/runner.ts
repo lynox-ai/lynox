@@ -135,6 +135,22 @@ export interface RunManifestOptions {
    * Absent (ad-hoc tests, legacy callers) = pre-fix behaviour: steps start clean.
    */
   runTaint?: RunTaint | undefined;
+  /**
+   * The session whose abort may reach this run's step agents.
+   *
+   * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
+   * the library Run button, the HTTP re-target, and the worker loop's own scheduled
+   * pipelines, which go through the same `runGuardedSavedWorkflow`. Nothing aborts those
+   * steps, which is the filed gap rather than a reason to fall back on a process-wide
+   * set.
+   *
+   * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
+   * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
+   * false is the generalisation, because a worker path that runs an agent turn does have
+   * a session with a scope, and so does the interactive `run_workflow`. For a while
+   * neither supplied it, which made the whole step half dead code. See `AbortScope`.
+   */
+  abortScope?: import('../types/config.js').AbortScope | undefined;
 }
 
 /**
@@ -161,6 +177,22 @@ export interface RunCtxInput {
   secretStore?: SecretStoreLike | undefined;
   workflowId?: string | undefined;
   runTaint?: RunTaint | undefined;
+  /**
+   * The session whose abort may reach this run's step agents.
+   *
+   * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
+   * the library Run button, the HTTP re-target, and the worker loop's own scheduled
+   * pipelines, which go through the same `runGuardedSavedWorkflow`. Nothing aborts those
+   * steps, which is the filed gap rather than a reason to fall back on a process-wide
+   * set.
+   *
+   * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
+   * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
+   * false is the generalisation, because a worker path that runs an agent turn does have
+   * a session with a scope, and so does the interactive `run_workflow`. For a while
+   * neither supplied it, which made the whole step half dead code. See `AbortScope`.
+   */
+  abortScope?: import('../types/config.js').AbortScope | undefined;
 }
 
 /**
@@ -194,6 +226,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     secretStore: input.secretStore,
     workflowId: input.workflowId,
     runTaint: input.runTaint,
+    abortScope: input.abortScope,
   };
 }
 
@@ -834,7 +867,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -860,7 +893,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -872,7 +905,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

@@ -6,6 +6,7 @@ import type {
   IWorkerPool,
   ToolEntry,
   EmittingStreamHandler,
+  AbortScope,
   AgentConfig,
   ThinkingMode,
   AgentWarning,
@@ -285,6 +286,8 @@ export class ContinuationLoopError extends RunAbortedError {
 
 export class Agent implements IAgent {
   readonly name: string;
+  /** The agents this agent's chain may abort — see `AbortScope`. Inherited by children. */
+  readonly abortScope: AbortScope;
   readonly model: string;
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
@@ -964,6 +967,9 @@ export class Agent implements IAgent {
 
   constructor(config: AgentConfig) {
     this.name = config.name;
+    // Fresh when none is supplied, so `agent.abortScope` is never undefined for the
+    // code that registers into it — an agent with nobody above it owns its own chain.
+    this.abortScope = config.abortScope ?? { members: new Set() };
     this.model = config.model;
     this.memory = config.memory ?? null;
     this.tools = config.tools ?? [];

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed: stopping one conversation no longer stops work in another
+
+- Pressing stop, deleting a thread, or ending a session used to abort **every**
+  sub-agent and every workflow step running anywhere in the process, not just
+  the ones belonging to that conversation. Another window's fan-out, and a
+  background task's workflow steps, died with it — and a background task whose
+  run was cut that way was recorded as failed and started again by its retry
+  backoff. A stop now reaches the agents of its own conversation and the
+  agents those started, and nothing else.
+- ⚠ One thing this takes away: a **saved workflow launched on its own** — from
+  the workflow library, by a schedule, or through the API — has no conversation
+  to belong to, so a stop in a chat no longer ends it. Previously it did, by the
+  same over-broad reach. Such a run is still bounded by its own wall-clock,
+  iteration and spend limits; it simply cannot be stopped from elsewhere. A way
+  to stop it deliberately is a separate piece of work.
+
 ### Fixed: deleting an API profile removes the tokens its exchanges wrote
 
 - Deleting a profile — with `api_setup delete` or on the settings page —

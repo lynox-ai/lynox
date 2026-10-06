@@ -12,6 +12,30 @@ import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js'
 import type { SecretStoreLike, IsolationConfig, NetworkPolicy } from './security.js';
 import type { CapabilityContract } from './capability-contract.js';
 
+/**
+ * Everything ONE session's abort may reach: its spawned children, its workflow-step
+ * agents, and — because the scope is inherited at construction — their descendants.
+ *
+ * ⛔ WHY IT IS AN OBJECT THE OWNER SUPPLIES, rather than a registry each module keeps.
+ * The two registries this replaces were module-level `Set<Agent>`s, so `Session.abort()`
+ * aborted every spawned and every step agent IN THE PROCESS: a stop in one thread killed
+ * another thread's fan-out, and in the worker loop it killed foreign TRIGGER runs — which
+ * are then recorded `failed` and re-fire through the backoff, so the collateral STARTS
+ * autonomous runs. Filed 2026-08-24; this is that fix.
+ *
+ * ⛔ AND IT IS CARRIED BY THE AGENT, which is what makes it transitive without a walk: a
+ * child is built from a config derived from its parent's, so a grandchild lands in the
+ * set of the session that started the chain. A flat `Map<owner, Set<Agent>>` would need a
+ * recursive sweep, and a stop that forgot to recurse would leave grandchildren running —
+ * the failure the old code could not have, which is the one thing it had going for it.
+ *
+ * Structural (`{ abort(): void }`) rather than `Set<Agent>` so this file does not have to
+ * import the implementation it configures. `Agent` satisfies it.
+ */
+export interface AbortScope {
+  readonly members: Set<{ abort: () => void }>;
+}
+
 export interface AgentConfig {
   name:             string;
   model:            string;
@@ -29,6 +53,13 @@ export interface AgentConfig {
   promptTabs?:      PromptTabsFn | undefined;
   promptSecret?:    PromptSecretFn | undefined;
   promptMailConnect?: PromptMailConnectFn | undefined;
+  /**
+   * The abort scope this agent belongs to. A spawned child or a workflow step inherits
+   * its parent's, which is how a session's abort reaches a whole chain and nothing else.
+   * Absent means "nobody's abort reaches this agent" — true for a headless run with no
+   * session, and the honest state rather than a silent process-wide default.
+   */
+  abortScope?:      AbortScope | undefined;
   maxIterations?:      number | undefined;
   continuationPrompt?: string | undefined;
   excludeTools?:       string[] | undefined;

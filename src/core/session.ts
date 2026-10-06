@@ -37,8 +37,6 @@ import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import { channels } from './observability.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
-import { abortSpawnedAgents } from '../tools/builtin/spawn.js';
-import { abortPipelineAgents } from '../orchestrator/runtime-adapter.js';
 import { ChangesetManager } from './changeset.js';
 import {
   ToolResultBlobStore,
@@ -1490,10 +1488,32 @@ export class Session {
     return [...this._runToolNames];
   }
 
+  /**
+   * End this session's work: its own agent, and the agents its chain created.
+   *
+   * ⛔ ONLY ITS OWN, and that is the fix. This used to call `abortSpawnedAgents()` and
+   * `abortPipelineAgents()`, which iterated MODULE-LEVEL sets — so a stop in one thread
+   * aborted another thread's fan-out and another background task's workflow steps, with
+   * the victims' parents recording an abort nobody asked for. In the worker loop that
+   * was worse than lost work: a trigger run recorded `failed` re-fires through the
+   * backoff, so the collateral STARTED autonomous runs.
+   *
+   * The scope is carried by the agent and inherited by every child it builds, so this
+   * reaches a whole chain — children, workflow steps, grandchildren — and nothing
+   * outside it. An agentless session has nothing to abort and says so by doing nothing.
+   */
   abort(): void {
     this.agent?.abort();
-    abortSpawnedAgents();
-    abortPipelineAgents();
+    // `?.members`, not `.members`: the chain guards the agent and the scope is only
+    // guaranteed for `Agent` itself. This method runs inside a bare `setTimeout` callback
+    // on the orphan-run watchdog, where a throw has nothing to catch it — and `IAgent` is
+    // in the published barrel, so a duck-typed consumer implementation is the one way a
+    // scope-less agent gets here.
+    for (const member of this.agent?.abortScope?.members ?? []) {
+      // One throwing member must not keep the rest running: `abort()` reaches into an
+      // agent, and this loop is the only thing that ends the others.
+      try { member.abort(); } catch { /* the next one still gets its abort */ }
+    }
   }
 
   reset(): void {
@@ -2373,6 +2393,20 @@ export class Session {
     }
 
     this.agent = new Agent({
+      // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
+      // empty scope and orphans whatever is registered — a later `abort()` then reaches
+      // nothing. `_createAgent` has SEVEN callers (the ctor, `setModel`, `setEffort`,
+      // `setThinking`, `addTool`, `reloadUserConfig`, `_recreateAgent`), FIVE of them
+      // public methods, none checking for an in-flight run. The module-level set this
+      // replaced was immune by construction, so the scope only became a thing a rebuild
+      // can lose when it started living on the agent — which is what `_recreateAgent`'s
+      // own comment is about: a rebuild is infrastructural and must not make the session
+      // forget who it is.
+      //
+      // ⚠ On the first rebuild `this.agent` is null and this is `undefined`, which the
+      // constructor turns into a fresh scope — the same result as omitting the key, and
+      // the reason the plain read replaced a conditional spread that was doing nothing.
+      abortScope: this.agent?.abortScope,
       name: 'lynox',
       model,
       systemPrompt,

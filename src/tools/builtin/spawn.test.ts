@@ -17,6 +17,7 @@ let mockCostSnapshot: import('../../types/index.js').CostSnapshot | null;
 let mockCostSnapshotQueue: Array<import('../../types/index.js').CostSnapshot> | null;
 
 interface MockedAgentShape {
+  abortScope?: unknown;
   send: typeof mockSend;
   currentRunId?: string | undefined;
   spawnDepth: number;
@@ -59,8 +60,12 @@ vi.mock('../../core/agent.js', () => ({
     promptUser?: unknown;
     promptSecret?: unknown;
     promptTabs?: unknown;
+    abortScope?: unknown;
   }) {
     this.send = mockSend;
+    // Surfaced so a test can see WHICH scope the child inherited — the whole point of
+    // carrying it on the agent is that a grandchild lands in the session's set.
+    this.abortScope = config.abortScope;
     // T2-X1 part 4: ctor now accepts currentRunId — surface it on the instance
     // so executeThinker's return value (`childRunId: childAgent.currentRunId`)
     // reflects what spawn.ts minted via insertRun, not undefined.
@@ -183,6 +188,12 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     getExcludedToolNames: () => [],
     getMaxContextWindowTokens: () => undefined,
     getNativeContextWindow: () => undefined,
+    // Every agent owns one: a child registers in its PARENT's scope, so a session's
+    // abort reaches the whole chain and nothing outside it. REQUIRED on `IAgent` rather
+    // than optional, which is why this stub had to gain it — a stub that could leave it
+    // out would register its children nowhere and read as "this parent has none",
+    // i.e. exactly the silent half of the defect the scope replaces.
+    abortScope: { members: new Set<{ abort: () => void }>() },
     ...overrides,
   };
 }
@@ -252,6 +263,79 @@ describe('spawn_agent tool', () => {
     setTierSetResolver({ routingMode: 'standard', tierSet: null });
     setOpenAIModelResolver({ map: null });
     await initLLMProvider('anthropic');
+  });
+
+  it('a child registers in its PARENT\'s scope and INHERITS it, so a whole chain is reachable', async () => {
+    // ⛔ THE HALF A SESSION-LEVEL TEST CANNOT SEE. `Session.abort()` reaches the members
+    // of its own agent's scope; whether a child ever LANDS there is decided here, and it
+    // used to be decided by a module-level set that held every child in the process — so
+    // a stop in one thread aborted another thread's fan-out, and in the worker loop it
+    // aborted foreign trigger runs, which then re-fire through the backoff.
+    //
+    // Two assertions, because either alone passes a wrong implementation: registering in
+    // the child's OWN scope would leave the parent's empty (a stop reaches nothing), and
+    // registering in the parent's while giving the child a fresh one would make a
+    // GRANDCHILD unreachable — the one failure the old module-wide set could not have.
+    const agent = makeAgent();
+    let sizeDuringSend = -1;
+    let childScope: unknown;
+    // The default resolved value, not an invented shape: `send` resolves to a STRING
+    // here, and a fake that returned an object made the handler throw on `.trim()` —
+    // a divergence that would have been read as a defect in the code under test.
+    mockSend.mockImplementationOnce(async function (this: MockedAgentShape) {
+      sizeDuringSend = (agent.abortScope as { members: Set<unknown> }).members.size;
+      childScope = this.abortScope;
+      return 'sub-agent result';
+    });
+
+    await spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Analyze this data' }] }, agent);
+
+    expect(sizeDuringSend, 'the child is in the PARENT\'s scope while it runs').toBe(1);
+    expect(childScope, 'and inherited it, so its own children land there too').toBe(agent.abortScope);
+    expect((agent.abortScope as { members: Set<unknown> }).members.size,
+      'and is released when it finishes, or a long-lived session accumulates dead agents').toBe(0);
+  });
+
+  it('a GRANDCHILD lands in the same scope, so a stop reaches the whole depth', async () => {
+    // ⛔ WHAT THE CASE ABOVE DOES NOT MEASURE. It proves the child inherits the parent's
+    // scope OBJECT, from which transitivity FOLLOWS — but only because the registration
+    // and the inheritance sit in one unconditional path that every depth takes. Nothing
+    // pinned that unconditionality: a registration made depth-conditional
+    // (`if (parentAgent.spawnDepth === 0) …`) passes the case above and silently stops
+    // reaching anything below depth 1. Depth is a live concept here — `MAX_SPAWN_DEPTH`,
+    // `childDepth`, the depth refusal — so that mutant is not a contrived one.
+    //
+    // The second-level parent is the CONSTRUCTED child, not a stub I hand a scope to:
+    // `...this` carries the `abortScope` the ctor gave it and the `spawnDepth` spawn.ts
+    // set, so the object the grandchild is registered into comes from the code under
+    // test. The `makeAgent()` base underneath only supplies the IAgent surface the mock
+    // Agent does not set (tools, counters, callbacks); every key the ctor did set wins,
+    // because `this` spreads second.
+    const agent = makeAgent();
+    let grandchildScope: unknown;
+    let sizeDuringGrandchild = -1;
+
+    mockSend
+      .mockImplementationOnce(async function (this: MockedAgentShape) {
+        const childAsParent = { ...makeAgent(), ...this } as unknown as IAgent;
+        await spawnAgentTool.handler({ agents: [{ name: 'deeper', task: 'Go one level down' }] }, childAsParent);
+        return 'child result';
+      })
+      .mockImplementationOnce(async function (this: MockedAgentShape) {
+        grandchildScope = this.abortScope;
+        sizeDuringGrandchild = (agent.abortScope as { members: Set<unknown> }).members.size;
+        return 'grandchild result';
+      });
+
+    await spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Analyze this data' }] }, agent);
+
+    // TWO members at once, and that is the assertion: the child is still running, so a
+    // stop at the session reaches both generations rather than only the nearest.
+    expect(sizeDuringGrandchild, 'the grandchild AND its parent are in the session\'s scope').toBe(2);
+    expect(grandchildScope, 'and the grandchild inherited the same object, so depth 3 would land there too')
+      .toBe(agent.abortScope);
+    expect((agent.abortScope as { members: Set<unknown> }).members.size,
+      'and both are released when the chain unwinds').toBe(0);
   });
 
   it('spawns a sub-agent and returns result', async () => {

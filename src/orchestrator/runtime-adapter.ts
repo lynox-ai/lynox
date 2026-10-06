@@ -3,6 +3,7 @@ import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
 import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
+import type { AbortScope } from '../types/config.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
@@ -384,15 +385,11 @@ export function stripHumanInTheLoopTools(tools: ToolEntry[]): ToolEntry[] {
   return tools.filter(t => !isHumanInTheLoopTool(t.definition.name));
 }
 
-/** Active pipeline step agents — aborted on ESC interrupt. */
-const activePipelineAgents = new Set<Agent>();
-
-/** Abort all running pipeline step agents. */
-export function abortPipelineAgents(): void {
-  for (const a of activePipelineAgents) {
-    a.abort();
-  }
-}
+// The module-level `activePipelineAgents` set and `abortPipelineAgents()` are GONE, for
+// the reason given at `AbortScope`: they made any session's abort reach every step agent
+// in the process. A step now registers in the scope its caller supplies — threaded as the
+// last optional parameter, the same shape `runTaint` already uses here — and a run with no
+// session supplies none, which is the honest state and not a process-wide default.
 
 interface GateMeta {
   manifestName: string;
@@ -643,6 +640,8 @@ export async function spawnViaAgent(
   recordToolCall?: StepToolRecorder | undefined,
   secretStore?: SecretStoreLike | undefined,
   runTaint?: RunTaint | undefined,
+  /** The session whose abort may reach this step, if any — see `AbortScope`. */
+  abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -808,6 +807,8 @@ export async function spawnViaAgent(
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
+    // Inherited, so anything THIS step spawns is reachable by the same abort.
+    abortScope,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -815,7 +816,6 @@ export async function spawnViaAgent(
     }),
   });
 
-  activePipelineAgents.add(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run (the spawn-time seed below covers only taint that
   // existed BEFORE this step spawned).
@@ -837,6 +837,11 @@ export async function spawnViaAgent(
     agent.abort();
   }, timeoutMs);
   try {
+    // ⛔ INSIDE the try, paired with the `finally` that removes it. Outside it, a throw
+    // in the lines between add and try left a dead agent in a set that lives as long as
+    // the SESSION — nothing bulk-clears it, so it would be aborted again at every later
+    // stop. No-op while no producer supplied a scope; live now that they do.
+    abortScope?.members.add(agent);
     // Sub-agent gets the same per-turn time anchor as top-level chat,
     // so a pipeline step that schedules "in 5 min" via run_at lands at
     // wallclock + 5 min, not session-start + 5 min.
@@ -856,7 +861,7 @@ export async function spawnViaAgent(
     throw err;
   } finally {
     clearTimeout(timeoutId);
-    activePipelineAgents.delete(agent);
+    abortScope?.members.delete(agent);
     // Deregister + fold what this step SAW into the run accumulator — in
     // finally, because a step that read external content and then failed/timed
     // out still read it, and under on_failure:'continue' later steps still
@@ -913,6 +918,22 @@ export async function spawnInline(
   secretStore?: SecretStoreLike | undefined,
   runTaint?: RunTaint | undefined,
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined,
+  /**
+   * The session whose abort may reach this step, if any — see `AbortScope`.
+   *
+   * ⛔ LAST in the list, and that is not cosmetic: these are POSITIONAL parameters, so a
+   * new one inserted between two existing ones re-binds every caller that stops short of
+   * it. Measured: putting it before `parentActiveScopes` makes `tsc` refuse it with two
+   * errors, and fails the tests that assert the sibling field arrives.
+   *
+   * ⚠ Two corrections to earlier versions of this sentence, kept because both are the
+   * same mistake: it said the re-binding was "silent" (the type system catches the shape
+   * — what it cannot catch is a caller that stops short on purpose), and it named a test
+   * COUNT that the very commit rewriting it invalidated by adding another such test. A
+   * number in a comment is a claim with no mechanism behind it; the compiler error is the
+   * part that holds.
+   */
+  abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1108,6 +1129,8 @@ export async function spawnInline(
     // null when parent had no memory — that's strictly equivalent to the
     // previous behaviour and keeps headless callers + ad-hoc tests untouched.
     memory: parentMemory ?? undefined,
+    // Inherited, so anything THIS step spawns is reachable by the same abort.
+    abortScope,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1115,7 +1138,6 @@ export async function spawnInline(
     }),
   });
 
-  activePipelineAgents.add(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run — see spawnViaAgent.
   taintWiring.register(agent);
@@ -1150,6 +1172,8 @@ export async function spawnInline(
     : step.task;
 
   try {
+    // See `spawnViaAgent`: inside the try that releases it, so add and delete are paired.
+    abortScope?.members.add(agent);
     const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task, context: stepContext }), userTimezone));
     if (timedOut) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
@@ -1166,7 +1190,7 @@ export async function spawnInline(
     throw err;
   } finally {
     clearTimeout(timeoutId);
-    activePipelineAgents.delete(agent);
+    abortScope?.members.delete(agent);
     // Deregister + backstop fold — see spawnViaAgent's finally.
     taintWiring.release(agent);
   }
@@ -1208,6 +1232,22 @@ export async function spawnPipeline(
   parentRunId?: string | undefined,
   runTaint?: RunTaint | undefined,
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined,
+  /**
+   * The session whose abort may reach this step, if any — see `AbortScope`.
+   *
+   * ⛔ LAST in the list, and that is not cosmetic: these are POSITIONAL parameters, so a
+   * new one inserted between two existing ones re-binds every caller that stops short of
+   * it. Measured: putting it before `parentActiveScopes` makes `tsc` refuse it with two
+   * errors, and fails the tests that assert the sibling field arrives.
+   *
+   * ⚠ Two corrections to earlier versions of this sentence, kept because both are the
+   * same mistake: it said the re-binding was "silent" (the type system catches the shape
+   * — what it cannot catch is a caller that stops short on purpose), and it named a test
+   * COUNT that the very commit rewriting it invalidated by adding another such test. A
+   * number in a comment is a claim with no mechanism behind it; the compiler error is the
+   * part that holds.
+   */
+  abortScope?: AbortScope | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1275,6 +1315,11 @@ export async function spawnPipeline(
     parentMemory,
     // The nested run's inline steps inherit the same session scopes as the outer ones.
     parentActiveScopes,
+    // A nested pipeline's steps belong to the SAME session, so the scope rides down with
+    // it. Without this line the parameter above would be declared and unused — a nested
+    // pipeline's agents reachable by nothing, which is the shape the scoping is meant to
+    // remove rather than relocate.
+    abortScope,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.
