@@ -14,6 +14,7 @@ import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
+import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
@@ -4852,5 +4853,83 @@ describe('outbound-write consent is granted per exact host', () => {
     // …and a host that only ends in it still needs its own consent.
     const other = await visible({ url: 'https://xapi.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
     expect(other).toContain('requires user consent but no interactive prompt is available');
+  });
+});
+
+describe('the connection a call went through is stamped by the resolver, not the model', () => {
+  // Source-connection PRD, first build cut: `http_request` resolves the profile of
+  // the URL's host on every call and keeps it on the call's ledger row. The model's
+  // only influence is which URL it asks for; anything else it writes — a header,
+  // a body, a query value naming a connection — must not become the stamp.
+  async function stampOf(input: Parameters<typeof handler>[0]): Promise<CallSlot['connection']> {
+    const slot: CallSlot = {};
+    await runInCallSlot(slot, () => handler(input, makeAgent()));
+    return slot.connection;
+  }
+
+  async function registerProfile(): Promise<void> {
+    const { ApiStore } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    store.register({
+      id: 'shop',
+      name: 'Shop',
+      base_url: 'https://api.shop.example/v1',
+      description: 'a profile without engine-managed auth',
+    });
+    testCtx.apiStore = store;
+  }
+
+  it('stamps the profile that owns the request host — even with no credential attached', async () => {
+    await registerProfile();
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    // The stub agent has no vault, so nothing is attached; the call still read from `shop`.
+    // No engine.db behind this store → createdAt is null, not invented.
+    expect(await stampOf({ url: 'https://api.shop.example/v1/orders' })).toEqual({ id: 'shop', createdAt: null });
+  });
+
+  it('(a) a connection named in the model\'s header, body or query does not become the stamp', async () => {
+    await registerProfile();
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    // A host no profile owns, with every other field naming `shop`.
+    const stamp = await stampOf({
+      url: 'https://elsewhere.example/x?connection_id=shop&api_profile=shop',
+      method: 'GET',
+      headers: { 'X-Lynox-Connection': 'shop', 'X-Api-Profile': 'shop' },
+    });
+    expect(stamp).toBeUndefined();
+  });
+
+  it('(a) on a profile\'s host, a different connection named by the model does not replace the stamp', async () => {
+    const { ApiStore } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    store.register({ id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'the host owner' });
+    store.register({ id: 'crm', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'the connection the model names' });
+    testCtx.apiStore = store;
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    const stamp = await stampOf({
+      url: 'https://api.shop.example/v1/orders?connection_id=crm&host=api.crm.example',
+      headers: { 'X-Lynox-Connection': 'crm', Host: 'api.crm.example' },
+    });
+    expect(stamp?.id).toBe('shop');
+  });
+
+  it('a store that cannot answer created_at neither breaks the request nor loses the id', async () => {
+    // A store without `connectionCreatedAt` (a narrow stub, or one whose read throws)
+    // must not turn a working request into a failed one.
+    const profile = { id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'stub' };
+    testCtx.apiStore = {
+      getByHostname: (h: string) => (h === 'api.shop.example' ? profile : undefined),
+      getHostConflict: () => undefined,
+      connectionCreatedAt: () => { throw new Error('store unavailable'); },
+    } as never;
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+    const slot: CallSlot = {};
+    const result = await runInCallSlot(slot, () => handler({ url: 'https://api.shop.example/v1/orders' }, makeAgent()));
+    expect(result).toContain('HTTP 200');
+    expect(slot.connection).toEqual({ id: 'shop', createdAt: null });
   });
 });

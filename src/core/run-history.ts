@@ -115,6 +115,9 @@ export interface ToolCallRecord {
   output_json: string;
   duration_ms: number;
   sequence_order: number;
+  /** v54: the connection the engine resolved for this call; NULL = unknown (see v54). */
+  connection_id?: string | null | undefined;
+  connection_created_at?: string | null | undefined;
 }
 
 export interface RunStats {
@@ -1273,6 +1276,34 @@ const MIGRATIONS: string[] = [
   // which the 5-minute `expireOld()` sweep (engine.ts) enforces independently.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE pending_prompts ADD COLUMN trigger_id TEXT;`,
+
+  // v54 (source connection, first cut): which connection a tool call went through,
+  // as the engine resolved it — `connections.id` and that row's `created_at` at call
+  // time (core/call-connection.ts). Written only from the resolver; no tool input
+  // reaches these columns.
+  //
+  // NULL means UNKNOWN, not "no connection". Every row written before v54 is NULL
+  // and is not backfilled: the host is in `input_json`, but which profile owned it
+  // then is not recorded anywhere, and guessing from today's profiles would write a
+  // claim the data cannot carry. After v54, NULL still also covers calls whose host
+  // resolved no profile (incl. a host variant the profile does not name, and a host
+  // two profiles share), pipeline-step calls (written by runner.ts from stream
+  // events, which do not carry the stamp), and every tool other than http_request.
+  // `connection_created_at` alone is also NULL on an instance without engine.db.
+  // A stamped row means "the URL's host belonged to this profile", written before
+  // the request is sent — a call refused after that point (`output_json` non-empty)
+  // carries it too; one refused earlier (rate limits, a CRLF header) does not.
+  // The column is a lower bound; never read it as "everything from connection X".
+  //
+  // Plaintext, unlike input_json/output_json: a profile id and a timestamp, the same
+  // values engine.db already holds in plaintext, and a future delete has to select
+  // on them.
+  //
+  // A SOFT reference across files (`connections` is in engine.db): no FK, no
+  // ON DELETE, so the value outlives the connection row — the point of keeping it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
+   ALTER TABLE run_tool_calls ADD COLUMN connection_id TEXT;
+   ALTER TABLE run_tool_calls ADD COLUMN connection_created_at TEXT;`,
 ];
 
 export class RunHistory {
@@ -1583,12 +1614,14 @@ export class RunHistory {
     outputJson: string;
     durationMs: number;
     sequenceOrder: number;
+    connectionId?: string | undefined;
+    connectionCreatedAt?: string | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder);
+      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order, connection_id, connection_created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder, params.connectionId ?? null, params.connectionCreatedAt ?? null);
     return id;
   }
 

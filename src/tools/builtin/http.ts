@@ -29,6 +29,7 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { pv } from '../../core/prompt-value.js';
+import { noteCallConnection } from '../../core/call-connection.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -1301,6 +1302,37 @@ function writeRenewalFailure(
   );
 }
 
+/**
+ * Keep the connection this call's host resolves to on the call's ledger row
+ * (`core/call-connection.ts` says what the stamp does and does not mean). The same
+ * synchronous lookup the attach below makes, done first and on its own so it holds
+ * whether or not a credential is attached: a profile without engine-managed auth,
+ * or an agent without a vault, still talks to that connection. Written before the
+ * attach's own refusals and the handler's later ones, so those calls carry it too;
+ * the handler's earlier refusals (rate limits, a CRLF header) come first and do not.
+ * Nothing from the tool input but the URL's host reaches it,
+ * and the host only selects among profiles the user saved. Outside a tool call (a
+ * bulk run's worker effect) the note is a no-op.
+ */
+function stampResolvedConnection(url: string, apiStore: NonNullable<ToolContext['apiStore']>): void {
+  let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
+  try {
+    profile = apiStore.getByHostname(new URL(url).hostname);
+  } catch {
+    return;
+  }
+  if (!profile) return;
+  // Observability must never break the request it observes: a store that cannot
+  // answer `created_at` still yields the id, with the timestamp unknown.
+  let createdAt: string | null = null;
+  try {
+    createdAt = apiStore.connectionCreatedAt(profile.id) ?? null;
+  } catch {
+    createdAt = null;
+  }
+  noteCallConnection({ id: profile.id, createdAt });
+}
+
 async function attachEngineManagedAuth(
   url: string,
   headers: Record<string, string>,
@@ -1309,6 +1341,7 @@ async function attachEngineManagedAuth(
 ): Promise<AttachedAuth> {
   const secretStore = agent.secretStore;
   const apiStore = toolContext?.apiStore;
+  if (apiStore) stampResolvedConnection(url, apiStore);
   if (!apiStore || !secretStore) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;

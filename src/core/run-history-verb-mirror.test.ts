@@ -760,6 +760,8 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
       CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
       -- a real v43 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
+      -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
+      CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
       -- same reason: pending_prompts exists since v25, and v51 ALTERs it
       -- (segments_json). Without the stub this fixture fails on a migration
       -- that is correct for every real database.
@@ -799,8 +801,9 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // migrated forward through the latest version (v45 metrics S5b'-c, v46 threads-anchor,
     // v47 model_tier_source, v48 trigger_origin, v49 provenance-backfill marker,
     // v50 wire_snapshots extended-debug-capture, v51 prompt frame/value segments,
-    // v52 prompt origin, v53 pending_prompts.trigger_id — durable wait state):
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(53);
+    // v52 prompt origin, v53 pending_prompts.trigger_id — durable wait state,
+    // v54 run_tool_calls connection stamp — source connection):
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(54);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });

@@ -80,6 +80,7 @@ import { createDocsTool } from '../integrations/google/google-docs.js';
 import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
+import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -2552,6 +2553,66 @@ describe('Agent', () => {
 
   describe('recordToolCall sink', () => {
     type RecordedCall = { runId?: string | undefined; toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean };
+
+    describe('the connection a call resolved', () => {
+      // Source-connection PRD, first build cut. The http resolver notes the profile
+      // it resolved into the call's slot (call-connection.ts); the agent opens one
+      // slot per tool call and hands what is in it to the sink. Here tools stand in
+      // for the resolver by noting directly.
+      type Stamped = RecordedCall & { connection?: { id: string; createdAt: string | null } | undefined };
+      const tick = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+      it('hands each concurrent call its own connection', async () => {
+        const recorded: Stamped[] = [];
+        // `slow` notes after `fast` has finished: an agent-wide field would give both the last write.
+        const slow = makeTool('slow_tool', vi.fn(async () => { await tick(25); noteCallConnection({ id: 'conn-slow', createdAt: '2026-01-01 00:00:00' }); return 'ok'; }));
+        const fast = makeTool('fast_tool', vi.fn(async () => { await tick(1); noteCallConnection({ id: 'conn-fast', createdAt: null }); return 'ok'; }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([
+            { id: 'tu-s', name: 'slow_tool', input: {} },
+            { id: 'tu-f', name: 'fast_tool', input: {} },
+          ]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [slow, fast], recordToolCall: (c) => { recorded.push(c as Stamped); } });
+        await agent.send('go');
+        expect(recorded.find(c => c.toolName === 'slow_tool')?.connection).toEqual({ id: 'conn-slow', createdAt: '2026-01-01 00:00:00' });
+        expect(recorded.find(c => c.toolName === 'fast_tool')?.connection).toEqual({ id: 'conn-fast', createdAt: null });
+      });
+
+      it('keeps the stamp on a call that then fails', async () => {
+        const recorded: Stamped[] = [];
+        const tool = makeTool('fail_after_resolve', vi.fn(async () => { noteCallConnection({ id: 'shop', createdAt: null }); throw new Error('upstream 500'); }));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-x', name: 'fail_after_resolve', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('handled'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], recordToolCall: (c) => { recorded.push(c as Stamped); } });
+        await agent.send('go');
+        const call = recorded.find(c => c.toolName === 'fail_after_resolve');
+        expect(call?.isError).toBe(true);
+        expect(call?.connection?.id).toBe('shop');
+      });
+
+      it('opens the slot around the worker-pool path too', async () => {
+        // A pooled tool running in-process would otherwise inherit an enclosing
+        // call's slot (e.g. the parent spawn_agent's) and stamp THAT call.
+        const recorded: Stamped[] = [];
+        const tool = makeTool('pooled_tool', vi.fn().mockResolvedValue('unused'));
+        const workerPool = {
+          isWorkerSafe: (name: string) => name === 'pooled_tool',
+          execute: vi.fn(async () => { noteCallConnection({ id: 'pooled-conn', createdAt: null }); return 'ok'; }),
+          shutdown: async () => {},
+        };
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-w', name: 'pooled_tool', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [tool], workerPool, recordToolCall: (c) => { recorded.push(c as Stamped); } });
+        const outer: CallSlot = {};
+        await runInCallSlot(outer, () => agent.send('go'));
+        expect(workerPool.execute).toHaveBeenCalled();
+        expect(recorded.find(c => c.toolName === 'pooled_tool')?.connection?.id).toBe('pooled-conn');
+        expect(outer.connection, 'the enclosing slot must not take the pooled call\'s stamp').toBeUndefined();
+      });
+    });
 
     it('stamps the call with the run the agent is working under', async () => {
       // The link the whole attribution change rests on. A spawned child is

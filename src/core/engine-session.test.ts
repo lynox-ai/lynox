@@ -937,6 +937,29 @@ describe('Engine + Session (Orchestrator)', () => {
       );
     });
 
+    it('passes the connection a call resolved through to the ledger row, and none when it resolved none', async () => {
+      // Source-connection PRD, first build cut: the agent hands the stamp to the
+      // sink; the Session's sink is what writes run_tool_calls.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 3, isError: false, connection: { id: 'shop', createdAt: '2026-01-01 00:00:00' } });
+        agent?.recordToolCall?.({ toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('stop after two calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('stop after two calls');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.insertToolCall).toHaveBeenCalledWith(
+        expect.objectContaining({ toolName: 'http_request', connectionId: 'shop', connectionCreatedAt: '2026-01-01 00:00:00' }),
+      );
+      const plain = vi.mocked(rh.insertToolCall).mock.calls.map(c => c[0]).find(p => p.toolName === 'read_file');
+      expect(plain).toBeDefined();
+      expect(plain!.connectionId).toBeUndefined();
+      expect(plain!.connectionCreatedAt).toBeUndefined();
+    });
+
     it('a sub-agent\'s calls are still persisted — the rate limits are fed by these rows', async () => {
       // A rate-limit invariant, not a cosmetic one. These rows feed
       // `getToolCallCountSince`, which ENFORCES the http_request (200/hr,
