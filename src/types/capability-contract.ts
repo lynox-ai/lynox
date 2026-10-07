@@ -53,9 +53,11 @@ export interface ParamConstraint {
  * `assertHostPolicy` misses).
  */
 /**
- * How a contract came to exist. It is NOT a permission level — enforcement reads
- * the grant tuple, never this — it is the answer to "did a human look at it?",
- * which the grant alone cannot express.
+ * How a contract came to exist. It is NOT a permission level — it never widens what
+ * the tuple grants — it is the answer to "did a human look at it?", which the grant
+ * alone cannot express. It narrows in one place: `contractGrants` holds a `reviewed`
+ * grant to the URL rules the person was shown (https, no port, no credentials, no
+ * query, no fragment), which the tuple does not carry.
  *
  *  - `authorship`: derived automatically at save time from a workflow the user
  *    built in their own session. Note what the engine no longer does: saving used
@@ -63,10 +65,12 @@ export interface ParamConstraint {
  *    tool doing the saving is called by the model. Authorship-as-authorisation is
  *    defensible for an instance someone builds for themselves; it is NOT a review,
  *    and it is no longer how a workflow becomes runnable unattended.
- *  - `reviewed`: a human was shown what the grant permits and accepted it. No
- *    product path produces this yet; the field exists so the difference is
- *    visible rather than implied, and so the day it appears nothing has to be
- *    back-filled.
+ *  - `reviewed`: a human was shown the set of writes the grant enforces and accepted
+ *    it, and the acceptance is stamped with who, when and a checksum over what was
+ *    shown, on the object that carries the contract. Two paths produce it: a bulk
+ *    run's approval (`mintBulkContract`, the stamp on the run) and the grant dialog
+ *    of a saved workflow (`buildReviewedContract`, the stamp beside the contract on
+ *    the workflow), the latter only while its feature switch is on.
  *
  * Absent on contracts that predate the field and on imported ones (an import
  * deliberately arrives without a grant at all). Absent means "not recorded" —
@@ -95,3 +99,52 @@ export interface CapabilityContract {
   /** Per-parameter bind-time constraints, keyed by parameter name (S1). */
   paramConstraints: Record<string, ParamConstraint>;
 }
+
+/**
+ * Whether a contract handed to a run may still lift a refusal after the run has read
+ * external content. Held under a module-private symbol rather than a field: a symbol does
+ * not survive JSON, so a stored, imported or hand-written contract can never carry it. Only
+ * {@link withAfterUntrusted}, called by the run that verified the stamp, puts it there, and
+ * it then travels the whole chain to the step agents on the same object.
+ */
+const AFTER_UNTRUSTED: unique symbol = Symbol('capabilityContract.afterUntrusted');
+
+/** A copy of `contract` that may lift refusals after external content when `allowed`. */
+export function withAfterUntrusted(contract: CapabilityContract, allowed: boolean): CapabilityContract {
+  return Object.freeze({ ...contract, [AFTER_UNTRUSTED]: allowed });
+}
+
+/** True only for a contract {@link withAfterUntrusted} marked as allowed. */
+export function liftsAfterUntrusted(contract: CapabilityContract): boolean {
+  return (contract as CapabilityContract & { [AFTER_UNTRUSTED]?: boolean })[AFTER_UNTRUSTED] === true;
+}
+
+/**
+ * The acceptance of a `reviewed` contract on a saved workflow, stored beside the contract
+ * (not in it: the checksum covers the contract, so it cannot live inside it).
+ */
+export interface ReviewedGrantStamp {
+  /** The auth origin of the accepting request (`local`, `bearer:user`, `cookie:<tag>` …) — measured. */
+  by: string;
+  /** A name typed into the dialog. Declared, not proven; absent when none was typed. */
+  name?: string | undefined;
+  /** When the grant was accepted (ISO 8601). */
+  at: string;
+  /** Digest over contract, steps, mode, parameters, bound values, cron and `afterUntrusted`. */
+  checksum: string;
+  /** `keyed` = HMAC under the vault key; `unkeyed` = plain SHA-256, which binds nothing a database writer cannot recompute. */
+  binding: 'keyed' | 'unkeyed';
+  /** The schedule this acceptance created. Any other schedule runs without the contract. */
+  triggerId: string;
+  /** May the contract still lift a refusal after the run has read external content? */
+  afterUntrusted: boolean;
+}
+
+/**
+ * The contract that governs a tool call dispatched now, as the agent decides it — or why
+ * none does: `none` (the run has no contract) or `untrusted` (it has one, but the run read
+ * external content before this call and the grant does not cover that case).
+ */
+export type GoverningContract =
+  | { contract: CapabilityContract; withheld: null }
+  | { contract: undefined; withheld: 'none' | 'untrusted' };

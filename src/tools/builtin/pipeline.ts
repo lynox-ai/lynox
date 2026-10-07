@@ -18,6 +18,8 @@ import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
+import type { GrantDecision } from '../../core/workflow-grant.js';
+import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 
 const MAX_PLANS = 10;
 /** Retry-state buffer cap — larger than the plan cache so a burst of distinct
@@ -547,6 +549,22 @@ export interface RunSavedWorkflowResult {
    *  succeeded; present for every step that recorded an error (incl. on_failure
    *  = 'continue'/'notify' runs that finished 'completed' with errored steps). */
   stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number }> | undefined;
+  /** Why the run went ahead without the workflow's write grant, when it has one. */
+  grantNote?: string | undefined;
+  /** Writes the run was refused, or that may have landed before a refused redirect —
+   *  one line each, as the step's `http_request` reported it. For the owner's run report:
+   *  a refused write leaves its step `completed`, so nothing else would surface it. */
+  writeNotes?: string[] | undefined;
+}
+
+const WRITE_NOTE_LINE = new RegExp(`(?:${UNGRANTED_WRITE_PREFIX}|${WRITE_POSSIBLY_LANDED_PREFIX})[^\\n"]*`, 'g');
+
+/** Collects the refused and possibly-landed write lines from a step's tool calls. */
+export function collectWriteNotes(into: Set<string>): (call: { toolName: string; outputJson: string }) => void {
+  return (call) => {
+    if (call.toolName !== 'http_request') return;
+    for (const m of call.outputJson.matchAll(WRITE_NOTE_LINE)) into.add(m[0].trim());
+  };
 }
 
 /**
@@ -648,6 +666,12 @@ export async function runSavedWorkflow(
     memory?: IMemory | null | undefined;
     /** What the session that scheduled this run had taken in (see `TriggerRecord.created_untrusted`). */
     seed?: UntrustedCause | undefined;
+    /**
+     * Whether this run passes the workflow's contract on (`decideRunGrant`), asked with the
+     * workflow exactly as this function read it. Absent = no contract, whatever is stored:
+     * only a caller that knows how the run was started can answer.
+     */
+    decideGrant?: ((planned: PlannedPipeline) => GrantDecision) | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
@@ -693,6 +717,11 @@ export async function runSavedWorkflow(
     return { ok: false, error: `Workflow exceeds maximum of ${maxSteps} steps.` };
   }
 
+  const grant: GrantDecision = runtime?.decideGrant
+    ? runtime.decideGrant(planned)
+    : { contract: undefined, note: planned.capabilityContract !== undefined ? 'Ran without its write grant: this way of starting it does not carry one.' : null };
+  const writeNotes = new Set<string>();
+
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
     // (§4.5 drift fix). Backfilled to 'stop' on read, so legacy rows are
@@ -710,19 +739,22 @@ export async function runSavedWorkflow(
     // it the step sub-agents inherited an undefined posture → a benign step that
     // hit any DANGEROUS_BASH pattern was denied non-interactively (no approver)
     // and the run silently failed. `buildRunCtx` makes the posture explicit +
-    // the option object complete; the capability-contract seam rides along (null
-    // here = the safe autonomous-deny default until Slice B grants writes).
+    // the option object complete. No contract is the safe default; a `reviewed`
+    // contract rides along only when `decideGrant` passed it, i.e. it came from the
+    // grant dialog of the scheduling route while that feature is on, and its stamp
+    // still matches.
     const state = await runManifest(manifest, config, buildRunCtx({
       autonomy: 'autonomous',
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
       parentMemory: runtime?.memory ?? null,
-      // Slice B: the stored capability-contract authorises this headless run's
-      // declared outbound writes (enforced per-tool-call at isDangerous); the
-      // DoS bounds (wall-clock/iterations/spend, with headless defaults) stop a
-      // runaway from inside the run. Absent contract = the safe deny default.
-      capabilityContract: planned.capabilityContract,
+      // The decided contract — never the stored one directly — authorises this
+      // headless run's declared outbound writes (enforced per-tool-call at
+      // isDangerous); the DoS bounds (wall-clock/iterations/spend, with headless
+      // defaults) stop a runaway from inside the run.
+      capabilityContract: grant.contract,
+      observeToolCall: collectWriteNotes(writeNotes),
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
       // Headless: no caller to seed from, except what the scheduling session had taken in
@@ -737,7 +769,11 @@ export async function runSavedWorkflow(
     const stepErrors = [...state.outputs.values()]
       .filter(o => o.error !== undefined && o.error !== '')
       .map(o => ({ stepId: o.stepId, error: o.error, costUsd: o.costUsd }));
-    return { ok: true, runId: state.runId, status: state.status, costUsd, stepErrors, error: state.error };
+    return {
+      ok: true, runId: state.runId, status: state.status, costUsd, stepErrors, error: state.error,
+      ...(grant.note !== null ? { grantNote: grant.note } : {}),
+      ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
+    };
   } catch (err: unknown) {
     return { ok: false, error: `Workflow execution failed: ${getErrorMessage(err)}` };
   }

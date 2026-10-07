@@ -385,12 +385,14 @@ export interface IAgent {
   readonly isolation?: IsolationConfig | undefined;
   readonly autonomy?: AutonomyLevel | undefined;
   /**
-   * Capability contract governing this (headless) agent's outbound writes. Read
-   * by the `http_request` tool's first-use-consent gate so a contract-granted
-   * write is recognised as pre-declared consent. Undefined for in-session agents
-   * (they have a live approver). See `types/capability-contract.ts`.
+   * The capability contract that governs a tool call dispatched now, or why none does.
+   * The one question both readers ask — the danger check in the agent loop and the
+   * `http_request` tool's first-use-consent gate — so the two cannot disagree about the
+   * same call. A function, not the field: the field alone does not know whether the run
+   * has read external content, and a reader that took it directly would skip that check.
+   * See `types/capability-contract.ts`.
    */
-  readonly capabilityContract?: import('./capability-contract.js').CapabilityContract | undefined;
+  governingContract(): import('./capability-contract.js').GoverningContract;
   readonly toolContext: import('../core/tool-context.js').ToolContext;
   /**
    * Mutable session-scoped counters shared with sub-agents. See

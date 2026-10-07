@@ -15,6 +15,7 @@ import type {
   AutonomyLevel,
   PreApprovalSet,
   CapabilityContract,
+  GoverningContract,
   PreApproveAuditLike,
   SecretStoreLike,
   ChangesetManagerLike,
@@ -26,7 +27,8 @@ import type {
   ToolCallRecorder,
   CacheProfile,
 } from '../types/index.js';
-import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
+import { headlessRefusalNote } from './write-notes.js';
+import { liftsAfterUntrusted, getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -489,12 +491,12 @@ export class Agent implements IAgent {
   private readonly preApproval: PreApprovalSet | undefined;
   private readonly audit: PreApproveAuditLike | undefined;
   /**
-   * Capability contract authorising this agent's headless outbound writes.
-   * RESERVED SEAM (Slice A1): carried here beside `autonomy`/`preApproval` so
-   * the `isDangerous` enforcement point can read it, but A1 attaches no logic —
-   * `undefined` = the safe autonomous-deny default (PRD §4.2). Slice B enforces.
+   * Capability contract authorising this agent's headless outbound writes;
+   * `undefined` = the safe autonomous-deny default (PRD §4.2). Private on purpose:
+   * every reader goes through {@link governingContract}, which also applies the
+   * external-content rule. A reader of the bare field would skip it.
    */
-  readonly capabilityContract: CapabilityContract | undefined;
+  private readonly capabilityContract: CapabilityContract | undefined;
   readonly secretStore: SecretStoreLike | undefined;
   readonly userId: string | undefined;
   readonly activeScopes: import('../types/index.js').MemoryScopeRef[] | undefined;
@@ -781,6 +783,25 @@ export class Agent implements IAgent {
   private _taintBeforeBatch: boolean | undefined;
   /** Whether this CONVERSATION has ingested untrusted content (sticky; see field doc). */
   get conversationSawUntrusted(): boolean { return this._conversationSawUntrusted; }
+  /**
+   * The contract that governs a tool call dispatched now, or why none does. A contract
+   * lifts a refusal only while the call had nothing external before it, unless the run
+   * that handed the contract over was granted otherwise (`liftsAfterUntrusted`).
+   *
+   * Reads the snapshot taken when the current tool batch started, never the running
+   * latch: the latch is armed for a call's OWN tool before the danger check runs, and
+   * `http_request` is itself an external-content tool, so reading it would make every
+   * `http_request` refuse itself. Both readers — the danger check in `_executeOne` and the
+   * consent gate inside `http_request` — run inside a batch and so see the same snapshot.
+   * Outside a batch the fallback is the state right now, which can only refuse more.
+   */
+  governingContract(): GoverningContract {
+    const contract = this.capabilityContract;
+    if (contract === undefined) return { contract: undefined, withheld: 'none' };
+    if (liftsAfterUntrusted(contract)) return { contract, withheld: null };
+    const taintedBefore = this._taintBeforeBatch ?? (this._sawUntrustedData || this._conversationSawUntrusted);
+    return taintedBefore ? { contract: undefined, withheld: 'untrusted' } : { contract, withheld: null };
+  }
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
    *  Also arms the sticky conversation latch (DK.1 F5). */
   noteUntrustedData(): void { this._sawUntrustedData = true; this._conversationSawUntrusted = true; }
@@ -3871,7 +3892,7 @@ export class Agent implements IAgent {
     let downgradeDecision: import('../types/models.js').ModelTier | undefined;
     const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerousDetailed(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.capabilityContract);
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.governingContract().contract);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     if (effectiveSignal) {
@@ -3899,10 +3920,17 @@ export class Agent implements IAgent {
           };
         }
       } else {
+        const refusal = `Permission denied (non-interactive): ${tc.name}${headlessRefusalNote(tc.name, tc.input, this.governingContract().withheld === 'untrusted')}`;
+        // Streamed like every other result, so a step's recorder sees the refusal: a
+        // headless run's owner learns of a refused write only through it (the step itself
+        // still completes). Same shape as the escalated-skip result above.
+        if (this.onStream) {
+          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, isError: true });
+        }
         return {
           type: 'tool_result',
           tool_use_id: tc.id,
-          content: `Permission denied (non-interactive): ${tc.name}`,
+          content: refusal,
           is_error: true,
         };
       }

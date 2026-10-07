@@ -139,6 +139,22 @@ export class WorkflowStore {
     return res.changes > 0;
   }
 
+  /**
+   * Write a reviewed grant: the contract, its stamp and the first-run-confirm, in ONE
+   * statement, so no reader sees a stamp without its contract or a confirm without
+   * either. Exact id only — unlike the prefix-matched writers above, this one must never
+   * land on a second row. Does not bump `updated_at` (same as {@link setConfirmedAt}).
+   * A concurrent edit between the caller's read and this write is not lost silently: the
+   * stamp's checksum covers the steps, so the run check refuses the mismatch.
+   */
+  setReviewedGrant(id: string, contractJson: string, stampJson: string, confirmedAt: string): boolean {
+    if (id === '') return false;
+    const res = this.db.prepare(
+      "UPDATE workflows SET definition_json = json_set(definition_json, '$.capabilityContract', json(?), '$.reviewedGrant', json(?), '$.confirmedAt', ?) WHERE id = ?",
+    ).run(contractJson, stampJson, confirmedAt, id);
+    return res.changes === 1;
+  }
+
   /** Prefix-matched delete (mirrors legacy `deletePlannedPipeline`). */
   remove(id: string): boolean {
     if (id === '') return false; // empty id → likePrefix '%' would match ALL rows

@@ -7,7 +7,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
-import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
@@ -2845,6 +2845,11 @@ export class RunHistory {
   /** Slice B2: stamp the human's first-run-confirm onto the workflow blob. */
   setWorkflowConfirmedAt(id: string, confirmedAt: string): boolean {
     return this._requireWorkflowStore().setConfirmedAt(id, confirmedAt);
+  }
+
+  /** Write a reviewed grant (contract + stamp + confirm) in one statement; exact id only. */
+  setWorkflowReviewedGrant(id: string, contract: CapabilityContract, stamp: ReviewedGrantStamp, confirmedAt: string): boolean {
+    return this._requireWorkflowStore().setReviewedGrant(id, JSON.stringify(contract), JSON.stringify(stamp), confirmedAt);
   }
 
   /** Slice B2: flip a scheduled trigger's cron kill-switch. */

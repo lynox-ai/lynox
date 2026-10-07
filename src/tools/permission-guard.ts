@@ -6,6 +6,7 @@ import { isWorkspaceActive } from '../core/workspace.js';
 import { channels } from '../core/observability.js';
 import { extractMatchString, globToRegex } from '../core/pre-approve.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
+import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 
 // ── isCriticalTool — moved from pre-approve.ts ─────────────
 
@@ -490,9 +491,31 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   } catch {
     return false;
   }
+  // No contract grants a mail API, whoever wrote it: the published promise is that mail
+  // leaves the instance only once it is confirmed in the chat.
+  if (isMailProviderTarget(obj.url)) return false;
+  if (contract.origin === 'reviewed' && !isReviewableUrl(parsed, obj.url)) return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!_matchesAnyGlob(host, contract.hostPatterns)) return false;
   if (!_matchesAnyGlob(parsed.pathname, contract.pathPatterns)) return false;
+  return true;
+}
+
+/**
+ * The URL dimensions the grant tuple does not carry. A reviewed contract shows a person
+ * `METHOD https://host/path` and the tuple compares only method, hostname and pathname, so
+ * without this a reviewed grant would also admit plain http, any port, credentials in the
+ * URL, and an arbitrary query. These are the rules the bulk path applies to every target at
+ * planning (`externalTargetKey`); here they are checked at dispatch, because a workflow's
+ * model writes its URL at run time.
+ */
+export function isReviewableUrl(parsed: URL, raw: string): boolean {
+  if (parsed.protocol !== 'https:' || parsed.port !== '') return false;
+  if (parsed.username !== '' || parsed.password !== '') return false;
+  // On the raw text: a non-empty query or fragment always has its character there, and a
+  // bare one that `URL` normalised away does too.
+  if (raw.includes('?')) return false;
+  if (raw.includes('#')) return false;
   return true;
 }
 

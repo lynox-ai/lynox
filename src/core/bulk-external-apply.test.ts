@@ -357,6 +357,24 @@ describe('applying an external run', () => {
     }
   });
 
+  it('a run over more paths than a saved workflow\'s grant may name still reads and writes under its own contract', async () => {
+    // Both are `reviewed`, and both go through `contractGrants`. The form a workflow's grant
+    // must have (`reviewedContractShapeError`, at most MAX_REVIEWED_PATHS paths) is checked
+    // only where a workflow is saved; checking it at dispatch would halt every bulk run
+    // larger than that.
+    const s = shop();
+    for (let i = 4; i < 30; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+    const restore = serve(s);
+    try {
+      const many = Array.from({ length: 30 }, (_, i) => url(i));
+      const c = client({ contract: mintBulkContract(HOST, many) });
+      expect((await c.get(url(29))).kind).toBe('ok');
+      expect((await c.write(url(29), 'PATCH', { price: '13.00' })).kind).toBe('ok');
+    } finally {
+      restore();
+    }
+  });
+
   it('a small run halted by one such target writes the rest on resume, and leaves that one failed', async () => {
     const s = shop();
     s.items.set(`/products/${LOOKS_LIKE_A_KEY}`, { id: 9, title: 'Keyed', price: '12.00' });

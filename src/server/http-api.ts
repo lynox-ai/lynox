@@ -6032,7 +6032,9 @@ export class LynoxHTTPApi {
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
         });
       }
-      jsonResponse(res, 200, { workflows: workflows.slice(0, limit) });
+      // Whether the schedule dialog may offer a write grant at all (the feature switch).
+      const { workflowGrantEnabled } = await import('../core/workflow-grant.js');
+      jsonResponse(res, 200, { workflows: workflows.slice(0, limit), grantEnabled: workflowGrantEnabled() });
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
@@ -6100,7 +6102,9 @@ export class LynoxHTTPApi {
       // Route through the budget + managed-credit lifecycle (cap, credit gate,
       // cost report) — runSavedWorkflow alone bypasses all three.
       const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
-      const result = await runGuardedSavedWorkflow(engine, params['id']!, runParams);
+      // A person pressed Run over this authenticated route: the workflow's write grant may
+      // apply, with the cron and values of the schedule it was accepted for, never the request's.
+      const result = await runGuardedSavedWorkflow(engine, params['id']!, runParams, { origin: { kind: 'library' } });
       if (!result.ok) {
         const code = result.error?.includes('not found') ? 404 : 400;
         errorResponse(res, code, result.error ?? 'Workflow run failed');
@@ -6126,6 +6130,42 @@ export class LynoxHTTPApi {
         stepErrors: (result.stepErrors ?? []).map(e => (
           e.error === undefined ? e : { ...e, error: capForClient(maskForClient(e.error)) }
         )),
+        // Refused or possibly-landed writes, and why the run had no grant. URLs a step
+        // wrote, so masked and capped like the step errors.
+        ...(result.grantNote !== undefined ? { grantNote: capForClient(maskForClient(result.grantNote)) } : {}),
+        ...(result.writeNotes !== undefined ? { writeNotes: result.writeNotes.map((n) => capForClient(maskForClient(n))) } : {}),
+      });
+    }));
+
+    // The preview of a write grant for a saved workflow: what the entry would enforce, one
+    // line per (method, URL), the bound values, and the checksum the acceptance must echo.
+    // Writes nothing. Closed, with the acceptance, by the feature switch.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/grant-preview', async (_req, res, params, body) => {
+      const { workflowGrantEnabled, prepareWorkflowGrant } = await import('../core/workflow-grant.js');
+      if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+      const history = engine.getRunHistory();
+      if (!requireService(res, history, 'History')) return;
+      const engineDb = engine.getEngineDb();
+      if (!requireService(res, engineDb, 'Engine database')) return;
+      if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid grant'); return; }
+      const b = body as Record<string, unknown>;
+      const scheduleCron = typeof b['scheduleCron'] === 'string' ? b['scheduleCron'] : '';
+      const { isValidCron } = await import('../core/cron-parser.js');
+      if (!isValidCron(scheduleCron)) { errorResponse(res, 400, `Invalid cron expression: ${scheduleCron}`); return; }
+      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const planned = getPipeline(params['id']!, history);
+      if (!planned || planned.template !== true) { errorResponse(res, 404, 'Workflow not found'); return; }
+      if (planned.mode !== 'autonomous') { errorResponse(res, 400, `Workflow "${planned.id}" is interactive and cannot be scheduled.`); return; }
+      const prepared = prepareWorkflowGrant(planned, {
+        method: b['method'], host: b['host'], paths: b['paths'], params: b['params'], cron: scheduleCron, afterUntrusted: b['afterUntrusted'],
+      }, engineDb);
+      if (!prepared.ok) { errorResponse(res, 400, prepared.error); return; }
+      jsonResponse(res, 200, {
+        tuples: prepared.tuples,
+        boundParams: prepared.boundParams,
+        afterUntrusted: prepared.afterUntrusted,
+        binding: prepared.binding,
+        checksum: prepared.checksum,
       });
     }));
 
@@ -6217,6 +6257,32 @@ export class LynoxHTTPApi {
         if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
         if (planned.mode !== 'autonomous') {
           errorResponse(res, 400, `Workflow "${planned.id}" is interactive and cannot be scheduled — convert it to autonomous first.`); return;
+        }
+        // The acceptance of a write grant, after its preview. Closed with the feature switch
+        // like the preview: this is where the contract is written, and without a vault key
+        // its checksum is a SHA-256 over inputs any signed-in caller can read, so closing
+        // only the preview would leave it open.
+        const rawGrant = b['grant'];
+        if (rawGrant !== undefined) {
+          const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
+          if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
+          if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
+          const g = rawGrant as Record<string, unknown>;
+          const engineDb = engine.getEngineDb();
+          if (!requireService(res, engineDb, 'Engine database')) return;
+          try {
+            const accepted = acceptWorkflowGrant(planned, {
+              method: g['method'], host: g['host'], paths: g['paths'], params: rawParams, cron: scheduleCron,
+              afterUntrusted: g['afterUntrusted'], checksum: g['checksum'], name: g['name'],
+              title: title ?? `Scheduled: ${planned.name}`,
+            }, this._authOrigin.get(_req) ?? 'unknown', { history, taskManager, hasher: engineDb });
+            if (!accepted.ok) { errorResponse(res, accepted.status, accepted.error); return; }
+            forgetPipeline(planned.id);
+            jsonResponse(res, 201, accepted.task);
+          } catch (e) {
+            errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to schedule workflow');
+          }
+          return;
         }
         const { bindWorkflowParameters } = await import('../orchestrator/workflow-params.js');
         const bound = bindWorkflowParameters(planned.parameters ?? [], rawParams as Record<string, unknown> | undefined, {

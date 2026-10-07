@@ -4,6 +4,21 @@ import type { UntrustedCause } from './untrusted-signals.js';
 import type { Engine, RunContext } from './engine.js';
 import { checkPersistentBudget } from './session-budget.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
+import { decideRunGrant, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
+import type { PlannedPipeline } from '../types/pipeline.js';
+
+/** `decideRunGrant` bound to this engine's schedules and keyed hash. */
+function grantDecider(engine: Engine, origin: GrantRunOrigin): (planned: PlannedPipeline) => GrantDecision {
+  return (planned) => planned.capabilityContract === undefined ? { contract: undefined, note: null } : decideRunGrant(
+    planned,
+    origin,
+    (id) => {
+      const t = engine.getTaskManager()?.getTrigger(id);
+      return t === undefined ? undefined : { workflowId: t.pipeline_id ?? null, cron: t.schedule_cron ?? null, paramsJson: t.pipeline_params ?? null };
+    },
+    engine.getEngineDb(),
+  );
+}
 
 /**
  * Run a saved / scheduled workflow through the SAME budget + managed-credit
@@ -56,7 +71,11 @@ export async function runGuardedSavedWorkflow(
   engine: Engine,
   workflowId: string,
   params?: Record<string, unknown> | undefined,
-  opts?: { seed?: UntrustedCause | undefined } | undefined,
+  opts?: {
+    seed?: UntrustedCause | undefined;
+    /** How the run was started. Absent = the run passes no contract on, whatever is stored. */
+    origin?: GrantRunOrigin | undefined;
+  } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
   const budgetCheck = checkPersistentBudget();
@@ -124,6 +143,7 @@ export async function runGuardedSavedWorkflow(
     toolContext,
     memory: engine.getMemory(),
     seed: opts?.seed,
+    ...(opts?.origin !== undefined ? { decideGrant: grantDecider(engine, opts.origin) } : {}),
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.
