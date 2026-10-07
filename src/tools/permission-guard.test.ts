@@ -2304,6 +2304,15 @@ describe('isDangerous', () => {
       ['git -C /srv/a\\"b push', 'git push'],
       ['git -C . "push"', 'git push'],
       ["git -C . p''ush", 'git push'],
+      ["git -C 'a;b' push", 'git push'],
+      ["git --exec-path='/opt/a;b' push", 'git push'],
+      // Each surface carries its own share: the segments split at `;`, quote removal
+      // joins `p''ush`, and only the joined form reads past an escaped line break.
+      ['echo -n hi;git -C . push', 'git push'],
+      ["git -C 'a;b' p''ush", 'git push'],
+      ["echo -n hi;git -C . p''ush", 'git push'],
+      ["git -C . \\\n p''ush", 'git push'],
+      ['git -C . \\\n "push"', 'git push'],
     ])('blocks %s in autonomous mode', (command, label) => {
       const result = auto(command);
       expect(result).toContain(label);
@@ -2342,6 +2351,13 @@ describe('isDangerous', () => {
       'echo -n "first\nsecond > out"',
       'grep -e git -c commit notes.txt',
       'echo git - commit',
+      // An operator glued to a value still ends the command there.
+      'git -C dir|grep -v push',
+      'git -C x; push',
+      "python3 -c 'print(1)'|grep -m http.server",
+      'systemctl --user -q; restart-app.sh',
+      // `\\` before a line break is a literal backslash; the break still ends the command.
+      'git -C a\\\\\npush',
     ])('leaves %s free in autonomous mode', (command) => {
       expect(auto(command)).toBeNull();
     });
@@ -2381,6 +2397,14 @@ describe('isDangerous', () => {
       const started = performance.now();
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
       expect(performance.now() - started).toBeLessThan(10_000);
+    });
+
+    it('stays fast when one oversized word follows the options', () => {
+      // Every reading would otherwise carry the whole word into the `.*` rules again.
+      const cmd = `x ${'-a '.repeat(64)}${'cat-'.repeat(2375)}`;
+      const started = performance.now();
+      ask(cmd);
+      expect(performance.now() - started).toBeLessThan(3_000);
     });
 
     it('stays fast when options and values alternate', () => {

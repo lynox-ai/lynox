@@ -678,11 +678,18 @@ function _checkPatterns(segments: string[], patterns: Array<{ pattern: RegExp; l
   return null;
 }
 
-// A token carrying a shell operator is not a plain option: `-euo|tail` ends the command at the pipe.
+// A shell operator outside quotes ends the command there: `-euo|tail`, `dir;` (`'a;b'` does not).
+const carriesOperator = (token: string): boolean =>
+  /[|;&<>()]/.test(token.replace(/\\[\s\S]|"(?:[^"\\]|\\[\s\S])*"|'[^']*'/g, ''));
 const isOptionToken = (token: string): boolean =>
-  token.length > 1 && token.startsWith('-') && !/[|;&<>()]/.test(token);
+  token.length > 1 && token.startsWith('-') && !carriesOperator(token);
 /** Tokens of the remainder kept per variant — enough for any rule's subcommand and arguments. */
 const OPTION_VARIANT_TAIL = 64;
+/** Characters of the remainder kept per variant: one oversized word must not make every variant long. */
+const OPTION_VARIANT_CHARS = 512;
+/** An escaped line break continues the command; `\\` before it is a literal backslash and does not. */
+const joinContinuations = (text: string): string =>
+  text.replace(/(\\*)\\\n/g, (match, before: string) => (before.length % 2 === 0 ? `${before} ` : match));
 /**
  * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
  * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
@@ -706,25 +713,27 @@ const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+/g;
  * caught before can stop being caught. A variant never leaves the command without a word after
  * it (`set -e` does not become `set`, `set -e x | head` not `set | head`), and each keeps a
  * bounded tail, so the work stays linear in the command's length. A variant stays on its line
- * and keeps the line's own text: options never continue a command across a line break (only
- * across an escaped one), and joining lines would let a rule read a `>` or a `|` from the next
- * line as part of this command.
+ * and keeps the line's own text: options never continue a command across a line break, and
+ * joining lines would let a rule read a `>` or a `|` from the next line as part of this command.
+ * (An escaped line break is joined by the caller, before quotes are removed.)
  */
 export function withoutLeadingOptions(segment: string): string[] {
   const variants: string[] = [];
-  for (const line of segment.replace(/\\\n/g, ' ').split('\n')) {
+  for (const line of segment.split('\n')) {
     const tokens = [...line.matchAll(SHELL_WORD)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
     for (let i = 0; i < tokens.length - 1; i++) {
       const word = tokens[i]!.text;
       // A command word: not an option itself, and not the value of the option before it.
       if (isOptionToken(word) || (i > 0 && isOptionToken(tokens[i - 1]!.text))) continue;
       for (let k = i + 1; k < tokens.length - 1; k++) {
-        const inRun = isOptionToken(tokens[k]!.text) || (k > i + 1 && isOptionToken(tokens[k - 1]!.text));
+        const inRun = isOptionToken(tokens[k]!.text)
+          || (k > i + 1 && isOptionToken(tokens[k - 1]!.text) && !carriesOperator(tokens[k]!.text));
         if (!inRun) break;
         // Nothing would stand in the subcommand's place: `set -e x | head` is not `set | head`.
         if (/^[|;&<>)]/.test(tokens[k + 1]!.text)) continue;
+        const from = tokens[k + 1]!.start;
         const last = tokens[Math.min(k + OPTION_VARIANT_TAIL, tokens.length - 1)]!;
-        variants.push(`${word} ${line.slice(tokens[k + 1]!.start, last.end)}`);
+        variants.push(`${word} ${line.slice(from, Math.min(last.end, from + OPTION_VARIANT_CHARS))}`);
       }
     }
   }
@@ -745,9 +754,16 @@ function _bashScanSegments(chunk: string, withVariants: boolean): string[] {
   const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
   const all = [...segments, ...strippedSegments];
   if (!withVariants) return [normalized, stripped, ...all];
-  // The whole chunk too: a segment ends at every line break, an escaped one included.
-  const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
-  return [...wholes, ...all].flatMap(withoutLeadingOptions);
+  // The readings come from the text with its quotes still in place: only there is `'a;b'` a
+  // value rather than a `;`, and `\\` a backslash rather than an escape. The whole chunk too,
+  // with escaped line breaks joined, since a segment ends at every line break. Each reading is
+  // then read once more as the shell executes it (`p''ush` → `push`).
+  const readings = [joinContinuations(normalized), ...segments].flatMap(withoutLeadingOptions);
+  return readings.flatMap((reading) => {
+    if (!/["'\\]/.test(reading)) return [reading];
+    const executed = stripShellQuotes(reading);
+    return executed === reading ? [reading] : [reading, executed];
+  });
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
