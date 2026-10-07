@@ -19,6 +19,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
+import { httpRequestTool, oauthRenewalBackoffSizeForTests, resetOAuthRenewalBackoffForTests, OAUTH_RENEWAL_BACKOFF_MS } from './http.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({
@@ -41,6 +42,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The renewal hold is module state; a test that fails a renewal must not hold the next test's profile.
+  resetOAuthRenewalBackoffForTests();
   vi.restoreAllMocks();
   restorePinnedTransport?.();
   restorePinnedTransport = undefined;
@@ -1680,6 +1683,121 @@ describe('the renewal fires on expiry and not otherwise', () => {
     expect(String(out)).not.toMatch(/^Error:/);
     expect(seen.authorization, 'the stored token was not attached after a failed renewal').toBe('Bearer OLD_TOKEN');
     expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('OLD_TOKEN');
+  });
+});
+
+describe('a failed renewal holds the profile back', () => {
+  const T0 = Date.parse('2026-10-07T12:00:00.000Z');
+  const SEED = {
+    CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+    CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+  };
+  const expiring = (expiresAt: number): ApiProfile =>
+    crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: expiresAt } } });
+
+  let now = T0;
+  beforeEach(() => {
+    now = T0;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+  });
+
+  /** One store, one vault, one agent across requests: the hold is per profile, so the requests must share it. */
+  function setup(tokenStatus: () => number): { apiStore: ApiStore; vault: MockVault; agent: never; tokenPosts: () => number; lastAuth: () => string | undefined } {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(expiring(T0 - 1000));
+    const vault = makeVault(SEED);
+    let posts = 0;
+    let auth: string | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) {
+        posts++;
+        const status = tokenStatus();
+        return status === 200
+          ? new Response(JSON.stringify({ access_token: 'MINTED', expires_in: 3600 }), { status, headers: { 'content-type': 'application/json' } })
+          : new Response('{"error":"invalid_scope"}', { status, headers: { 'content-type': 'application/json' } });
+      }
+      auth = new Headers(init?.headers).get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { apiStore, vault, agent: makeAgent(apiStore, vault), tokenPosts: () => posts, lastAuth: () => auth };
+  }
+
+  const request = (agent: never): Promise<unknown> =>
+    httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, agent);
+
+  it('sends no second renewal with the same inputs inside the period, and still attaches the stored token', async () => {
+    const t = setup(() => 400);
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(1);
+
+    now = T0 + OAUTH_RENEWAL_BACKOFF_MS - 1;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(1);
+    expect(t.lastAuth()).toBe('Bearer OLD_TOKEN');
+  });
+
+  it('renews at once inside the period when an input changed', async () => {
+    const t = setup(() => 400);
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(1);
+
+    // A new consent or a manual fetch_token rewrites the expiry; here it is still inside the buffer.
+    t.apiStore.register(expiring(T0 - 500));
+    now = T0 + 1;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(2);
+  });
+
+  it('renews again once the period has passed, and holds for the same period after the next failure', async () => {
+    const t = setup(() => 400);
+    await request(t.agent);
+
+    now = T0 + OAUTH_RENEWAL_BACKOFF_MS;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(2);
+
+    // The period does not grow: the token has expired, and a longer hold would only
+    // keep a recovered provider further away.
+    const second = now;
+    now = second + OAUTH_RENEWAL_BACKOFF_MS - 1;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(2);
+    now = second + OAUTH_RENEWAL_BACKOFF_MS;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(3);
+  });
+
+  it('holds one entry for a profile that keeps failing, and drops it when a renewal succeeds', async () => {
+    let status = 400;
+    const t = setup(() => status);
+    await request(t.agent);
+    now = T0 + OAUTH_RENEWAL_BACKOFF_MS;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(2);
+    expect(oauthRenewalBackoffSizeForTests()).toBe(1);
+
+    status = 200;
+    now += 2 * OAUTH_RENEWAL_BACKOFF_MS;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(3);
+    expect(t.vault.peek('CRM_API_ACCESS_TOKEN')).toBe('MINTED');
+    expect(oauthRenewalBackoffSizeForTests()).toBe(0);
+  });
+
+  it('renews at once inside the period when a new refresh token was stored', async () => {
+    const t = setup(() => 400);
+    await request(t.agent);
+    t.vault.set('CRM_API_REFRESH_TOKEN', 'REFRESH_2');
+    now = T0 + 1;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(2);
   });
 });
 

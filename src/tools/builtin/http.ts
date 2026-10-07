@@ -1148,6 +1148,47 @@ export function oauthRenewalDeclinedDiagnosis(
 const oauthRenewalsInFlight = new Map<string, Promise<void>>();
 
 /**
+ * How long a profile is held back after a failed renewal. Fixed, not doubling: the
+ * renewal runs only inside a five-minute buffer before expiry, so a growing period
+ * would soon reach past the expiry itself, and from then on every request goes out
+ * with a dead token until a renewal succeeds. One minute bounds the posts to about
+ * one a minute per profile and set of inputs in this process (the minute starts
+ * when the exchange returns), and keeps a recovered provider at most a minute away.
+ */
+export const OAUTH_RENEWAL_BACKOFF_MS = 60 * 1000;
+
+/**
+ * Profiles held back after a failed renewal, keyed by profile id. An entry is
+ * removed when a renewal for the profile succeeds; one whose period has passed
+ * stays until then, and only counts failures for the log line.
+ */
+const oauthRenewalBackoff = new Map<string, { inputs: string; failures: number; until: number }>();
+
+/**
+ * What a renewal for this profile is made of, as one fingerprint: the profile's
+ * whole `auth.oauth` block and the refresh token the attach already read. Two
+ * renewals with the same fingerprint post the same exchange.
+ *
+ * `auth.oauth` carries `token_expires_at`, which every successful exchange and the
+ * OAuth callback rewrite, so a new consent or a manual `fetch_token` changes the
+ * fingerprint without this module having to be told. Taken from values the attach
+ * holds anyway: no extra vault read, so no extra `secretAccess` event.
+ */
+export function oauthRenewalInputs(profile: ApiProfile, storedRefresh: string | null): string {
+  return tokenFingerprint(`${JSON.stringify(profile.auth?.oauth ?? null)}\u0000${storedRefresh ?? ''}`);
+}
+
+/** How many profiles are held back right now. For tests of the map's size. */
+export function oauthRenewalBackoffSizeForTests(): number {
+  return oauthRenewalBackoff.size;
+}
+
+/** Forget every hold. The map is module state, so tests must not share it. */
+export function resetOAuthRenewalBackoffForTests(): void {
+  oauthRenewalBackoff.clear();
+}
+
+/**
  * Renew an oauth2 access token that is about to expire, by running the SAME
  * exchange the `api_setup` tool runs — deliberately by calling that handler
  * rather than by extracting its body into a shared function.
@@ -1173,22 +1214,31 @@ const oauthRenewalsInFlight = new Map<string, Promise<void>>();
  * it calls is the only thing that writes state, and it writes no revocation it
  * has not proven.
  *
- * ⚠ Residue, named rather than left for a reader to discover — and LARGER than
- * a first version of this note said. There is no back-off after a failure, so a
- * profile whose renewal keeps failing is retried on every request that reaches
- * the buffer, at up to sixteen seconds each.
+ * After a failed renewal the profile is held back: no further renewal POST goes
+ * out for it until a waiting period passes, as long as the renewal's inputs are
+ * the same ({@link oauthRenewalInputs}). The period is one minute
+ * ({@link OAUTH_RENEWAL_BACKOFF_MS} says why it does not grow). A change of input
+ * lifts it at once: a new consent or a manual `fetch_token` rewrites
+ * `token_expires_at`, and an edit to the profile's `auth.oauth` or a newly stored
+ * refresh token changes the rest. What it does not see is a change outside those
+ * inputs — any other profile field, a client
+ * secret replaced in the vault, a setting fixed at the provider, a provider that
+ * recovers. Those wait out the minute; reading the client credentials on every
+ * request to see them would cost two vault reads, and two audit events, per call.
  *
- * That first note called the cost "bounded by the session budget". It is not.
- * The budget is charged by the exchange's callback AFTER a response arrives, so
- * a token endpoint that HANGS is never charged at all: the ceiling of a hundred
- * requests bounds the triggering calls, not the renewals that time out. State is
- * still not corrupted, so this stays a cost rather than a cache that would also
- * refuse a provider that has recovered — but anyone deciding whether to add
- * back-off should know which of the two numbers actually binds.
+ * Before this, a renewal that kept failing was retried on every request inside
+ * the buffer, at up to sixteen seconds each, and a token endpoint that hangs is
+ * never charged to the session budget, so nothing else bounded it.
+ *
+ * The hold is a cost bound, not a verdict. It lives in this process only and
+ * records nothing; the request still goes out with the stored token, exactly as
+ * after a failed renewal; and a manual `fetch_token` is never held, so whoever
+ * acts on the failure is not blocked by it.
  */
 async function renewExpiringOAuthToken(
   profileId: string,
   agent: import('../../types/index.js').IAgent,
+  inputs: string,
 ): Promise<void> {
   if (!mayRenewOAuthUnattended(agent)) {
     // Silent on purpose, and this is the one refusal that should be: it is the
@@ -1201,18 +1251,38 @@ async function renewExpiringOAuthToken(
   const running = oauthRenewalsInFlight.get(profileId);
   if (running !== undefined) return running;
 
-  const run = runOAuthRenewal(profileId, agent).finally(() => {
+  const held = oauthRenewalBackoff.get(profileId);
+  if (held !== undefined && held.inputs === inputs && Date.now() < held.until) {
+    process.stderr.write(
+      `[lynox:http] oauth token renewal skipped for profile "${profileId}": ${String(held.failures)} consecutive renewal(s) with these inputs failed; `
+      + `the next is not attempted before ${new Date(held.until).toISOString()}. The stored token is attached unchanged.\n`,
+    );
+    return;
+  }
+
+  const run = runOAuthRenewal(profileId, agent).then((ok) => {
+    if (ok) {
+      oauthRenewalBackoff.delete(profileId);
+      return;
+    }
+    // Counted per input, for the log: a failure after the inputs changed starts again at one.
+    const failures = (held !== undefined && held.inputs === inputs ? held.failures : 0) + 1;
+    oauthRenewalBackoff.set(profileId, { inputs, failures, until: Date.now() + OAUTH_RENEWAL_BACKOFF_MS });
+  }).finally(() => {
     oauthRenewalsInFlight.delete(profileId);
   });
   oauthRenewalsInFlight.set(profileId, run);
   return run;
 }
 
-/** The renewal itself. Never rejects — see the contract on the caller above. */
+/**
+ * The renewal itself. Never rejects — see the contract on the caller above.
+ * Resolves `true` only when the exchange answered `Token exchange OK`.
+ */
 async function runOAuthRenewal(
   profileId: string,
   agent: import('../../types/index.js').IAgent,
-): Promise<void> {
+): Promise<boolean> {
   // TWO catches, not one, and the split is the point. A first draft wrapped both
   // steps together — which would have swallowed a failing import as if it were a
   // provider hiccup, leaving a packaging defect invisible for as long as nobody
@@ -1229,7 +1299,7 @@ async function runOAuthRenewal(
       + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.
 `,
     );
-    return;
+    return false;
   }
 
   // The RETURN VALUE is read, because almost every failure IS one. Discarding it
@@ -1259,13 +1329,16 @@ async function runOAuthRenewal(
       // at least the buffer, so the request continues. This is what lets an
       // operator tell a renewal that was refused from one that never ran.
       writeRenewalFailure(profileId, 'refused', typeof answer === 'string' ? answer : String(answer), agent);
+      return false;
     }
+    return true;
   } catch (err) {
     // A throw here is a vault write that failed, or something under the exchange
     // that it does not convert. Either way it must not be silent: the request
     // continues on the stored token, but the grant may now be broken in a way
     // only a log will show.
     writeRenewalFailure(profileId, 'threw', err instanceof Error ? err.message : String(err), agent);
+    return false;
   }
 }
 
@@ -1516,7 +1589,7 @@ async function attachEngineManagedAuth(
       const stored = secretStore.resolve(refreshSlot);
       const slotState = oauthRefreshSlotState(profile, refreshSlot, stored);
       if (oauthProfileMayBeRenewedUnattended(profile, stored !== null)) {
-        await renewExpiringOAuthToken(profile.id, agent);
+        await renewExpiringOAuthToken(profile.id, agent, oauthRenewalInputs(profile, stored));
       } else {
         process.stderr.write(
           `[lynox:http] oauth token renewal declined for profile "${profile.id}": ${oauthRenewalDeclinedDiagnosis(profile, slotState)}\n`,
