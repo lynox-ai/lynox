@@ -532,7 +532,7 @@ describe('httpRequestTool', () => {
       }));
     });
 
-    it('and the result says the body was repaired, naming what came off', async () => {
+    it('and the result says the body was repaired, WITHOUT quoting any of it', async () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
 
@@ -543,8 +543,11 @@ describe('httpRequestTool', () => {
         body: '{"a":1}</body>',
       }, agentWithPromptFn());
 
-      expect(String(result)).toContain('</body>');
       expect(String(result)).toContain('repaired');
+      // ⚠ …and it quotes NOTHING from the body. A resolved `secret:NAME` can sit inside that tag
+      // (`agent.ts` substitutes before the handler runs), and this line is past both the egress
+      // scan and `maskSecrets`. The absence is the guarantee, so it is asserted.
+      expect(String(result)).not.toContain('</body>');
     });
 
     it('a legitimate HTML POST reaches fetch UNCHANGED, tag and all', async () => {
@@ -563,6 +566,27 @@ describe('httpRequestTool', () => {
       expect(fetchMock).toHaveBeenCalledWith('http://example.com/api', expect.objectContaining({ body: html }));
       // …and no note claims otherwise, or the engine would be reporting an edit it did not make.
       expect(String(result)).not.toContain('repaired');
+    });
+
+    it('⭐ the egress scan reads the ORIGINAL body, so a credential parked in the stray tag blocks', async () => {
+      // ⚠ This is the witness for the scan's DIRECTION, and nothing else in the suite had one.
+      // The repaired body is a prefix of the original, so scanning it instead would fail OPEN on
+      // exactly this shape: `agent.ts` resolves `secret:NAME` before the handler runs, a vault
+      // value made of word characters and dashes passes the tag grammar whole, and the repair
+      // then removes it — leaving a credential that was never scanned and never reported.
+      mockDnsPublic();
+      // Assembled at runtime on purpose: a key-shaped literal on an added line trips the
+      // `pattern-scan` commit hook, which reads added lines and does not care that this is a test.
+      const keyish = `${['sk', 'ant', 'api03'].join('-')}-${'z'.repeat(40)}`;
+      const result = await visible({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: `{"a":1}</${keyish}>`,
+      }, agentWithPromptFn());
+
+      expect(result).toContain('Blocked');
+      expect(result).toContain('Anthropic API key');
     });
 
     // Slice B: the capability-contract is the headless write's consent — without

@@ -5,10 +5,33 @@ const JSON_CT = { 'Content-Type': 'application/json' } as const;
 const HTML_CT = { 'Content-Type': 'text/html' } as const;
 
 describe('repairStrayCloseTag — the shape the model actually produced', () => {
-  it('takes `</body>` off a JSON array and reports exactly what it removed', () => {
+  it('takes `</body>` off a JSON array', () => {
     const got = repairStrayCloseTag('[{"location_code":2756,"keywords":["botox aarau"]}]</body>', JSON_CT);
     expect(got?.body).toBe('[{"location_code":2756,"keywords":["botox aarau"]}]');
-    expect(got?.removed).toBe('</body>');
+  });
+
+  it('returns the repaired body and NOTHING from the original — no echo channel', () => {
+    // ⚠ This pins a deliberate absence, so it needs saying why. An earlier version also returned
+    // the removed text, for the caller's note to quote. `agent.ts` resolves `secret:NAME` before
+    // the handler runs, so a body can arrive ending in `</THE-VALUE>` — and that note sits past
+    // both the egress scan and `maskSecrets`. The shape is the guarantee: there is no field to
+    // leak through. A length cap was tried first and was the wrong cut.
+    const got = repairStrayCloseTag('{"a":1}</Zq7Lm2Xp9Rt4Vb8Nc3Hd6Fj1Ks5Wg0Ya>', JSON_CT);
+    expect(got).not.toBeNull();
+    expect(Object.keys(got as object)).toEqual(['body']);
+    expect(JSON.stringify(got)).not.toContain('Zq7Lm2');
+  });
+
+  it('runs in LINEAR time — the first version of this was quadratic', () => {
+    // ⚠ A timing assertion, which is normally a bad test. It is the right one here because the
+    // defect it guards is a wall-clock defect and nothing else observes it. The original
+    // `/\s*<\/[A-Za-z][\w:-]*>\s*$/.replace(body)` retried from every position in a whitespace
+    // run: measured 7652 ms on this input, synchronous, inside the tool handler. The margin is
+    // four orders of magnitude, so the bound is not delicate.
+    const body = `{${' '.repeat(80_000)}x`;
+    const started = Date.now();
+    expect(repairStrayCloseTag(body, JSON_CT)).toBeNull();
+    expect(Date.now() - started, 'the trailing-tag scan is backtracking over the body again').toBeLessThan(1000);
   });
 
   it('repairs the same body when the call declares NO content type at all', () => {
@@ -28,7 +51,28 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
   });
 
   it('tolerates whitespace around the stray tag', () => {
-    expect(repairStrayCloseTag('{"a":1}\n  </body>\n', JSON_CT)?.body).toBe('{"a":1}');
+    // ⚠ Asserted as a PROPERTY, not as a string. An earlier version pinned `'{"a":1}'` exactly,
+    // which also pinned that the repair eats the whitespace BEFORE the tag — a formatting detail
+    // of the regex that then existed. The linear replacement leaves it, which parses identically
+    // and changes less of someone else's data. Pinning the literal made the stricter
+    // implementation look like a regression.
+    const got = repairStrayCloseTag('{"a":1}\n  </body>\n', JSON_CT);
+    expect(JSON.parse(got?.body ?? 'null')).toEqual({ a: 1 });
+  });
+
+  it('⭐ what it sends is always a PREFIX of what the model wrote', () => {
+    // ⚠ This is the invariant every security argument about this function rests on: the egress
+    // scan can read the ORIGINAL body and still be a strict superset of what goes out, and no
+    // content can be introduced that the layers have not seen. Stated as its own test because
+    // it is cited as a reason elsewhere, and a cited property with no witness is just a claim.
+    for (const body of [
+      '{"a":1}</body>', '[1,2]</html>', '"s"</x>', '{"a":1}\n  </body>\n',
+      '  \n[{"a":1}]</body>', '123</body>',
+    ]) {
+      const got = repairStrayCloseTag(body, JSON_CT);
+      expect(got, body).not.toBeNull();
+      expect(body.startsWith(got?.body ?? '\u0000'), `${body} → not a prefix`).toBe(true);
+    }
   });
 });
 
@@ -93,16 +137,31 @@ describe('repairStrayCloseTag — which conditions actually discriminate', () =>
     expect(() => JSON.parse(htmlAsJson)).toThrow();
   });
 
-  it('caps what it reports, because the caller puts it in a system line', () => {
-    // The tag grammar forbids whitespace and punctuation, so no sentence fits — but the NAME is
-    // unbounded, and the note that quotes it sits outside the untrusted-data wrap.
-    const long = `</${'a'.repeat(200)}>`;
-    const got = repairStrayCloseTag(`{"a":1}${long}`, JSON_CT);
-    expect(got?.body).toBe('{"a":1}');
-    expect(got?.removed.length).toBeLessThanOrEqual(40);
-    expect(got?.removed.endsWith('…')).toBe(true);
-    // …and a normal tag is reported whole, or the cap would be hiding the useful case.
-    expect(repairStrayCloseTag('{"a":1}</body>', JSON_CT)?.removed).toBe('</body>');
+  it('a leading-whitespace body still gets its intent read — `trimStart` is load-bearing', () => {
+    // Without the trim, `lead` is a space, `looksLikeJson` is false, and this falls through to
+    // the header. It would then be repaired here and NOT repaired without a content type —
+    // a difference nothing else in the file would notice.
+    expect(repairStrayCloseTag('  \n[{"a":1}]</body>', {})?.body).toBe('  \n[{"a":1}]');
+  });
+
+  it('a JSON STRING body counts as JSON intent', () => {
+    // `"` is in the lead set for a reason: a bare string is a valid JSON document and an API can
+    // legitimately want one. Dropping it from the set makes this case header-dependent.
+    expect(repairStrayCloseTag('"hallo"</body>', {})?.body).toBe('"hallo"');
+  });
+
+  it('reads the content type case-insensitively, header name and value both', () => {
+    // HTTP header names are case-insensitive and `application/JSON` is a real spelling. A body
+    // with no JSON-looking lead reaches the repair only through the header, so each folding is
+    // the single thing standing between this call and an unrepaired body.
+    for (const headers of [
+      { 'content-type': 'application/json' },
+      { 'CONTENT-TYPE': 'application/json' },
+      { 'Content-Type': 'APPLICATION/JSON' },
+      { 'Content-Type': 'application/json; charset=utf-8' },
+    ]) {
+      expect(repairStrayCloseTag('123</body>', headers)?.body, JSON.stringify(headers)).toBe('123');
+    }
   });
 
   it('(b) is REDUNDANT under (c), and that is recorded rather than re-derived', () => {

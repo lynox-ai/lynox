@@ -2261,8 +2261,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       typeof input.body === 'string' ? repairStrayCloseTag(input.body, headers) : null;
     const outboundBody = repairedBody?.body ?? input.body;
 
-    if (outboundBody && isWriteMethod(method)) {
-      const secretMatch = detectSecretInContent(outboundBody);
+    // ⚠ The scan reads `input.body` — the ORIGINAL — and not the repaired one, which is the
+    // opposite of what the first draft did under "scan what goes out". The repaired body is a
+    // PREFIX of the original by construction, so scanning the original is a strict superset: it
+    // catches a credential that sat in the part being removed as well. Its two failure
+    // directions are not symmetric. Scanning the prefix fails OPEN on exactly the case worth
+    // knowing about — a model, or a prompt injection reaching one, parking a resolved
+    // `secret:NAME` in the trailing tag, which `agent.ts` substitutes before this handler sees
+    // the body. Scanning the original can only over-report, on a value that is not sent.
+    if (input.body && isWriteMethod(method)) {
+      const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
         blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileState()));
       }
@@ -2486,8 +2494,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // records without also being read, so the MODEL sees this line too. That is a cost worth
       // naming and, here, also the useful half: the party that produced the broken argument is
       // the one being told. The user's chat is unaffected; tool results do not render as text.
+      //
+      // ⚠ And it quotes NOTHING from the body. An earlier version named the tag it removed; a
+      // resolved `secret:NAME` can end up inside that tag, and this line is past the point where
+      // either the egress scan or `maskSecrets` could catch it. `model-json-body.ts` has the
+      // measurement. The model wrote the tag, so repeating it to the model adds nothing anyway.
       if (repairedBody !== null) {
-        wrapped += `\n\n**[Engine note — your request body was repaired before it was sent]**\nIt ended in \`${repairedBody.removed}\`, which is not valid JSON, so the API would have rejected it. The engine removed that and sent the rest unchanged. Do not add a closing tag to a JSON body.`;
+        wrapped += `\n\n**[Engine note — your request body was repaired before it was sent]**\nIt ended in a closing tag, which is not valid JSON, so the API would have rejected the call. The engine removed that tag and sent the rest unchanged. Do not append a closing tag to a JSON body.`;
       }
 
       // Engine-managed-auth 401-hint. When the engine DECLINED to attach a

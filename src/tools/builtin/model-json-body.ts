@@ -25,8 +25,34 @@
  * request goes out, without counting anything and without seeing a result.
  */
 
-/** A trailing closing tag — `</body>`, `</html>`, `</ns:x>` — and any whitespace around it. */
-const TRAILING_CLOSE_TAG = /\s*<\/[A-Za-z][\w:-]*>\s*$/;
+/**
+ * The tag NAME, anchored at both ends and run against a candidate already cut out by index —
+ * never against the whole body.
+ *
+ * ⚠ The first version of this was `/\s*<\/[A-Za-z][\w:-]*>\s*$/` applied with `.replace()` to
+ * the body, and it was quadratic. `\s*` is unanchored, so the engine retries from every position
+ * in a whitespace run and backtracks off the `<` each time. Measured on `'{' + n spaces + 'x'`:
+ * 616 ms at n=20 000, 1783 ms at 40 000, **7652 ms at 80 000** — synchronous, inside the tool
+ * handler, before anything else runs. A model, or a prompt injection reaching one, could freeze
+ * the process for seconds with an 80 KB body that is broken for any reason at all. Found by a
+ * review round; the shape is cheap to get wrong because the regex reads as obviously fine.
+ */
+const TAG_NAME = /^[A-Za-z][\w:-]*$/;
+
+/**
+ * Split a trailing closing tag off a body, in LINEAR time. Returns the body without it, or null.
+ *
+ * Index work only: `trimEnd`, one `endsWith`, one `lastIndexOf`, and the anchored name test over
+ * the candidate. No unanchored quantifier ever sees the body.
+ */
+function withoutTrailingCloseTag(body: string): string | null {
+  const trimmed = body.trimEnd();
+  if (!trimmed.endsWith('>')) return null;
+  const open = trimmed.lastIndexOf('</');
+  if (open === -1) return null;
+  if (!TAG_NAME.test(trimmed.slice(open + 2, -1))) return null;
+  return trimmed.slice(0, open);
+}
 
 const parses = (text: string): boolean => {
   try {
@@ -45,9 +71,28 @@ const declaredContentType = (headers: Readonly<Record<string, string>>): string 
 export interface RepairedBody {
   /** The body to send instead. */
   readonly body: string;
-  /** Exactly what was taken off the end, for the note the call carries. */
-  readonly removed: string;
 }
+
+/**
+ * ⚠ WHAT THIS DELIBERATELY DOES NOT RETURN: the text that was removed.
+ *
+ * It did, for one commit, so the caller's note could quote it — and that was an echo path from
+ * model output into a privileged channel. A security round found what it costs. `agent.ts`
+ * resolves `secret:NAME` references BEFORE the handler runs, so a model can write a body ending
+ * in `</secret:NAME>` and the handler receives `…</THE-ACTUAL-VALUE>`; a vault value made of
+ * `[A-Za-z0-9_:-]` passes the tag grammar whole. The repair then strips it — so the egress scan
+ * no longer sees it — and the note quoted 37 characters of it into a line that sits outside the
+ * untrusted-data wrap, where `maskSecrets` could not match it either, because masking replaces
+ * the exact value and this was a prefix.
+ *
+ * A length cap was the first answer and it was the wrong shape: it bounded the symptom while
+ * leaving the channel open, and it needed a cap, an allowlist AND a secret scan to be defended
+ * — three checks per instance, which is the signature of a fix cut at the wrong place.
+ *
+ * The right answer is subtractive, and it costs nothing: **the model already knows what it
+ * wrote.** Echoing the tag back informs nobody and opens a channel, so the note names the shape
+ * ("it ended in a closing tag") and never a value.
+ */
 
 /**
  * Three conditions. TWO of them discriminate and the third does not, and saying which is which
@@ -88,15 +133,9 @@ export function repairStrayCloseTag(
 
   if (parses(body)) return null;
 
-  const stripped = body.replace(TRAILING_CLOSE_TAG, '');
-  if (stripped === body) return null;
+  const stripped = withoutTrailingCloseTag(body);
+  if (stripped === null) return null;
   if (!parses(stripped)) return null;
 
-  // ⚠ CAPPED, because `removed` is MODEL OUTPUT and its caller puts it in a line that sits
-  // OUTSIDE the untrusted-data wrap — engine guidance, which is the surface a model reads as
-  // instruction. The tag grammar above already forbids whitespace and punctuation, so no
-  // sentence fits through; what it does NOT bound is length (`[\w:-]*`), and an arbitrarily long
-  // token in a system line is worth refusing even when it cannot say anything.
-  const removed = body.slice(stripped.length).trim();
-  return { body: stripped, removed: removed.length > 40 ? `${removed.slice(0, 37)}…` : removed };
+  return { body: stripped };
 }
