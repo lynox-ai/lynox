@@ -484,9 +484,9 @@ function derivePathEndpoints(spec: OpenApiDoc): ApiEndpoint[] {
 /**
  * Said above every bootstrap draft. Its values are external text — an OpenAPI spec, or a model's
  * extraction over a docs page. The block also holds a few engine labels and cautions, but they
- * share fields with the page's own text (`draft.notes`), so the preamble exempts nothing: the
- * engine's guidance is what stands outside the block. The tool-result scan catches known
- * phrasings only. A declared fence, not `<untrusted_data>`: that wrapper is recognised by the result scan
+ * sit among the page's own text (in `draft.notes` and in the summary), so the preamble exempts
+ * nothing; each caution that matters is repeated outside the block, in the engine's lines. The
+ * tool-result scan catches known phrasings only. A declared fence, not `<untrusted_data>`: that wrapper is recognised by the result scan
  * only when it is the WHOLE result, and this result also carries the engine's own next steps,
  * so a wrapper here would have flagged every bootstrap as a boundary escape.
  */
@@ -1083,7 +1083,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   // dropped, the next steps) stay outside. The id here is a slug of the docs URL's host, the
   // model's own input.
   return compose([
-    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}
+    engineText(`Bootstrapped draft profile from ${docsUrl} (extraction cost $${costUsd.toFixed(4)}).${injectedNote}${truncatedNote}${apiHostCandidates.length > 0 ? `\n${String(apiHostCandidates.length)} other API host(s) seen on the docs page are listed in the block below; verify against an authoritative source before swapping base_url.` : ''}
 
 Review the draft, fill auth.vault_keys via ask_secret, then call action="create":`),
     renderFence('api_bootstrap_draft', `${summary}${linkedNote}${hostHintNote}

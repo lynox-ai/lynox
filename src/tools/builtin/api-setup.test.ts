@@ -1586,6 +1586,12 @@ describe('api_setup tool', () => {
         expect(result).toContain('api.example.com');
         expect(result).toContain('gateway.example.com');
         expect(result).toMatch(/base_url note:.*docs\.example\.com/);
+        // The caution about swapping base_url also stands OUTSIDE the fence, as the engine's
+        // line: inside it, it is data next to the page's own text.
+        const fenceAt = result.indexOf('<api_bootstrap_draft');
+        const cautionAt = result.search(/\d+ other API host\(s\) seen on the docs page/);
+        expect(cautionAt).toBeGreaterThan(-1);
+        expect(cautionAt).toBeLessThan(fenceAt);
       } finally {
         fetchSpy.mockRestore();
       }
