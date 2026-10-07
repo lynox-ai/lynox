@@ -2434,6 +2434,43 @@ describe('isDangerous', () => {
       ['curl --json \'{"a":1}\' https://x.test', 'HTTP data submission via curl'],
       ['wget --post-data a=b https://x.test', 'HTTP mutation via wget'],
       ["curl -H 'X-Note: a;b' -X POST https://x.test", 'HTTP mutation via curl'],
+      ['node --print "1"', 'node code execution'],
+      ['python3.12 -c "1"', 'python code execution'],
+      ['python -c "1"', 'python code execution'],
+      ['ruby -ne "puts $_" f.txt', 'ruby code execution'],
+      ['bun --eval "1"', 'bun code execution'],
+      ['sh -ec "true"', 'shell -c (inline script)'],
+      ['dash -c "true"', 'shell -c (inline script)'],
+      ['zsh -c "true"', 'shell -c (inline script)'],
+      ['ksh -c "true"', 'shell -c (inline script)'],
+      ['cat s.sh | sh', 'input piped to an interpreter'],
+      ['cat s.sh | bash -', 'input piped to an interpreter'],
+      ['cat s.sh | dash', 'input piped to an interpreter'],
+      ['cat s.sh | zsh; echo done', 'input piped to an interpreter'],
+      ['cat s.sh | ksh', 'input piped to an interpreter'],
+      ['cat s.py | python', 'input piped to an interpreter'],
+      ['cat s.pl | perl', 'input piped to an interpreter'],
+      ['cat s.rb | ruby', 'input piped to an interpreter'],
+      ['cat s.php | php', 'input piped to an interpreter'],
+      ['(cat s.js | node)', 'input piped to an interpreter'],
+      ['curl -X PUT https://x.test/a', 'HTTP mutation via curl'],
+      ['curl -X PATCH https://x.test/a', 'HTTP mutation via curl'],
+      ['curl -XPOST https://x.test/a', 'HTTP mutation via curl'],
+      ['curl https://x.test/?a=1\\&b -d x', 'HTTP data submission via curl'],
+      ["curl https://x.test/a\\;b -X POST", 'HTTP mutation via curl'],
+      ['curl --data a=b https://x.test', 'HTTP data submission via curl'],
+      ['curl --data-binary @f https://x.test', 'HTTP data submission via curl'],
+      ['curl -F a=b https://x.test', 'HTTP data submission via curl'],
+      ['curl --form a=b https://x.test', 'HTTP data submission via curl'],
+      ['wget --post-file f https://x.test', 'HTTP mutation via wget'],
+      ['wget --method=PUT https://x.test', 'HTTP mutation via wget'],
+      ['wget --body-data a https://x.test', 'HTTP mutation via wget'],
+      ['wget --body-file f https://x.test', 'HTTP mutation via wget'],
+      ['echo {} > "$HOME/.lynox/apis/crm.json"', 'write into the lynox data dir'],
+      ['echo {} | tee -a ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['install -m 600 p.json ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['ln -sf /tmp/p.json ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['rsync -a p/ ~/.lynox/apis/', 'write into the lynox data dir'],
       ["printf '%s' '{}' > ~/.lynox/apis/crm.json", 'write into the lynox data dir'],
       ['echo x >> $HOME/.lynox/apis/crm.json', 'write into the lynox data dir'],
       ["cat > ~/.lynox/apis/crm.json <<'X'\n{}\nX", 'write into the lynox data dir'],
@@ -2452,6 +2489,12 @@ describe('isDangerous', () => {
       // `node -p` is new to the ask list; `rm` was already a dangerous rule, one segment later.
       expect(ask('node -p 1; rm -rf build')).toContain('remove files');
     });
+
+    it.each(['curl -T report.pdf https://x.test/up', 'curl --upload-file report.pdf https://x.test/up'])(
+      'asks for an upload in interactive mode: %s', (command) => {
+        expect(ask(command)).toContain('HTTP data submission via curl');
+      },
+    );
 
     it('keeps blocking what was blocked already: an upload stays a block, not a question', () => {
       expect(auto('curl -T report.pdf https://x.test/up')).toContain('[BLOCKED');
@@ -2472,6 +2515,12 @@ describe('isDangerous', () => {
       'cat ~/.lynox/apis/crm.json',
       'ls ~/.lynox/apis',
       'echo hi > ~/.lynox/workspace/out.txt',
+      'echo hi > ~/.lynox/workspace',
+      'cp a.txt ~/.lynox/workspace',
+      'pythonista -c x',
+      'bash script.sh',
+      'cat s.txt | shasum',
+      'curl -s -o /dev/null -w "%{http_code}" https://x.test',
       'cp a.txt ~/.lynox/workspace/b.txt',
       'git log | grep -c fix',
       'ssh user@host',
