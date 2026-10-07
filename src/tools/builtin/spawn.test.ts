@@ -174,6 +174,22 @@ function makeTool(name: string): ToolEntry {
 // the returned agent stub.
 let testCounters: import('../../types/index.js').SessionCounters;
 
+/**
+ * Drive the child's prompt callbacks WHILE the child runs. A settled child's
+ * callbacks are cut on purpose (a question from what it abandoned must not reach
+ * the parent — see "once the child settles…"), so a test that calls them after the
+ * handler returned tests the cut, not the wiring. `body` only makes the calls;
+ * assert after the handler, because a throw inside a child's send is swallowed.
+ */
+type ChildCallbacks = { promptUser: PromptUserFn; promptSecret: PromptSecretFn; promptTabs: PromptTabsFn };
+async function whileChildRuns(body: (cfg: ChildCallbacks) => Promise<void>): Promise<void> {
+  const { Agent: MockAgent } = await import('../../core/agent.js');
+  mockSend.mockImplementationOnce(async () => {
+    await body(vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as ChildCallbacks);
+    return 'done';
+  });
+}
+
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   const tools = overrides.tools ?? [
     makeTool('bash'),
@@ -620,13 +636,13 @@ describe('spawn_agent tool', () => {
       await expect(spawnAgentTool.handler({ agents: [{ name: 'continuing', task: 'Analyze' }] }, makeAgent())).rejects.not.toThrow(/spawn time limit/);
     }, 3000);
 
-    it('once the child settles, a late question from what it abandoned is withdrawn at birth, not handed the parent\'s run', async () => {
+    it('once the child settles, a late question from what it abandoned never reaches the parent, on any channel', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       vi.mocked(MockAgent).mockClear();
       const seen: (AbortSignal | undefined)[] = [];
       const parent = makeAgent({
-        promptUser: vi.fn(async (_q: unknown, _o?: string[], m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return 'ok'; }),
-        promptTabs: vi.fn(async (_q: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return ['ok']; }),
+        promptUser: vi.fn(async (_q: unknown, _o?: string[], m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return 'Yes'; }),
+        promptTabs: vi.fn(async (_q: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return ['A']; }),
         promptSecret: vi.fn(async (_n: unknown, _p: unknown, _k?: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return 'saved' as const; }),
       });
       mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
@@ -638,15 +654,42 @@ describe('spawn_agent tool', () => {
       type Tabs = (q: unknown[], m?: { signal?: AbortSignal | undefined }) => Promise<string[]>;
       type Secret = (n: string, p: string, k?: string, m?: { signal?: AbortSignal | undefined }) => Promise<unknown>;
       const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as { promptUser: Ask; promptTabs: Tabs; promptSecret: Secret };
-      // The settled child's own run signal is gone — its getter hands on undefined.
-      await cfg.promptUser('late?', undefined, { signal: undefined });
-      await cfg.promptTabs([{ question: 'late?' }], { signal: undefined });
-      await cfg.promptSecret('K', 'late?', undefined, { signal: undefined });
-      expect(seen).toHaveLength(3);
-      expect(seen.every(sig => sig?.aborted === true)).toBe(true);
-      // A signal the call does carry still wins.
+      // Not given — and the parent's channel (which might ignore a stopped signal, as the
+      // worker loop's does) is never asked, so nobody can answer it.
+      await expect(cfg.promptUser('late?', ['Yes', 'No'])).resolves.toBe('__dismissed__');
+      await expect(cfg.promptTabs([{ question: 'late?' }])).resolves.toEqual([]);
+      await expect(cfg.promptSecret('K', 'late?')).resolves.toBe('canceled');
+      expect(seen).toHaveLength(0);
+    }, 3000);
+
+    it('a question still open when the child settles carries a signal that stops at the settle', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const seen: (AbortSignal | undefined)[] = [];
+      const never = <T,>() => new Promise<T>(() => { /* nobody answers */ });
+      const parent = makeAgent({
+        promptUser: vi.fn((_q: unknown, _o?: string[], m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return never<string>(); }),
+        promptTabs: vi.fn((_q: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return never<string[]>(); }),
+        promptSecret: vi.fn((_n: unknown, _p: unknown, _k?: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return never<'saved'>(); }),
+      });
       const own = new AbortController();
-      await cfg.promptUser('own?', undefined, { signal: own.signal });
+      mockSend.mockImplementationOnce(async () => {
+        const cfg = vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as {
+          promptUser: (q: string, o?: string[], m?: { signal?: AbortSignal | undefined }) => Promise<string>;
+          promptTabs: (q: unknown[], m?: { signal?: AbortSignal | undefined }) => Promise<string[]>;
+          promptSecret: (n: string, p: string, k?: string, m?: { signal?: AbortSignal | undefined }) => Promise<unknown>;
+        };
+        // Raised while the child lives, with no run signal of its own, and left open.
+        void cfg.promptUser('q?', undefined, { signal: undefined });
+        void cfg.promptTabs([{ question: 'q?' }], { signal: undefined });
+        void cfg.promptSecret('K', 'q?', undefined, { signal: undefined });
+        void cfg.promptUser('own?', undefined, { signal: own.signal });
+        return 'done';
+      });
+      await spawnAgentTool.handler({ agents: [{ name: 'open', task: 'Analyze' }] }, parent);
+      expect(seen).toHaveLength(4);
+      expect(seen.slice(0, 3).every(sig => sig?.aborted === true)).toBe(true);
+      // A signal the call did carry still wins.
       expect(seen[3]).toBe(own.signal);
     }, 3000);
 
@@ -2691,16 +2734,20 @@ describe('spawn_agent tool', () => {
         promptSecret: promptSecret as unknown as IAgent['promptSecret'],
         promptTabs: promptTabs as unknown as IAgent['promptTabs'],
       });
+      promptUser.mockResolvedValue('Yes');
+      promptSecret.mockResolvedValue('saved');
+      promptTabs.mockResolvedValue(['picked']);
+      const answers: unknown[] = [];
+      await whileChildRuns(async (child) => {
+        answers.push(await child.promptUser('Proceed?', ['Yes', 'No']));
+        answers.push(await child.promptSecret('STRIPE_KEY', 'Paste it', 'api_key'));
+        answers.push(await child.promptTabs([{ question: 'Which one?' }]));
+      });
       await spawnAgentTool.handler(
         { agents: [{ name: 'asker', task: 'Maybe ask the user' }] },
         agent,
       );
-
-      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as {
-        promptUser: PromptUserFn;
-        promptSecret: PromptSecretFn;
-        promptTabs: PromptTabsFn;
-      };
+      expect(vi.mocked(MockAgent)).toHaveBeenCalled();
       // All three must REACH the parent's channel so ask_user / ask_secret /
       // ask_tabs invoked by the sub-agent surface to the same UI.
       //
@@ -2711,15 +2758,10 @@ describe('spawn_agent tool', () => {
       // actually needs, so that is what is pinned — and the arguments are pinned
       // with it, because a wrapper that dropped the options would be invisible to
       // a bare "was called".
-      promptUser.mockResolvedValue('Yes');
-      promptSecret.mockResolvedValue('saved');
-      promptTabs.mockResolvedValue(['picked']);
       // The ANSWER has to come back, not just the call go out. A wrapper with a
       // block body that forgets its `return` calls through perfectly and hands
       // every consent decision back as undefined — invisible to "was called".
-      await expect(ctorArg.promptUser('Proceed?', ['Yes', 'No'])).resolves.toBe('Yes');
-      await expect(ctorArg.promptSecret('STRIPE_KEY', 'Paste it', 'api_key')).resolves.toBe('saved');
-      await expect(ctorArg.promptTabs([{ question: 'Which one?' }])).resolves.toEqual(['picked']);
+      expect(answers).toEqual(['Yes', 'saved', ['picked']]);
       expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No'], expect.anything());
       expect(promptSecret).toHaveBeenCalledWith('STRIPE_KEY', 'Paste it', 'api_key', expect.anything());
       expect(promptTabs).toHaveBeenCalledWith([{ question: 'Which one?' }], expect.anything());
@@ -2750,6 +2792,7 @@ describe('spawn_agent tool', () => {
         tools: [makeTool('bash'), askSecretTool as unknown as ToolEntry<unknown>, makeTool('spawn_agent')],
       });
 
+      await whileChildRuns(async (child) => { await child.promptSecret('STRIPE_KEY', 'Paste it'); });
       await spawnAgentTool.handler(
         { agents: [{ name: 'asker', task: 'Set up an integration' }] },
         parent,
@@ -2759,7 +2802,6 @@ describe('spawn_agent tool', () => {
         promptSecret: PromptSecretFn;
         tools: ToolEntry<unknown>[];
       };
-      await ctorArg.promptSecret('STRIPE_KEY', 'Paste it');
       expect(promptSecret, 'the child must reach the parent channel').toHaveBeenCalled();
       const names = ctorArg.tools.map((t) => t.definition.name);
       expect(names, 'a spawned child must keep ask_secret').toContain(
@@ -4397,6 +4439,7 @@ describe('spawn_agent tool', () => {
     it('stamps the child name and task onto a prompt the child raises', async () => {
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Merge');
       const agent = makeAgent({ promptUser });
+      await whileChildRuns(async (child) => { await child.promptUser('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']); });
       await spawnAgentTool.handler(
         { agents: [{ name: 'inbox-triage', task: 'Fold duplicate contacts' }] },
         agent,
@@ -4405,11 +4448,10 @@ describe('spawn_agent tool', () => {
       // The parent's OWN prompt carries nothing — the cause of that one is the
       // message directly above it, and an "asked by" line there is noise.
       await agent.promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
-      expect(promptUser.mock.calls[0]![2]).toBeUndefined();
+      expect(promptUser.mock.calls[1]![2]).toBeUndefined();
 
       // The child's does.
-      await (await childConfig()).promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
-      expect(promptUser.mock.calls[1]![2]).toMatchObject({
+      expect(promptUser.mock.calls[0]![2]).toMatchObject({
         subagent: true,
         subagentName: 'inbox-triage',
         subagentTask: 'Fold duplicate contacts',
@@ -4425,25 +4467,25 @@ describe('spawn_agent tool', () => {
       // client's `clean()` reduces it to '' — so a renderer keyed on the NAME
       // shows nothing at all for exactly the parent it exists to warn about.
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await whileChildRuns(async (child) => { await child.promptUser('Merge?', ['Merge', 'Cancel']); });
       await spawnAgentTool.handler(
         { agents: [{ name: '​', task: 'Fold duplicate contacts' }] },
         makeAgent({ promptUser }),
       );
-      await (await childConfig()).promptUser!('Merge?', ['Merge', 'Cancel']);
       expect(promptUser.mock.calls[0]![2]!.subagent, 'the flag is the engine\'s, not the spec\'s').toBe(true);
     });
 
     it('stamps promptSecret and promptTabs too, not only promptUser', async () => {
       const promptSecret = vi.fn().mockResolvedValue('saved');
       const promptTabs = vi.fn().mockResolvedValue([]);
+      await whileChildRuns(async (child) => {
+        await child.promptSecret('STRIPE_KEY', 'Paste the key');
+        await child.promptTabs([{ question: 'Which account?' }]);
+      });
       await spawnAgentTool.handler(
         { agents: [{ name: 'connector', task: 'Wire the Stripe key' }] },
         makeAgent({ promptSecret, promptTabs }),
       );
-
-      const child = await childConfig();
-      await child.promptSecret!('STRIPE_KEY', 'Paste the key');
-      await child.promptTabs!([{ question: 'Which account?' }]);
       expect(promptSecret.mock.calls[0]![3]).toMatchObject({ subagentName: 'connector' });
       expect(promptTabs.mock.calls[0]![1]).toMatchObject({ subagentName: 'connector' });
     });
@@ -4467,11 +4509,11 @@ describe('spawn_agent tool', () => {
 
     it('lets a caller-supplied meta win, so a step inside a child keeps its own', async () => {
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await whileChildRuns(async (child) => { await child.promptUser('Proceed?', ['Yes'], { subagentName: 'inner', stepId: 'load' }); });
       await spawnAgentTool.handler(
         { agents: [{ name: 'outer', task: 'Run the pipeline' }] },
         makeAgent({ promptUser }),
       );
-      await (await childConfig()).promptUser!('Proceed?', ['Yes'], { subagentName: 'inner', stepId: 'load' });
 
       const meta = promptUser.mock.calls[0]![2]!;
       expect(meta.subagentName, 'the nearer wrapper must not overwrite the nearer caller').toBe('inner');

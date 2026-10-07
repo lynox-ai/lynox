@@ -762,9 +762,17 @@ function promptCallbacksWithOrigin(
     //
     // `holdForHuman` stops the spawn time limit while the question is open (see
     // `SpawnDeadline`).
-    promptUser: promptUser ? (q, opts, m) => whileHeld(holdForHuman, () => promptUser(q, opts, { ...origin, ...m, signal: m?.signal ?? childGone })) : undefined,
-    promptSecret: promptSecret ? (n, p, k, m) => whileHeld(holdForHuman, () => promptSecret(n, p, k, { ...origin, ...m, signal: m?.signal ?? childGone })) : undefined,
-    promptTabs: promptTabs ? (qs, m) => whileHeld(holdForHuman, () => promptTabs(qs, { ...origin, ...m, signal: m?.signal ?? childGone })) : undefined,
+    //
+    // And a question raised once the child has settled is not forwarded at all: it
+    // answers itself as not-given (the same value an unanswered question settles to),
+    // whatever the parent's channel does with a stopped signal — the worker loop's,
+    // for one, ignores it, and would leave the question answerable for its TTL.
+    promptUser: promptUser ? (q, opts, m) => (childGone.aborted ? Promise.resolve('__dismissed__')
+      : whileHeld(holdForHuman, () => promptUser(q, opts, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
+    promptSecret: promptSecret ? (n, p, k, m) => (childGone.aborted ? Promise.resolve('canceled' as const)
+      : whileHeld(holdForHuman, () => promptSecret(n, p, k, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
+    promptTabs: promptTabs ? (qs, m) => (childGone.aborted ? Promise.resolve([])
+      : whileHeld(holdForHuman, () => promptTabs(qs, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
   };
 }
 
