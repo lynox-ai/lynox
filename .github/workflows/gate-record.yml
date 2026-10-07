@@ -65,6 +65,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # Needed to reach this PR's head after its branch is gone — see the run block.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           # The PROPERTY, from GitHub's own payload — not the repo name, which is a proxy that a
           # rename breaks without a symptom. The script fails CLOSED (treats the record as public)
           # when this is absent, which for THIS repo is also the correct answer.
@@ -76,7 +78,48 @@ jobs:
           # compares the two trees, so once main moves ahead every file changed
           # there shows up as this PR's — which reds a docs-only PR the moment
           # somebody else lands code, and the script's own list is then wrong.
-          git diff --name-only "$BASE_SHA...$HEAD_SHA" > /tmp/pr-files.txt
+          # ⚠ `edited` fires on MERGED PRs too, and then TWO things combine.
+          # `delete_branch_on_merge` is on, so the head is reachable from no branch; and for a
+          # merged PR this event resolves to the BASE branch at the merge commit, so
+          # `actions/checkout` builds a local `main` and never asks for `refs/pull/<n>/merge`.
+          # On an OPEN PR it does ask, and the head arrives for free as that merge commit's second
+          # parent — which is why none of this can happen there. Both ingredients are needed.
+          #
+          # Measured on lynox-ai/lynox#1577 on 2026-10-08: correcting the body after the merge left
+          # this required check red with a bare `fatal: Invalid symmetric difference expression` and
+          # exit 128, before the script could print its own fail-closed refusal. A required check
+          # that reds for a reason nobody can act on is what teaches that reds are decorative, and
+          # this job exists as a mechanism because prose lost to exactly that.
+          #
+          # The head survives as `refs/pull/<n>/head`, which the server keeps serving, so fetch it
+          # when — and only when — the object is missing; on an open PR it never is, so this is
+          # inert there. The number arrives through `env` like every other input to this step, never
+          # spliced into the shell by the workflow expression syntax.
+          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --quiet origin "refs/pull/$PR_NUMBER/head" || true
+          fi
+          # ⛔ This catches the DIFF FAILING, not the reasons it can fail. The first draft tested
+          # each endpoint for presence, which is an enumeration — and a review found a second
+          # bare-128 path it did not cover (`fatal: … no merge base`, on disjoint histories). An
+          # enumeration needs a new branch per reason; wrapping the command empties that set
+          # instead of listing it, and git's own words say which case it was.
+          #
+          # ⚠ The stderr redirect comes FIRST, before the stdout one, and that order is the
+          # whole point of it: bash opens them left to right, so with `>` first a failure to open
+          # the file list leaves the error file UNTRUNCATED and the message then quotes a reason
+          # from some earlier run. A review round reproduced exactly that. This way the error
+          # file is truncated first and bash's own complaint lands inside it.
+          #
+          # ⚠ `--name-only` is load-bearing for more than brevity: a full diff can be driven
+          # through an author-supplied `diff.<driver>.command` via `.gitattributes`, which would
+          # put author-controlled text into the stderr this line quotes. Measured by a review
+          # round: with `--name-only` that channel produces nothing; without it, it produces the
+          # author's string. `tr` below removes the newlines either way, so no quoted text can
+          # begin a line and forge a workflow command — but do not drop either of them.
+          if ! git diff --name-only "$BASE_SHA...$HEAD_SHA" 2>/tmp/pr-diff-err > /tmp/pr-files.txt; then
+            echo "::error::gate-record: could not compute this PR's diff ($BASE_SHA...$HEAD_SHA) — refusing to pass on a diff this check cannot see. git said: $(tr '\n' ' ' < /tmp/pr-diff-err)"
+            exit 1
+          fi
           node scripts/gate-record.mjs \
             --body-file /tmp/pr-body.txt \
             --head "$HEAD_SHA" \
