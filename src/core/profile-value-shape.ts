@@ -81,8 +81,12 @@ export const GRANT_TYPE_SHAPE = /^[A-Za-z0-9_:.\-]{1,40}$/;
  */
 export const HTTP_HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/;
 
-/** A query parameter name the engine will name to the model and the model can put in a URL as is. */
-export const QUERY_PARAM_NAME = /^[A-Za-z0-9._~-]{1,64}$/;
+/**
+ * A query parameter name the engine will name to the model and the model can put in a URL as
+ * is. The same set `safeToken` in http.ts prints, so a name validation accepts is never one the
+ * 401 hint calls rejected.
+ */
+export const QUERY_PARAM_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 
 /**
  * A vault slot name a profile resolves, as it may appear in a sentence: under the

@@ -168,14 +168,16 @@ function validateProfile(profile: ApiProfile): string | null {
     if (!VALID_AUTH_TYPES.has(profile.auth.type)) {
       return `Invalid auth.type "${profile.auth.type}": must be none, basic, bearer, header, query, or oauth2`;
     }
-    // The value is not repeated: a file-loaded profile can hold any text here.
+    // The value is not repeated: a file-loaded profile can hold any text here. Checked for
+    // every auth.type on purpose: a leftover name is still printed by `view`, so it must be a
+    // name even when nothing attaches it.
     const headerName: unknown = profile.auth.header_name;
     if (headerName !== undefined && (typeof headerName !== 'string' || !HTTP_HEADER_NAME.test(headerName))) {
       return 'Invalid auth.header_name: must be an HTTP header name, for example "X-Api-Key" (letters, digits and !#$%&\'*+-.^_`|~, no spaces, at most 64 characters).';
     }
     const queryParam: unknown = profile.auth.query_param;
     if (queryParam !== undefined && (typeof queryParam !== 'string' || !QUERY_PARAM_NAME.test(queryParam))) {
-      return 'Invalid auth.query_param: must be a query parameter name, for example "api_key" (letters, digits and . _ ~ -, at most 64 characters).';
+      return 'Invalid auth.query_param: must be a query parameter name, for example "api_key" (letters, digits and . _ -, at most 64 characters).';
     }
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;

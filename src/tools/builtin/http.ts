@@ -1716,16 +1716,12 @@ async function attachEngineManagedAuth(
 
 /**
  * Header, query-param and vault-key names come from the PROFILE, and a
- * prompt-injected agent can author one: `validateProfile` shape-checks
- * `username_key`/`password_key`, checks `vault_keys` only for being a list of
- * strings, and never checks `header_name` or `query_param`. These land in a
- * hint that is appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the model is meant to
- * trust — so a name carrying newlines can forge a reminder of its own.
- *
- * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`
- * since they were written, and the root fix belongs in `validateProfile`, not here).
- * What IS new is widening it to two fields never interpolated before across three
- * more shapes.
+ * prompt-injected agent can author one. `validateProfile` now shape-checks all of
+ * them at create/update, but a profile loaded from a file is not validated, so these
+ * names still reach this hint unchecked unless this file shapes them. The hint is
+ * appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the
+ * model is meant to trust — so a name carrying newlines could forge a reminder of its
+ * own; `safeToken` below is what stops that here.
  *
  * ⚠ The sentence here used to end "so the filter goes on everything this file
  * prints, old hints included". **That was false when it was written and a review
