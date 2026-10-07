@@ -2206,9 +2206,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // enum both answers coincide, so this is the right set today, and they are still two
     // different questions.
     //
-    // They also differ on case: this predicate folds, the place that actually decides
-    // whether a body is sent — `bodySent` below, which `opts.body` only reads the result of —
-    // compares the RAW method. So a lowercase
+    // They also differ on case: this predicate folds, and BOTH places that decide whether a body
+    // is sent — `opts.body` below and the `bodySent` term it does not read — compare the RAW
+    // method. So a lowercase
     // read has its body sent and not scanned, and the GET-exfiltration check above is
     // skipped too — none of it reachable through the validated dispatch, which enforces
     // the enum case-sensitively.
@@ -2230,10 +2230,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // `opts`, and a BODYLESS POST went out and returned 200 — an empty record on the remote with
     // nothing reporting it, where the condition below forwards the value and lets the transport
     // refuse it. Guarding that with a fifteenth refusal site was the next attempt and cost more
-    // than it bought: three comments and fourteen test names in this repo state the refusal
-    // count, and the by-member list in the test file exists precisely so a new site cannot be
-    // added without its own row. So the predicate stays written twice. Both spellings are here,
-    // eleven lines apart, which is the cheapest form of a duplication that has to agree.
+    // than it bought: this repo states the refusal count in three comments and fourteen test
+    // names, all of which a new site falsifies at once. ⚠ Not because any check catches it — the
+    // by-member list in the test file says of itself that it "does not notice a FIFTEENTH refusal
+    // added as a plain `return`" and that "nothing cheap can". The cost is the fourteen names and
+    // three sentences, and the risk is that they quietly stop being true, which is worse.
+    //
+    // So the predicate stays written twice, and the duplication is NOT cheap: the two spellings
+    // sit 130 lines apart with the body-secret refusal and the whole write-consent gate between
+    // them. Nothing makes them agree. That is the known cost of not folding, stated rather than
+    // dressed up — an earlier draft of this sentence claimed eleven lines and adjacency as the
+    // justification, which was simply wrong.
     //
     // It holds the body rather than a boolean so the `typeof` narrowing survives to the call
     // below, which then needs no cast; a boolean would force one, because `input.body` is
@@ -2246,7 +2253,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // free, though, and an earlier draft of this paragraph said it was: the fold is what creates
     // the unscanned body for a lowercase `'get'`, so unifying them would stop sending it. That
     // is a real behaviour change on the one spelling the paragraph above calls out and pays for
-    // knowingly. Named here because the next edit to the method set has to find three places.
+    // knowingly. Named here because the next edit to the method set has to find three places for
+    // THIS question — and four more on the same GET/HEAD-versus-rest axis that an enum change
+    // touches: `shouldRewriteToGet` and the GET-exfiltration gate compare raw, `httpTimeoutMessage`
+    // and `undoClassFor` fold. Only the last is pinned by a test. Leaving one of them out of a
+    // paragraph like this is how the compensation claim three paragraphs down went wrong.
     const bodySent: string | null =
       typeof input.body === 'string' && method !== 'GET' && method !== 'HEAD'
         ? input.body
@@ -2285,8 +2296,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     //      schema minimum, the clamp floor is 1 ms, the abort timer is armed before the `try`,
     //      and `fetchPinned` resolves DNS before a byte leaves — so a 1 ms abort lands here with
     //      nothing on the wire. From in here the only observable fact is that `fetch` was CALLED,
-    //      which is strictly weaker. (The message it rides already says the request may have
-    //      taken effect, so nothing was lost by dropping it.)
+    //      which is strictly weaker. For the six methods the schema admits, the message this
+    //      note rides already carries the uncertainty ("may still have reached the server"), so
+    //      dropping the clause took nothing away. ⚠ That compensation does NOT hold for a
+    //      lowercase verb: `httpTimeoutMessage` folds case and returns the bare line for
+    //      GET/HEAD, while this term compares raw and does send the body. Unreachable through the
+    //      validated dispatch, and named because an earlier draft of this parenthetical asserted
+    //      the compensation without the exception — on the one spelling the paragraph above
+    //      spends its length defending.
     //   2. that the API WOULD HAVE REJECTED the call. `model-json-body.ts` measured the opposite
     //      on the API that produced this defect: HTTP 200 with an application-level
     //      "POST Data Is Empty". Accepted and misread is not rejected.
@@ -2307,7 +2324,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // helpers, not to this constant.
     const repairNote = repairedBody === null
       ? ''
-      : `\n\n**[Engine note \u2014 your request body was repaired]**\nIt ended in a closing tag, which is not valid JSON. The engine removed that tag before using the body. Do not append a closing tag to a JSON body.`;
+      : `\n\n**[Engine note \u2014 your request body was repaired]**\nIt had a closing tag at the end, which is not valid JSON. The engine removed that tag, and the whitespace around it, before using the body. Do not append a closing tag to a JSON body.`;
 
     // ⚠ The scan reads `input.body` — the ORIGINAL — and not the repaired one, which is the
     // opposite of what the first draft did under "scan what goes out". The repaired body is a

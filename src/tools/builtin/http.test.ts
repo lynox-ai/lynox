@@ -587,6 +587,31 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs[0]!.body).toBeUndefined();
     });
 
+    it('⭐ a HEAD whose body ends in a tag gets NO note either — the other dropped half', async () => {
+      // ⚠ Written because a surviving mutant found this exact hole: deleting only
+      // `&& method !== 'HEAD'` from the term killed nothing. The GET half had a witness, the HEAD
+      // half had none, and the consequence is the defect this branch exists to remove — `opts`
+      // drops a HEAD body, so the engine would report repairing a body it discarded. The body
+      // must be REPAIRABLE for this to witness anything: the neighbouring "HEAD suppresses body"
+      // test uses a non-JSON body, which the repair declines on its first condition, so it could
+      // never have caught this.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'HEAD',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+      }, agentWithPromptFn());
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(result)).not.toContain('repaired');
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.body).toBeUndefined();
+    });
+
     it('⭐ the note survives a timeout — the silent path is the one that mattered', async () => {
       // On success the note rides the wrapped result; on a timeout the handler THROWS, and the
       // note used to be lost. The model then retried with the identical broken body and the
@@ -638,14 +663,18 @@ describe('httpRequestTool', () => {
       // deliberate edit has to be made twice, and that cost IS the gate.
       const EXPECTED =
         '\n\n**[Engine note \u2014 your request body was repaired]**\n'
-        + 'It ended in a closing tag, which is not valid JSON. '
-        + 'The engine removed that tag before using the body. '
+        + 'It had a closing tag at the end, which is not valid JSON. '
+        + 'The engine removed that tag, and the whitespace around it, '
+        + 'before using the body. '
         + 'Do not append a closing tag to a JSON body.';
 
       expect(msg).toContain(EXPECTED);
-      // …and the note is the TAIL of the message, so the engine's own sentence cannot be read as
-      // part of the timeout text it follows.
-      expect(msg.endsWith(EXPECTED), 'the note is not the last thing the model reads').toBe(true);
+      // …and on THIS path the note is the tail, so the engine's own sentence cannot be read as
+      // part of the timeout text it follows. ⚠ Scoped to the timeout path deliberately: on the
+      // SUCCESS path three appenders legitimately come after it (the 401 credential reminder, the
+      // OAuth2 swap hint and the profile warning), so a general "the note is last" would be
+      // false. An earlier version of this comment said it without the scope.
+      expect(msg.endsWith(EXPECTED), 'the note is not the tail of the timeout error').toBe(true);
     });
 
     it('⭐ the handler carries no copy of one retired sentence about which body is scanned', async () => {
@@ -659,34 +688,36 @@ describe('httpRequestTool', () => {
       const src = readFileSync(new URL('./http.ts', import.meta.url), 'utf8');
       const WRONG = 'gets scanned is the body that goes out';
 
-      // ⚠ Positive control FIRST, and it has to identify the SURFACE — not merely prove that some
-      // file was read. `repairStrayCloseTag` was the first choice and it is the gate-record
-      // defect verbatim: that symbol is declared in `model-json-body.ts` as well, so aiming the
-      // read one file sideways left the control satisfied and the needle absent — green, having
-      // swept nothing. A control token has to be ABSENT from every other surface, which is the
-      // property `tests/gate-record.test.ts` asserts for its own marker. This one occurs once in
-      // this handler and nowhere else under `tools/builtin`.
+      // ⚠ Positive control FIRST, and it has to identify the PARAGRAPH — not merely prove that
+      // some file was read. Three tokens were tried, and the sequence is the lesson:
+      //
+      //   1. `repairStrayCloseTag` — the gate-record defect verbatim. `model-json-body.ts`
+      //      declares it too, so aiming the read one file sideways left the control satisfied and
+      //      the needle absent: green, having swept nothing. A control token has to be ABSENT
+      //      from every other surface, which is the property `tests/gate-record.test.ts` asserts
+      //      for its own marker.
+      //   2. `export const httpRequestTool` — unique in the repo, but 280 lines from the claim.
+      //      Split this file and move the body-repair region, and the control stays green on a
+      //      file that no longer carries the comment.
+      //   3. `The scan reads the ORIGINAL` — suggested, and rejected by MEASUREMENT: it does not
+      //      occur in this file at all. The sentence reads "The scan reads `input.body` — the
+      //      ORIGINAL —". The control caught that, which is the only reason to write one.
+      //
+      // The token below sits in the sentence that states the CORRECT direction, so it dies when
+      // that correction is deleted. ⚠ It does NOT die when the repair-ordering block moves: that
+      // block is ~42 lines from this one, so a split between them still leaves this green. 280
+      // lines became 42, not zero, and an earlier draft of this comment claimed the control
+      // "dies exactly when the correction does", which overstates it.
       //
       // A moved file, incidentally, is NOT the failure this guards: `readFileSync` throws ENOENT
       // and the test goes loudly red. The reachable failure was always the wrong TARGET.
-      // ⚠ The token names the PARAGRAPH, not the file, and that distinction is the whole repair.
-      // The first control was `repairStrayCloseTag`, which `model-json-body.ts` also declares, so
-      // aiming the read one file sideways left it satisfied with the needle absent — green,
-      // sweeping nothing. The second was `export const httpRequestTool`: unique, but 280 lines
-      // away, so splitting this file and moving the body-repair region would leave the control
-      // green on a file that no longer carries the comment. This phrase sits in the sentence that
-      // states the CORRECT direction, so the control dies exactly when the correction does.
-      //
-      // A third candidate was suggested and rejected by measurement: `The scan reads the ORIGINAL`
-      // does not occur in this file at all — the sentence reads "The scan reads `input.body` — the
-      // ORIGINAL —". The control caught it, which is the only reason to write one.
       expect(src, 'the sweep is not reading the paragraph whose claim this is about')
         .toContain('and not the repaired one');
       expect(src, 'a comment claims the scan reads the repaired body; it reads the original')
         .not.toContain(WRONG);
     });
 
-    it('⭐ an EMPTY body attaches nothing — the term must not widen what goes out', async () => {
+    it('⭐ an EMPTY body attaches nothing — `opts.body` must not widen what goes out', async () => {
       // ⚠ This witnesses the TRUTHINESS test at `opts.body`, which is the one thing about the
       // outbound body this change deliberately did not touch. `''` is falsy, so nothing is
       // attached; replace that condition with an `!== undefined` and an empty body becomes an
