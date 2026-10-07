@@ -43,6 +43,19 @@ export class ApiProfileUnlinkError extends Error {
 // hand the id into `join(apisDir, …)`.
 const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
+/** The auth types a briefing line may name; anything else a stored profile holds is left out. */
+const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
+
+/**
+ * A stored value on one line: every line or paragraph separator and control character
+ * becomes a space, so the value cannot begin a line of its own in the briefing. Not a
+ * string (a profile from a file is not type-checked) prints as a marker.
+ */
+function oneLineInBriefing(value: unknown): string {
+  if (typeof value !== 'string') return `<non-string: ${typeof value}>`;
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ');
+}
+
 /**
  * Said once above every value a stored profile carries, in `view` and in `list`. It names
  * what the text is (reference about one API) and what it cannot do, because a profile can
@@ -1231,26 +1244,39 @@ export class ApiStore {
   }
 
   /**
-   * Format all profiles as system prompt context (compact summary).
-   * Injected into the agent's briefing. Full details available via `api_setup` tool.
+   * Format all profiles as a compact summary for the session briefing.
+   *
+   * Two blocks, split by who wrote the text. `<api_profiles>` holds what the profiles
+   * STORE — name, description, address — and nothing else; a profile can come from a file
+   * or from an earlier agent, so its preamble says what the text is. Each value is flattened
+   * onto its own line, so a stored line break cannot start a line of its own, and a
+   * docs-page bootstrap keeps its description wrapped as untrusted data, as `view` does.
+   * `<api_profile_rules>` holds the engine's own guidance about maintaining profiles, so a
+   * stored value cannot append a sentence that reads as part of it. Only engine-derived
+   * values sit outside the stored text: the admitted id, a known auth type, and counts.
    */
   formatForSystemPrompt(): string {
     if (this.profiles.size === 0) return '';
 
     const lines = [...this.profiles.values()].map(p => {
-      const auth = p.auth ? ` [${p.auth.type}]` : '';
-      const endpoints = p.endpoints?.length ? `, ${String(p.endpoints.length)} endpoints` : '';
+      const auth = p.auth && BRIEFING_AUTH_TYPES.has(p.auth.type) ? ` [${p.auth.type}]` : '';
+      const endpoints = Array.isArray(p.endpoints) && p.endpoints.length ? `, ${String(p.endpoints.length)} endpoints` : '';
       const shape = p.response_shape && p.response_shape.kind !== 'passthrough' ? ', shape' : '';
-      return `- ${p.name}: ${p.description} (${p.base_url}${auth}${endpoints}${shape})`;
+      const description = p.provenance?.source === 'docs_url'
+        ? wrapUntrustedData(oneLineInBriefing(p.description), 'api_profile.description')
+        : oneLineInBriefing(p.description);
+      return `- ${p.id}: ${oneLineInBriefing(p.name)} — ${description} (${oneLineInBriefing(p.base_url)}${auth}${endpoints}${shape})`;
     });
 
-    return compose([renderFence('api_profiles', `${lines.join('\n')}
-
+    return compose([
+      renderFence('api_profiles', lines.join('\n'), {
+        preamble: `Registered APIs, one per line, each starting with its id. ${STORED_PROFILE_PREAMBLE}`,
+      }),
+      renderFence('api_profile_rules', `Use \`api_setup\` action=view with the id to get full details BEFORE calling an API above.
 Maintain these profiles as you learn. If an API call returns an unexpected schema, hits a rate limit,
 or teaches you a new pitfall, update the profile via \`api_setup\` action=refine. For new APIs,
-prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.`, {
-      preamble: 'Registered APIs (use \`api_setup\` action=view with the id to get full details BEFORE calling the API):',
-    })]);
+prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a profile when no spec exists.`),
+    ], '\n');
   }
 
   /**
