@@ -6,9 +6,9 @@
 
 - The background worker reserved every scheduled agent task's worst case — the
   most such a run may spend, $15 for an ordinary scheduled task — against the
-  daily and monthly spend caps. Where the daily cap was no larger than that, the
-  first cent of recorded spend made the reservation exceed the cap, and no scheduled agent task started again until the
-  day rolled over; where the daily cap was smaller, such a task never started at
+  daily and monthly spend caps. Where the daily cap equalled that, the first cent of
+  recorded spend made the reservation exceed the cap, and no such task started
+  again until the day rolled over; where the daily cap was smaller, such a task never started at
   all. The worker now reserves the smallest of the run's worst case, the headroom
   still free under the caps, and the per-run session ceiling, and lowers the
   run's own cost cap to that same amount. With less than $0.05 of headroom the
@@ -42,6 +42,7 @@
   run that delegated to it, so that run's next turn computed with more room than
   it had. The sub-agent's actual cost is now booked on the delegating run's cost
   cap, on self-hosted, BYOK and managed instances alike. (#1542)
+
 ### Changed — BREAKING (library consumers): `IAgent` gains `chargeExternalCost`
 
 - `IAgent` has a new required method, `chargeExternalCost(usd)`, used to book a
@@ -51,13 +52,13 @@
 ### Fixed: credential masking catches a key glued to an identifier or an escape
 
 - Credential shapes with a known vendor prefix (Anthropic, OpenAI, Stripe,
-  GitHub, AWS, Google, Slack, Shopify) only matched at a word boundary, so a key
-  written directly after `_` — as part of a variable name — or after a JSON or
-  URL escape was neither masked nor detected, and could come back whole in an API error. It is now masked and
-  detected there too. A snake_case name that merely contains such a prefix, with
-  no digit in what follows, is still not taken for a key. (#1540)
-- The same rule applies to the web UI's pasted-key guard and display masking, to
-  and to the redaction applied before a conversation is turned into a saved
+  GitHub, AWS, Google, Slack, Shopify) only matched at a word boundary, so the
+  vendor rules did not recognise a key written directly after `_` — as part of a
+  variable name — or after a JSON or URL escape; where only those rules apply it
+  was neither masked nor detected, and could come back whole in an API error. It is now masked and
+  detected there too. A snake_case name that merely contains such a prefix, with no digit in the letters and digits right after it, is still not taken
+  for a key. (#1540)
+- The same rule applies to the web UI's pasted-key guard and display masking, and to the redaction applied before a conversation is turned into a saved
   workflow.
 
 ### Changed: rendering hardening for chat Markdown
@@ -79,12 +80,12 @@
   that scheduled it. The task now records whether that conversation had taken in
   untrusted content (for example web or mail content, or an external tool's
   result) and its run
-  starts from that state: each step is judged as it would have been in that
+  starts from that state: each step's actions are judged with the untrusted-content state of that
   conversation. A task created from a conversation that had taken in nothing
   runs as before. (#1528)
 - The record lives in the new `engine.db` column `triggers.created_untrusted`
-  (schema v19). Tasks created before this release have nothing recorded and run
-  as before. A task that is saved again never loses a recorded state, and a
+  (schema v19). A workflow task created before this release carries no record; to
+  give it one, create it again from its conversation. A task that is saved again never loses a recorded state, and a
   stored value this version does not recognise is read as untrusted.
 
 ### Fixed: web UI errors that went unreported
@@ -101,8 +102,9 @@
 ### Internal
 
 - The Svelte components of the web UI are linted, the Markdown renderer
-  included, and floating promises across the web UI are handled or marked.
-  (#1527, #1539, #1543)
+  included, and floating promises in the web UI outside the chat view are handled or marked, and
+  the chat view's prompt-answer, stop, dismissal and copy calls are handled.
+  (#1527, #1536, #1539, #1543)
 - `tests/online/` calls real provider APIs and now runs only with
   `LYNOX_ONLINE=1`; an ordinary local run leaves it out and says so. The checks
   in it that need no provider moved to `tests/online-guards.test.ts`. (#1538)
@@ -122,7 +124,7 @@ with a clean state again after a rollback, as it did before this release.
 
 Rolling back further, to 2.14.x: the two steps under 2.15.0's **Upgrade and
 rollback** still apply — settle every parked trigger, and check scheduled mails
-already claimed for sending.
+already claimed for sending — as does its note on the withdrawn preset models.
 
 ## 2.15.0 — 2026-10-07
 
