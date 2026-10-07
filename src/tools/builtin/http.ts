@@ -2218,14 +2218,45 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // classified `none` and scanned. Folding stays because the declaration needs it — a
     // lowercase write must classify, and `undo-declaration.test.ts` pins that — so the cost
     // lands on one unreachable spelling and is paid knowingly.
-    // ⚠ Repair a model's stray trailing close tag BEFORE the scan below, not after, so the body
-    // that gets scanned is the body that goes out. The three conditions and the evidence live in
-    // `model-json-body.ts`; the short version is that `minimax-m3` ends JSON bodies with a
-    // literal `</body>`, which makes every POST through the API store fail at the far end with a
-    // misleading error, and the model then repeats the identical call.
-    const repairedBody =
-      typeof input.body === 'string' ? repairStrayCloseTag(input.body, headers) : null;
-    const outboundBody = repairedBody?.body ?? input.body;
+    // ⚠ Does a body actually leave? ONE term, because this predicate is read three times below
+    // — the repair, `opts.body`, and the note on the result — and when it was written out twice
+    // the three disagreed: the note fired on a GET, whose body `opts` never carries, and told the
+    // model its request body had been repaired before being sent. It had not been sent at all.
+    // It holds the body rather than a boolean, so the narrowing survives and the repair below
+    // needs no cast — `strictest` would otherwise make this an `as string`, which is a claim
+    // about a value rather than a check of it.
+    const bodySent: string | null =
+      typeof input.body === 'string' && input.body.length > 0
+        && method !== 'GET' && method !== 'HEAD'
+        ? input.body
+        : null;
+
+    // ⚠ Repair a model's stray trailing close tag before `opts` is built, and ONLY when a body
+    // leaves. The three conditions and the evidence live in `model-json-body.ts`; the short
+    // version is that `minimax-m3` ends JSON bodies with a literal `</body>`, which makes every
+    // POST through the API store fail at the far end with a misleading error, and the model then
+    // repeats the identical call.
+    //
+    // ⚠ An earlier version of this comment justified the ordering by claiming the scan reads
+    // the REPAIRED body. That had been false since the direction was reversed one commit later,
+    // and it was a claim about security behaviour in a public repo. The scan reads the ORIGINAL
+    // on purpose; the paragraph below says why.
+    //
+    // ⚠ The wrong sentence is deliberately NOT quoted here, not even as history — a test sweeps
+    // this file for it, and a sweep with an exception is a sweep somebody will widen. Same rule
+    // as `scripts/gate-record.mjs` follows for its own refused format.
+    const repairedBody = bodySent === null ? null : repairStrayCloseTag(bodySent, headers);
+    const outboundBody = repairedBody?.body ?? bodySent;
+
+    // ⚠ ONE string for the note, because it is appended on TWO paths and the second was
+    // missing. On success it rides the wrapped result; on a timeout or transport failure the
+    // handler throws instead, and the model then retried with the identical broken body while
+    // the repair stayed invisible to it — the exact loop this change exists to end, one layer
+    // further out. Written twice, the two would drift; the empty string when nothing was
+    // repaired makes both call sites unconditional.
+    const repairNote = repairedBody === null
+      ? ''
+      : `\n\n**[Engine note — your request body was repaired before it was sent]**\nIt ended in a closing tag, which is not valid JSON, so the API would have rejected the call. The engine removed that tag and sent the rest unchanged. Do not append a closing tag to a JSON body.`;
 
     // ⚠ The scan reads `input.body` — the ORIGINAL — and not the repaired one, which is the
     // opposite of what the first draft did under "scan what goes out". The repaired body is a
@@ -2293,7 +2324,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     const opts: RequestInit = { method, headers };
-    if (outboundBody && method !== 'GET' && method !== 'HEAD') {
+    if (outboundBody !== null) {
       opts.body = outboundBody;
     }
     // Hard cap. The original 30s default + agent-overridable timeout meant a
@@ -2464,9 +2495,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // resolved `secret:NAME` can end up inside that tag, and this line is past the point where
       // either the egress scan or `maskSecrets` could catch it. `model-json-body.ts` has the
       // measurement. The model wrote the tag, so repeating it to the model adds nothing anyway.
-      if (repairedBody !== null) {
-        wrapped += `\n\n**[Engine note — your request body was repaired before it was sent]**\nIt ended in a closing tag, which is not valid JSON, so the API would have rejected the call. The engine removed that tag and sent the rest unchanged. Do not append a closing tag to a JSON body.`;
-      }
+      wrapped += repairNote;
 
       // Engine-managed-auth 401-hint. When the engine DECLINED to attach a
       // credential it did not fail the request — a profile that works today keeps
@@ -2604,7 +2633,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // the file needs the region to enforce it, not the reader to remember.
       if (err instanceof ToolSoftFailure) throw err;
       if (timedOut !== null) {
-        throw new Error(httpTimeoutMessage(timeoutMs, method, timedOut === 'wall', answeredStatus));
+        // The note rides the timeout too — see `repairNote` above for why the silent path is
+        // the one that matters here.
+        throw new Error(httpTimeoutMessage(timeoutMs, method, timedOut === 'wall', answeredStatus) + repairNote);
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {

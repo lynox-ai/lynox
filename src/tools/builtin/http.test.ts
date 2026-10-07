@@ -550,6 +550,66 @@ describe('httpRequestTool', () => {
       expect(String(result)).not.toContain('</body>');
     });
 
+    it('⭐ a GET whose body ends in a tag gets NO note — nothing was sent to repair', async () => {
+      // ⚠ The defect this pins shipped: the note fired whenever `repairStrayCloseTag` returned
+      // something, and that was computed independently of whether a body leaves at all. `opts`
+      // never carries a body on GET/HEAD, so the engine told the model "your request body was
+      // repaired before it was sent" about a body it had discarded. The sentence was false, and
+      // false in the direction that teaches the model something untrue about its own call.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+      }, agentWithPromptFn());
+
+      expect(String(result)).not.toContain('repaired');
+      // …and the body really was dropped rather than repaired-and-sent, or this would pass for
+      // the wrong reason.
+      expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('body');
+    });
+
+    it('⭐ the note survives a timeout — the silent path is the one that mattered', async () => {
+      // On success the note rides the wrapped result; on a timeout the handler THROWS, and the
+      // note used to be lost. The model then retried with the identical broken body and the
+      // repair was invisible to it — the same loop one layer out. One string, two paths.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => { /* never settles */ })));
+
+      // ⚠ It REJECTS — a timeout is a thrown Error, not a returned refusal, so `visible` (which
+      // unwraps blocked calls) does not catch it. Asserting on the rejection is the point: the
+      // note has to be on the error the model receives.
+      await expect(handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+        timeout_ms: 50,
+      }, agentWithPromptFn())).rejects.toThrow(/repaired before it was sent/);
+    });
+
+    it('⭐ no comment in the handler claims the scan reads the repaired body', async () => {
+      // ⚠ A TEXT sweep, and it says so: it checks a sentence, not the behaviour. The behaviour
+      // has its own witness ("the egress scan reads the ORIGINAL body"), and the two are not
+      // interchangeable — the code was right and the comment was wrong for one commit, which is
+      // exactly the state a behavioural test cannot see. A claim about security behaviour in a
+      // public repo is worth a sweep even when the sweep is only a correlate.
+      const { readFileSync } = await import('node:fs');
+      const src = readFileSync(new URL('./http.ts', import.meta.url), 'utf8');
+      const WRONG = 'gets scanned is the body that goes out';
+
+      // Positive control FIRST: the sweep must be reading the handler at all. Without this, a
+      // moved file makes the assertion below vacuous and green — the failure mode I shipped in
+      // the gate-record test and had to come back for.
+      expect(src, 'the sweep is not reading http.ts').toContain('repairStrayCloseTag');
+      expect(src, 'a comment claims the scan reads the repaired body; it reads the original')
+        .not.toContain(WRONG);
+    });
+
     it('a legitimate HTML POST reaches fetch UNCHANGED, tag and all', async () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
