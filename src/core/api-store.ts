@@ -1360,9 +1360,11 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
    * earlier agent, and nothing on the way in checks its text. `provenance.source` does not
    * decide this, because it is one of those stored values.
    *
-   * A fence, not `<untrusted_data>`: that marker taints the conversation (secrets refused
-   * in unattended runs, memory capture held for review), and a profile's guidelines are
-   * meant to be applied. The one exception keeps what was already there: a profile
+   * A fence, not `<untrusted_data>`: the briefing tells the model never to follow
+   * instructions inside that marker, and a profile's guidelines are instructions meant to
+   * be applied. (The conversation is treated as having taken in external content either
+   * way: `api_setup` is on the agent's external-content tool list, so a view arms that
+   * latch by itself.) The one exception keeps what was already there: a profile
    * bootstrapped from a docs page (a model extraction over an arbitrary HTML page) still
    * has its description, guidelines, avoid and notes wrapped as untrusted data inside the
    * fence.
