@@ -930,6 +930,18 @@ export function looksBinaryUpload(buf: Buffer): boolean {
   return suspicious / sample.length > 0.1;
 }
 
+/**
+ * How many of a replayed run's step errors the answer carries.
+ *
+ * The replay is the one body in this route that is free and repeatable: the claim of a
+ * completed run is never deleted, so the same request can be made for ever at no LLM cost.
+ * Each message is capped on its own, but without a COUNT cap the array is as long as the
+ * workflow has failing steps — measured at 1.29 MB for 2000 of them, from a 90-byte POST.
+ * Fifty is far more than a person reads and far less than a megabyte; past it the body says
+ * `stepErrorsTruncated` rather than quietly looking complete.
+ */
+const MAX_REPLAYED_STEP_ERRORS = 50;
+
 /** Type-guard that sends 503 if the service is null/undefined. Caller must `return` after a false result. */
 function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
   if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
@@ -6265,6 +6277,9 @@ export class LynoxHTTPApi {
                 // `idempotent: true` is the marker the four existing idempotent routes in
                 // this file already answer with, so a client has one field to look at.
                 const heldSteps = history.getPipelineStepResults(held.runId);
+                const heldFailed = heldSteps.filter(st => st.error !== null && st.error !== '');
+                const replayStepErrors = heldFailed.slice(0, MAX_REPLAYED_STEP_ERRORS);
+                const replayStepErrorsTruncated = heldFailed.length > replayStepErrors.length;
                 jsonResponse(res, 200, {
                   ran: true,
                   idempotent: true,
@@ -6274,9 +6289,21 @@ export class LynoxHTTPApi {
                     ? undefined
                     : capForClient(maskForClient(heldRun.error)),
                   costUsd: heldRun?.total_cost_usd ?? 0,
-                  stepErrors: heldSteps
-                    .filter(s => s.error !== null && s.error !== '')
-                    .map(s => ({ stepId: s.step_id, error: capForClient(maskForClient(s.error ?? '')), costUsd: s.cost_usd })),
+                  // ⚠ CAPPED BY COUNT, not only per string. Each message is capped at 600
+                  // characters, but the array was unbounded — and unlike the first run's
+                  // answer, this one is free and repeatable for ever: the claim of a
+                  // completed run is never deleted. Measured on the uncapped version: 2000
+                  // step rows returned a 1.29 MB body for a 90-byte POST, which
+                  // `jsonResponse` stringifies and measures in memory, at up to 600
+                  // requests a minute from loopback. The truncation is stated in the body
+                  // rather than silent, because a client that cannot see it would read a
+                  // short list as "those were all the failures".
+                  stepErrors: replayStepErrors.map(s => ({
+                    stepId: s.step_id,
+                    error: capForClient(maskForClient(s.error ?? '')),
+                    costUsd: s.cost_usd,
+                  })),
+                  ...(replayStepErrorsTruncated ? { stepErrorsTruncated: true } : {}),
                 });
                 return;
               }

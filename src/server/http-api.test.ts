@@ -7307,6 +7307,43 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
+      it('caps the replayed step errors by COUNT and says so when it truncates', async () => {
+        // The replay is the one body here that is free and repeatable — the claim of a
+        // completed run is never deleted — so an unbounded array is an amplifier: measured
+        // at 1.29 MB for 2000 step rows from a 90-byte POST, at up to 600 requests a minute
+        // from loopback. Each message was already capped; the COUNT was not.
+        seedClaim('k-1', 'run-a', { started: true, status: 'completed' });
+        const ins = claimHistory.getDb().prepare(
+          `INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, error, cost_usd)
+           VALUES (?, ?, 'failed', ?, 0)`,
+        );
+        for (let i = 0; i < 60; i++) ins.run('run-a', `s${i}`, `step ${i} blew up`);
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as { stepErrors: unknown[]; stepErrorsTruncated?: boolean };
+          expect(body.stepErrors).toHaveLength(50);
+          // ⚠ And the truncation is STATED. A short list that looks complete would read as
+          // "those were all the failures", which is the quiet half of the same defect.
+          expect(body.stepErrorsTruncated).toBe(true);
+        });
+      });
+
+      it('does NOT claim truncation when the whole list fits', async () => {
+        // The other direction, so a constant `true` cannot satisfy the test above.
+        seedClaim('k-1', 'run-a', { started: true, status: 'completed' });
+        claimHistory.getDb().prepare(
+          `INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, error, cost_usd)
+           VALUES (?, 's1', 'failed', 'the only failure', 0)`,
+        ).run('run-a');
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          const raw = await res.text();
+          expect(JSON.parse(raw).stepErrors).toHaveLength(1);
+          expect(raw).not.toContain('stepErrorsTruncated');
+        });
+      });
+
       it('RESTARTS a failed run onto a new run id and runs it', async () => {
         seedClaim('k-1', 'run-a', { started: true, status: 'failed' });
         // The restarted run has to actually START, or the claim is released at the end of

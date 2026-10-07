@@ -179,8 +179,19 @@ describe('the workflow run attempt key', () => {
       expect(attemptIsOver({ httpStatus: 409, code: 'run_in_progress' })).toBe(false);
     });
 
+    it('KEEPS the key when the earlier run may still be ALIVE and spending', () => {
+      // ⚠ This asserted `true` one revision ago, and that single boolean undid the server's
+      // whole refusal: `run_outcome_unknown` means the claimed run STARTED and its outcome
+      // was never recorded, so it may still be running. Discarding the key let the next
+      // click take a fresh claim and start a second, possibly concurrent, paid run — and
+      // the sentence shown beside it told the owner to click again.
+      //
+      // The distinction that had been collapsed: `run_claim_held` means the earlier run is
+      // OVER, so a new attempt duplicates nothing alive. Those are not the same answer.
+      expect(attemptIsOver({ httpStatus: 409, code: 'run_outcome_unknown' })).toBe(false);
+    });
+
     it('ends the attempt on a 409 that cannot change its answer', () => {
-      expect(attemptIsOver({ httpStatus: 409, code: 'run_outcome_unknown' })).toBe(true);
       expect(attemptIsOver({ httpStatus: 409, code: 'run_claim_held' })).toBe(true);
       // A 409 whose code this build does not know: still terminal, because no further
       // click on the same key could get a different answer out of the route.

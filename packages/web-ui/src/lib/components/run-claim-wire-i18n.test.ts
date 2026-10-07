@@ -142,7 +142,8 @@ describe('the run claim reaches the view that holds its key', () => {
     // red for a refactor and green for a genuinely orphaned key, i.e. wrong in both
     // directions. The keys are split by where they belong, so neither file can satisfy the
     // other's.
-    const inView = ['run_already_running', 'run_outcome_unknown', 'run_claim_held'];
+    const inView = ['run_already_running', 'run_outcome_unknown', 'run_claim_held',
+      'run_outcome_unknown_force', 'run_outcome_unknown_released'];
     const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_replayed_cost', 'run_restarted_cost', 'run_restarted_free'];
     for (const [key, source, where] of [
       ...inView.map(k => [k, VIEW, 'the view'] as const),
@@ -182,6 +183,26 @@ describe('the run claim reaches the view that holds its key', () => {
       .toMatch(/data\.restartedFrom === undefined/);
     expect(RUN_FN, 'and the view delegates the composition')
       .toMatch(/composeRunNotice\(data,/);
+  });
+
+  it('the unknown-outcome sentence does not tell the owner to click again', () => {
+    // ⚠ The sharpest defect of this change, and it lived in a STRING: the route refuses
+    // because the earlier run may still be spending, and the sentence beside the refusal
+    // read "Klicke erneut, wenn du einen neuen Lauf starten willst" while the client
+    // discarded the key on that same answer. The server refused and the client undid it.
+    const line = I18N.split('\n').find(l => l.includes("'workflow_library.run_outcome_unknown'"))!;
+    expect(line, 'the sentence must not instruct the click it is refusing')
+      .not.toMatch(/Klicke erneut|[Cc]lick again/);
+    // and the release is an ASKED act, with the consequence named in the question
+    expect(RUN_FN, 'the only way out is a confirm, not a silent discard')
+      .toMatch(/confirm\(t\('workflow_library\.run_outcome_unknown_force'\)\)/);
+    const forced = I18N.split('\n').find(l => l.includes("'workflow_library.run_outcome_unknown_force'"))!;
+    expect(forced, 'the question has to say what a new run would do')
+      .toMatch(/verdoppeln|duplicate/);
+    // It must not re-run by itself: the release and the run stay two decisions.
+    const block = RUN_FN.slice(RUN_FN.indexOf("run_outcome_unknown_force"));
+    expect(block.slice(0, 400), 'the confirm must not call the runner')
+      .not.toMatch(/runWorkflow\(/);
   });
 
   it('the local sentence WINS over the server message for the codes it knows', () => {

@@ -35,10 +35,22 @@ const RUN_KEY_PREFIX = 'lynox:workflow-run-key:';
  */
 export function attemptIsOver(answer: { httpStatus: number; code?: string | undefined }): boolean {
   if (answer.httpStatus === 409) {
-    // The two codes that mean "your attempt is alive". Every other 409 — the outcome is
-    // unknown, or the run is held in a status the route does not act on — is the end of
-    // this key: no further click on it could change the answer.
-    return answer.code !== 'run_claim_in_flight' && answer.code !== 'run_in_progress';
+    // ⚠ THREE codes keep the key, and the third is the one this function got wrong in a way
+    // that undid the server's refusal. `run_outcome_unknown` means the claimed run STARTED
+    // and its outcome was never recorded — so it may still be running and still spending.
+    // The route refuses precisely for that reason. Treating it as terminal discarded the
+    // key, and the next click took a fresh claim and started a second, possibly CONCURRENT,
+    // paid run with nothing anywhere checking for the first.
+    //
+    // The distinction that was collapsed: for `run_claim_held` the earlier run is OVER (a
+    // status the route does not act on), so a new attempt duplicates nothing that is still
+    // alive. For `run_outcome_unknown` it may be. Those are not the same answer.
+    //
+    // Keeping it means the key stays at 409 until its owner deliberately releases it, which
+    // the view asks about rather than deciding — see `clearAttemptKey`'s caller.
+    return answer.code !== 'run_claim_in_flight'
+      && answer.code !== 'run_in_progress'
+      && answer.code !== 'run_outcome_unknown';
   }
   // ⚠ 400 is NOT terminal, and the first version of this function said it was, with the
   // reason "refused before any claim could be taken". That reason is refuted by a test in

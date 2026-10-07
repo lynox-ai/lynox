@@ -320,6 +320,26 @@
 						? t('workflow_library.run_claim_held')
 						: t('workflow_library.run_outcome_unknown');
 				}
+				if (msg?.code === 'run_outcome_unknown') {
+					// ⚠ The ONE state where the earlier run may still be alive and still
+					// spending. The key is kept (so no click can silently duplicate it), and
+					// the only way out is this question — asked once, naming the consequence,
+					// and answered by the person rather than decided here.
+					//
+					// This replaced a sentence that told the owner to click again, while the
+					// client discarded the key on the same answer: the server refused because a
+					// run may still be paying, and the client undid the refusal on the next
+					// click. Releasing is now an act, not a side effect.
+					//
+					// It does NOT re-run. The release and the run are two decisions, so the
+					// confirm cannot turn into a second run the person did not separately ask
+					// for.
+					if (confirm(t('workflow_library.run_outcome_unknown_force'))) {
+						clearAttemptKey(id, params);
+						error = '';
+						notice = t('workflow_library.run_outcome_unknown_released');
+					}
+				}
 				return;
 			}
 			if (!res.ok) {
