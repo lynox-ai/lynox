@@ -1,7 +1,7 @@
 // === Pipeline ===
 
 import type { ModelTier, ThinkingHint, EffortLevel } from './models.js';
-import type { CapabilityContract } from './capability-contract.js';
+import type { CapabilityContract, ReviewedGrantStamp } from './capability-contract.js';
 
 /**
  * Per-workflow resource bounds for unattended (headless/autonomous) runs — the
@@ -161,14 +161,19 @@ export interface PlannedPipeline {
    */
   capabilityContract?: CapabilityContract | undefined;
   /**
-   * First-run-confirm timestamp (PRD §4.2 S2). Set once by a human at
-   * promote-to-cron after they've seen the resolved contract. **B1 defines this
-   * field as part of the storage seam; the scheduling surface that enforces it
-   * (refusing to schedule a contract-governed workflow whose `confirmedAt` is
-   * absent) is Slice B2** — until then there is no product path that writes a
-   * `capabilityContract` onto a saved workflow, so the gate is not yet
-   * load-bearing. Capture-time presence of a contract does NOT authorise
-   * unattended-N-times; this explicit human action does.
+   * The acceptance of a `reviewed` contract: who, when, a checksum over what was shown,
+   * and the schedule it was given for. Written together with the contract and
+   * `confirmedAt` by the grant branch of the scheduling route, in one write. A run
+   * passes the contract on only when this is present and its checksum still matches
+   * (`decideRunGrant`); `confirmedAt` alone never lifts anything.
+   */
+  reviewedGrant?: ReviewedGrantStamp | undefined;
+  /**
+   * First-run-confirm timestamp (PRD §4.2 S2): a human scheduled this workflow, so the
+   * WorkerLoop may run it unattended at all. It does not authorise a write — that takes
+   * a `reviewed` contract with its stamp (`reviewedGrant`). Also written by the v0→v1
+   * content migration for every template, which is why it can never stand in for a
+   * stamp.
    */
   confirmedAt?: string | undefined;
   /**

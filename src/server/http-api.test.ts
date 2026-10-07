@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -1152,6 +1152,130 @@ describe('LynoxHTTPApi', () => {
     it('404s an unknown workflow', async () => {
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'nope', scheduleCron: '0 9 * * *' }) });
       expect(res.status).toBe(404);
+    });
+
+    describe('a reviewed write grant (preview + acceptance)', () => {
+      const GRANT = { method: 'POST', host: 'api.example.com', paths: ['/v1/reports'] };
+      const CRON = '0 9 1 * *';
+      const VALUES = { month: '2026-06' };
+      // The instance's keyed hash without a vault key: plain SHA-256, length-prefixed like
+      // `EngineDb.keyedHash`. Any signed-in caller can compute it — which is the point of
+      // the switch test below.
+      const unkeyed = {
+        hashIsKeyed: false,
+        keyedHash(parts: Iterable<string>): string {
+          const h = createHash('sha256');
+          for (const p of parts) h.update(`${String(Buffer.byteLength(p))}:`).update(p);
+          return h.digest('hex');
+        },
+      };
+      const setGrant = vi.fn().mockReturnValue(true);
+      const deleteTrigger = vi.fn().mockReturnValue(true);
+      // This file shares ONE per-IP rate window; the requests below are paid back so a test
+      // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+      const rateCounts = (): Map<string, { count: number }> =>
+        (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      let windowBefore = new Map<string, number>();
+      beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+      afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
+      async function withGrantServices(test: () => Promise<void>): Promise<void> {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origDb = engineRef['getEngineDb'];
+        const origHistory = engineRef['getRunHistory'] as () => Record<string, unknown>;
+        const history = origHistory();
+        engineRef['getEngineDb'] = () => unkeyed;
+        engineRef['getRunHistory'] = () => ({ ...history, setWorkflowReviewedGrant: setGrant, deleteTrigger });
+        try { await test(); } finally { engineRef['getEngineDb'] = origDb; engineRef['getRunHistory'] = origHistory; }
+      }
+
+      async function shownChecksum(): Promise<string> {
+        const { prepareWorkflowGrant } = await import('../core/workflow-grant.js');
+        const wf = mockGetPipeline() as Parameters<typeof prepareWorkflowGrant>[0];
+        const p = prepareWorkflowGrant(wf, { ...GRANT, params: VALUES, cron: CRON, afterUntrusted: false }, unkeyed);
+        if (!p.ok) throw new Error(p.error);
+        return p.checksum;
+      }
+
+      beforeEach(() => {
+        setGrant.mockClear();
+        deleteTrigger.mockClear();
+        storeWf({ steps: [{ id: 's', task: 'post', input_template: { url: 'https://api.example.com/v1/reports', body: '{{params.month}}' } }] });
+      });
+      afterEach(() => { vi.unstubAllEnvs(); });
+
+      describe('switch off (the shipped state)', () => {
+        it('refuses the preview', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/workflows/wf-sched/grant-preview', { method: 'POST', body: JSON.stringify({ ...GRANT, params: VALUES, scheduleCron: CRON }) });
+            expect(res.status).toBe(403);
+          });
+        });
+
+        it('refuses an acceptance with a correctly computed unkeyed checksum, and no contract is written', async () => {
+          await withGrantServices(async () => {
+            const checksum = await shownChecksum();
+            const res = await jsonFetch('/api/tasks', {
+              method: 'POST',
+              body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum } }),
+            });
+            expect(res.status).toBe(403);
+            expect(setGrant).not.toHaveBeenCalled();
+            expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+          });
+        });
+
+        it('COUNTER-CASE: scheduling without a grant still answers 201 — the switch closes the grant, not scheduling', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES }) });
+            expect(res.status).toBe(201);
+            expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+            expect(setGrant).not.toHaveBeenCalled();
+          });
+        });
+      });
+
+      describe('switch on', () => {
+        beforeEach(() => { vi.stubEnv('LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', '1'); });
+
+        it('the preview lists one line per enforced method and URL, the values, the binding and the checksum', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/workflows/wf-sched/grant-preview', { method: 'POST', body: JSON.stringify({ ...GRANT, params: VALUES, scheduleCron: CRON }) });
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({
+              tuples: ['GET https://api.example.com/v1/reports', 'POST https://api.example.com/v1/reports'],
+              boundParams: VALUES, afterUntrusted: false, binding: 'unkeyed', checksum: await shownChecksum(),
+            });
+            expect(setGrant).not.toHaveBeenCalled();
+          });
+        });
+
+        it('the acceptance schedules and writes the grant with the schedule\'s id and the request\'s auth origin', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/tasks', {
+              method: 'POST',
+              body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
+            });
+            expect(res.status).toBe(201);
+            expect(setGrant).toHaveBeenCalledWith('wf-sched', expect.objectContaining({ origin: 'reviewed' }), expect.objectContaining({
+              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+            }), expect.any(String));
+            expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
+            expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
+          });
+        });
+
+        it('answers 409 when the accepted grant is not the one shown', async () => {
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/tasks', {
+              method: 'POST',
+              body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: { month: '2026-07' }, grant: { ...GRANT, checksum: await shownChecksum() } }),
+            });
+            expect(res.status).toBe(409);
+            expect(setGrant).not.toHaveBeenCalled();
+          });
+        });
+      });
     });
   });
 
@@ -6837,6 +6961,25 @@ describe('LynoxHTTPApi', () => {
       expect(body.status).toBe('completed');
       // No body → no re-target params (4th arg undefined); 5th = engine runtime.
       expect(mockRunSavedWorkflow).toHaveBeenCalledWith('wf-1', expect.anything(), expect.anything(), undefined, expect.anything());
+    });
+
+    it('POST /api/workflows/:id/run is a person\'s library start: it asks for the workflow\'s write grant, and reports what the run was refused', async () => {
+      mockRunSavedWorkflow.mockResolvedValue({
+        ok: true, runId: 'run-g', status: 'completed',
+        grantNote: 'Ran without its write grant: the grant has no record of its acceptance.',
+        writeNotes: ['Not granted for an unattended run: POST https://api.example.com/v1/reports.'],
+      });
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      const body = await res.json() as { grantNote?: string; writeNotes?: string[] };
+      expect(body.grantNote).toMatch(/no record of its acceptance/);
+      expect(body.writeNotes).toEqual(['Not granted for an unattended run: POST https://api.example.com/v1/reports.']);
+      // Only a caller that names the origin gets a grant decision at all; without it the
+      // run passes no contract on.
+      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown };
+      expect(typeof runtime.decideGrant).toBe('function');
+      // The request is paid back: this file shares one per-IP rate window.
+      const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);
     });
 
     it('POST /api/workflows/:id/run forwards re-target params from the body', async () => {

@@ -6,6 +6,7 @@ import { isWorkspaceActive } from '../core/workspace.js';
 import { channels } from '../core/observability.js';
 import { extractMatchString, globToRegex } from '../core/pre-approve.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
+import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 
 // ── isCriticalTool — moved from pre-approve.ts ─────────────
 
@@ -490,9 +491,49 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   } catch {
     return false;
   }
+  // No contract grants a mail API, whoever wrote it: the published promise is that mail
+  // leaves the instance only once it is confirmed in the chat.
+  if (isMailProviderTarget(obj.url)) return false;
+  if (contract.origin === 'reviewed' && !isReviewableUrl(parsed, obj.url)) return false;
+  if (contract.origin === 'reviewed' && carriesTargetOverride((input as { headers?: unknown }).headers)) return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!_matchesAnyGlob(host, contract.hostPatterns)) return false;
   if (!_matchesAnyGlob(parsed.pathname, contract.pathPatterns)) return false;
+  return true;
+}
+
+/**
+ * Request headers that re-target a call past the tuple a person was shown: a caller-set
+ * `Host` (or a forwarded host, or a rewritten URL a front end honours) routes the request
+ * to another virtual host or path on the same address (TLS and the pin still follow the
+ * URL), and the method-override headers make a server that honours them run another verb —
+ * DELETE included — under a granted POST.
+ */
+const TARGET_OVERRIDE_HEADERS = new Set([
+  'host', 'x-forwarded-host', 'x-original-url', 'x-rewrite-url',
+  'x-http-method-override', 'x-http-method', 'x-method-override',
+]);
+
+function carriesTargetOverride(headers: unknown): boolean {
+  if (headers === null || typeof headers !== 'object') return false;
+  return Object.keys(headers).some((name) => TARGET_OVERRIDE_HEADERS.has(name.trim().toLowerCase()));
+}
+
+/**
+ * The URL dimensions the grant tuple does not carry. A reviewed contract shows a person
+ * `METHOD https://host/path` and the tuple compares only method, hostname and pathname, so
+ * without this a reviewed grant would also admit plain http, any port, credentials in the
+ * URL, and an arbitrary query. These are the rules the bulk path applies to every target at
+ * planning (`externalTargetKey`); here they are checked at dispatch, because a workflow's
+ * model writes its URL at run time.
+ */
+export function isReviewableUrl(parsed: URL, raw: string): boolean {
+  if (parsed.protocol !== 'https:' || parsed.port !== '') return false;
+  if (parsed.username !== '' || parsed.password !== '') return false;
+  // On the raw text: a non-empty query or fragment always has its character there, and a
+  // bare one that `URL` normalised away does too.
+  if (raw.includes('?')) return false;
+  if (raw.includes('#')) return false;
   return true;
 }
 

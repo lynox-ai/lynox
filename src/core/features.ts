@@ -15,7 +15,8 @@ export type FeatureFlag =
   | 'api-setup-v2'
   | 'api-cost-display'
   | 'proactive-deep'
-  | 'proactive-deep-anthropic';
+  | 'proactive-deep-anthropic'
+  | 'workflow-reviewed-grant';
 
 // Core feature flags (immutable)
 const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
@@ -26,6 +27,7 @@ const CORE_FEATURE_ENV_MAP: Record<FeatureFlag, string> = {
   'api-cost-display': 'LYNOX_FEATURE_API_COST_DISPLAY',
   'proactive-deep': 'LYNOX_FEATURE_PROACTIVE_DEEP',
   'proactive-deep-anthropic': 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC',
+  'workflow-reviewed-grant': 'LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT',
 };
 
 const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
@@ -61,6 +63,13 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   // Allow proactive deep escalation even when the resolved deep slot is Anthropic
   // (premium — Fable/Opus). Default OFF. No-op unless `proactive-deep` is also ON.
   'proactive-deep-anthropic': false,
+  // A person may grant a saved workflow a `reviewed` contract in the scheduling dialog
+  // (`core/workflow-grant.ts`). Default OFF, and it stays off until a decision on mail APIs
+  // outside the known-provider list is taken: with it on, a granted workflow may POST
+  // unattended to the one host and paths the person typed. A core flag rather than a
+  // `registerFeature` one: it must exist from module load, whoever registers what, and
+  // `clearDynamicFeatures` must not be able to drop it.
+  'workflow-reviewed-grant': false,
 };
 
 // Dynamic registry for Pro/plugin feature flags

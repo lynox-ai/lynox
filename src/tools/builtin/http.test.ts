@@ -64,10 +64,13 @@ const TEST_USER_CONFIG = {} as LynoxUserConfig;
 let testCtx: ToolContext;
 let testCounters: SessionCounters;
 
-function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract } = {}): never {
+function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted' } = {}): never {
+  const c = extras.capabilityContract;
   return {
     promptUser: extras.promptUser,
-    capabilityContract: extras.capabilityContract,
+    governingContract: () => (c !== undefined && extras.withheld === undefined
+      ? { contract: c, withheld: null }
+      : { contract: undefined, withheld: extras.withheld ?? 'none' }),
     toolContext: testCtx,
     sessionCounters: testCounters,
   } as never;
@@ -848,15 +851,77 @@ describe('httpRequestTool', () => {
 
       it('blocks a redirect that leaves the contract (no body smuggled past the host/path pin)', async () => {
         mockDnsPublic();
-        // The granted host 307-redirects to another host → the redirect guard trips
-        // and the handler throws (like every other "Blocked:" network error).
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+        // The granted host 307-redirects to another host → the redirect guard trips. The POST
+        // itself already reached the granted host, so the refusal says the write may have
+        // landed rather than "blocked".
+        const fetchMock = vi.fn().mockResolvedValue(
           createMockResponse({ status: 307, headers: { location: 'https://evil.test/collect' } }),
-        ));
-        await expect(handler(
+        );
+        vi.stubGlobal('fetch', fetchMock);
+        const res = await visible(
           { url: 'https://example.com/v1/report', method: 'POST', body: '{"secret":"x"}' },
           makeAgent({ capabilityContract: contract }),
-        )).rejects.toThrow(/capability-contract/);
+        );
+        expect(res).toMatch(/^Write possibly landed: POST https:\/\/example\.com\/v1\/report was sent/);
+        expect(fetchMock).toHaveBeenCalledTimes(1); // nothing went to evil.test
+      });
+
+      it('a headless write refusal names verb, host and path — never the query', async () => {
+        mockDnsPublic();
+        const res = await visible(
+          { url: 'https://evil.test/v1/report?token=abc', method: 'POST', body: '{}' },
+          makeAgent({ capabilityContract: contract }),
+        );
+        expect(res).toContain('Not granted for an unattended run: POST https://evil.test/v1/report.');
+        expect(res).not.toContain('token=abc');
+      });
+
+      it('says why when the grant was withheld after external content', async () => {
+        mockDnsPublic();
+        const res = await visible(
+          { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+          makeAgent({ capabilityContract: contract, withheld: 'untrusted' }),
+        );
+        expect(res).toContain('read external content before this call');
+      });
+
+      describe('a redirect after a reviewed write', () => {
+        const reviewed: CapabilityContract = {
+          version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+          hostPatterns: ['example.com'], pathPatterns: ['/v1/report', '/v1/done'], paramConstraints: {},
+        };
+
+        it('follows a 303 to a listed path as GET', async () => {
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://example.com/v1/done' } }))
+            .mockResolvedValueOnce(createMockResponse({ status: 200, body: 'done' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await handler({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: reviewed }));
+          expect(res).toContain('done');
+          expect((fetchMock.mock.calls[1]![1] as RequestInit).method).toBe('GET');
+        });
+
+        it('does not follow a 303 to an unlisted path, and says the write may have landed', async () => {
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://example.com/elsewhere' } }));
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: reviewed }));
+          expect(res).toMatch(/^Write possibly landed: POST https:\/\/example\.com\/v1\/report was sent and answered with a redirect to https:\/\/example\.com\/elsewhere/);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it('still names the POST two hops later, after the method was rewritten to GET', async () => {
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://example.com/v1/done' } }))
+            .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://example.com/elsewhere' } }));
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: reviewed }));
+          expect(res).toMatch(/^Write possibly landed: POST /);
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+        });
       });
     });
 
@@ -1964,7 +2029,7 @@ describe('httpRequestTool', () => {
           resolvePrompt = res;
         }),
       );
-      const agent = { promptUser, sessionCounters: testCounters } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
 
       const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -1998,7 +2063,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
         new Promise<string>((res) => { resolvePrompt = res; }),
       );
-      const agent = { promptUser, sessionCounters: testCounters } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
 
       const url = `https://api-parallel-deny-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -2025,7 +2090,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>()
         .mockResolvedValueOnce('Deny')
         .mockResolvedValueOnce('Allow');
-      const agent = { promptUser, sessionCounters: testCounters } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
 
       const url = `https://api-reprompt-${Date.now()}.example.com/v1/x`;
       const first = await visible({ url, method: 'POST', body: '{}' }, agent);

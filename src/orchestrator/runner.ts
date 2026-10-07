@@ -108,6 +108,12 @@ export interface RunManifestOptions {
    */
   capabilityContract?: CapabilityContract | undefined;
   /**
+   * Sees every tool call a top-level step's own agent makes, whether or not a
+   * RunHistory records it. The saved-workflow run report reads refused and
+   * possibly-landed writes from it. Not threaded into nested pipelines.
+   */
+  observeToolCall?: StepToolRecorder | undefined;
+  /**
    * Per-workflow DoS bounds enforced *inside* this run, between steps (PRD §4.2
    * S3). Set only by the headless saved-workflow path (`runSavedWorkflow`), with
    * conservative defaults applied there; sub-pipelines + in-session runs omit it
@@ -173,6 +179,7 @@ export interface RunCtxInput {
   runHistory?: RunHistory | undefined;
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
+  observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
   secretStore?: SecretStoreLike | undefined;
   workflowId?: string | undefined;
@@ -221,6 +228,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     runHistory: input.runHistory,
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
+    observeToolCall: input.observeToolCall,
     limits: input.limits,
     secretStore: input.secretStore,
     workflowId: input.workflowId,
@@ -862,18 +870,25 @@ async function executeStep(
         });
       } catch { stepRunId = undefined; }
     }
-    const recordToolCall: StepToolRecorder | undefined = (stepRunId && options.runHistory)
+    const persist = (stepRunId && options.runHistory) ? options.runHistory : undefined;
+    const observe = options.observeToolCall;
+    const recordToolCall: StepToolRecorder | undefined = (persist || observe)
       ? (call) => {
-          try {
-            options.runHistory!.insertToolCall({
-              runId: stepRunId!,
-              toolName: call.toolName,
-              inputJson: call.inputJson,
-              outputJson: call.outputJson,
-              durationMs: call.durationMs,
-              sequenceOrder: toolSeq++,
-            });
-          } catch { /* best-effort: observability must never break the run */ }
+          if (persist) {
+            try {
+              persist.insertToolCall({
+                runId: stepRunId!,
+                toolName: call.toolName,
+                inputJson: call.inputJson,
+                outputJson: call.outputJson,
+                durationMs: call.durationMs,
+                sequenceOrder: toolSeq++,
+              });
+            } catch { /* best-effort: observability must never break the run */ }
+          }
+          if (observe) {
+            try { observe(call); } catch { /* an observer never breaks the run */ }
+          }
         }
       : undefined;
 

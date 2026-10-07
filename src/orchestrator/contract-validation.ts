@@ -1,6 +1,7 @@
 import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/pre-approve.js';
+import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -69,6 +70,11 @@ export function validateContractAgainstSteps(planned: {
 }): string | null {
   const contract = planned.capabilityContract;
   if (!contract) return null;
+
+  if (contract.origin === 'reviewed') {
+    const shapeError = reviewedContractShapeError(contract, planned.steps);
+    if (shapeError !== null) return `Capability-contract is invalid: ${shapeError}`;
+  }
 
   // Reject a match-(nearly)-anything host grant (`hostPatterns: ['*']`/`['**']`):
   // it would let a contract-governed autonomous run reach ANY host (fleet-wide
@@ -168,6 +174,11 @@ const GLOB_META = /[*?[\]]/;
  * A derived grant inherits the trust level of whatever authored the steps, and
  * that is not the user. What a contract may be derived FROM is a converged-PRD
  * question; this function is the part that was answerable at the code.
+ *
+ * The answer since: from what a person types into the grant dialog, never from
+ * recorded steps — not even as a pre-filled suggestion (`buildReviewedContract`).
+ * This function stays unwired; an exception would need its own decision that
+ * reopens both reasons above.
  */
 export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): CapabilityContract | undefined {
   if (!steps || steps.length === 0) return undefined;
@@ -272,4 +283,142 @@ export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): 
     // re-targetable parameter exists, which is the only thing constraints bind.
     paramConstraints: {},
   };
+}
+
+/** What a person types into the grant dialog of a saved workflow: one write verb, one
+ *  host, the paths it may write to. Everything else in the contract follows from it. */
+export interface ReviewedGrantEntry {
+  method: string;
+  host: string;
+  paths: readonly string[];
+}
+
+/** Paths one grant may name. A list longer than a person reads is not a review. */
+export const MAX_REVIEWED_PATHS = 20;
+
+/**
+ * The host a person typed, normalised the way the request side is (`URL` lowercases the
+ * hostname, and `globToRegex` compares case-sensitively), or `null`. A port, a path,
+ * credentials, a query or a fragment is refused rather than cut off: what was typed has
+ * to be exactly what is granted.
+ */
+export function normaliseReviewedHost(entry: string): string | null {
+  const raw = entry.trim();
+  if (raw === '' || /[/?#@\s\\]/.test(raw)) return null;
+  let url: URL;
+  try {
+    url = new URL(`https://${raw}`);
+  } catch {
+    return null;
+  }
+  if (url.port !== '' || url.username !== '' || url.password !== '') return null;
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') return null;
+  if (GLOB_META.test(url.hostname)) return null;
+  return url.hostname;
+}
+
+/** A path as typed, if it is already the literal a request resolves to: absolute, no
+ *  query or fragment, no dot segments, nothing `URL` would re-encode, no glob character. */
+function isLiteralReviewedPath(path: string): boolean {
+  if (!path.startsWith('/') || /[?#\\]/.test(path) || GLOB_META.test(path)) return false;
+  let resolved: string;
+  try {
+    resolved = new URL(`https://h.invalid${path}`).pathname;
+  } catch {
+    return false;
+  }
+  return resolved === path;
+}
+
+/**
+ * Why a contract does not have the one shape a `reviewed` grant on a saved workflow may
+ * have, or `null` when it does. The shape is the bulk run's (`mintBulkContract`), so that
+ * the set a person is shown is the set that is enforced:
+ *  - `http_request` only, GET plus exactly one of POST, PUT, PATCH (DELETE stays out, as in
+ *    `MINTABLE_WRITE_METHODS`);
+ *  - one host, literal and lowercase, and no path on it a mail API answers;
+ *  - one or more literal paths;
+ *  - for every parameter that flows into a tool call, an `enum` of exactly one value, and
+ *    no constraint on anything else.
+ * The product of methods × host × paths is then finite and equal to the list.
+ *
+ * Only the save of a WORKFLOW checks this (`validateContractAgainstSteps`). A bulk run's
+ * contract is also `reviewed` but is stored on the run and never passes through here.
+ */
+export function reviewedContractShapeError(contract: CapabilityContract, steps: InlinePipelineStep[] | undefined): string | null {
+  if (contract.grantedTools.length !== 1 || contract.grantedTools[0] !== 'http_request') {
+    return 'a reviewed grant covers http_request and nothing else.';
+  }
+  const methods = contract.httpMethods.map((m) => m.toUpperCase());
+  const writes = methods.filter((m) => m !== 'GET');
+  if (methods.length !== 2 || !methods.includes('GET') || writes.length !== 1 || !MINTABLE_WRITE_METHODS.has(writes[0]!)) {
+    return 'a reviewed grant holds GET and exactly one of POST, PUT or PATCH.';
+  }
+  if (contract.hostPatterns.length !== 1) return 'a reviewed grant names exactly one host.';
+  const host = contract.hostPatterns[0]!;
+  if (normaliseReviewedHost(host) !== host) return `host "${host}" is not a literal lowercase host name.`;
+  const paths = contract.pathPatterns;
+  if (paths.length === 0 || paths.length > MAX_REVIEWED_PATHS) {
+    return `a reviewed grant names between 1 and ${MAX_REVIEWED_PATHS} paths.`;
+  }
+  for (const path of paths) {
+    if (!isLiteralReviewedPath(path)) return `path "${path}" is not a literal absolute path.`;
+    if (isMailProviderTarget(`https://${host}${path}`)) {
+      return `https://${host}${path} is a mail API, and mail leaves the instance only once it is confirmed in the chat.`;
+    }
+  }
+  const referenced = new Set<string>();
+  for (const step of steps ?? []) {
+    for (const p of paramsReferencedInTemplate(step.input_template)) referenced.add(p);
+  }
+  for (const [name, c] of Object.entries(contract.paramConstraints)) {
+    if (!referenced.has(name)) return `parameter "${name}" is constrained but flows into no tool call.`;
+    const keys = Object.keys(c).filter((k) => (c as Record<string, unknown>)[k] !== undefined);
+    if (keys.length !== 1 || !Array.isArray(c.enum) || c.enum.length !== 1) {
+      return `parameter "${name}" must be bound to exactly one value.`;
+    }
+  }
+  for (const name of referenced) {
+    if (!(name in contract.paramConstraints)) return `parameter "${name}" flows into a tool call and is not bound to a value.`;
+  }
+  return null;
+}
+
+/**
+ * The contract a person's entry grants, with every parameter that reaches a tool call
+ * pinned to the value bound for this schedule. Built from the dialog, never from the
+ * steps: a recorded step may be a call the consent gate refused, and its template was
+ * written by a model. The steps are read only for WHICH parameters need a value.
+ */
+export function buildReviewedContract(
+  entry: ReviewedGrantEntry,
+  steps: InlinePipelineStep[] | undefined,
+  boundParams: Readonly<Record<string, unknown>>,
+): { contract: CapabilityContract } | { error: string } {
+  const method = entry.method.trim().toUpperCase();
+  if (!MINTABLE_WRITE_METHODS.has(method)) return { error: 'The write method must be POST, PUT or PATCH.' };
+  const host = normaliseReviewedHost(entry.host);
+  if (host === null) return { error: `"${entry.host}" is not a host name. Enter the host alone, without scheme, port, path or credentials.` };
+  const paths = [...new Set(entry.paths.map((p) => p.trim()).filter((p) => p !== ''))];
+  const paramConstraints: Record<string, ParamConstraint> = {};
+  for (const step of steps ?? []) {
+    for (const name of paramsReferencedInTemplate(step.input_template)) {
+      const value = boundParams[name];
+      if (typeof value !== 'string' && typeof value !== 'number') {
+        return { error: `Parameter "${name}" flows into a tool call and needs a text or number value for this schedule.` };
+      }
+      paramConstraints[name] = { enum: [value] };
+    }
+  }
+  const contract: CapabilityContract = {
+    version: 1,
+    origin: 'reviewed',
+    grantedTools: ['http_request'],
+    httpMethods: ['GET', method as HttpMethod],
+    hostPatterns: [host],
+    pathPatterns: paths,
+    paramConstraints,
+  };
+  const shapeError = reviewedContractShapeError(contract, steps);
+  return shapeError === null ? { contract } : { error: shapeError.charAt(0).toUpperCase() + shapeError.slice(1) };
 }

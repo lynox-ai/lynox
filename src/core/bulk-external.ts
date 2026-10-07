@@ -294,8 +294,8 @@ export interface ExternalClient {
 }
 
 /**
- * GET for bulk runs. Every guard runs before anything is sent, in this order: the run's
- * contract, the network policy, the secret-pattern scan of the address and body, the
+ * GET for bulk runs. Every guard runs before anything is sent, in this order: the mail-API
+ * refusal, the run's contract, the network policy, the secret-pattern scan of the address and body, the
  * credential, the profile's rate limit. No redirect is
  * followed (plan §4 F7): a 3xx is an answer, never a hop.
  */
@@ -303,10 +303,12 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const now = deps.now ?? Date.now;
   let sent = 0;
   const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined, onSend?: () => void): Promise<ExternalRead> => {
-    if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
+    // Before the contract: `contractGrants` refuses a mail target as well, and checked second
+    // this would halt as `contract`, which names the wrong reason.
     if (isMailProviderTarget(url)) return { kind: 'blocked' };
+    if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);

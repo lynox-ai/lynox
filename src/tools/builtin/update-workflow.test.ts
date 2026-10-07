@@ -216,7 +216,10 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
       version: 1, grantedTools: ['http_request'], httpMethods: ['POST'],
       hostPatterns: ['hooks.example.com'], pathPatterns: ['/report'], paramConstraints: {},
     };
-    history.insertPlannedPipeline(makePlanned({ capabilityContract: contract, confirmedAt: '2026-06-24T10:00:00.000Z' }));
+    history.insertPlannedPipeline(makePlanned({
+      capabilityContract: contract, confirmedAt: '2026-06-24T10:00:00.000Z',
+      reviewedGrant: { by: 'local', at: '2026-06-24T10:00:00.000Z', checksum: 'c', binding: 'keyed', triggerId: 'task-1', afterUntrusted: false },
+    }));
     history.insertTrigger({ id: 'task-1', title: 'cron', scheduleCron: '0 9 * * *', pipelineId: 'wf-1' });
     const agent = makeAgent(history);
 
@@ -232,6 +235,8 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     // reason about. Asserted separately from confirmedAt on purpose: dropping
     // the contract reset leaves the line above green and only this one red.
     expect(getPipeline('wf-1', history)!.capabilityContract).toBeUndefined();
+    // Its acceptance stamp goes with it, also asserted on its own.
+    expect(getPipeline('wf-1', history)!.reviewedGrant).toBeUndefined();
   });
 
   it('clears stale confirmedAt for an UNGOVERNED scheduled edit', async () => {

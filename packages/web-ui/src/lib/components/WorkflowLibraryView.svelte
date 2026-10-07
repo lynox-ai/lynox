@@ -38,6 +38,9 @@
 	}
 
 	let workflows = $state<SavedWorkflow[]>([]);
+	// Whether this instance lets a person grant a workflow unattended writes (engine feature
+	// switch, reported by GET /workflows/library). Off: the dialog offers no grant fields.
+	let grantEnabled = $state(false);
 	let loading = $state(true);
 	let error = $state('');
 	let notice = $state('');
@@ -64,8 +67,9 @@
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/library?limit=100`);
 			if (!res.ok) throw new Error();
-			const data = (await res.json()) as { workflows: SavedWorkflow[] };
+			const data = (await res.json()) as { workflows: SavedWorkflow[]; grantEnabled?: boolean };
 			workflows = data.workflows;
+			grantEnabled = data.grantEnabled === true;
 		} catch {
 			error = t('common.load_failed');
 		}
@@ -123,11 +127,78 @@
 	let scheduleCron = $state('0 9 * * *');
 	let scheduling = $state(false);
 
+	// The write grant (engine `workflow-grant.ts`): what the person types, and the preview the
+	// engine returned for exactly that. Any change to an input drops the preview, so what is
+	// accepted is always what was shown last; the engine checks the same with the checksum.
+	let grantOpen = $state(false);
+	let grantMethod = $state('POST');
+	let grantHost = $state('');
+	let grantPaths = $state('');
+	let grantName = $state('');
+	let grantAfterUntrusted = $state(false);
+	interface GrantPreview { tuples: string[]; boundParams: Record<string, unknown>; binding: 'keyed' | 'unkeyed'; checksum: string }
+	let grantPreview = $state<GrantPreview | null>(null);
+	let previewing = $state(false);
+
+	function grantPathList(): string[] {
+		return grantPaths.split('\n').map((p) => p.trim()).filter((p) => p !== '');
+	}
+
+	function dropGrantPreview(): void {
+		grantPreview = null;
+	}
+
 	function onScheduleClick(wf: SavedWorkflow): void {
 		paramValues = Object.fromEntries((wf.parameters ?? []).map((p) => [p.name, '']));
 		scheduleCron = '0 9 * * *';
 		error = '';
+		grantOpen = false;
+		grantMethod = 'POST';
+		grantHost = '';
+		grantPaths = '';
+		grantName = '';
+		grantAfterUntrusted = false;
+		grantPreview = null;
 		scheduleModalWf = wf;
+	}
+
+	async function previewGrant(): Promise<void> {
+		const wf = scheduleModalWf;
+		if (!wf || previewing) return;
+		previewing = true;
+		error = '';
+		try {
+			const res = await fetch(`${getApiBase()}/workflows/${wf.id}/grant-preview`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					method: grantMethod,
+					host: grantHost,
+					paths: grantPathList(),
+					scheduleCron: scheduleCron.trim(),
+					afterUntrusted: grantAfterUntrusted,
+					...(wf.parameters && wf.parameters.length > 0 ? { params: { ...paramValues } } : {}),
+				}),
+			});
+			const data = (await res.json().catch(() => null)) as (GrantPreview & { error?: string }) | null;
+			if (!res.ok || !data || !Array.isArray(data.tuples)) {
+				grantPreview = null;
+				error = data?.error ?? t('workflow_library.grant_preview_failed');
+				return;
+			}
+			grantPreview = data;
+		} catch {
+			error = t('workflow_library.grant_preview_failed');
+		} finally {
+			previewing = false;
+		}
+	}
+
+	/** One line per (method, URL) a stored contract enforces — the cross product, listed. */
+	function contractTuples(c: WorkflowContract): string[] {
+		const hosts = c.hostPatterns ?? [];
+		const paths = (c.pathPatterns ?? []).length > 0 ? c.pathPatterns ?? [] : [''];
+		return (c.httpMethods ?? []).flatMap((m) => hosts.flatMap((h) => paths.map((p) => `${m} https://${h}${p}`)));
 	}
 
 	function cancelScheduleModal(): void {
@@ -158,6 +229,7 @@
 			error = t('workflow_library.params_required');
 			return;
 		}
+		if (grantOpen && !grantPreview) { error = t('workflow_library.grant_preview_required'); return; }
 		scheduling = true;
 		error = '';
 		try {
@@ -168,6 +240,18 @@
 					pipelineId: wf.id,
 					scheduleCron: scheduleCron.trim(),
 					...(wf.parameters && wf.parameters.length > 0 ? { params: { ...paramValues } } : {}),
+					...(grantOpen && grantPreview
+						? {
+							grant: {
+								method: grantMethod,
+								host: grantHost,
+								paths: grantPathList(),
+								afterUntrusted: grantAfterUntrusted,
+								checksum: grantPreview.checksum,
+								...(grantName.trim() ? { name: grantName.trim() } : {}),
+							},
+						}
+						: {}),
 				}),
 			});
 			if (!res.ok) {
@@ -452,10 +536,10 @@
 				{@const c = scheduleModalWf.capabilityContract}
 				<div class="rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-3 mb-4 text-xs">
 					<p class="font-medium mb-1 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.schedule_contract_title')}</p>
-					<ul class="space-y-0.5 text-text-subtle">
-						{#if c.httpMethods?.length || c.hostPatterns?.length}
-							<li>{(c.httpMethods ?? []).join(', ')} → {(c.hostPatterns ?? []).join(', ')}{(c.pathPatterns ?? []).map((p) => ` ${p}`).join('')}</li>
-						{/if}
+					<ul class="space-y-0.5 text-text-subtle font-mono">
+						{#each contractTuples(c) as line (line)}
+							<li>{line}</li>
+						{/each}
 						{#each (c.grantedTools ?? []).filter((tool) => tool !== 'http_request') as tool (tool)}
 							<li>{tool}</li>
 						{/each}
@@ -469,6 +553,7 @@
 				<input
 					bind:value={scheduleCron}
 					placeholder="0 9 * * *"
+					oninput={dropGrantPreview}
 					onkeydown={onScheduleKey}
 					class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 font-mono text-[16px] md:text-sm focus:border-accent focus:outline-none"
 				/>
@@ -487,11 +572,75 @@
 								bind:value={paramValues[param.name]}
 								type={param.type === 'date' ? 'date' : 'text'}
 								inputmode={param.type === 'number' ? 'decimal' : undefined}
+								oninput={dropGrantPreview}
 								onkeydown={onScheduleKey}
 								class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 							/>
 						</label>
 					{/each}
+				</div>
+			{/if}
+
+			{#if grantEnabled}
+				<div class="mt-4 rounded-[var(--radius-sm)] border border-border p-3 text-xs">
+					<label class="flex items-center gap-2 font-medium">
+						<input type="checkbox" bind:checked={grantOpen} onchange={dropGrantPreview} />
+						{t('workflow_library.grant_toggle')}
+					</label>
+					{#if grantOpen}
+						<p class="mt-2 text-[10px] text-text-subtle">{t('workflow_library.grant_hint')}</p>
+						<div class="mt-3 grid grid-cols-[auto_1fr] items-center gap-2">
+							<span>{t('workflow_library.grant_method')}</span>
+							<select bind:value={grantMethod} onchange={dropGrantPreview} class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm">
+								<option value="POST">POST</option>
+								<option value="PUT">PUT</option>
+								<option value="PATCH">PATCH</option>
+							</select>
+							<span>{t('workflow_library.grant_host')}</span>
+							<input bind:value={grantHost} oninput={dropGrantPreview} placeholder="api.example.com" autocomplete="off" class="rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 font-mono text-[16px] md:text-sm focus:border-accent focus:outline-none" />
+						</div>
+						<label class="mt-2 block">
+							<span class="block mb-1">{t('workflow_library.grant_paths')}</span>
+							<textarea bind:value={grantPaths} oninput={dropGrantPreview} rows="3" placeholder="/v1/reports" class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 font-mono text-[16px] md:text-sm focus:border-accent focus:outline-none"></textarea>
+						</label>
+						<label class="mt-2 flex items-start gap-2">
+							<input type="checkbox" bind:checked={grantAfterUntrusted} onchange={dropGrantPreview} class="mt-0.5" />
+							<span>{t('workflow_library.grant_after_untrusted')}<span class="block text-[10px] text-text-subtle">{t('workflow_library.grant_after_untrusted_hint')}</span></span>
+						</label>
+						<label class="mt-2 block">
+							<span class="block mb-1">{t('workflow_library.grant_name')}</span>
+							<input bind:value={grantName} autocomplete="name" class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none" />
+						</label>
+						<button
+							onclick={previewGrant}
+							disabled={previewing}
+							class="mt-3 rounded-[var(--radius-sm)] border border-border bg-bg-muted px-3 py-1 text-xs hover:bg-bg transition-colors disabled:opacity-50"
+						>{t('workflow_library.grant_preview')}</button>
+						{#if grantPreview}
+							<div class="mt-3 rounded-[var(--radius-sm)] border border-warning/30 bg-warning/10 p-2">
+								<p class="font-medium mb-1">{t('workflow_library.grant_preview_title')}</p>
+								<ul class="space-y-0.5 font-mono text-text-subtle">
+									{#each grantPreview.tuples as line (line)}
+										<li>{line}</li>
+									{/each}
+								</ul>
+								{#if Object.keys(grantPreview.boundParams).length > 0}
+									<p class="mt-2 font-medium">{t('workflow_library.grant_values')}</p>
+									<ul class="space-y-0.5 font-mono text-text-subtle">
+										{#each Object.entries(grantPreview.boundParams) as [name, value] (name)}
+											<li>{name} = {String(value)}</li>
+										{/each}
+									</ul>
+								{/if}
+								{#if grantAfterUntrusted}
+									<p class="mt-2">{t('workflow_library.grant_after_untrusted_on')}</p>
+								{/if}
+								{#if grantPreview.binding === 'unkeyed'}
+									<p class="mt-2 flex items-center gap-1"><Icon name="warning" size="xs" />{t('workflow_library.grant_unkeyed')}</p>
+								{/if}
+							</div>
+						{/if}
+					{/if}
 				</div>
 			{/if}
 

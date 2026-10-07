@@ -1662,6 +1662,9 @@ export class WorkerLoop {
     // of its own, and its params came from that one.
     const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
       seed: storedUntrustedCause(task.created_untrusted),
+      // Which schedule fired: a workflow's write grant holds for the schedule it was
+      // accepted with and for no other (`decideRunGrant`).
+      origin: { kind: 'schedule', triggerId: task.id },
     });
 
     if (!result.ok) {
@@ -1671,9 +1674,17 @@ export class WorkerLoop {
       throw new Error(result.error ?? `Pipeline ${task.pipeline_id} execution failed`);
     }
 
+    // What the owner must read even when every step completed: a write the run was
+    // refused, or one that may have landed before a refused redirect, and why the run
+    // had no write grant. A refused write does not fail its step, so without this the
+    // only trace is a tool result nobody reads.
+    const grantLines = [...(result.grantNote !== undefined ? [result.grantNote] : []), ...(result.writeNotes ?? [])];
+    const grantReport = grantLines.length > 0 ? `\n${grantLines.map((l) => `• ${l}`).join('\n')}` : '';
     const success = result.status === 'completed';
     if (success) {
-      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})`, true);
+      // Still a success: the run completed. Marking it failed would retry the whole run
+      // (repeating its other effects) and flip the trigger's status, on every instance.
+      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})${grantReport}`, true);
       return;
     }
 
@@ -1681,7 +1692,7 @@ export class WorkerLoop {
     // NOT just push. Record the failure, then open (or bump) an unread chat
     // thread loaded with the run's context — the user opens it + fixes in chat
     // (Slice C adds the retry/diagnose tools that act on the reply).
-    this.engine.getTaskManager()?.recordTaskRun(task.id, `Pipeline ${result.status ?? 'unknown'}`, 'failed');
+    this.engine.getTaskManager()?.recordTaskRun(task.id, `Pipeline ${result.status ?? 'unknown'}${grantReport}`, 'failed');
     const stepDetail = (result.stepErrors ?? [])
       .filter(s => s.error)
       .map(s => `• ${s.stepId}: ${s.error}`)
@@ -1699,6 +1710,7 @@ export class WorkerLoop {
         `Your scheduled workflow "${task.title}" didn't complete (status: ${result.status ?? 'unknown'}).\n\n` +
         (result.error ? `Error: ${result.error}\n\n` : '') +
         (stepDetail ? `Failed steps:\n${stepDetail}\n\n` : '') +
+        (grantLines.length > 0 ? `Writes:\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
         `Reply here and I'll help you fix it — I have this run loaded${ref ? ` ${ref}` : ''}.`,
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
     });

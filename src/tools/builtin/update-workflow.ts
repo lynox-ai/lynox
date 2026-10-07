@@ -162,6 +162,11 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     if (updated.capabilityContract !== undefined) {
       updated.capabilityContract = undefined;
     }
+    // Its stamp goes with it. A stale stamp would fail its checksum anyway; dropping it
+    // keeps "is there an accepted grant?" answerable without recomputing anything.
+    if (updated.reviewedGrant !== undefined) {
+      updated.reviewedGrant = undefined;
+    }
 
     // Persist (INSERT OR REPLACE, same id) — insertPlannedPipeline re-runs the
     // fail-closed contract validation at the chokepoint as a backstop — then

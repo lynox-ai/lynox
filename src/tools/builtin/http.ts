@@ -18,6 +18,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, ungrantedWriteNote, urlForNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -143,6 +144,22 @@ function blockedVerbatim(message: string): never {
   throw new ToolSoftFailure(message, message);
 }
 
+/**
+ * A redirect refused after a write was already sent: the host received the request and
+ * answered it, so the write may have happened even though the call ends refused. Its own
+ * class so the handler can say that instead of "blocked", ahead of the generic rewrite.
+ */
+export class RedirectRefusedAfterWrite extends Error {
+  constructor(method: string, sentUrl: string, redirectUrl: string) {
+    super(
+      `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
+      `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
+      `Do not repeat the request: check the target system for whether it was carried out.`,
+    );
+    this.name = 'RedirectRefusedAfterWrite';
+  }
+}
+
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
 const DEFAULT_RESPONSE_BYTES = 100_000;
@@ -216,6 +233,7 @@ export async function fetchWithValidatedRedirects(
 ): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
+  const originalMethod = method;
   let body = init.body;
   // Carried explicitly so credential headers (incl. the engine-attached OAuth2
   // Bearer) can be dropped on a cross-origin hop (mirror fetch()); see
@@ -269,6 +287,10 @@ export async function fetchWithValidatedRedirects(
       body = undefined;
     }
     if (redirectGuard && !redirectGuard(nextUrl, method)) {
+      // Decided on the method the call STARTED with: after a 303 (or a cross-origin hop)
+      // `method` is already GET, and a POST that reached the host would then read as a
+      // read that was merely redirected.
+      if (isWriteMethod(originalMethod)) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl);
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
     currentUrl = nextUrl;
@@ -2363,16 +2385,22 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // enforced before this tool ran). This is what makes a contract-governed
     // headless write actually execute; without it the gate below would block
     // every unattended write (no `promptUser` in a background run).
+    // Asked for writes only: a read is never gated by the contract here.
+    const governing = isWriteMethod(method) ? agent.governingContract() : null;
+    const contract = governing?.contract;
     const contractGrantsWrite =
-      agent.capabilityContract !== undefined &&
-      contractGrants('http_request', input, agent.capabilityContract);
+      contract !== undefined &&
+      contractGrants('http_request', input, contract);
     if (isWriteMethod(method) && !contractGrantsWrite) {
       const hostname = new URL(input.url).hostname;
       const approved = agent.sessionCounters.approvedOutboundDomains;
       const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
       if (!approved.has(hostname)) {
         if (!agent.promptUser) {
-          blockedVerbatim(`Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`);
+          blockedVerbatim(
+            `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
+            `\n${ungrantedWriteNote(method, input.url, governing?.withheld === 'untrusted')}`,
+          );
         }
         const promptUser = agent.promptUser;
         let pending = pendingMap.get(hostname);
@@ -2441,7 +2469,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       agent.sessionCounters.httpRequests++;
       // For a contract-governed write, re-validate every redirect hop against
       // the contract so a 307/308 can't carry the body past the host/path pin.
-      const contract = agent.capabilityContract;
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean =>
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
@@ -2711,6 +2738,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // otherwise be the trap. A rule that is safe only outside one region of
       // the file needs the region to enforce it, not the reader to remember.
       if (err instanceof ToolSoftFailure) throw err;
+      // Ahead of `friendlyBlockMessage`, whose rewrite would turn this into a generic
+      // refusal: here the write was sent and answered, and only its redirect was refused.
+      if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
