@@ -404,7 +404,16 @@ export function rollbackMergeById(
   // `applied:false` one is on disk and `GET /api/merges` lists it. The wording
   // may therefore say the dead end, and may not say «no longer on record».
   | { ok: false; reason: 'chained'; blocking: MergeRollbackBlocker | null } {
-  const record = readAll(store, sweepsDir).find((r) => r.view.id === id);
+  // ⚠ READ THE DIRECTORY ONCE. `readAll` is `readdirSync` plus a `readFileSync`,
+  // a `JSON.parse` and two subject lookups per ledger, and the `chained` branch
+  // below needs the same set to find the blocking merge. Calling it twice made
+  // one refusal cost 2 × O(ledgers in the sweeps directory) — bounded by the
+  // 90-day retention but by nothing else, and a request an owner can repeat.
+  // Hoisting is equivalence, not a shortcut: nothing between here and that
+  // filter writes to the store or the directory, so a second read would return
+  // the same rows.
+  const records = readAll(store, sweepsDir);
+  const record = records.find((r) => r.view.id === id);
   if (!record) return { ok: false, reason: 'not_found' };
   const { view, file } = record;
   if (!view.applied) return { ok: false, reason: 'not_applied' };
@@ -509,7 +518,7 @@ export function rollbackMergeById(
     // whereas a plain pick would take the newest match, which happens to be the
     // right one, and pass unnoticed. It is a discriminator for a neighbouring
     // mutation, not a guard against an ambiguous match the schema forbids.
-    const candidates = readAll(store, sweepsDir).filter(
+    const candidates = records.filter(
       (r) => r.file.entry.dupId === tip.dup
         && r.view.inEffect && r.view.applied
         && !(r.file.dataStore.length > 0 && !dataStore)
