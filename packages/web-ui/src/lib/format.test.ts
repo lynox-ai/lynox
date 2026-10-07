@@ -127,3 +127,13 @@ describe('getModelPricing + estimateCost', () => {
 		expect(p.cacheRead).toBe(0.3);
 	});
 });
+
+describe('getModelPricing with a model id that names a prototype member', () => {
+	it.each(['toString', '__proto__', 'constructor', 'hasOwnProperty'])('%s gets the fallback pricing', (id) => {
+		expect(getModelPricing(id)).toEqual(getModelPricing('an-unknown-model-id'));
+		expect(Number.isFinite(estimateCost(id, { input_tokens: 1000, output_tokens: 1000 }))).toBe(true);
+	});
+	it('a known model still resolves (positive control)', () => {
+		expect(getModelPricing('claude-opus-4-6').input).toBe(5);
+	});
+});

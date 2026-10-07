@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
-import { modelCapability, normalizeModelId } from '../types/models.js';
+import { modelCapability, normalizeModelId, ownEntry } from '../types/models.js';
 import type { ModelPricing } from '../types/models.js';
 
 export type { ModelPricing };
@@ -36,7 +36,10 @@ function loadPricingOverride(): Record<string, ModelPricing> | null {
     // `NaN >= cap` is false, EVERY budget layer (cost-guard, session budget,
     // managed debit) then fails OPEN, not closed. Drop bad entries (warn) so a
     // single typo in an operator's pricing.json can't disable billing.
-    const validated: Record<string, ModelPricing> = {};
+    // No prototype: a `"__proto__"` key in the file would otherwise REPLACE this
+    // object's prototype on assignment instead of becoming an entry. Lookups read
+    // own entries only (`ownEntry`).
+    const validated: Record<string, ModelPricing> = Object.create(null) as Record<string, ModelPricing>;
     for (const [model, pricing] of Object.entries(parsed as Record<string, unknown>)) {
       if (isValidPricing(pricing)) {
         validated[model] = pricing;
@@ -62,7 +65,7 @@ export function getPricing(model: string): ModelPricing {
   }
   const base = normalizeModelId(model);
   // Override file wins (operator opt-in), then registry, then conservative fallback.
-  return overridePricing[model] ?? overridePricing[base]
+  return ownEntry(overridePricing, model) ?? ownEntry(overridePricing, base)
     ?? modelCapability(model)?.pricing
     ?? FALLBACK_PRICING;
 }
