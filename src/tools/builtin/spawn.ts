@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId, profileNamed } from '../../types/index.js';
+import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
@@ -44,11 +45,74 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
  * after: below this a child stops right after that turn, so the money buys an abort
  * instead of an answer, and the parent is handed a truncated child to reason about.
  *
- * ⚠ FLAT, which is a known weakness: a first turn costs different amounts per tier, so
- * one figure is generous for some models and tight for others. Deriving it from the run's
- * resolved pricing would be the honest version of this constant; it is not built here.
+ * ⛔ DERIVED PER MODEL, and every figure names the SET it is counted over — because a
+ * child's model is not restricted to the tier defaults, and because an earlier version of
+ * this comment counted a set it had not measured. Over all **39** ids in
+ * `MODEL_CAPABILITIES` a cold first turn runs from **$0.000898** (`ministral-3b-2410`) to
+ * **$0.88** (`claude-fable-5`: 20k prefix at $20/Mtok plus 9 600 output tokens at
+ * $50/Mtok); over the three tier defaults it is $0.052288 / $0.192 / $0.44, a spread of
+ * 8.41x. So the flat $0.05 this replaces was nearly exact for the fast tier and **17.60x
+ * too low** at the top — a child admitted with five cents there spends eighty-eight,
+ * which is the overspend the floor exists to refuse. A flat floor is not a loose floor;
+ * up there it is no floor at all.
+ *
+ * ⚠ The other direction is larger, not a side note: at the cheap end the flat figure was
+ * **55.66x too HIGH** (11.13x on `ministral-14b-2512`, the mid-cheap case), so batches on
+ * a cheap model were refused although every share could have paid for dozens of turns.
+ * This change admits those.
+ *
+ * ⛔ AND AN UNPRICED ID GETS NO FLOOR AT ALL. `estimateFirstTurnUSD` answers for an
+ * unknown id with the FALLBACK rate — $0.32, dearer than the balanced tier and 6.4x the
+ * flat figure it replaced. Conservative is right for a reservation and wrong for a
+ * threshold: a profile pinning a local model at `localhost:11434` is unpriced AND free,
+ * and a fallback-derived floor refuses a child handed the run's whole remainder, on a
+ * price nobody pays. So `hasKnownPricing` gates the floor and self-hosters keep their
+ * fan-out.
+ *
+ * ⚠ WHAT THAT COSTS, stated as measured rather than as reassurance. An earlier version of
+ * this comment said admitting "costs at most one small turn", and both words were wrong:
+ * the turn's price is UNKNOWN — that is the premise of the carve-out, not something to
+ * assume small — and the bound is per CHILD, so a ten-child batch is ten such turns. The
+ * class is not only free local models: a profile pinning an expensive model through a
+ * custom endpoint is unpriced too, and this file takes the opposite stance on the same
+ * predicate one screen up (`profileBandIsDeepOrUnknown` treats an unknown band as DEEP,
+ * precisely so an expensive custom model cannot run unconsented). The zero-share refusal
+ * below bounds the degenerate case; the general one is filed, with that contradiction
+ * named.
+ *
+ * `estimateFirstTurnUSD` prices the COLD turn — prefix written at the cacheWrite rate,
+ * not read — because a run's first turn always is one.
+ *
+ * ⚠ WHAT IT DOES NOT PRICE, measured and filed rather than left implicit: the child's own
+ * output cap. The wire cap is `spec.max_tokens ?? profile?.max_tokens` and reaches the
+ * provider unclamped, and the gap cuts BOTH ways. Each figure below says which method
+ * produced it, because the two differ by the fill factor and an earlier version of this
+ * paragraph mixed them in one sentence:
+ *   · a child setting `max_tokens: 64000` is admitted on the balanced floor of $0.192.
+ *     Priced the way this floor prices (the 0.3 fill), its first turn is $0.408 — 2.13x the
+ *     threshold that let it in; emitting the whole cap, $1.08 — 5.6x.
+ *   · a child setting `max_tokens: 500` costs $0.12225 by the same fill method and is
+ *     REFUSED by that same $0.192 floor — work the flat $0.05 would have admitted.
+ * So the floor is too low in one direction and too high in the other, and only the first is
+ * a gap against the figure it replaces. Pricing the cap needs both halves of that fallback
+ * chain and is its own change.
  */
-const MIN_CHILD_BUDGET_USD = 0.05;
+function minChildBudgetUSD(model: string): number {
+  if (!hasKnownPricing(model)) return 0;
+  return estimateFirstTurnUSD(model);
+}
+/**
+ * Dollars for a model-facing message.
+ *
+ * ⚠ MEASURED, not stylistic: `toFixed(2)` on a derived floor printed `"would get $0.00,
+ * and one turn on its model costs about $0.00"` for a `ministral`-class child — a refusal
+ * whose own reason rounds to nothing, in exactly the cheap-model regime the derived floor
+ * exists to serve. Four decimals below a cent follows the repo's existing convention for
+ * small amounts (`toFixed(4)` at ten call sites).
+ */
+function usdLabel(amount: number): string {
+  return amount < 0.01 ? amount.toFixed(4) : amount.toFixed(2);
+}
 
 /** The live limit; only tests shorten it (`setSpawnTimeoutMsForTests`). */
 let spawnTimeoutMs = SPAWN_TIMEOUT;
@@ -113,7 +177,17 @@ export function createSpawnDeadline(ms: number): SpawnDeadline {
 }
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
 
-/** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
+/**
+ * Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the
+ * per-spawn cost guard.
+ *
+ * ⚠ RESTORED. A previous revision replaced the second clause with "a child's guard IS the
+ * share this estimate helps compute, so it cannot catch an overshoot of itself" — which is
+ * false, and the true sentence had been there first. This ratio feeds
+ * {@link estimateSpawnCost} only, i.e. `checkSessionBudget` and the batch announcement; the
+ * shares come from `requested` (each child's `max_budget_usd`), never from this estimate.
+ * The per-spawn guard does still cap a child's dollars however badly the fill is guessed.
+ */
 const SPAWN_OUTPUT_FILL_RATIO = 0.3;
 
 /**
@@ -181,11 +255,17 @@ function budgetNote(
   remainingUSD: number | null,
 ): string {
   if (trimmed.length === 0) return '';
+  // ⛔ `usdLabel`, not `toFixed(2)`, and the derived floor is what made this reachable:
+  // while the floor was a flat $0.05 no admitted share could be under five cents, so this
+  // note could not carry a sub-cent amount. Deriving it admits them — measured, a $0.009
+  // remainder rendered as "This run had $0.01 left ... got $0.00", which rounds the
+  // remainder UP and the shares away, on the same surface and for the same reader as the
+  // refusal below.
   const lines = trimmed
-    .map((t) => `- \`${escapeXml(t.name)}\`: asked $${t.asked.toFixed(2)}, got $${t.got.toFixed(2)}`)
+    .map((t) => `- \`${escapeXml(t.name)}\`: asked $${usdLabel(t.asked)}, got $${usdLabel(t.got)}`)
     .join('\n');
   return '\n\n## Budget note\n\n'
-    + `This run had $${(remainingUSD ?? 0).toFixed(2)} left of its cost ceiling, so the `
+    + `This run had $${usdLabel(remainingUSD ?? 0)} left of its cost ceiling, so the `
     + `sub-agent budgets were scaled down to fit:\n${lines}\n\n`
     + 'A sub-agent that stopped at its budget reports what it had and did NOT fail. '
     + 'Delegating more of them would not buy more budget — the ceiling belongs to this run.';
@@ -1484,6 +1564,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     });
     /** What each child asked for, index-aligned with `specs`. */
     const requested: number[] = [];
+    /** The resolved model per child, index-aligned with `specs` — the floor is per model. */
+    const childModels: string[] = [];
     specs.forEach((spec, i) => {
       const { model, tier } = resolveSpawnChildRouting({
         spec,
@@ -1502,6 +1584,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // multipliers a child actually gets (adaptive thinking is on by default, a role may
       // ask for max effort, and `max_tokens` is unvalidated).
       requested.push(spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD);
+      // Taken from the SAME routing resolution the announcement uses, so the floor and
+      // the child cannot disagree about which model is being priced. (Same resolution as
+      // the ANNOUNCEMENT; `executeThinker` resolves again from a freshly loaded config,
+      // so this is not a proof that the child cannot end up elsewhere.)
+      childModels.push(model);
       // The SAME check the identity block and the result header use. This site
       // had its own charset — one that stripped `/` and cut at 64 — so a
       // Fireworks child was announced to the UI as
@@ -1572,21 +1659,76 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       //
       // The last child absorbs the difference rather than a tolerance being added to the
       // comparison: a tolerance would make the bound inexact for every caller, while
-      // this keeps `sum <= remainder` true as arithmetic. The floor is checked AFTER, so
-      // a child pushed under it by the correction is still refused.
+      // this keeps `sum <= remainder` true as arithmetic.
+      //
+      // ⚠ The floor is checked AFTER this, which is the right order — but NOT a witnessed
+      // one, and the earlier version of this line claimed more than it could show. The
+      // give-back moves the last share by a few ULPs, so it cannot push a child across a
+      // floor except on an exact tie: a mutant that hoists the floor check above this
+      // block survives the whole suite. Correct by construction, indistinguishable by
+      // test; do not read it as a protection that something checks.
       const built = shares.reduce((sum, usd) => sum + usd, 0);
       if (built > remainingRunUSD && shares.length > 0) {
         shares[shares.length - 1] = Math.max(0, shares[shares.length - 1]! - (built - remainingRunUSD));
       }
-      const tooSmall = shares.findIndex((usd) => usd < MIN_CHILD_BUDGET_USD);
+      // ⛔ Per child, against ITS OWN model's first turn. Two
+      // children on different tiers have different floors.
+      //
+      // ⚠ `findIndex` names the FIRST child under its own floor, which is NOT necessarily
+      // the expensive one — the earlier version of this comment said "refused on account
+      // of the expensive one alone" and that is wrong. At a $0.03 remainder a `fast` child
+      // and a balanced one both get $0.015, and the `fast` child is under ITS floor
+      // ($0.052288), so the message names the CHEAP one. The expensive child is named only
+      // when the cheap one clears its own floor.
+      const floors = childModels.map((m) => minChildBudgetUSD(m));
+      // ⛔ A SHARE OF ZERO IS REFUSED WHATEVER THE FLOOR SAYS, and this line is what keeps
+      // the unpriced carve-out above from opening a hole. `share < 0` is false for a share
+      // of exactly 0, so on a model with no price (floor 0) a caller-supplied
+      // `max_budget_usd: 0` would be ADMITTED with a ceiling of zero — a child that runs
+      // one booked turn and stops, which is precisely the outcome the floor exists to
+      // refuse, and which the sibling test `refuses a child whose caller asked for nothing`
+      // forbids for every priced model. The zero case is its own refusal rather than an
+      // emergent property of a number, because the floor is allowed to be 0 by design.
+      const noMoney = shares.findIndex((share) => !(share > 0));
+      const tooSmall = noMoney >= 0 ? noMoney : shares.findIndex((share, i) => share < floors[i]!);
       if (tooSmall >= 0) {
+        // ⚠ ONE message, and two things in it had to change rather than one. The AMOUNTS,
+        // because this floor admits sub-cent shares that the flat one could not. And the
+        // REASON clause: main quoted the flat figure ("under the $0.05 a sub-agent needs to
+        // return anything"), which no longer exists — so the reason is now the cost of a
+        // turn on that child's own model. The remedies are main's two, unchanged; a third
+        // one ("give the expensive ones a cheaper model") was added in an earlier revision
+        // and removed again, because the child this message names is often the CHEAPEST in
+        // the batch, and a remedy it cannot follow is worse than none.
+        //
+        // ⛔ The reason clause branches, and only the reason. On a model this instance has
+        // no price for the floor is 0, so quoting it would read "would get $0.0000, and one
+        // turn on its model costs about $0.0000" — a refusal whose own arithmetic cancels
+        // out, and an assertion that a turn is free, which is exactly what an unpriced model
+        // is not known to be. That case is reachable only because of the carve-out above, so
+        // it is this change's to get right.
+        //
+        // ⚠ What this message still gets wrong is NOT touched here: on a run with ample
+        // remainder, where a child's own small `max_budget_usd` is what binds, "N
+        // sub-agent(s) cannot share" is false and main's two remedies do not work either.
+        // That defect is PRE-EXISTING and filed. A first attempt to split the message by
+        // `factor` shipped a second text that was false in its own case, so the fix is its
+        // own change with a witness per branch.
+        const name = specs[tooSmall]!.name;
+        const got = shares[tooSmall]!;
+        const need = floors[tooSmall]!;
         throw new Error(
-          `This run has $${remainingRunUSD.toFixed(2)} left of its own cost ceiling, which `
-          + `${String(specs.length)} sub-agent(s) cannot share: "${specs[tooSmall]!.name}" would get `
-          + `$${shares[tooSmall]!.toFixed(2)}, under the $${MIN_CHILD_BUDGET_USD.toFixed(2)} a sub-agent `
-          + 'needs to return anything. Delegate fewer at once, or run them one after another.',
+          `This run has $${usdLabel(remainingRunUSD)} left of its own cost ceiling, which `
+          + `${String(specs.length)} sub-agent(s) cannot share: "${name}" would get `
+          + `$${usdLabel(got)}, `
+          + (need > 0
+            ? `and one turn on its model costs about $${usdLabel(need)}. `
+            : 'and a sub-agent with no budget runs a single turn and then stops, so it '
+              + 'would buy an abort rather than an answer. ')
+          + 'Delegate fewer at once, or run them one after another.',
         );
       }
+
       // ⛔ RESERVE, do not merely read — and this is the half an earlier attempt left
       // out. The agent dispatches up to ten tool calls in parallel, so a second
       // `spawn_agent` in this same turn can be admitted in this very instant; two

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
-import { modelCapability, normalizeModelId, ownEntry } from '../types/models.js';
+import { modelCapability, normalizeModelId, getDefaultMaxTokens, ownEntry } from '../types/models.js';
 import type { ModelPricing } from '../types/models.js';
 
 export type { ModelPricing };
@@ -68,6 +68,131 @@ export function getPricing(model: string): ModelPricing {
   return ownEntry(overridePricing, model) ?? ownEntry(overridePricing, base)
     ?? modelCapability(model)?.pricing
     ?? FALLBACK_PRICING;
+}
+
+/**
+ * Assumed prefix of a run's FIRST model call, in tokens: system prompt plus tool
+ * definitions. Named rather than folded into the formula because it is the one figure
+ * in {@link estimateFirstTurnUSD} that is a guess, and the estimate is only as good as
+ * it is. A real prefix on a tool-heavy agent runs larger; that direction is the safe
+ * one for a floor, which is why this is not tuned down.
+ */
+const FIRST_TURN_PREFIX_TOKENS = 20_000;
+
+/**
+ * Fraction of a model's output ceiling a first turn is assumed to use.
+ *
+ * Equal to the spawn path's `SPAWN_OUTPUT_FILL_RATIO` on purpose — two different fill
+ * ratios for "one turn" would make the two estimates disagree about the same run. ⚠ That
+ * used to be stated here and enforced nowhere, i.e. a rule with no mechanism; a test now
+ * asserts the two are equal, so the next person to tune one is told about the other.
+ */
+const FIRST_TURN_OUTPUT_FILL = 0.3;
+
+/**
+ * Does this instance have real pricing for `model`, as opposed to the conservative
+ * fallback?
+ *
+ * ⛔ WHY A CALLER NEEDS TO KNOW, and it is the measured reason this function exists:
+ * {@link estimateFirstTurnUSD} prices an unknown id at the FALLBACK rate, which is the
+ * Opus rate — $0.32, higher than the balanced tier and 6.4x the flat $0.05 that the
+ * spawn floor used to be. Conservative is right for "how much should I reserve"; it is
+ * wrong for "is this budget too small to bother", because it refuses on a price nobody
+ * is paying. A profile pinning a local model at `localhost:11434` is unpriced AND free,
+ * and a floor derived from the fallback refuses a child handed the run's entire
+ * remainder. So a caller using the estimate as a THRESHOLD asks this first.
+ *
+ * Own-entry lookups on purpose: a bracket read of an object literal answers for
+ * `__proto__`, `toString` and every other prototype member with something that is not
+ * pricing, which makes an estimate NaN — and `x < NaN` is false, so a threshold built on it
+ * admits everything. That class is closed at the source: `ownEntry` guards the override map
+ * and `modelCapability`, and the override map itself has no prototype. A sweep of `src/`
+ * finds no remaining dynamic bracket read of a model-keyed map (`MODEL_MAP[tier]` is keyed
+ * by a typed `ModelTier`, not by an id from outside). An earlier revision of this comment
+ * claimed the shape "still lives in the registry lookups themselves"; the own-entries
+ * hardening landed between that sentence and this one and made it false.
+ */
+export function hasKnownPricing(model: string): boolean {
+  if (overridePricing === null) {
+    overridePricing = loadPricingOverride() ?? {};
+  }
+  const base = normalizeModelId(model);
+  // ⛔ ONE resolution, then one predicate — {@link getPricing}'s own chain with its
+  // fallback left off. Written as three separate `isValidPricing` tests it was subtly
+  // different: `getPricing` uses `??` and stops at the first PRESENT entry, while an
+  // `||` over three predicates keeps going past a present-but-invalid one into the
+  // registry, so lookup 3 could answer for a key lookup 1 already owned. Measured through
+  // the test hook: an override entry `{input: 1}` on a registry id made this function say
+  // "priced" off the REGISTRY while `getPricing` returned the invalid override — floor NaN,
+  // and `share < NaN` is false, so every child was admitted. Resolving once cannot diverge.
+  //
+  // `modelCapability` normalises @-suffixed Vertex ids and is the same reader `getPricing`
+  // uses, so a Vertex-dated id that the billing prices reads as priced here. A lookup of
+  // its own would be a second answer to one question.
+  const entry = ownEntry(overridePricing, model)
+    ?? ownEntry(overridePricing, base)
+    ?? modelCapability(model)?.pricing;
+  // The predicate is this function's own and `getPricing` has none: it trusts that every
+  // file entry was validated on load, which `loadPricingOverride` does. So in the product
+  // the two agree. They part only for an entry seeded through the exported test hook
+  // without validation, and there this answers "unpriced" — no floor rather than a floor
+  // of NaN, which is the direction that cannot absorb a comparison.
+  return isValidPricing(entry);
+}
+
+/**
+ * What a run's FIRST model call costs on `model`, in dollars, against the model's own
+ * output ceiling.
+ *
+ * ⛔ WHY THE COLD RATE, and this is the whole point of the function. A cost guard books
+ * a turn BEFORE it compares, so any run — however small its budget — completes one full
+ * turn. A floor that decides "is this budget worth admitting at all?" therefore has to
+ * be measured against that first turn, and a first turn is always cold: its prefix is
+ * written at the `cacheWrite` rate, not read at the `cacheRead` one.
+ *
+ * ⚠ WHAT THE SENTENCE ABOVE EXCLUDES, and it is excluded on purpose rather than forgotten:
+ * a caller may carry its own output cap — a spawn spec's `max_tokens`, or a profile's — and
+ * that value reaches the provider unclamped. Measured, a child admitted on the $0.192
+ * balanced floor (which assumes 4 800 output tokens) can emit 64 000 and cost about $1.08.
+ * Pricing a caller-supplied cap is a second argument and a second lookup chain, and it is
+ * filed as its own change: this function answers for the MODEL, and a caller that sets a cap
+ * must not read the answer as covering it.
+ *
+ * ⚠ WHAT THIS REPLACES — every number names the SET it is counted over, because the two
+ * sets give very different answers and an earlier version of this comment counted
+ * neither. The admission floors were FLAT at $0.05. Over the three TIER DEFAULTS
+ * (`MODEL_MAP`) a cold first turn costs $0.052288 / $0.192 / $0.44 — a spread of 8.41x,
+ * and the flat figure is nearly exact for the cheapest. Over all 39 ids in
+ * `MODEL_CAPABILITIES` the range is $0.000898 (`ministral-3b-2410`) to $0.88
+ * (`claude-fable-5`): 17.60x too low at the top, and 55.66x too HIGH at the bottom.
+ *
+ * ⚠ SO IT WAS WRONG IN BOTH DIRECTIONS, and the first version of this comment told only
+ * the tightening half. At the cheap end the flat figure refused batches whose shares
+ * could each have paid for dozens of turns. Deriving the floor ADMITS those, and that
+ * half owes a witness as much as the other does.
+ *
+ * For an unknown id this returns the FALLBACK price rather than 0 — right for a
+ * reservation, wrong for a threshold. See {@link hasKnownPricing}.
+ *
+ * ⚠ NO non-finite guard here, and the reason is narrower than an earlier version of this
+ * comment claimed. That version said both factors are "numbers by construction"; they are
+ * not, in general — they are numbers because every entry reaching `overridePricing` is
+ * validated by `loadPricingOverride`, and because the own-entries hardening stopped a
+ * model-keyed bracket read from answering with a prototype member. Those are two
+ * boundaries doing the work, not a construction. Through the exported test hook
+ * `_resetOverridePricingForTests`, which skips the first of them, a NaN rate still reaches
+ * this arithmetic — a refuter did exactly that.
+ *
+ * It stays out because in the PRODUCT the branch cannot fire, and a branch that cannot
+ * fire is a reader's false confidence; the honest version is to name the two boundaries
+ * rather than to call the result structural. A caller that seeds pricing by hand is
+ * responsible for what it seeds.
+ */
+export function estimateFirstTurnUSD(model: string): number {
+  const pricing = getPricing(model);
+  const output = getDefaultMaxTokens(model) * FIRST_TURN_OUTPUT_FILL;
+  return (FIRST_TURN_PREFIX_TOKENS / 1_000_000) * pricing.cacheWrite
+    + (output / 1_000_000) * pricing.output;
 }
 
 export function calculateCost(model: string, usage: {
