@@ -44,4 +44,4 @@ This `SUBPROCESSORS.md` file is the engineering-visible source of truth; the web
 ## Contact
 
 For questions about sub-processors or to object to a sub-processor change:
-<privacy@lynox.ai> · EU representative: <https://app.prighter.com/portal/13646667120>
+<privacy@lynox.ai>
