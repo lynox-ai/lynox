@@ -482,7 +482,6 @@ describe('gate-record — the shipped template does not answer its own questions
     // purpose: the script's docblock carried only the format's HEAD, so a whole-format
     // `not.toContain` would have missed it.
     const PLURAL = 'round(s)';
-    const refused = REVIEW_FORMAT.replace('<round|rounds>', PLURAL);
 
     // ⚠ THE PREMISE, and it needs the pair. Asserting only that the record is refused is two
     // causes for one observation — a stale `head:` refuses it too. So: refused WITH the
@@ -492,15 +491,37 @@ describe('gate-record — the shipped template does not answer its own questions
     expect(evaluate({ body: record({ review: '1 opus round, no findings' }), head: HEAD, files: CODE }).ok,
       'the base record is broken for some other reason, so the refusal above proves nothing').toBe(true);
 
-    for (const [label, text] of [['the PR template', TEMPLATE], ['scripts/gate-record.mjs', SCRIPT]] as Array<[string, string]>) {
-      // ⚠ An identity guard, because a sweep cannot tell «clean» from «not reading the file».
-      // Measured: pointing the read at `package.json` left this test green.
-      expect(text, `the sweep is not reading ${label}`).toContain('gate-record');
+    // ⚠ Each surface carries its OWN token, and each token is absent from the other. A shared
+    // one does not identify anything: with `gate-record` for both, pointing the script read at
+    // the template left all 145 green — the guard satisfied, the template swept twice and the
+    // script never swept at all. Measured, and silent, which is the direction that matters.
+    //
+    // ⚠ And each token is STRUCTURAL, not prose. The fence is what `extractRecord` parses. The
+    // export is what this file imports at the top, so it cannot vanish while the test compiles.
+    // The script deliberately keeps the string `gate-record` out of its own code — it assembles
+    // `MARK` from parts — so every occurrence there is a COMMENT, and anchoring on a comment in a
+    // file whose comments are rewritten every commit buys a red with the wrong diagnosis.
+    // Measured: rewording those five comments reds the guard while the sweep reads the right file.
+    for (const [label, text, token] of [
+      ['the PR template', TEMPLATE, '```gate-record'],
+      ['scripts/gate-record.mjs', SCRIPT, 'export const REVIEW_FORMAT'],
+    ] as Array<[string, string, string]>) {
+      expect(text, `the sweep is not reading ${label} — it found no \`${token}\``).toContain(token);
       expect(text, `${label} contains an example of the form the grammar refuses — an author who reads it writes a record that fails`)
         .not.toContain(PLURAL);
     }
-    // The marker the loop greps is the one the grammar refuses — now the same value.
-    expect(refused).toBe('<n> <model> round(s), <result>');
+    // ⚠ The marker itself, pinned directly. It used to be checked by asserting a whole format
+    // derived from it — which was a SECOND typed format literal, and a format tripwire sitting in
+    // a test about something else, which is exactly what the named pin below exists to replace.
+    // Measured: this form still kills every change to the marker, with a message that names the
+    // subject instead of printing two near-identical formats, and it takes the sweep test out of
+    // the red set when the CONSTANT drifts.
+    //
+    // ⚠ It is load-bearing for the premise pair above too, not just for the grep: change the
+    // marker to something absent from both surfaces and the pair stays green on its own (the
+    // negative leg still refuses, the positive still passes, the grep finds nothing). Measured —
+    // so this is not a tidiness assertion.
+    expect(PLURAL, 'the swept marker is not the parenthesised plural').toBe('round(s)');
   });
 
   /**
@@ -512,11 +533,15 @@ describe('gate-record — the shipped template does not answer its own questions
    * to `REVIEW_FORMAT` was tried and measured VACUOUS for exactly this: a reader that reads the
    * constant cannot notice the constant changing.
    *
-   * ⚠ It lives in a test NAMED for it because of a diagnosis problem. A drifted constant used to
-   * red four tests — about field placeholders, about the sweep, about one-string, about free
-   * text — none of them named for a format change, so the cause had to be inferred from four
-   * unrelated-sounding failures. Now the alarm announces itself and the others may read the
-   * constant.
+   * ⚠ It lives in a test NAMED for it because of a diagnosis problem, and the honest version of
+   * that claim is narrower than the first one written here. A drifted constant does NOT red one
+   * test; it reds three, because the format legitimately appears in three different facts — this
+   * pin, «the template teaches the same format», and the aggregate placeholder message. What
+   * changed is that exactly one of them is NAMED for a format change, so the cause is readable
+   * instead of inferred from near-identical `Object.is` output. Measured: four before, three
+   * after, one self-announcing. The one that left the set is the free-text assertion, which now
+   * reads the constant — and it did not go vacuous doing so, which was the risk: it still has its
+   * own witness for its own purpose, that the message prescribes the format at all.
    */
   it('⭐ REVIEW_FORMAT is this exact string — changing it is a deliberate act', () => {
     expect(REVIEW_FORMAT).toBe('<n> <model> <round|rounds>, <result>');
