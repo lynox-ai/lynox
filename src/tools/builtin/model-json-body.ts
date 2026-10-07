@@ -92,5 +92,11 @@ export function repairStrayCloseTag(
   if (stripped === body) return null;
   if (!parses(stripped)) return null;
 
-  return { body: stripped, removed: body.slice(stripped.length).trim() };
+  // ⚠ CAPPED, because `removed` is MODEL OUTPUT and its caller puts it in a line that sits
+  // OUTSIDE the untrusted-data wrap — engine guidance, which is the surface a model reads as
+  // instruction. The tag grammar above already forbids whitespace and punctuation, so no
+  // sentence fits through; what it does NOT bound is length (`[\w:-]*`), and an arbitrarily long
+  // token in a system line is worth refusing even when it cannot say anything.
+  const removed = body.slice(stripped.length).trim();
+  return { body: stripped, removed: removed.length > 40 ? `${removed.slice(0, 37)}…` : removed };
 }

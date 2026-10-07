@@ -93,6 +93,18 @@ describe('repairStrayCloseTag — which conditions actually discriminate', () =>
     expect(() => JSON.parse(htmlAsJson)).toThrow();
   });
 
+  it('caps what it reports, because the caller puts it in a system line', () => {
+    // The tag grammar forbids whitespace and punctuation, so no sentence fits — but the NAME is
+    // unbounded, and the note that quotes it sits outside the untrusted-data wrap.
+    const long = `</${'a'.repeat(200)}>`;
+    const got = repairStrayCloseTag(`{"a":1}${long}`, JSON_CT);
+    expect(got?.body).toBe('{"a":1}');
+    expect(got?.removed.length).toBeLessThanOrEqual(40);
+    expect(got?.removed.endsWith('…')).toBe(true);
+    // …and a normal tag is reported whole, or the cap would be hiding the useful case.
+    expect(repairStrayCloseTag('{"a":1}</body>', JSON_CT)?.removed).toBe('</body>');
+  });
+
   it('(b) is REDUNDANT under (c), and that is recorded rather than re-derived', () => {
     // No body both parses and ends in a closing tag — valid JSON ends in `}`, `]`, `"`, a digit
     // or `e`/`l`, never in `>`. So (b) refuses nothing that (c) would accept. It stays in the
