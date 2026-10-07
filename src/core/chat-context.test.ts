@@ -77,8 +77,10 @@ describe('resolveChatContext (Slice C context-injection seam)', () => {
   });
 
   it('says reviewed only when the grant actually records a review', () => {
+    // The one shape a reviewed grant on a workflow may have (GET plus one write verb);
+    // the save refuses any other (`reviewedContractShapeError`).
     const contract: CapabilityContract = {
-      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
       hostPatterns: ['h.example.com'], pathPatterns: ['/x'], paramConstraints: {},
     };
     history.insertPlannedPipeline(makePlanned({ capabilityContract: contract }));
