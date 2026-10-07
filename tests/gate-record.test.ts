@@ -591,7 +591,15 @@ describe('gate-record — the shipped template does not answer its own questions
     const FENCE = '```gate-record';
     // ⚠ Exactly ONE fence, asserted rather than assumed. With two, `indexOf` finds the first and
     // `indexOf('```', …)` its close, so the second survives the cut and the assertion below can
-    // be satisfied by a skeleton again. Cheap, and it closes the class instead of today's case.
+    // be satisfied by a skeleton again.
+    //
+    // ⚠ What it covers, stated narrowly because an earlier version of this comment claimed it
+    // "closes the class": it counts this ONE spelling. A `~~~gate-record` fence is invisible to
+    // it — and to `extractRecord`, which anchors on ```` ```gate-record ```` at line start, so the
+    // two agree on that. Where they DIVERGE: this count is the broader of the two, because it
+    // counts the marker anywhere, including inside prose. An inline mention would redden this
+    // test while the parser sees one fence. That direction is the safe one — a false red, not a
+    // false green — and it is the reason this is a count and not a parse.
     expect(TEMPLATE.split(FENCE).length - 1, 'the template no longer has exactly one gate-record fence').toBe(1);
     const fence = TEMPLATE.indexOf(FENCE);
     const fenceEnd = TEMPLATE.indexOf('```', fence + 3);
