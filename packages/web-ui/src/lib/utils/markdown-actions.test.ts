@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseHTML } from 'linkedom';
-import { OWN_ATTR, OWN_MARK, resolveOwnAction } from './markdown-actions.js';
+import { OWN_MARK, resolveOwnAction } from './markdown-actions.js';
 
 // A click on the markdown view counts only on controls the view built. Message markup can copy a
 // control's classes and `data-*`; what it cannot copy is the marker, because the sanitizer drops it.
@@ -68,13 +67,6 @@ describe('the marker', () => {
 		for (const m of tags) expect(m[0], m[0]).toContain('${OWN_MARK}');
 	});
 
-	it('is an attribute the sanitizer\'s default configuration does not allow', () => {
-		expect(OWN_MARK).toBe(` ${OWN_ATTR}`);
-		expect(OWN_ATTR).not.toMatch(/^(data|aria)-/);
-		// DOMPurify keeps an attribute only if its name is on its built-in lists (or data-/aria-).
-		const require = createRequire(import.meta.url);
-		const bundle = readFileSync(require.resolve('dompurify'), 'utf8');
-		expect(bundle).toContain("'accept'"); // positive control: this is the file with the lists
-		expect(bundle).not.toContain(OWN_ATTR);
-	});
+	// That the sanitizer removes it is tested on the app's real sanitizing path, in a real DOM:
+	// markdown-actions.sanitizer.test.ts.
 });
