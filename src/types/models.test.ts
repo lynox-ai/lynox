@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   clampTier,
+  modelCapability,
+  ownEntry,
+  FALLBACK_CAPABILITY,
   modelIdExceedsMaxTier,
   getModelId,
   getContextWindow,
@@ -740,5 +743,30 @@ describe('isMistralHost', () => {
     expect(isMistralHost(undefined)).toBe(false);
     expect(isMistralHost('')).toBe(false);
     expect(isMistralHost('not a url')).toBe(false);
+  });
+});
+
+describe('a model id that names a prototype member', () => {
+  // A model id is outside input. On an object literal, `map['toString']` is a function
+  // and `map['__proto__']` is Object.prototype, so an unguarded lookup hands back a
+  // prototype member as if it were a capability.
+  const PROTO_KEYS = ['toString', '__proto__', 'constructor', 'hasOwnProperty', 'valueOf'];
+
+  it.each(PROTO_KEYS)('%s resolves to no capability and every getter to its fallback', (id) => {
+    expect(modelCapability(id)).toBeUndefined();
+    expect(getContextWindow(id)).toBe(FALLBACK_CAPABILITY.contextWindow);
+    expect(getDefaultMaxTokens(id)).toBe(FALLBACK_CAPABILITY.defaultMaxOutput);
+    expect(getMaxContinuations(id)).toBe(FALLBACK_CAPABILITY.maxContinuations);
+    expect(resolveNativeContextWindow(id)).toBe(FALLBACK_CAPABILITY.contextWindow);
+    expect(getCharsPerToken(id)).toBe(getCharsPerToken('an-unknown-model-id'));
+  });
+
+  it('ownEntry reads own entries and nothing from the prototype', () => {
+    const map: Record<string, number> = { a: 1 };
+    expect(ownEntry(map, 'a')).toBe(1);
+    expect(ownEntry(map, 'toString')).toBeUndefined();
+    expect(ownEntry(map, '__proto__')).toBeUndefined();
+    // Positive control on the real registry: a known id still resolves.
+    expect(modelCapability('claude-sonnet-4-6')?.contextWindow).toBe(MODEL_CAPABILITIES['claude-sonnet-4-6']!.contextWindow);
   });
 });

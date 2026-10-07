@@ -104,6 +104,40 @@ describe('Pricing', () => {
     });
   });
 
+  describe('a model id that names a prototype member', () => {
+    const PROTO_KEYS = ['toString', '__proto__', 'constructor', 'hasOwnProperty', 'valueOf'];
+    afterEach(() => { _resetOverridePricingForTests({}); });
+
+    it.each(PROTO_KEYS)('%s is priced at the fallback, and its cost is finite', (id) => {
+      _resetOverridePricingForTests({});
+      expect(getPricing(id)).toEqual(getPricing('an-unknown-model-id'));
+      const cost = calculateCost(id, { input_tokens: 1000, output_tokens: 1000, cache_creation_input_tokens: 10, cache_read_input_tokens: 10 });
+      expect(Number.isFinite(cost)).toBe(true);
+    });
+
+    it('a pricing.json with a "__proto__" key keeps it as an entry and leaves the rest intact', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-pricing-'));
+      // Written as text: JSON.stringify of an object literal would drop the key.
+      writeFileSync(join(dir, 'pricing.json'),
+        '{"__proto__": {"input": 7, "output": 7, "cacheWrite": 7, "cacheRead": 7},'
+        + ' "good-model": {"input": 1, "output": 2, "cacheWrite": 3, "cacheRead": 0.5}}');
+      const prev = process.env['LYNOX_DATA_DIR'];
+      process.env['LYNOX_DATA_DIR'] = dir;
+      _resetOverridePricingForTests(null);
+      try {
+        expect(getPricing('__proto__')).toEqual({ input: 7, output: 7, cacheWrite: 7, cacheRead: 7 });
+        expect(getPricing('good-model')).toEqual({ input: 1, output: 2, cacheWrite: 3, cacheRead: 0.5 });
+        // The entry did not become the map's prototype: an inherited name is not priced from it.
+        expect(getPricing('constructor')).toEqual(getPricing('an-unknown-model-id'));
+        expect(getPricing('input')).toEqual(getPricing('an-unknown-model-id'));
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_DATA_DIR'];
+        else process.env['LYNOX_DATA_DIR'] = prev;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('calculates cost correctly for opus', () => {
     const cost = calculateCost('claude-opus-4-6', {
       input_tokens: 1_000_000,

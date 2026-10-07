@@ -16,7 +16,8 @@ const FALLBACK_PRICING = MODEL_PRICING['claude-sonnet-4-6']!;
 
 export function getModelPricing(model: string | null | undefined) {
 	if (!model) return FALLBACK_PRICING;
-	return MODEL_PRICING[model] ?? FALLBACK_PRICING;
+	// Own entries only: `MODEL_PRICING['toString']` would otherwise be a function.
+	return Object.hasOwn(MODEL_PRICING, model) ? MODEL_PRICING[model]! : FALLBACK_PRICING;
 }
 
 /**

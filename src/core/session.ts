@@ -26,7 +26,7 @@ import type {
   PromptText,
   ToolCallRecorder,
 } from '../types/index.js';
-import { effectiveContextWindow } from '../types/index.js';
+import { effectiveContextWindow, profileNamed } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
@@ -294,7 +294,7 @@ export function resolveNamedProfile(
   name: string,
 ): import('../types/index.js').ModelProfile {
   const profiles = userConfig.model_profiles;
-  const resolved = profiles?.[name];
+  const resolved = profileNamed(profiles, name);
   if (!resolved) throw new Error(`Unknown model profile "${name}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
   return resolved;
 }
