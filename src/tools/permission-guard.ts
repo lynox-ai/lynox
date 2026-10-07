@@ -166,9 +166,9 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\brm\s+-rf\s+\//i,                label: 'rm -rf /' },
   { pattern: /\bsudo\b/i,                       label: 'elevated privileges' },
   { pattern: /\bgit\s+push\s+(?=.*--force)(?=.*main)/i, label: 'force push main' },
-  { pattern: /\bgit\s+commit\b(?!-)/i,                label: 'git commit (requires explicit user request)' },
+  { pattern: /\bgit\s+commit\b(?!-graph)/i,           label: 'git commit (requires explicit user request)' },
   { pattern: /\bgit\s+push\b/i,                       label: 'git push (requires explicit user request)' },
-  { pattern: /\bgit\s+merge\b(?!-)/i,                 label: 'git merge (modifies branch history)' },
+  { pattern: /\bgit\s+merge\b(?!-(?:base|tree)\b)/i,  label: 'git merge (modifies branch history)' },
   { pattern: /\bgit\s+rebase\b/i,                     label: 'git rebase (rewrites history)' },
   { pattern: /\bgit\s+cherry-pick\b/i,                label: 'git cherry-pick (modifies branch history)' },
   { pattern: /\bgit\s+revert\b/i,                     label: 'git revert (creates revert commit)' },
@@ -230,8 +230,8 @@ const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bgit\s+push\b/i,             label: 'git push (requires explicit user request)' },
   { pattern: /\bgit\s+reset\s+--hard/i,     label: 'hard reset' },
   { pattern: /\bgit\s+add\s+(-A|--all|\.)\s*(?:$|[|;&])/im, label: 'stage all files (review before committing)' },
-  { pattern: /\bgit\s+commit\b(?!-)/i,      label: 'git commit (requires explicit user request)' },
-  { pattern: /\bgit\s+merge\b(?!-)/i,       label: 'git merge' },
+  { pattern: /\bgit\s+commit\b(?!-graph)/i, label: 'git commit (requires explicit user request)' },
+  { pattern: /\bgit\s+merge\b(?!-(?:base|tree)\b)/i, label: 'git merge' },
   { pattern: /\bgit\s+rebase\b/i,           label: 'git rebase' },
   { pattern: /\bgit\s+cherry-pick\b/i,      label: 'git cherry-pick' },
   { pattern: /\bgit\s+revert\b/i,           label: 'git revert' },
@@ -733,9 +733,10 @@ export function withoutLeadingOptions(segment: string): string[] {
 
 // Build the per-chunk scan surface: the normalized form, the quote-removed
 // form the shell actually executes (`r''m -rf /` → `rm -rf /`), and both split
-// into segments so cross- and intra-segment patterns are all covered — plus each
-// segment with the options before its subcommand dropped (see withoutLeadingOptions).
-function _bashScanSegments(chunk: string): string[] {
+// into segments so cross- and intra-segment patterns are all covered. With
+// `withVariants`, it is the same surface read with the options before each
+// subcommand dropped instead (see withoutLeadingOptions).
+function _bashScanSegments(chunk: string, withVariants: boolean): string[] {
   const normalized = normalizeCommand(chunk);
   const stripped = stripShellQuotes(normalized);
   const segments = splitCommandSegments(normalized);
@@ -743,9 +744,10 @@ function _bashScanSegments(chunk: string): string[] {
   // work for the common unquoted command).
   const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
   const all = [...segments, ...strippedSegments];
+  if (!withVariants) return [normalized, stripped, ...all];
   // The whole chunk too: a segment ends at every line break, an escaped one included.
   const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
-  return [normalized, stripped, ...all, ...[...wholes, ...all].flatMap(withoutLeadingOptions)];
+  return [...wholes, ...all].flatMap(withoutLeadingOptions);
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
@@ -763,12 +765,18 @@ function _scanBashDanger(
   rawCmd: string,
   patterns: Array<{ pattern: RegExp; label: string }>,
 ): { label: string } | null {
-  if (rawCmd.length <= BASH_SCAN_WINDOW) {
-    return _checkPatterns(_bashScanSegments(rawCmd), patterns);
-  }
-  for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
-    const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW)), patterns);
-    if (hit) return hit;
+  // The command as written, in every window, before any reading with options dropped: a
+  // variant only adds surface, so it must not put its label in front of a plain hit.
+  for (const withVariants of [false, true]) {
+    if (rawCmd.length <= BASH_SCAN_WINDOW) {
+      const hit = _checkPatterns(_bashScanSegments(rawCmd, withVariants), patterns);
+      if (hit) return hit;
+      continue;
+    }
+    for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
+      const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW), withVariants), patterns);
+      if (hit) return hit;
+    }
   }
   return null;
 }

@@ -2302,10 +2302,19 @@ describe('isDangerous', () => {
       ["git -C '/srv/my repo' -c a=b commit -m msg", 'git commit'],
       ['git -C /repo \\\n  push origin main', 'git push'],
       ['git -C /srv/a\\"b push', 'git push'],
+      ['git -C . "push"', 'git push'],
+      ["git -C . p''ush", 'git push'],
     ])('blocks %s in autonomous mode', (command, label) => {
       const result = auto(command);
       expect(result).toContain(label);
       expect(result).toContain('[BLOCKED');
+    });
+
+    it('names the plain hit, not a reading with options dropped, when both are in the command', () => {
+      // The plain `rm -rf /` sits in a later scan window than the optioned `git -C x push`.
+      const cmd = `git -C x push\n${'echo hi\n'.repeat(1500)}rm -rf /`;
+      expect(cmd.length).toBeGreaterThan(10_000);
+      expect(auto(cmd)).toContain('rm -rf /');
     });
 
     it.each([
@@ -2337,16 +2346,22 @@ describe('isDangerous', () => {
       expect(auto(command)).toBeNull();
     });
 
-    // Reaching `git <subcommand>` behind `-C` must not drag in the plumbing commands whose names
-    // merely start with a ruled one: `merge-base` and `commit-tree` read, they do not merge or commit.
+    // Reaching `git <subcommand>` behind `-C` must not drag in the read-only plumbing whose name
+    // merely starts with a ruled one. `commit-tree` and `merge-file` write, so they stay ruled.
+    // `merge-tree` writes objects, but it moves no ref and changes no file.
     describe.each(['', '-C /repo '])('git %s<subcommand>', (opts) => {
-      it.each(['merge-base HEAD origin/main', 'merge-tree --write-tree a b', 'commit-tree -p HEAD t', 'commit-graph verify'])(
+      it.each(['merge-base HEAD origin/main', 'merge-tree --write-tree a b', 'commit-graph verify'])(
         'leaves %s free', (sub) => {
           expect(auto(`git ${opts}${sub}`)).toBeNull();
           expect(ask(`git ${opts}${sub}`)).toBeNull();
         },
       );
-      it.each([['merge origin/main', 'git merge'], ['commit -m msg', 'git commit']])('still stops %s', (sub, label) => {
+      it.each([
+        ['merge origin/main', 'git merge'],
+        ['commit -m msg', 'git commit'],
+        ['commit-tree -p HEAD t', 'git commit'],
+        ['merge-file ours base theirs', 'git merge'],
+      ])('still stops %s', (sub, label) => {
         expect(auto(`git ${opts}${sub}`)).toContain(label);
         expect(ask(`git ${opts}${sub}`)).toContain(label);
       });
