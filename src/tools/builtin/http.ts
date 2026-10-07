@@ -623,6 +623,16 @@ interface HintContext {
 export const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 /**
+ * The longest timeout one `http_request` fetch may be given, whatever it asks for.
+ * The handler races the fetch against that timeout plus {@link HTTP_WALL_GRACE_MS},
+ * so a stalled body cannot hold a session.
+ */
+export const HTTP_HARD_CAP_MS = 60_000;
+
+/** How far past its timeout the handler's wall timer lets a fetch run before it gives up on it. */
+export const HTTP_WALL_GRACE_MS = 1000;
+
+/**
  * The name `api_setup` registers under. A literal, because a static import of
  * `api-setup.ts` from this module is a cycle — the same reason the renewal below
  * imports it dynamically. Pinned by a test against `apiSetupTool.definition.name`
@@ -1158,11 +1168,19 @@ const oauthRenewalsInFlight = new Map<string, Promise<void>>();
 export const OAUTH_RENEWAL_BACKOFF_MS = 60 * 1000;
 
 /**
- * Profiles held back after a failed renewal, keyed by profile id. An entry is
- * removed when a renewal for the profile succeeds; one whose period has passed
- * stays until then, and only counts failures for the log line.
+ * Profiles held back, keyed by profile id: after a failed renewal, or after a
+ * successful one that left the profile still due ({@link holdAfterSuccess}). An
+ * entry is removed when a renewal succeeds and leaves the profile no longer due;
+ * one whose period has passed stays until then, and only counts failures for the
+ * log line.
  */
-const oauthRenewalBackoff = new Map<string, { inputs: string; failures: number; until: number }>();
+const oauthRenewalBackoff = new Map<string, {
+  inputs: string;
+  /** `failed`: the renewal failed. `still-due`: it succeeded, but the profile still reads as due. */
+  reason: 'failed' | 'still-due';
+  failures: number;
+  until: number;
+}>();
 
 /**
  * What a renewal for this profile is made of, as one fingerprint: the profile's
@@ -1186,6 +1204,48 @@ export function oauthRenewalBackoffSizeForTests(): number {
 /** Forget every hold. The map is module state, so tests must not share it. */
 export function resetOAuthRenewalBackoffForTests(): void {
   oauthRenewalBackoff.clear();
+}
+
+/** The two stores the attach already holds, handed to the renewal so it reads the same ones. */
+interface OAuthRenewalStores {
+  readonly apiStore: NonNullable<ToolContext['apiStore']>;
+  readonly secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']>;
+}
+
+/**
+ * After a renewal that SUCCEEDED: should the profile be held anyway?
+ *
+ * Yes when the profile still reads as due, because then the next request would
+ * renew again, and the one after it, with nothing in between. It reads as due when
+ * the exchange's new expiry never reached the profile (its save was refused), or
+ * when the provider issues tokens that live less than the refresh buffer.
+ *
+ * The hold ends at least the longest fetch ({@link HTTP_HARD_CAP_MS} plus
+ * {@link HTTP_WALL_GRACE_MS}) before the NEW token expires, so a request attached
+ * while it holds is fetched on a valid token. Not covered: a request that waits for
+ * a person after the attach and before it is sent (any prompt on that path, such as
+ * a write confirmation or the check on a GET that looks like exfiltration); that
+ * wait has no limit, and a token shorter-lived than it can expire meanwhile. The lifetime comes
+ * from the exchange ({@link exchangedTokenExpiryFor}), not from the profile, which
+ * in the refused-save case still describes the old token. Without a known lifetime
+ * there is no bound, so there is no hold.
+ *
+ * The inputs are taken AFTER the renewal: the exchange may have stored a rotated
+ * refresh token, and the next attach fingerprints what is there then.
+ */
+function holdAfterSuccess(
+  profileId: string,
+  stores: OAuthRenewalStores,
+  newExpiry: number | 'unknown' | undefined,
+): { inputs: string; ms: number } | null {
+  const profile = stores.apiStore.get(profileId);
+  const due = profile?.auth?.oauth?.token_expires_at;
+  if (profile === undefined || typeof due !== 'number' || Date.now() < due - OAUTH_REFRESH_BUFFER_MS) return null;
+  if (typeof newExpiry !== 'number') return null;
+  const ms = Math.min(OAUTH_RENEWAL_BACKOFF_MS, newExpiry - HTTP_HARD_CAP_MS - HTTP_WALL_GRACE_MS - Date.now());
+  if (ms <= 0) return null;
+  const slot = profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+  return { inputs: oauthRenewalInputs(profile, stores.secretStore.resolve(slot)), ms };
 }
 
 /**
@@ -1230,6 +1290,9 @@ export function resetOAuthRenewalBackoffForTests(): void {
  * the buffer, at up to sixteen seconds each, and a token endpoint that hangs is
  * never charged to the session budget, so nothing else bounded it.
  *
+ * A successful renewal can hold too, when the profile still reads as due
+ * afterwards; {@link holdAfterSuccess} sizes that hold by the new token's lifetime.
+ *
  * The hold is a cost bound, not a verdict. It lives in this process only and
  * records nothing; the request still goes out with the stored token, exactly as
  * after a failed renewal; and a manual `fetch_token` is never held, so whoever
@@ -1239,6 +1302,7 @@ async function renewExpiringOAuthToken(
   profileId: string,
   agent: import('../../types/index.js').IAgent,
   inputs: string,
+  stores: OAuthRenewalStores,
 ): Promise<void> {
   if (!mayRenewOAuthUnattended(agent)) {
     // Silent on purpose, and this is the one refusal that should be: it is the
@@ -1253,21 +1317,26 @@ async function renewExpiringOAuthToken(
 
   const held = oauthRenewalBackoff.get(profileId);
   if (held !== undefined && held.inputs === inputs && Date.now() < held.until) {
+    const why = held.reason === 'failed'
+      ? `${String(held.failures)} consecutive renewal(s) with these inputs failed`
+      : 'the last renewal succeeded, but the profile still reads as due for renewal';
     process.stderr.write(
-      `[lynox:http] oauth token renewal skipped for profile "${profileId}": ${String(held.failures)} consecutive renewal(s) with these inputs failed; `
+      `[lynox:http] oauth token renewal skipped for profile "${profileId}": ${why}; `
       + `the next is not attempted before ${new Date(held.until).toISOString()}. The stored token is attached unchanged.\n`,
     );
     return;
   }
 
-  const run = runOAuthRenewal(profileId, agent).then((ok) => {
-    if (ok) {
-      oauthRenewalBackoff.delete(profileId);
+  const run = runOAuthRenewal(profileId, agent).then((result) => {
+    if (result.ok) {
+      const after = holdAfterSuccess(profileId, stores, result.expiry);
+      if (after === null) oauthRenewalBackoff.delete(profileId);
+      else oauthRenewalBackoff.set(profileId, { inputs: after.inputs, reason: 'still-due', failures: 0, until: Date.now() + after.ms });
       return;
     }
     // Counted per input, for the log: a failure after the inputs changed starts again at one.
-    const failures = (held !== undefined && held.inputs === inputs ? held.failures : 0) + 1;
-    oauthRenewalBackoff.set(profileId, { inputs, failures, until: Date.now() + OAUTH_RENEWAL_BACKOFF_MS });
+    const failures = (held !== undefined && held.reason === 'failed' && held.inputs === inputs ? held.failures : 0) + 1;
+    oauthRenewalBackoff.set(profileId, { inputs, reason: 'failed', failures, until: Date.now() + OAUTH_RENEWAL_BACKOFF_MS });
   }).finally(() => {
     oauthRenewalsInFlight.delete(profileId);
   });
@@ -1277,12 +1346,13 @@ async function renewExpiringOAuthToken(
 
 /**
  * The renewal itself. Never rejects — see the contract on the caller above.
- * Resolves `true` only when the exchange answered `Token exchange OK`.
+ * `ok` only when the exchange answered `Token exchange OK`; `expiry` is then the
+ * new token's expiry as the exchange computed it.
  */
 async function runOAuthRenewal(
   profileId: string,
   agent: import('../../types/index.js').IAgent,
-): Promise<boolean> {
+): Promise<{ ok: boolean; expiry?: number | 'unknown' | undefined }> {
   // TWO catches, not one, and the split is the point. A first draft wrapped both
   // steps together — which would have swallowed a failing import as if it were a
   // provider hiccup, leaving a packaging defect invisible for as long as nobody
@@ -1299,7 +1369,7 @@ async function runOAuthRenewal(
       + `Profile "${profileId}" keeps its stored token until it expires; renew with api_setup fetch_token.
 `,
     );
-    return false;
+    return { ok: false };
   }
 
   // The RETURN VALUE is read, because almost every failure IS one. Discarding it
@@ -1329,16 +1399,16 @@ async function runOAuthRenewal(
       // at least the buffer, so the request continues. This is what lets an
       // operator tell a renewal that was refused from one that never ran.
       writeRenewalFailure(profileId, 'refused', typeof answer === 'string' ? answer : String(answer), agent);
-      return false;
+      return { ok: false };
     }
-    return true;
+    return { ok: true, expiry: mod.exchangedTokenExpiryFor(profileId) };
   } catch (err) {
     // A throw here is a vault write that failed, or something under the exchange
     // that it does not convert. Either way it must not be silent: the request
     // continues on the stored token, but the grant may now be broken in a way
     // only a log will show.
     writeRenewalFailure(profileId, 'threw', err instanceof Error ? err.message : String(err), agent);
-    return false;
+    return { ok: false };
   }
 }
 
@@ -1589,7 +1659,7 @@ async function attachEngineManagedAuth(
       const stored = secretStore.resolve(refreshSlot);
       const slotState = oauthRefreshSlotState(profile, refreshSlot, stored);
       if (oauthProfileMayBeRenewedUnattended(profile, stored !== null)) {
-        await renewExpiringOAuthToken(profile.id, agent, oauthRenewalInputs(profile, stored));
+        await renewExpiringOAuthToken(profile.id, agent, oauthRenewalInputs(profile, stored), { apiStore, secretStore });
       } else {
         process.stderr.write(
           `[lynox:http] oauth token renewal declined for profile "${profile.id}": ${oauthRenewalDeclinedDiagnosis(profile, slotState)}\n`,
@@ -2319,8 +2389,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // but NOT to response.body.getReader() once headers have arrived, so a
     // chunked-transfer stall is invisible to the timeout below. Race below
     // is the wrap-around guarantee: no matter where in the pipeline things
-    // hang, the whole tool call resolves within HARD_CAP.
-    const HTTP_HARD_CAP_MS = 60_000;
+    // hang, the fetch resolves within HARD_CAP plus HTTP_WALL_GRACE_MS of the timers starting.
     const requestedTimeout = input.timeout_ms ?? 30_000;
     const timeoutMs = Math.min(Math.max(1, requestedTimeout), HTTP_HARD_CAP_MS);
     const controller = new AbortController();
@@ -2341,7 +2410,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         timedOut = 'wall';
         controller.abort();
         reject(new Error(httpTimeoutMessage(timeoutMs, method, true, answeredStatus)));
-      }, timeoutMs + 1000);
+      }, timeoutMs + HTTP_WALL_GRACE_MS);
     });
 
     try {
