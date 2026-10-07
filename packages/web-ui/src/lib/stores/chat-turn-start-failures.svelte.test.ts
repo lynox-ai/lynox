@@ -1,3 +1,7 @@
+// @vitest-environment jsdom
+// jsdom on purpose: it makes vitest compile Svelte for the browser, where a `$state` list is a
+// proxy over a copy of the array it was given. Under the default (server) compile it is the
+// array itself, and tests pass that the browser would fail.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // A turn whose start fails before the server answers (no connection, a request cut off) is
@@ -65,6 +69,10 @@ function expectFailedAndFree(text: string): void {
 }
 
 beforeEach(async () => {
+	// jsdom's storage is real and outlives a test, and the store saves on a 500 ms debounce through
+	// whatever storage is there when it fires: let earlier tests' saves land, then start empty.
+	await wait(700);
+	globalThis.localStorage?.clear();
 	listeners = {};
 	vi.stubGlobal('navigator', { onLine: true });
 	vi.stubGlobal('window', { addEventListener: (type: string, fn: () => void) => { listeners[type] = fn; } });
@@ -396,9 +404,6 @@ describe('a turn whose start fails after the user moved on', () => {
 		return { fail: () => pending.shift()?.(new TypeError('Failed to fetch')) };
 	}
 	beforeEach(async () => {
-		// The store saves on a 500 ms debounce, through whatever storage is there when it fires.
-		// Let every earlier test's saves land before this test's storage exists.
-		await wait(700);
 		withStorage();
 		vi.resetModules();
 		store = await import('./chat.svelte.js');
@@ -548,5 +553,123 @@ describe('a turn whose start fails after the user moved on', () => {
 		await settle();
 		const saved = JSON.parse(localStorage.getItem('lynox-chat') ?? '{}') as { threads?: Record<string, unknown> };
 		expect(saved.threads?.['t1']).toBeUndefined();
+	});
+});
+
+describe('a turn whose start fails while its own thread is being resumed', () => {
+	function withStorage(): void {
+		const data = new Map<string, string>();
+		vi.stubGlobal('localStorage', {
+			getItem: (k: string) => data.get(k) ?? null,
+			setItem: (k: string, v: string) => { data.set(k, v); },
+			removeItem: (k: string) => { data.delete(k); },
+		});
+	}
+	beforeEach(async () => {
+		withStorage();
+		vi.resetModules();
+		store = await import('./chat.svelte.js');
+	});
+
+	/** The turn's request hangs; the thread's transcript is held until `answer()`, then empty. */
+	function hangingWithHeldTranscript(): { fail: () => void; answer: () => void } {
+		const runs: Array<(e: unknown) => void> = [];
+		const transcripts: Array<(r: Response) => void> = [];
+		serve((url) => {
+			if (url.endsWith('/run')) return new Promise<Response>((_, r) => { runs.push(r); });
+			if (url.includes('/threads/t1/messages')) return new Promise<Response>((r) => { transcripts.push(r); });
+			return undefined;
+		});
+		return {
+			fail: () => runs.shift()?.(new TypeError('Failed to fetch')),
+			answer: () => { for (const r of transcripts.splice(0)) r(json({ messages: [], activeRun: null })); },
+		};
+	}
+
+	for (const savedWithTurn of [true, false]) {
+		it(`keeps it as a failed message when the shorter transcript arrives${savedWithTurn ? '' : ' (saved copy older than the turn)'}`, async () => {
+			const net = hangingWithHeldTranscript();
+			void store.sendMessage('go');
+			await settle();
+			if (savedWithTurn) {
+				const [sent, reply] = store.getMessages();
+				localStorage.setItem('lynox-chat', JSON.stringify({ sessionId: 't1', threads: { t1: [{ ...sent }, { ...reply }] } }));
+			}
+			const resumed = store.resumeThread('t1');
+			await settle();
+			net.fail();
+			await settle();
+			net.answer();
+			await resumed;
+			await settle();
+			const turns = store.getMessages().filter((m) => m.content === 'go');
+			expect(turns).toHaveLength(1);
+			expect(turns[0]!.failed).toBe(true);
+			expect(turns[0]!.sendUnconfirmed).toBe(true);
+			expect(store.getMessages().some((m) => m.role === 'assistant' && !m.content)).toBe(false);
+		});
+	}
+
+	it('puts it back even while another turn streams there, leaving that turn\'s screen alone', async () => {
+		const runs: Array<(e: unknown) => void> = [];
+		const live = sseStream();
+		serve((url, n) => {
+			if (url.endsWith('/run')) return n === 1 ? new Promise<Response>((_, r) => { runs.push(r); }) : sse(live);
+			return undefined;
+		});
+		void store.sendMessage('go');
+		await settle();
+		// Resumed from a saved copy older than the turn; it holds an older failed message, so it stays
+		// on screen. Then another turn starts and streams.
+		const older = { role: 'user', content: 'earlier', createdAt: '2026-01-01T00:00:00.000Z', failed: true };
+		localStorage.setItem('lynox-chat', JSON.stringify({ sessionId: 't1', threads: { t1: [older] } }));
+		await store.resumeThread('t1');
+		await settle();
+		void store.sendMessage('next');
+		await settle();
+		expect(store.getIsStreaming()).toBe(true);
+		runs.shift()?.(new TypeError('Failed to fetch'));
+		await settle();
+		const turns = store.getMessages().filter((m) => m.content === 'go');
+		expect(turns).toHaveLength(1);
+		expect(turns[0]!.failed).toBe(true);
+		expect(store.getIsStreaming()).toBe(true);
+		expect(store.getChatError()).toBeFalsy();
+		live.close();
+		await settle();
+	});
+
+	it('marks it in a thread archived while the turn hung and brought back before it failed', async () => {
+		const runs: Array<(e: unknown) => void> = [];
+		serve((url) => (url.endsWith('/run') ? new Promise<Response>((_, r) => { runs.push(r); }) : undefined));
+		void store.sendMessage('go');
+		await settle();
+		// The turn has started; then the thread is archived and brought back, and the user moves on.
+		const threads = await import('./threads.svelte.js');
+		await threads.archiveThread('t1');
+		await threads.unarchiveThread('t1');
+		await store.resumeThread('t2');
+		await settle();
+		runs.shift()?.(new TypeError('Failed to fetch'));
+		await settle();
+		const saved = JSON.parse(localStorage.getItem('lynox-chat') ?? '{}') as { threads?: Record<string, Array<{ content: string; failed?: boolean }>> };
+		expect(saved.threads?.['t1']?.find((m) => m.content === 'go')?.failed).toBe(true);
+	});
+
+	it('marks it in a thread this page dropped earlier and then used again', async () => {
+		const runs: Array<(e: unknown) => void> = [];
+		serve((url) => (url.endsWith('/run') ? new Promise<Response>((_, r) => { runs.push(r); }) : undefined));
+		// The thread exists (the session is open), then this page drops its copy, as for a delete.
+		await store.ensureSession();
+		store.dropPersistedThread('t1');
+		// It is used again: a turn starts in it, hangs, and the user moves on.
+		void store.sendMessage('go');
+		await settle();
+		await store.resumeThread('t2');
+		await settle();
+		runs.shift()?.(new TypeError('Failed to fetch'));
+		await settle();
+		const saved = JSON.parse(localStorage.getItem('lynox-chat') ?? '{}') as { threads?: Record<string, Array<{ content: string; failed?: boolean }>> };
+		expect(saved.threads?.['t1']?.find((m) => m.content === 'go')?.failed).toBe(true);
 	});
 });

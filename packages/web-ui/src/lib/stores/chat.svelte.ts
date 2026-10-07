@@ -341,10 +341,16 @@ function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
  * falsely "resurrect" stale local messages after the server already
  * forgot the thread.
  */
+/** The list `resumeThread` put on screen from the thread's saved copy; while `messages` is
+ *  still this list, what is shown is that local copy and nothing has replaced it (the server's
+ *  transcript, a reconcile, another thread). */
+let _hydratedLocal: ChatMessage[] | null = null;
+
 /** Threads whose saved copy was dropped in this session: nothing writes them back. */
 const _droppedThreads = new Set<string>();
 
-/** A thread brought back (unarchived): its saved copy may be written again. */
+/** A thread in use again (a turn starts in it, or it was unarchived): its saved copy may be
+ *  written again. */
 export function forgetDroppedThread(threadId: string): void {
 	_droppedThreads.delete(threadId);
 }
@@ -1034,12 +1040,17 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 		const sent = turn.userMsg;
 		ownMsg = messages.find((m) => isSameTurn(m, sent)) ?? null;
 	}
-	const sameThread = ownMsg !== null || (turn.userMsg === null && messages === turn.messages);
+	// The turn's thread, shown from its own saved copy (resumed, not replaced by the server's
+	// transcript or another list): the turn can be put back there.
+	const shownFromSavedCopy = inTurnThread && turn.userMsg !== null && _hydratedLocal !== null
+		&& messages === _hydratedLocal;
+	const sameThread = ownMsg !== null || shownFromSavedCopy || (turn.userMsg === null && messages === turn.messages);
 	if (sameThread) {
 		let userMsg: ChatMessage | undefined = ownMsg ?? undefined;
 		if (!userMsg && queueId !== undefined) userMsg = messages.find((m) => m.role === 'user' && m.queueId === queueId);
 		if (!userMsg) {
-			// It failed before the message was added: add it, so the user's text is not lost.
+			// It failed before the message was added, or the thread's saved copy predates it: add it,
+			// so the user's text is not lost.
 			const fileNames = files?.map((f) => f.name).join(', ');
 			messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
 			userMsg = messages[messages.length - 1];
@@ -1193,6 +1204,9 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		throw err;
 	}
 	turn.sid = sid;
+	// A turn starts in this thread, so it is in use again, even if this page saw it dropped (an
+	// escalation thread has a fixed id and is re-created on demand).
+	forgetDroppedThread(sid);
 
 	// Find and un-queue if this message was already added as queued.
 	// Prefer id-based lookup when the run originated from messageQueue;
@@ -3407,6 +3421,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	// with an empty chat if the fetch is slow/failing.
 	const localMessages = loadPersistedThread(threadId);
 	messages = localMessages;
+	_hydratedLocal = messages;
 	sessionId = threadId;
 	chatError = null;
 	cancelLostPromptRecheck();
@@ -3570,7 +3585,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// (longer, fragmented) shape would never adopt the merged transcript,
 			// so the fix wouldn't reach already-viewed threads. `failed`/`queued`
 			// rows are local-only + unrecoverable, so their presence keeps local.
-			const hasUnpersistedLocal = localMessages.some((m) =>
+			// What is on screen, while it is still this resume's local copy: a turn that failed while
+			// the transcript loaded marks (or puts back) its message there. In the browser `messages`
+			// is a proxy over a copy of `localMessages`, so those marks are not in `localMessages`.
+			const shown = messages === _hydratedLocal ? messages : localMessages;
+			const hasUnpersistedLocal = shown.some((m) =>
 				m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
 			// The shorter-transcript adoption must NOT fire while a turn is streaming: the
 			// fetch above awaited a round-trip, and a turn sent in that window is in local
@@ -3578,7 +3597,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// adopting the shorter server list would wipe the in-flight user bubble +
 			// placeholder. The `>=` path stays unguarded — a thread switch that legitimately
 			// loads an equal-or-longer transcript is unaffected.
-			if (serverMessages.length >= localMessages.length
+			if (serverMessages.length >= shown.length
 				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
 				// Server messages never carry chips — without this, adoption wipes a
 				// pending-review chip at run end (the observed end-of-run flicker) and
