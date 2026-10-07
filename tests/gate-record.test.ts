@@ -588,14 +588,29 @@ describe('gate-record — the shipped template does not answer its own questions
     //
     // Keyed on the text OUTSIDE the fence, or this would pass on the skeleton the test above
     // already covers and witness nothing new.
-    const fence = TEMPLATE.indexOf('```gate-record');
-    expect(fence, 'the template no longer contains a gate-record fence — this test is reading the wrong file').toBeGreaterThan(-1);
+    const FENCE = '```gate-record';
+    // ⚠ Exactly ONE fence, asserted rather than assumed. With two, `indexOf` finds the first and
+    // `indexOf('```', …)` its close, so the second survives the cut and the assertion below can
+    // be satisfied by a skeleton again. Cheap, and it closes the class instead of today's case.
+    expect(TEMPLATE.split(FENCE).length - 1, 'the template no longer has exactly one gate-record fence').toBe(1);
+    const fence = TEMPLATE.indexOf(FENCE);
     const fenceEnd = TEMPLATE.indexOf('```', fence + 3);
+    expect(fenceEnd, 'the gate-record fence is never closed').toBeGreaterThan(fence);
     const prose = TEMPLATE.slice(0, fence) + TEMPLATE.slice(fenceEnd + 3);
+
     expect(prose, 'the field description no longer quotes the format the script prescribes').toContain(REVIEW_FORMAT);
-    // Positive control for the slicing: the fence's own content must be GONE from `prose`, or
-    // the assertion above could be satisfied by the skeleton it is meant to exclude.
-    expect(prose).not.toContain('head: <40-hex sha of this PR\'s head commit>');
+
+    // ⚠ The control for the slicing, and its OWN control above it — which is the part worth
+    // keeping. The first version of this asserted that `prose` does not contain
+    // `head: <40-hex sha of this PR's head commit>`. That string is not in the template and never
+    // was; the skeleton reads `head: <short SHA>`. I wrote the marker from memory, so the control
+    // was green against any slicing whatsoever, including none. A `not.toContain` whose needle
+    // does not exist is not a weak control, it is NO control — and it looks exactly like a
+    // passing one. So the needle is proven present in the whole file before its absence in the
+    // slice means anything.
+    const SKELETON_LINE = `review: ${REVIEW_FORMAT}`;
+    expect(TEMPLATE, 'the control marker is not in the template at all — this assertion proves nothing').toContain(SKELETON_LINE);
+    expect(prose, 'the fence was not cut out, so the assertion above may be reading the skeleton').not.toContain(SKELETON_LINE);
   });
 
   it('is rejected on `security:` too, which needs a diff that OWES that gate', () => {
