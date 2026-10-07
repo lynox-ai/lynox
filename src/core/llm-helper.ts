@@ -267,15 +267,18 @@ export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path
   }
 }
 
+/** A refused value as an error message may show it: quoted, escaped, at most 40 characters — the value is model output steered by whatever text the model read. */
+const shownValue = (value: string): string => `${JSON.stringify(value.slice(0, 40))}${value.length > 40 ? '…' : ''}`;
+
 function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: string, depth: number): void {
   switch (prop.type) {
     case 'string':
       if (typeof value !== 'string') throw new Error(`Expected string at "${path}", got ${typeof value}`);
       if (prop.enum && !prop.enum.includes(value)) {
-        throw new Error(`Value "${value}" at "${path}" not in enum [${prop.enum.join(', ')}]`);
+        throw new Error(`Value ${shownValue(value)} at "${path}" not in enum [${prop.enum.join(', ')}]`);
       }
       if (prop.pattern && !new RegExp(prop.pattern).test(value)) {
-        throw new Error(`Value "${value}" at "${path}" does not match pattern /${prop.pattern}/`);
+        throw new Error(`Value ${shownValue(value)} at "${path}" does not match pattern /${prop.pattern}/`);
       }
       break;
     case 'number':
