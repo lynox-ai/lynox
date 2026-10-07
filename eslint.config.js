@@ -91,14 +91,6 @@ export default [
     },
   },
   {
-    // Floating promises are an error in every component except this one: its remaining ones
-    // start a chat turn, whose failure handling is being reworked on its own.
-    files: ['packages/web-ui/src/lib/components/ChatView.svelte'],
-    rules: {
-      '@typescript-eslint/no-floating-promises': 'warn',
-    },
-  },
-  {
     // ⚠ STRICTER THAN THE REPO, FOR ONE FILE. The repo allows `console.warn` everywhere.
     // In the Voxtral voice catalogue every diagnostic must go through the local `report`
     // closure, which pairs the warning with the flag that shortens the cache lifetime: a

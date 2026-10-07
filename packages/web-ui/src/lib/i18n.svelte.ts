@@ -740,6 +740,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_content_policy': { de: 'Die Anfrage wurde aufgrund der Inhaltsrichtlinie abgelehnt. Bitte formuliere deine Nachricht um.', en: 'The request was rejected due to content policy. Please rephrase your message.' },
 	'chat.error_model_unavailable': { de: 'Das gewählte KI-Modell ist nicht verfügbar. Prüfe die [Einstellungen](/app/settings).', en: 'The selected AI model is not available. Check your [settings](/app/settings).' },
 	'chat.error_context_length': { de: 'Die Konversation ist zu lang. Starte einen neuen Chat.', en: 'The conversation is too long. Start a new chat.' },
+	'chat.still_running': { de: 'In diesem Chat läuft noch ein Auftrag. Seine Antwort erscheint hier; deine Nachricht wurde nicht noch einmal gesendet.', en: 'A turn is still running in this chat. Its answer shows up here; your message was not sent again.' },
 	'chat.error_offline': { de: 'Keine Internetverbindung. Stelle die Verbindung wieder her und versuche es nochmal.', en: 'No internet connection. Reconnect and try again.' },
 	'chat.error_copy_detail': { de: 'Fehlerdetails kopieren', en: 'Copy error details' },
 	'chat.error_toast_prefix': { de: 'Diese Antwort ist fehlgeschlagen', en: 'This response failed' },

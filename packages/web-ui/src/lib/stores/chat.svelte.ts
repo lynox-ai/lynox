@@ -105,6 +105,10 @@ export interface ChatMessage {
 	 *  transcript was unreachable". The auto-refire on reconnect must re-check
 	 *  with the server before spending money on this one. */
 	failedOffline?: boolean;
+	/** The failure above happened before the server answered the request that starts the turn
+	 *  (connection lost, server unreachable), so the turn may or may not have arrived. Nothing
+	 *  sends it again without first asking the server whether a turn is still running. */
+	sendUnconfirmed?: boolean;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
 	/** DK-UX: durable-knowledge writes made during this turn, surfaced as inline chips
@@ -581,6 +585,7 @@ let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : fa
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
 	msg.failed = false;
+	msg.sendUnconfirmed = false;
 	msg.queued = true;
 	msg.queueId = newQueueId();
 	messageQueue.push({ id: msg.queueId, task: msg.content });
@@ -602,6 +607,11 @@ if (typeof window !== 'undefined') {
 		// Auto-retry the last failed message
 		const lastFailed = [...messages].reverse().find((m) => m.role === 'user' && m.failed);
 		if (lastFailed && !isStreaming) {
+			// A turn whose start failed before the server answered may be running: ask first.
+			if (lastFailed.sendUnconfirmed) {
+				void askBeforeResend().then((resend) => { if (resend) refireFailedTurn(lastFailed); });
+				return;
+			}
 			// A turn marked failed WITHOUT server confirmation gets asked about
 			// first. `failedOffline` means both probes were blind, so "failed" was
 			// a guess — and re-POSTing on a guess re-runs and re-bills a turn the
@@ -968,7 +978,140 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<R
 	return 'took-over';
 }
 
+/** How far a turn got before it failed: what its failure handling may touch. */
+interface TurnStart {
+	/** The message list the turn started in, for a failure before its message was added. */
+	readonly messages: ChatMessage[];
+	sid: string | null;
+	/** The turn's own bubbles, by object: indices shift when a bubble before them is removed. */
+	userMsg: ChatMessage | null;
+	assistantMsg: ChatMessage | null;
+	epoch: number;
+	/** The run's stream was reached: from here the run's own handling owns the turn. */
+	streaming: boolean;
+}
+
+/** Run one turn. Never rejects: a turn that cannot be started is marked failed and reported. */
 async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions, queueId?: string): Promise<void> {
+	const turn: TurnStart = { messages, sid: null, userMsg: null, assistantMsg: null, epoch: -1, streaming: false };
+	try {
+		await _runTurn(task, files, displayText, runOptions, queueId, turn);
+	} catch (err) {
+		if (turn.streaming) {
+			// The stream's own handling decides what a dropped run means; this is a fault in it.
+			console.error('[chat] a run failed after its stream began', err);
+			return;
+		}
+		failTurnStart(turn, displayText ?? task, files, queueId);
+	}
+}
+
+/**
+ * A turn failed before the server answered the request that starts it: no connection, an
+ * unreadable session answer, a request cut off. The server may or may not have the turn, so
+ * the message is marked failed AND unconfirmed: it is never sent again without first asking
+ * whether a turn is still running (`askBeforeResend`).
+ */
+function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined): void {
+	// Still the turn's thread: its own message is in the list (the list may have been rebuilt),
+	// or, for a turn that failed before adding one, the list is the one it started in.
+	const ownMsg = turn.userMsg && messages.includes(turn.userMsg) ? turn.userMsg : null;
+	const sameThread = ownMsg !== null || (turn.userMsg === null && messages === turn.messages);
+	if (sameThread) {
+		let userMsg: ChatMessage | undefined = ownMsg ?? undefined;
+		if (!userMsg && queueId !== undefined) userMsg = messages.find((m) => m.role === 'user' && m.queueId === queueId);
+		if (!userMsg) {
+			// It failed before the message was added: add it, so the user's text is not lost.
+			const fileNames = files?.map((f) => f.name).join(', ');
+			messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
+			userMsg = messages[messages.length - 1];
+		}
+		if (userMsg) {
+			userMsg.queued = false;
+			userMsg.failed = true;
+			userMsg.sendUnconfirmed = true;
+		}
+		const aIdx = turn.assistantMsg ? messages.indexOf(turn.assistantMsg) : -1;
+		const a = aIdx >= 0 ? messages[aIdx] : undefined;
+		if (a && !a.content && !a.blocks?.length && !a.toolCalls?.length) {
+			messages.splice(aIdx, 1);
+		}
+		// The 404 path drops the session to re-create it; if that failed, keep the thread.
+		if (sessionId === null && turn.sid !== null) sessionId = turn.sid;
+	}
+	// Only what this turn claimed: a turn that failed before claiming the stream leaves alone
+	// whatever is streaming now.
+	if (turn.epoch !== -1 && turn.epoch === streamEpoch) {
+		isStreaming = false;
+		streamingActivity = 'idle';
+		streamingToolName = null;
+		streamingToolPhase = null;
+		retryStatus = null;
+	}
+	if (!sameThread) return;
+	chatError = t('chat.error_connection');
+	chatErrorDetail = null;
+	persistChat();
+	// The turns queued behind this one still get their go, once there is a connection to try:
+	// a turn started offline returns without sending and would be dropped from the queue.
+	const online = typeof navigator === 'undefined' || navigator.onLine;
+	if (online && !pendingChangeset && messageQueue.length > 0) {
+		const next = messageQueue.shift()!;
+		persistChatNow();
+		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
+	}
+}
+
+let _resendProbeInFlight = false;
+
+/**
+ * Before a failed turn is sent again, ask the server whether a turn is still running in this
+ * thread. If one is, it is not sent again: the user is told and the running turn's stream is
+ * attached. Resolves whether to send; never rejects.
+ */
+async function askBeforeResend(): Promise<boolean> {
+	if (_resendProbeInFlight || isStreaming) return false;
+	const sid = sessionId;
+	// No session yet: the failed turn never reached one, so nothing can be running.
+	if (!sid) return true;
+	_resendProbeInFlight = true;
+	let running: boolean;
+	try {
+		const res = await fetch(`${getApiBase()}/runs/active`);
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		running = selectReattachTarget(await res.json(), sid) !== null;
+	} catch {
+		// Not "nothing is running": the question could not be asked, so nothing is sent.
+		if (sessionId === sid) addToast(t('chat.error_connection'), 'error', 6000);
+		return false;
+	} finally {
+		_resendProbeInFlight = false;
+	}
+	// The thread changed, or a turn started meanwhile: that is now the turn in charge.
+	if (sessionId !== sid || isStreaming) return false;
+	if (!running) return true;
+	addToast(t('chat.still_running'), 'info', 6000);
+	// The last run's checkpoint says nothing about this run's stream.
+	lastAppliedSeq = 0;
+	// Attaches to the running turn's stream and resolves when that turn ends; it handles its
+	// own failures (an unreachable stream leaves the thread as it is).
+	void reattachToActiveRun(sid, -1);
+	return false;
+}
+
+/** The tap on a failed message: asks first, then sends `text` again. Never rejects. */
+export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<void> {
+	if (isStreaming) {
+		addToast(t('chat.still_running'), 'info', 6000);
+		return;
+	}
+	if (!await askBeforeResend()) return;
+	msg.failed = false;
+	msg.sendUnconfirmed = false;
+	await sendMessage(text);
+}
+
+async function _runTurn(task: string, files: FileAttachment[] | undefined, displayText: string | undefined, runOptions: RunOptions | undefined, queueId: string | undefined, turn: TurnStart): Promise<void> {
 	chatError = null;
 	retryStatus = null;
 
@@ -989,6 +1132,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		}
 		throw err;
 	}
+	turn.sid = sid;
 
 	// Find and un-queue if this message was already added as queued.
 	// Prefer id-based lookup when the run originated from messageQueue;
@@ -1007,14 +1151,17 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
 		userMsgIdx = messages.length - 1;
 	}
+	turn.userMsg = messages[userMsgIdx] ?? null;
 
 	const assistantIdx = messages.length;
 	messages.push({ role: 'assistant', content: '', toolCalls: [] });
+	turn.assistantMsg = messages[assistantIdx] ?? null;
 
 	// Claim ownership of the shared streaming state so an in-flight re-attach
 	// that ends mid-send can't switch off this run's activity indicators.
 	streamEpoch++;
 	const epoch = streamEpoch;
+	turn.epoch = epoch;
 	isStreaming = true;
 	// Seed liveness markers so a stale value from the previous run can't
 	// flash "Verbindung scheint langsam" for the first ~20s of this run.
@@ -1208,6 +1355,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		return;
 	}
 
+	turn.streaming = true;
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';

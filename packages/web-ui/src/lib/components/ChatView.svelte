@@ -1,6 +1,7 @@
 <script lang="ts">
 	import {
 		sendMessage,
+		retryFailedTurn,
 		abortRun,
 		replyPermission,
 		replyPermissionTabs,
@@ -303,7 +304,7 @@
 		// Demo chips are direct prompts — no agent-context preamble, no
 		// effort overrides; the demo tenant runs on the cheap-tier defaults
 		// the CP provisioner injects.
-		sendMessage(prompt);
+		void sendMessage(prompt); /* never rejects; a turn that cannot start is marked failed and reported */
 	}
 
 	function sendOnboardingStep(idx: number, url?: string) {
@@ -316,7 +317,7 @@
 		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
 		pendingOnboardingAdvance = true;
 		// Onboarding instructions are explicit — use low effort, no thinking
-		sendMessage(context ? `${context}\n\n${prompt}` : prompt, prompt, undefined, { effort: 'low', thinking: 'disabled' });
+		void sendMessage(context ? `${context}\n\n${prompt}` : prompt, prompt, undefined, { effort: 'low', thinking: 'disabled' }); /* never rejects; a turn that cannot start is marked failed and reported */
 	}
 
 	function submitOnboardingUrl() {
@@ -1963,7 +1964,7 @@
 		const isMobile = window.innerWidth < 768;
 		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
-			handleSend();
+			void handleSend(); /* never rejects; a turn that cannot start is marked failed and reported */
 		}
 		if (e.key === 'Escape' && isStreaming) {
 			void abortRun(); /* never rejects; a stop that does not arrive is reported */
@@ -2704,7 +2705,7 @@
 							</button>
 						{/if}
 						<button
-							onclick={() => { if (msg.failed) { sendMessage(userText); msg.failed = false; } else { void copyWithToast(userText); } }}
+							onclick={() => { if (msg.failed) void retryFailedTurn(msg, userText); /* never rejects; asks the server before sending again */ else void copyWithToast(userText); }}
 							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
