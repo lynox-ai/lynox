@@ -878,8 +878,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // and `buildTierPresetSignal` omits the key when undefined — so the one preset
     // that exists to make EU processing EXPLICIT could not show the chip on the slot
     // this model serves. NOT every Mistral entry carries the field — `ministral-3b`
-    // and the older/legacy entries still lack it, so they show no provenance chip
-    // where they are catalog-selectable. Nothing enforces it registry-wide; the guard that
+    // and the older/legacy entries still lack it. Nothing enforces it registry-wide; the guard that
     // exists covers preset slots only (tier-presets.test.ts).
     provenance: 'EU',
   },

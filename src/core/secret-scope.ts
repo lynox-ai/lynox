@@ -287,7 +287,7 @@ export function scopeSecretStore(
       (!allowed.has(name) && !isInfraSecret(name) ? 'out-of-scope' : undefined),
 
     // Writes are NOT narrowed, and this is a stated limit of this piece rather
-    // than an oversight. The row this closes is about what a child can REACH;
+    // than an oversight. This scope is about what a child can REACH;
     // bounding what it can STORE is a different seam with a different failure
     // mode, and an earlier draft of this file found it the hard way: a throwing
     // `set` fires inside `api_setup fetch_token` AFTER the token exchange has

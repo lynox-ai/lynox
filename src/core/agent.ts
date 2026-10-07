@@ -504,7 +504,7 @@ export class Agent implements IAgent {
   /** Per-conversation blob store for tool results recallable after compaction. */
   readonly toolResultBlobStore: import('./tool-result-blob-store.js').ToolResultBlobStore | undefined;
   /**
-   * H-024 shadow-mode tracker — per-conversation behavioural anomaly detector.
+   * Shadow-mode tracker — per-conversation behavioural anomaly detector.
    * Threaded from the Session (owns it across Agent recreation). When set, the
    * agent records every successful tool dispatch and calls `checkAnomaly()`
    * for channel-side-effect publishing. Return value intentionally discarded:
@@ -3742,15 +3742,6 @@ export class Agent implements IAgent {
    * the same column with neither the flatten nor the bound — the narrow door
    * shut, the wide one open, and the commit claiming the threat closed.
    *
-   * ⚠⚠ And there is a THIRD writer of that column which this does NOT reach, so
-   * do not read the paragraph above as coverage. Pipeline steps build their
-   * Agent with no `recordToolCall` in its config, so `_recordToolCall` is a
-   * no-op for them and their row is written by `createStepStreamHandler` →
-   * `runner.ts` → `insertToolCall` from the STREAM event:
-   * `boundedJson(event.result)`, a different cap, no masking order, no flatten,
-   * no cut mark. `http_request` is in `INLINE_CORE_TOOLS`, so that path is live
-   * for the very tool this change is about.
-   *
    * Order is load-bearing. Mask FIRST: truncating first hands the masker a
    * fragment its pattern no longer matches, leaving the tail verbatim. Flatten
    * is length-preserving, so it cannot move the cut. Replace rather than strip:
@@ -4093,11 +4084,10 @@ export class Agent implements IAgent {
         this._conversationSawUntrusted = true;
       }
 
-      // H-024 shadow mode: observe tool-call sequences for anomaly patterns.
+      // Shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard
       // the return value — shadow mode does NOT block dispatch or surface a
-      // warning to the user. Enforcement is deferred to v1.7.3 after we
-      // observe false-positive rate in production. The preview is built via
+      // warning to the user. The preview is built via
       // formatToolCallPreview (secret-safe: URL-only for http_request, path-
       // only for read_file/write_file, strips known secret-bearing fields
       // from the catch-all). record() + checkAnomaly() are O(1) per call.

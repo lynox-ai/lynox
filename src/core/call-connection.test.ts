@@ -9,7 +9,7 @@ import { RunHistory } from './run-history.js';
 import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 
 /**
- * The per-call connection stamp (source-connection PRD, first build cut).
+ * The per-call connection stamp.
  *
  * Three properties the stamp has to carry, each with its own witness below:
  *  (a) only the engine's resolver writes it — a value the model supplies does not
@@ -17,7 +17,7 @@ import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connect
  *      handed, and it is isolated per call; the http resolver half is in http.test.ts);
  *  (b) it outlives the `connections` row it names;
  *  (c) a connection deleted and set up again is told apart from the old one — and
- *      where it is NOT (a re-authorisation of the same row), the gap is pinned.
+ *      where it is NOT (a re-authorisation of the same row), that is pinned too.
  */
 describe('call-connection slot', () => {
   it('is a no-op outside a call', () => {

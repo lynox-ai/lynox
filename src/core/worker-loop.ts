@@ -22,17 +22,16 @@ import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
 // handler was its first consumer; src/core/ is the better home now that there
-// are two, and the move is deliberately NOT made here because it would edit
-// http-api.ts, which core#1196 holds. `src/core/config.ts` already imports
-// across the same seam, so this is precedented rather than novel.
+// are two. `src/core/config.ts` already imports across the same seam, so this
+// is precedented rather than novel.
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
  *  `http-api.ts` (which calls it "the canonical skip marker") and in
  *  `onboarding-promotion.ts` (`ONBOARDING_SKIP_MARKER`), and recognised by
- *  `ask-user.ts`. It is a fourth literal copy, so all four must stay spelled
- *  the same. */
+ *  `ask-user.ts`. It is one more literal copy of a marker spelled out in several
+ *  places, engine and web UI alike; every copy must stay spelled the same. */
 const DISMISSED_ANSWER = '__dismissed__';
 
 /** What a swept run's result reads as. It is a RESULT, not a status: the status
@@ -597,8 +596,7 @@ export class WorkerLoop {
         //   · the cost guard books a turn and only then compares, so the bound is
         //     `grant + one turn`, not `grant` (see MIN_VIABLE_RUN_USD);
         //   · `spawn_agent` children and the in-run `run_workflow` tool carry their own
-        //     budgets and bill the same daily cap;
-        //   · a manual run through `runTriggerNow` reserves nothing.
+        //     budgets and bill the same daily cap.
         // What this coupling removes is the standstill.
         //
         // Only `run_agent` is couplable: `executeStandard` and `executeWatch` each set a

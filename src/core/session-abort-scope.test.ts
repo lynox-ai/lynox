@@ -16,8 +16,8 @@ import type { AbortScope, LynoxConfig } from '../types/config.js';
  * MODULE-LEVEL `Set<Agent>` — so a stop in one thread aborted every spawned sub-agent and
  * every workflow-step agent IN THE PROCESS. Their parents recorded an abort nobody asked
  * for. In the worker loop it was worse than lost work: a trigger run recorded `failed`
- * re-fires through the backoff, so the collateral STARTED autonomous runs. No test touched
- * that line; this file does.
+ * re-fires through the backoff, so the collateral STARTED autonomous runs. No test covered
+ * that behaviour; this file does.
  *
  * ⚠ THE OTHER HALF IS NOT HERE. Whether a child ever LANDS in its parent's scope is
  * decided in the spawn tool and in the two step executors, and `spawn.test.ts` carries
