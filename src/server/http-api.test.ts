@@ -7385,6 +7385,49 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
+      it('a RESTART whose new run is refused keeps the claim, not deletes it', async () => {
+        // ⚠ The restart sets `started_at` back to NULL, so this request's own release
+        // matched it. If the restarted run is then refused before it starts — an exhausted
+        // credit gate — the claim was DELETED, and with it the only record that the earlier
+        // attempt had spent. The next click ran again, paid, with nothing disclosed. In that
+        // column "nothing was spent" and "the earlier spend was carried forward" look
+        // identical, which is the conflation `started_at` exists to prevent one level up.
+        seedClaim('k-1', 'run-a', { started: true, status: 'failed' });
+        claimHistory.getDb().prepare('UPDATE pipeline_runs SET total_cost_usd = ? WHERE id = ?')
+          .run(12.5, 'run-a');
+        mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Run blocked: credit exhausted' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(400);
+          const row = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
+          expect(row, 'the claim must survive a refused restart').not.toBeNull();
+          expect(row!.runId, 'and it holds the restarted id').not.toBe('run-a');
+        });
+        // and the next attempt is told what the earlier one cost, rather than running clean
+        mockRunSavedWorkflow.mockReset();
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          const body = await res.json() as { error?: string; code?: string };
+          // The claim is unstarted and still held, so the honest answer is the in-flight
+          // refusal — NOT a fresh paid run.
+          expect(res.status).toBe(409);
+          expect(body.code).toBe('run_claim_in_flight');
+        });
+      });
+
+      it('masks a string that rides in `extra`, not only the message', async () => {
+        // `extra` travels in the body the masker owns, and only `message` was masked —
+        // which made the docblock's argument true of the message and false of the fields
+        // beside it. Driven through the exported builder, since no route passes a
+        // credential there today.
+        const key = `sk-ant-${'c'.repeat(60)}`;
+        const body = buildClientErrorBody('a refusal', 'some_code', { runId: 'run-a', note: `leaked ${key}` });
+        expect(JSON.stringify(body)).not.toContain(key);
+        expect(body['note']).toContain('leaked');
+        expect(body['runId'], 'a plain id is untouched').toBe('run-a');
+      });
+
       it('a FIRST run discloses no earlier attempt, because there was none', async () => {
         // The other direction, so "always send the fields" cannot satisfy the test above:
         // a client branches on their PRESENCE, so present-but-zero would announce an

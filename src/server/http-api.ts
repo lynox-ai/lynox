@@ -874,6 +874,15 @@ export function buildClientErrorBody(
 ): Record<string, unknown> {
   // Destructuring is the strip: whatever those two held does not reach `safe`.
   const { error: _droppedError, code: _droppedCode, ...safe } = extra ?? {};
+  // ⚠ And every STRING in `extra` is masked and capped too. Only `message` was, which made
+  // the docblock's own argument — that the one place which masks is the one place which
+  // builds the body — true of the message and quietly false of the fields it had just
+  // added. Nothing passes a credential there today (the only caller sends a server-minted
+  // run id), so this closes a shape rather than a leak; a shape in the body-builder is
+  // worth closing, because the next caller is the one that would not think about it.
+  for (const [k, v] of Object.entries(safe)) {
+    if (typeof v === 'string') safe[k] = capForClient(maskForClient(v));
+  }
   return {
     ...safe,
     error: capForClient(maskForClient(message)),
@@ -6322,6 +6331,14 @@ export class LynoxHTTPApi {
                 claimedRunId = mintedRunId;
                 restartedFrom = { runId: held.runId, costUsd: heldRun?.total_cost_usd ?? 0 };
                 break;
+              // ⚠ `restartedFrom` being set is ALSO what tells the cleanup below not to
+              // release. The restart sets `started_at` back to NULL, so the release's
+              // `started_at IS NULL` matches — and if the restarted run is then refused
+              // before it starts (an exhausted credit gate, say), the claim is deleted and
+              // the record of the EARLIER attempt's spend goes with it. The next click then
+              // runs again, paid, with nothing disclosed. "Nothing was spent" and "the
+              // previous spend was carried forward" look identical in that column, which is
+              // exactly the conflation `started_at` exists to prevent, one level up.
               case 'unknown-outcome':
                 // `started_at` is set and no run row ever landed: the insert is
                 // fire-and-forget and a 5s SQLITE_BUSY is swallowed while the run pays.
@@ -6412,7 +6429,7 @@ export class LynoxHTTPApi {
         // spent would come back as a 500, the view would read that as a failure, discard its
         // key, and the next click would pay for the whole workflow again. The claim row is
         // correct either way; the damage would travel entirely through the wrong answer.
-        if (ownedRunId !== undefined && idempotencyKey !== undefined) {
+        if (ownedRunId !== undefined && idempotencyKey !== undefined && restartedFrom === undefined) {
           try {
             history.releaseUnstartedWorkflowRunClaim(claimWorkflowId, idempotencyKey, ownedRunId);
           } catch { /* the boot sweep releases it instead — never at the cost of the answer */ }
