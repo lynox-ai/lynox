@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from './oauth-refresh-failure.js';
+import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from './oauth-refresh-failure.js';
 
 describe('classifyRefreshFailure — the three kinds, by token-endpoint error code', () => {
   it.each([
@@ -44,6 +44,23 @@ describe('reclassifyForeignGrant — revocation or the wrong client', () => {
   it('leaves every other kind alone', () => {
     expect(reclassifyForeignGrant('transient', 'a', 'b')).toBe('transient');
     expect(reclassifyForeignGrant('client-misconfigured', 'a', 'a')).toBe('client-misconfigured');
+  });
+});
+
+describe('isScopeRejection', () => {
+  it('is true for invalid_scope on a 400, which the classifier leaves transient', () => {
+    const body = JSON.stringify({ error: 'invalid_scope' });
+    expect(classifyRefreshFailure(400, body)).toBe('transient');
+    expect(isScopeRejection(400, body)).toBe(true);
+  });
+
+  it('is false for every other code, for a non-JSON body and for a 5xx or 429', () => {
+    expect(isScopeRejection(400, JSON.stringify({ error: 'invalid_grant' }))).toBe(false);
+    expect(isScopeRejection(400, JSON.stringify({ error: 'invalid_request' }))).toBe(false);
+    expect(isScopeRejection(400, '<html>invalid_scope</html>')).toBe(false);
+    expect(isScopeRejection(400, 'null')).toBe(false);
+    expect(isScopeRejection(503, JSON.stringify({ error: 'invalid_scope' }))).toBe(false);
+    expect(isScopeRejection(429, JSON.stringify({ error: 'invalid_scope' }))).toBe(false);
   });
 });
 

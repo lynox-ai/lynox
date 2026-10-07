@@ -520,6 +520,129 @@ describe('fetch_token — a profile connected through a provider preset', () => 
   });
 });
 
+describe('fetch_token — a refused scope', () => {
+  const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
+  const withPreset = (p: ApiProfile, extra: Record<string, unknown> = {}): ApiProfile =>
+    ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: 'bexio', scope: 'contact_show', ...extra } } });
+  const STANDARD_VAULT = { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' };
+
+  /**
+   * Every preset state a scope refusal can reach gets the same reply. Advice per state
+   * was tried and each version was false in some reachable state, so the reply holds
+   * facts and one prohibition, and this checks that no state is told to change the
+   * profile or is told to retry.
+   */
+  const states: { name: string; profile: ApiProfile; vault: Record<string, string>; grant: string }[] = [
+    { name: 'connected, refresh token presented', profile: withPreset(crmProfile({ oauth_grant: stamp('client-1', 'rt-1'), custom_endpoint_ack: ACK2 })), vault: STANDARD_VAULT, grant: 'refresh_token' },
+    { name: 'never connected, client credentials', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials')), vault: STANDARD_VAULT, grant: 'client_credentials' },
+    { name: 'last consent returned no refresh token', profile: withPreset(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-0'), origin: 'callback', state: 'no-refresh' }, custom_endpoint_ack: ACK2 }, 'client_credentials')), vault: { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }, grant: 'client_credentials' },
+    { name: 'refresh token read from its own slot', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }), { refresh_token_key: 'CRM_OWN_REFRESH' }), vault: { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' }, grant: 'refresh_token' },
+  ];
+
+  for (const st of states) {
+    it(`gives a preset profile (${st.name}) facts and a prohibition, no retry and no prescribed change`, async () => {
+      const store = new ApiStore();
+      store.register(st.profile);
+      const before = JSON.stringify(store.get('crm-api'));
+      const vault = makeVault(st.vault);
+      const agent = makeAgent(store, vault);
+      const spy = tokenEndpoint(400, JSON.stringify({ error: 'invalid_scope' }));
+
+      const result = await fetchToken(agent);
+
+      // The state is the one named, not one an earlier refusal stood in for.
+      expect(spy).toHaveBeenCalledTimes(1);
+      const body = new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body));
+      expect(body.get('grant_type')).toBe(st.grant);
+      expect(result).toContain('refused the scopes this exchange asked for (openid offline_access contact_show)');
+      expect(result).toContain('Do not call fetch_token again for this profile unchanged');
+      expect(result).toContain('Put this in front of the person who owns the connection');
+      expect(result).toContain('NOT a lynox tool limitation');
+      expect(result).not.toContain('retry later');
+      expect(result).not.toContain('api_setup update');
+      expect(result).not.toContain('ask_secret');
+      expect(JSON.stringify(store.get('crm-api'))).toBe(before);
+      for (const [k, v] of Object.entries(st.vault)) expect(vault.peek(k)).toBe(v);
+    });
+  }
+
+  it('tells a profile without a preset to check its scope, without the preset reply', async () => {
+    const store = new ApiStore();
+    const base = crmProfile({ oauth_grant: stamp('client-1', 'rt-1') });
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'contacts.write' } } });
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_scope' }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('refused the scopes this exchange asked for (contacts.write)');
+    expect(result).toContain('Check auth.oauth.scope');
+    expect(result).not.toContain('action "connect"');
+    expect(result).not.toContain('retry later');
+  });
+
+  it('caps a free-text scope it echoes back', async () => {
+    const store = new ApiStore();
+    const base = crmProfile({ oauth_grant: stamp('client-1', 'rt-1') });
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'x'.repeat(5000) } } });
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_scope' }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain(`(${'x'.repeat(200)}…)`);
+    expect(result).not.toContain('x'.repeat(201));
+  });
+
+  it('still reads another unclassified 4xx on a preset profile as temporary', async () => {
+    const store = new ApiStore();
+    store.register(states[0]!.profile);
+    const agent = makeAgent(store, vaultWithRefresh());
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_request' }));
+
+    const result = await fetchToken(agent);
+
+    expect(result).toContain('retry later');
+    expect(result).not.toContain('refused the scopes');
+  });
+});
+
+describe('fetch_token — which host the rate limit counts against', () => {
+  const bexio = (): ApiProfile => {
+    const base = crmProfile({ rate_limit: { requests_per_hour: 1 }, custom_endpoint_ack: { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] } });
+    return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, preset_id: 'bexio' } } };
+  };
+
+  it('counts a preset profile\'s exchange against the preset\'s token host', async () => {
+    const store = new ApiStore();
+    store.register(bexio());
+    store.rateLimiter.register('auth.bexio.com', { requests_per_hour: 1 });
+    expect(store.checkRateLimit('auth.bexio.com')).toBeNull();
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    const result = await fetchToken(agent);
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result).toContain('API rate limit reached for auth.bexio.com');
+  });
+
+  it('does not count it against the host of the token_url the profile names', async () => {
+    const store = new ApiStore();
+    store.register(bexio());
+    // The profile's own bucket (api.crm.example, also its token_url host) is spent.
+    expect(store.checkRateLimit('api.crm.example')).toBeNull();
+    expect(store.checkRateLimit('api.crm.example')).not.toBeNull();
+    const agent = makeAgent(store, vaultWithRefresh());
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 }));
+
+    const result = await fetchToken(agent);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(result).toContain('Token exchange OK');
+  });
+});
+
 describe('fetch_token — what a successful exchange records', () => {
   it('stamps a fingerprint of the client, not the id itself, for the refresh token now in play', async () => {
     const store = new ApiStore();
