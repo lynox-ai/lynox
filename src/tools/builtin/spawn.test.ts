@@ -1996,8 +1996,20 @@ describe('spawn_agent tool', () => {
       // clause carrying an imperative verb may contain no digit at all. The figures this
       // message does carry are descriptions, and they live in clauses without one.
       const { balanced, deep } = await floors();
-      /** Imperative heads this surface uses. A digit in the same clause is a prescription. */
-      const IMPERATIVE = /\b(Raise|raise|Give|give|Delegate|delegate|Lower|lower|Use|use|set|needs|come back with|re-run)\b/;
+      /**
+       * Imperative heads, and what this list IS and IS NOT — stated because a round measured
+       * both error directions. It catches the obvious smuggle (`Raise … $0.20`) and it is NOT a
+       * grammar: `Increase`, `Bump`, `Pass`, `Try`, `Allow` and a figure spelled in words all
+       * walk past it. The verbs `set`, `use`, `needs` and `lower` were REMOVED from it, because
+       * each of them appears in ordinary description beside a legitimate figure ("one turn needs
+       * $0.19"), so they produced false alarms on true sentences — a rule with both error
+       * directions is worse than a narrow one plus a real invariant.
+       *
+       * ⛔ THE INVARIANT IS THE FIGURE COUNT below, not this regex. A prescription has to put a
+       * number in the message, so a message whose figure count is exactly what its branch
+       * describes cannot carry a smuggled one, whatever verb introduces it.
+       */
+      const IMPERATIVE = /\b(Raise|raise|Give|give|Delegate|delegate|come back with|re-run)\b/;
       const fixtures: Array<[string, number, unknown[]]> = [
         ['spent ceiling', 0, [{ name: 'one', task: 'A' }]],
         ['spent ceiling, zero ask', 0, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
@@ -2020,7 +2032,16 @@ describe('spawn_agent tool', () => {
         // `toFixed`. `max_tokens` is unbounded on the schema and unvalidated, and the floor is
         // priced against it — so this is the one input that can put `4.5e+302` in front of a
         // model. The per-figure assertion below is what refuses it.
-        ['own budget, an absurd cap', 0.25, [{ name: 'one', task: 'A', model: 'fast', max_budget_usd: 5, max_tokens: 1e12 }]],
+        // ⛔ A LARGE CAP, because the floor is priced against `max_tokens` and that field is
+        // unbounded on the schema and unvalidated — spawn.ts says so itself. Measured: `1e12`
+        // prints `$1500000.02`, a readable figure, which is what this pins.
+        // ⚠ The sweep deliberately stops short of `1e21`, where `toFixed` switches to exponent
+        // notation and the message would carry `$1.5e+294`. That is NOT this change's: `usdLabel`
+        // on `origin/main` is byte-identical and main's refusal prints the same expression, so
+        // the defect is pre-existing and filed rather than repaired under this diff. The
+        // no-exponent assertion below stays, because it is the right assertion the day the cap
+        // is bounded.
+        ['own budget, a large but finite cap', 0.25, [{ name: 'one', task: 'A', model: 'fast', max_budget_usd: 5, max_tokens: 1e12 }]],
         ['siblings, batch fits', 0.5, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
         ['siblings, batch cannot fit', 0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
         ['siblings at the gate boundary', balanced * 2, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
@@ -2028,9 +2049,23 @@ describe('spawn_agent tool', () => {
         ['the exact-tie remainder', balanced, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
         ['ten children', 0.4, Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, task: 'A' }))],
       ];
-      for (const [label, remainder, agents] of fixtures) {
+      /**
+       * How many `$`-figures each branch may print, by shape. THIS is the invariant: a smuggled
+       * figure raises the count whatever wording introduces it, and a reworded sentence with the
+       * same figures passes. Derived from the source, one entry per fixture in order.
+       */
+      const expectedFigures = [
+        // ⚠ MEASURED, not estimated. A first version of this list was typed from reading the
+        // source and two entries were wrong — the same mistake this session corrected three
+        // times elsewhere today. The series comes from a run that printed it.
+        2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 5, 5, 7, 3, 3, 4, 6, 4, 3, 6, 6,
+      ];
+      expect(expectedFigures, 'one expected count per fixture').toHaveLength(fixtures.length);
+
+      for (const [i, [label, remainder, agents]] of fixtures.entries()) {
         const msg = await refusalFor(remainder, agents);
         expect(msg, `${label}: no NaN, Infinity or exponent reaches the model`).not.toMatch(/Infinity|NaN|e[+-][0-9]/);
+        expect((msg.match(/\$[0-9]/g) ?? []).length, `${label}: the figure count its branch describes`).toBe(expectedFigures[i]);
         for (const figure of msg.match(/\$[0-9]+(?:\.[0-9]+)?/g) ?? []) {
           expect(figure, `${label}: ${figure} is printed at display precision`).toMatch(/^\$[0-9]+\.[0-9]{2}([0-9]{2})?$/);
         }
@@ -2046,19 +2081,29 @@ describe('spawn_agent tool', () => {
       }
     });
 
-    it('two amounts compared in one sentence are never printed identically', async () => {
+    it('two amounts that round alike are not put in apposition', async () => {
       // ⛔ THE ORIGINAL DEFECT, RE-ENTERED THROUGH THE DESCRIPTION. `usdLabel` rounds to nearest
       // and 15 of the 39 priced ids round down, so an ask of $0.19 against a $0.192 floor read
-      // "it may spend $0.19 and one turn on its model costs about $0.19" — with an instruction
-      // to raise it beside them. Measured over a sweep: 73 of 2 717 refusals said "X is below X".
-      const msg = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.19 }]);
-      expect(msg, 'the ask is separated from the floor').toContain('it may spend $0.1900');
-      expect(msg, 'and the floor from the ask').toContain('costs about $0.1920');
-      expect(msg, 'so the sentence no longer says X is below X').not.toMatch(/spend \$0\.19 and one turn[^$]*\$0\.19\b/);
-      // The control: where the two differ at display precision, nothing is widened.
-      const plain = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
-      expect(plain, 'an unambiguous pair stays at two decimals').toContain('it may spend $0.10');
-      expect(plain, 'and so does its floor').toContain('costs about $0.19');
+      // "it may spend $0.19 and one turn on its model costs about $0.19" — two identical figures
+      // with one declared insufficient against the other. A sweep found 73 of 2 717 refusals
+      // saying "X is below X".
+      //
+      // ⚠ A per-sentence precision chooser was the first repair and it was the WRONG instrument.
+      // A round measured both of its holes: a pair colliding at four decimals as well as two was
+      // left alone, so the defect survived for every ask in `[0.1915, 0.192)`; and its collision
+      // test compared `toFixed` output against a formatter with two arms, so a sub-cent pair
+      // printed alike without triggering it. The sentence states the relation instead, which no
+      // precision can be wrong about — so the witness is on the WORDS.
+      for (const ask of [0.19, 0.19199, 0.192 - 1e-9]) {
+        const msg = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: ask }]);
+        expect(msg, `ask ${String(ask)}: the relation is in words`).toContain('and one turn costs more');
+        expect(msg, `ask ${String(ask)}: so no bare apposition of two equal-looking figures`)
+          .not.toMatch(/spend \$[0-9.]+ and one turn on its model/);
+      }
+      // And the same in the run-cannot-pay branch, where the remainder and the floor collide.
+      const { balanced } = await floors();
+      const short = await refusalFor(balanced * 0.999, [{ name: 'one', task: 'A' }]);
+      expect(short, 'the remainder relation is in words too').toContain('more than the whole remainder');
     });
 
     it('a floor of zero in the batch makes the fits-gate strict', async () => {
@@ -2157,7 +2202,10 @@ describe('spawn_agent tool', () => {
       // `max_tokens: 500` are ADMITTED. A previous cut said "nothing smaller will do", which
       // denied exactly those — and this is the one branch where a cheaper model demonstrably
       // clears the refusal, so withholding it was the expensive direction.
-      expect(msg, 'a cheaper model is named').toContain('A cheaper model or a narrower max_tokens');
+      // ⚠ As a MAY, not a fact: below the floor's irreducible prefix term (about $0.04 on the
+      // cheapest tier, $0.0008 on the cheapest priced id) NEITHER lever clears it, measured. An
+      // earlier revision wrote "would also clear it" and contradicted this file's own docblock.
+      expect(msg, 'both levers are named, as a may').toContain('may also clear it');
       expect(msg, 'so NOT the batch remedy that cannot work here').not.toContain('Delegate fewer at once');
       expect(msg, 'and nothing was scaled in this fixture').not.toContain('scaled it to');
     });
@@ -2333,8 +2381,13 @@ describe('spawn_agent tool', () => {
       // ceiling the child ran with, and that ceiling is the SCALED share — so it printed
       // `max_budget_usd=0.20499999999999996`, a description formatted as a parameter
       // assignment. Rounded to display precision, kept a number.
-      expect(result, 'the reported knob is readable too').toContain('COST BUDGET REACHED (max_budget_usd=0.2)');
-      expect(result, 'and carries no float tail either').not.toMatch(/max_budget_usd=0\.204/);
+      expect(result, 'the reported knob is readable too').toContain('COST BUDGET REACHED (max_budget_usd=0.205)');
+      expect(result, 'and carries no float tail either').not.toMatch(/max_budget_usd=0\.204999/);
+      // ⛔ AND IT NEVER READS AS ZERO FOR A POSITIVE CEILING. Rounding to cents was the first
+      // repair and it had two measured error directions: `0.00001` became `0`, which asserts the
+      // zero-budget branch this code path treats as a different diagnosis, and `0.00999` became
+      // `0.01`, overstating a ceiling. Significant digits do neither.
+      expect(result, 'a positive ceiling never prints as 0').not.toMatch(/max_budget_usd=0\)/);
       // ⛔ STRICTLY LARGER, which is the property that makes it worth typing: the child ran
       // with a ceiling BELOW the figure it is now told to ask for.
       const quoted = /at least ([0-9.]+)\)/.exec(result);
