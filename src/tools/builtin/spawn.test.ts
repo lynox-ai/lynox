@@ -509,13 +509,17 @@ describe('spawn_agent tool', () => {
       vi.useFakeTimers();
       try {
         const deadline = createSpawnDeadline(100);
+        expect(deadline.isHeldForHuman).toBe(false);
         const first = deadline.holdForHuman();
         const second = deadline.holdForHuman();
+        expect(deadline.isHeldForHuman).toBe(true);
         vi.advanceTimersByTime(500);
         first();
+        expect(deadline.isHeldForHuman).toBe(true);
         vi.advanceTimersByTime(500); // the second question is still open
         expect(deadline.signal.aborted).toBe(false);
         second();
+        expect(deadline.isHeldForHuman).toBe(false);
         vi.advanceTimersByTime(99);
         expect(deadline.signal.aborted).toBe(false);
         vi.advanceTimersByTime(1);

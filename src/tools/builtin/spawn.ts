@@ -68,6 +68,9 @@ export interface SpawnDeadline {
   readonly signal: AbortSignal;
   /** Stop the clock until the returned release is called (idempotent). */
   holdForHuman(): () => void;
+  /** Whether the child is waiting on a human right now (any question still open) — for
+   *  a caller that parks other per-child resources while it waits. */
+  readonly isHeldForHuman: boolean;
   /** The child settled: the limit no longer applies. */
   clear(): void;
 }
@@ -81,6 +84,7 @@ export function createSpawnDeadline(ms: number): SpawnDeadline {
   let cleared = false;
   return {
     signal: controller.signal,
+    get isHeldForHuman() { return holds > 0; },
     holdForHuman() {
       if (cleared || controller.signal.aborted) return () => undefined;
       if (holds === 0 && timer !== undefined) {
