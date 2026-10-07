@@ -46,8 +46,20 @@ describe('which imports ask for a file\'s text or URL rather than its module', (
 		}
 	});
 
-	it('not a module import that only carries a version or a look-alike name', () => {
-		for (const id of ['/a/chat.svelte.ts', '/a/chat.svelte.ts?v=123', '/a/chat.svelte.ts?rawish', '/a/raw.svelte.ts', '/a/chat.svelte.ts?curl', '/a/chat.svelte.ts?raw=1', '/a/chat.svelte.ts?url=1', '/a/chat.svelte.ts?raw?x', '/a/chat.svelte.ts?x?raw']) {
+	it('not a plain module import, a look-alike name, a valued or doubled query, or a worker', () => {
+		for (const id of [
+			'/a/chat.svelte.ts',
+			'/a/chat.svelte.ts?v=123',
+			'/a/chat.svelte.ts?rawish',
+			'/a/raw.svelte.ts',
+			'/a/chat.svelte.ts?curl',
+			'/a/chat.svelte.ts?raw=1',
+			'/a/chat.svelte.ts?url=1',
+			'/a/chat.svelte.ts?raw?x',
+			'/a/chat.svelte.ts?x?raw',
+			'/a/chat.svelte.ts?raw&worker',
+			'/a/chat.svelte.ts?sharedworker&url',
+		]) {
 			expect(asksForSourceOrUrl(id), id).toBe(false);
 		}
 	});
