@@ -4,6 +4,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
+	import { attemptKey, clearAttemptKey } from '../utils/run-attempt-key.js';
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
@@ -269,18 +270,51 @@
 		}
 	}
 
+	/**
+	 * The TERMINAL rule for an attempt's key lives here, because only this function sees
+	 * the response. `attemptKey`/`clearAttemptKey` hold the key itself (utils module, so
+	 * the lifecycle can be tested — a Svelte component cannot be imported in vitest here).
+	 *
+	 * Kept on exactly three answers: the two 409s that mean "your attempt is still alive",
+	 * and a thrown fetch. The third is the case the key exists for — a request whose answer
+	 * never arrived is precisely when the client does not know whether money was spent, and
+	 * throwing the key away there would defeat the mechanism.
+	 */
 	async function runWorkflow(id: string, params?: Record<string, string>): Promise<void> {
 		if (runningId) return;
 		runningId = id;
 		error = '';
 		notice = t('workflow_library.run_started');
+		const idempotencyKey = attemptKey(id);
+		let keepKey = false;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${id}/run`, {
 				method: 'POST',
-				...(params
-					? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ params }) }
-					: {})
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(params ? { params, idempotencyKey } : { idempotencyKey })
 			});
+			if (res.status === 409) {
+				// A refusal that is NOT a failure. Before the claim existed every non-ok
+				// answer landed in the error branch below, so a correctly reported "already
+				// running" would have shown as "run failed" — a red box for the one case
+				// where nothing went wrong.
+				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+				if (msg?.code === 'run_claim_in_flight' || msg?.code === 'run_in_progress') {
+					// The attempt is alive. Keep its key so a later click asks about THIS
+					// attempt instead of starting a second one.
+					keepKey = true;
+					notice = t('workflow_library.run_already_running');
+					error = '';
+				} else {
+					// `run_outcome_unknown` / `run_claim_held`: this attempt is over as far as
+					// its key goes, and no further click on the same key could change that.
+					// Discard it, so the next click is honestly a NEW attempt — which is the
+					// person's decision to make, after being told.
+					notice = '';
+					error = msg?.error ?? t('workflow_library.run_outcome_unknown');
+				}
+				return;
+			}
 			if (!res.ok) {
 				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
 				error = msg?.error ?? t('workflow_library.run_failed');
@@ -294,6 +328,7 @@
 				status?: string;
 				costUsd?: number;
 				error?: string;
+				idempotent?: boolean;
 				stepErrors?: Array<{ stepId: string; error?: string; costUsd: number }>;
 			};
 			const failedSteps = (data.stepErrors ?? []).filter((s) => s.error);
@@ -302,11 +337,12 @@
 					? ` ($${data.costUsd.toFixed(4)})`
 					: '';
 			const stepDetail = failedSteps.map((s) => `${s.stepId}: ${s.error}`).join('; ');
+			const replayed = data.idempotent === true ? ` ${t('workflow_library.run_replayed')}` : '';
 			if (data.status === 'completed') {
 				// The run finished successfully. Non-fatal step errors (on_failure:
 				// 'continue'/'notify') are appended as a caveat — they did NOT fail
 				// the run, so they belong in the success notice, not a red error box.
-				notice = `${t('workflow_library.run_done')}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`;
+				notice = `${t('workflow_library.run_done')}${replayed}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`;
 				error = '';
 			} else {
 				const detail = stepDetail || (data.error ?? '');
@@ -314,9 +350,14 @@
 				notice = '';
 			}
 		} catch {
+			// The answer never arrived, so whether the run started is unknown HERE — and
+			// that is precisely the case the key is for. Keep it: the next click asks the
+			// server, which does know, instead of paying for a second run.
+			keepKey = true;
 			error = t('workflow_library.run_failed');
 			notice = '';
 		} finally {
+			if (!keepKey) clearAttemptKey(id);
 			runningId = null;
 		}
 	}
