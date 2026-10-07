@@ -13,6 +13,7 @@
 	import { isChunkLoadError, triggerStaleReload } from '../utils/stale-reload.js';
 	import { resolveArtifactRender } from '../utils/artifact-inline.js';
 	import { parseFences, type CodeFence } from '../utils/code-fences.js';
+	import { OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 
@@ -86,10 +87,10 @@
 		const { svg } = await mermaid.render(id, code);
 		const encoded = btoa(unescape(encodeURIComponent(code)));
 		const btns = `<div class="diagram-actions">
-			<button class="diagram-btn mermaid-save" data-content="${encoded}" title="Save" type="button">${ICON_SAVE}</button>
-			<button class="diagram-btn mermaid-export" title="Export PNG" type="button">${ICON_DOWNLOAD}</button>
+			<button class="diagram-btn mermaid-save"${OWN_MARK} data-content="${encoded}" title="Save" type="button">${ICON_SAVE}</button>
+			<button class="diagram-btn mermaid-export"${OWN_MARK} title="Export PNG" type="button">${ICON_DOWNLOAD}</button>
 		</div>`;
-		return `<div class="mermaid-diagram">${btns}${svg}</div>`;
+		return `<div class="mermaid-diagram"${OWN_MARK}>${btns}${svg}</div>`;
 	}
 
 	function buildMermaidError(code: string, message: string): string {
@@ -150,8 +151,8 @@
 		const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(body), { async: false }) as string);
 		const encodedMd = btoa(unescape(encodeURIComponent(body)));
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		return `<div class="artifact-container artifact-md artifact-collapsed" data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
-			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
+		return `<div class="artifact-container artifact-md artifact-collapsed"${OWN_MARK} data-md="${encodedMd}" data-title="${safeTitle}" data-artifact-type="markdown"${idAttr}>
+			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon('markdown')}</span>
 				<span class="artifact-label">Markdown</span>
 				<span class="artifact-title">${safeTitle}</span>
@@ -191,8 +192,8 @@
 		const lines = body.split('\n');
 		const preview = escapeHtml(lines.slice(0, 60).join('\n')) + (lines.length > 60 ? '\n…' : '');
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
-		return `<div class="artifact-container artifact-data artifact-collapsed" data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}" data-artifact-type="${type}"${idAttr}>
-			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
+		return `<div class="artifact-container artifact-data artifact-collapsed"${OWN_MARK} data-raw="${encodedRaw}" data-ext="${meta.ext}" data-mime="${meta.mime}" data-title="${safeTitle}" data-artifact-type="${type}"${idAttr}>
+			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(type)}</span>
 				<span class="artifact-label">${meta.label}</span>
 				<span class="artifact-title">${safeTitle}</span>
@@ -236,8 +237,8 @@
 		const typeLabel = typeKey.toUpperCase();
 		const idAttr = artifactId ? ` data-artifact-id="${escapeHtml(artifactId)}"` : '';
 
-		return `<div class="artifact-container artifact-collapsed" data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
-			<div class="artifact-toolbar" data-action="toggle" style="cursor:pointer">
+		return `<div class="artifact-container artifact-collapsed"${OWN_MARK} data-html="${encoded}" data-title="${safeTitle}" data-artifact-type="${typeKey}"${idAttr}>
+			<div class="artifact-toolbar"${OWN_MARK} data-action="toggle" style="cursor:pointer">
 				<span class="artifact-type-icon">${artifactTypeIcon(typeKey)}</span>
 				<span class="artifact-label">${typeLabel}</span>
 				<span class="artifact-title">${safeTitle}</span>
@@ -255,8 +256,8 @@
 	 *  (html/svg, markdown, data) uses this so the pill is identical everywhere. */
 	function artifactActionBtns(): string {
 		const shareIcon = isIosSafari() ? ICON_SHARE : ICON_DOWNLOAD;
-		return `<button class="artifact-btn" data-action="expand" title="Expand">${ICON_EXPAND}</button>
-				<button class="artifact-btn" data-action="share" title="Share">${shareIcon}</button>
+		return `<button class="artifact-btn"${OWN_MARK} data-action="expand" title="Expand">${ICON_EXPAND}</button>
+				<button class="artifact-btn"${OWN_MARK} data-action="share" title="Share">${shareIcon}</button>
 				<button type="button" class="artifact-chevron" aria-label="${t('artifacts.toggle_preview')}" aria-expanded="false">${ICON_CHEVRON}</button>`;
 	}
 
@@ -314,19 +315,18 @@
 	// ── Event delegation ─────────────────────────────────────
 
 	function handleContainerClick(e: MouseEvent) {
-		const target = e.target as HTMLElement;
+		// Only the controls this view built count: message markup can copy their classes and
+		// `data-*`, but not their marker (see utils/markdown-actions.ts).
+		const hit = resolveOwnAction(e.target as Element);
+		if (!hit) return;
 
-		// Mermaid PNG export
-		const mermaidBtn = target.closest('.mermaid-export');
-		if (mermaidBtn) {
-			exportMermaidPng(mermaidBtn);
+		if (hit.kind === 'mermaid-export') {
+			exportMermaidPng(hit.diagram);
 			return;
 		}
 
-		// Mermaid save
-		const mermaidSaveBtn = target.closest('.mermaid-save') as HTMLElement | null;
-		if (mermaidSaveBtn) {
-			const encoded = mermaidSaveBtn.dataset['content'] ?? '';
+		if (hit.kind === 'mermaid-save') {
+			const encoded = hit.button.dataset['content'] ?? '';
 			const mermaidCode = decodeURIComponent(escape(atob(encoded)));
 			const title = prompt('Titel für dieses Diagramm:', 'Diagramm') ?? 'Diagramm';
 			// saveArtifact resolves null on failure and never rejects; both outcomes are said.
@@ -338,37 +338,26 @@
 		}
 
 		// Artifact toolbar toggle (collapsed → expanded with auto-height)
-		const toggleTarget = target.closest('[data-action="toggle"]') as HTMLElement | null;
-		if (toggleTarget && !target.closest('.artifact-btn')) {
-			const container = toggleTarget.closest('.artifact-container') as HTMLElement;
-			if (container) {
-				container.classList.toggle('artifact-collapsed');
-				const expanded = !container.classList.contains('artifact-collapsed');
-				// Keep the chevron button's aria-expanded in sync for screen readers.
-				container.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(expanded));
-				if (expanded) {
-					// Delay so browser lays out the iframe before measuring
-					requestAnimationFrame(() => resizeArtifactFrame(container));
-				}
+		const container = hit.container;
+		if (hit.kind === 'toggle') {
+			container.classList.toggle('artifact-collapsed');
+			const expanded = !container.classList.contains('artifact-collapsed');
+			// Keep the chevron button's aria-expanded in sync for screen readers.
+			container.querySelector('.artifact-chevron')?.setAttribute('aria-expanded', String(expanded));
+			if (expanded) {
+				// Delay so browser lays out the iframe before measuring
+				requestAnimationFrame(() => resizeArtifactFrame(container));
 			}
 			return;
 		}
 
-		// Artifact toolbar actions
-		const artifactBtn = target.closest('.artifact-btn') as HTMLElement | null;
-		if (artifactBtn) {
-			const action = artifactBtn.dataset['action'];
-			const container = artifactBtn.closest('.artifact-container') as HTMLElement;
-			if (!container) return;
-			// Auto-expand if collapsed
-			if (container.classList.contains('artifact-collapsed')) {
-				container.classList.remove('artifact-collapsed');
-				requestAnimationFrame(() => resizeArtifactFrame(container));
-			}
-
-			if (action === 'expand') void handleOpenBig(container);
-			else if (action === 'share') handleShare(container);
+		// Artifact toolbar actions. Auto-expand if collapsed.
+		if (container.classList.contains('artifact-collapsed')) {
+			container.classList.remove('artifact-collapsed');
+			requestAnimationFrame(() => resizeArtifactFrame(container));
 		}
+		if (hit.action === 'expand') void handleOpenBig(container);
+		else if (hit.action === 'share') handleShare(container);
 	}
 
 	/** The ONE "big view" action: open the artifact in the full gallery view
@@ -456,8 +445,8 @@
 		downloadBlob(html, artifactFilename(container, 'html'), 'text/html');
 	}
 
-	function exportMermaidPng(btn: Element) {
-		const svg = btn.closest('.mermaid-diagram')?.querySelector(':scope > svg') as SVGSVGElement | null;
+	function exportMermaidPng(diagram: Element) {
+		const svg = diagram.querySelector(':scope > svg') as SVGSVGElement | null;
 		if (!svg) return;
 
 		const clone = svg.cloneNode(true) as SVGSVGElement;
