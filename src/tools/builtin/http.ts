@@ -2206,8 +2206,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // enum both answers coincide, so this is the right set today, and they are still two
     // different questions.
     //
-    // They also differ on case: this predicate folds, the place that actually decides
-    // whether a body is sent (`opts.body`, below) compares the RAW method. So a lowercase
+    // They also differ on case: this predicate folds, and both spellings of "does a body leave"
+    // — the `opts.body` gate below, which is the one that decides, and the `bodySent` term that
+    // mirrors it for the repair — compare the RAW method. So a lowercase
     // read has its body sent and not scanned, and the GET-exfiltration check above is
     // skipped too — none of it reachable through the validated dispatch, which enforces
     // the enum case-sensitively.
@@ -2218,14 +2219,120 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // classified `none` and scanned. Folding stays because the declaration needs it — a
     // lowercase write must classify, and `undo-declaration.test.ts` pins that — so the cost
     // lands on one unreachable spelling and is paid knowingly.
-    // ⚠ Repair a model's stray trailing close tag BEFORE the scan below, not after, so the body
-    // that gets scanned is the body that goes out. The three conditions and the evidence live in
-    // `model-json-body.ts`; the short version is that `minimax-m3` ends JSON bodies with a
-    // literal `</body>`, which makes every POST through the API store fail at the far end with a
-    // misleading error, and the model then repeats the identical call.
-    const repairedBody =
-      typeof input.body === 'string' ? repairStrayCloseTag(input.body, headers) : null;
-    const outboundBody = repairedBody?.body ?? input.body;
+    // ⚠ Does a body actually leave? The repair below reads THIS and not `input.body`, and that is
+    // the entire behavioural content of this change: `opts.body` drops a body on GET/HEAD, so
+    // repairing one there corrected a value that is then thrown away — and the note reported the
+    // repair to the model anyway.
+    //
+    // ⛔ `opts.body` DELIBERATELY DOES NOT READ IT, and the reason is a measurement, not taste.
+    // Folding the two was the obvious next step and it changed behaviour: this term narrows on
+    // `typeof`, so a body that is present but not a string became `null`, no `body` key reached
+    // `opts`, and a BODYLESS POST went out and returned 200 — an empty record on the remote with
+    // nothing reporting it, where the condition below forwards the value and lets the transport
+    // refuse it. Guarding that with a fifteenth refusal site was the next attempt and cost more
+    // than it bought: this repo states the refusal count in three comments and fourteen test
+    // names, all of which a new site falsifies at once. ⚠ Not because any check catches it — the
+    // by-member list in the test file says of itself that it "does not notice a FIFTEENTH refusal
+    // added as a plain `return`" and that "nothing cheap can". The cost is the fourteen names and
+    // three sentences, and the risk is that they quietly stop being true, which is worse.
+    //
+    // So the predicate stays written twice, and the duplication is NOT cheap: the second spelling
+    // is at `opts.body`, with the body-secret refusal and the whole write-consent gate between it
+    // and this one. Nothing makes them agree. That is the known cost of not folding, stated
+    // rather than dressed up.
+    //
+    // ⚠ NO LINE DISTANCE IS GIVEN, and that omission is deliberate. Two drafts of this sentence
+    // carried one — "eleven lines", then "130 lines" — and the first was simply wrong while the
+    // second was EXACT when written and went stale inside the very commit that wrote it, because
+    // another hunk inserted six lines between the anchors. A measured number in a comment is a
+    // claim with a maintenance cost that nothing pays. Name the anchor, not the distance.
+    //
+    // It holds the body rather than a boolean so the `typeof` narrowing survives to the call
+    // below, which then needs no cast; a boolean would force one, because `input.body` is
+    // `string | undefined`. That is `strictNullChecks`, not anything `strictest` adds, and a
+    // non-null assertion would also work — this shape is preferred, not forced.
+    //
+    // ⚠ A THIRD spelling of the same question lives in the egress scan below —
+    // `input.body && isWriteMethod(method)` — and `isWriteMethod` folds case where these two
+    // compare raw. Over the schema enum all three agree on every member. Folding them is NOT
+    // free, though, and an earlier draft of this paragraph said it was: the fold is what creates
+    // the unscanned body for a lowercase `'get'`, so unifying them would stop sending it. That
+    // is a real behaviour change on the one spelling the paragraph above calls out and pays for
+    // knowingly. Named here because the next edit to the method set has to find three places for
+    // THIS question — and four more on the same GET/HEAD-versus-rest axis that an enum change
+    // touches: `shouldRewriteToGet` and the GET-exfiltration gate compare raw, `httpTimeoutMessage`
+    // and `undoClassFor` fold. The two that FOLD are both pinned by tests; the two that compare
+    // RAW are pinned by nothing, which is the half worth knowing. (An earlier draft said only
+    // `undoClassFor` was pinned. False: `httpTimeoutMessage`'s fold is pinned by the
+    // timeout-message test, which asserts a lowercase `head` gets the bare line.) Leaving one of
+    // these out of a paragraph like this is how the compensation claim below went wrong.
+    const bodySent: string | null =
+      typeof input.body === 'string' && method !== 'GET' && method !== 'HEAD'
+        ? input.body
+        : null;
+
+    // ⚠ Repair a model's stray trailing close tag before `opts` is built, and ONLY when a body
+    // leaves. The three conditions and the evidence live in `model-json-body.ts`; the short
+    // version is that `minimax-m3` ends JSON bodies with a literal `</body>`, which makes every
+    // POST through the API store fail at the far end with a misleading error, and the model then
+    // repeats the identical call.
+    //
+    // ⚠ An earlier version of this comment justified the ordering by claiming the scan reads the
+    // REPAIRED body. It was TRUE when written and went false two commits later, when the
+    // direction was reversed, and it was a claim about security behaviour in a public repo. The
+    // scan reads the ORIGINAL on purpose; the paragraph below says why.
+    //
+    // ⚠ The wrong sentence is deliberately NOT quoted here, not even as history — a test sweeps
+    // this file for that exact sentence, and a sweep with an exception is a sweep somebody will
+    // widen. Same rule as `scripts/gate-record.mjs` follows for its own refused format. What the
+    // sweep CANNOT do is recognise the same claim in different words; it pins one spelling, and
+    // its name says so.
+    const repairedBody = bodySent === null ? null : repairStrayCloseTag(bodySent, headers);
+
+    // ⚠ ONE string for the note, appended on the success path and on the timeout path. The
+    // timeout half is the one that mattered: a timed-out call used to throw with the repair
+    // invisible to the model, which then retried the identical broken body — the loop this
+    // repair exists to end, one layer further out. Written twice the two would drift, and the
+    // empty string when nothing was repaired keeps both call sites unconditional.
+    //
+    // ⛔ THREE CLAIMS WERE TAKEN OUT OF THIS SENTENCE, each because the code cannot support it.
+    // The note is a privileged channel into the model's context, so a sentence in it is a claim
+    // the engine makes, not decoration:
+    //
+    //   1. that the body REACHED THE NETWORK. Supportable on the success path, where a response
+    //      proves it, and not on the timeout path this change adds: `timeout_ms` carries no
+    //      schema minimum, the clamp floor is 1 ms, the abort timer is armed before the `try`,
+    //      and `fetchPinned` resolves DNS before a byte leaves — so a 1 ms abort lands here with
+    //      nothing on the wire. From in here the only observable fact is that `fetch` was CALLED,
+    //      which is strictly weaker. For the six methods the schema admits, the message this
+    //      note rides already carries the uncertainty ("may still have reached the server"), so
+    //      dropping the clause took nothing away. ⚠ That compensation does NOT hold for a
+    //      lowercase verb: `httpTimeoutMessage` folds case and returns the bare line for
+    //      GET/HEAD, while this term compares raw and does send the body. Unreachable through the
+    //      validated dispatch, and named because an earlier draft of this parenthetical asserted
+    //      the compensation without the exception — on the one spelling the paragraph above
+    //      spends its length defending.
+    //   2. that the API WOULD HAVE REJECTED the call. `model-json-body.ts` measured the opposite
+    //      on the API that produced this defect: HTTP 200 with an application-level
+    //      "POST Data Is Empty". Accepted and misread is not rejected.
+    //   3. that the rest was LEFT UNCHANGED. `withoutTrailingCloseTag` trims before and after
+    //      cutting, deliberately — that second trim is what rescues a body ending in U+00A0 or
+    //      U+FEFF — so trailing whitespace goes too. The sentence now says the tag was removed
+    //      and claims nothing about the remainder.
+    //
+    // All three are REMOVED rather than gated. Gating (1) would mean classifying every exit as
+    // sent or not-sent, a check per instance, which is the signature of a cut in the wrong place.
+    // Same subtraction as the removed tag echo in `model-json-body.ts`: the first answer bounded
+    // a symptom, the right one deleted the claim.
+    //
+    // Scope, and it is FIVE exits rather than the two an earlier draft of this paragraph named:
+    // downstream of the repair, the body-secret refusal, both write-consent refusals, the
+    // `Blocked:` translation and the raw re-throw all build their own messages and carry no note.
+    // Folding them onto one append point is a change to the catch's shape and to the refusal
+    // helpers, not to this constant.
+    const repairNote = repairedBody === null
+      ? ''
+      : `\n\n**[Engine note \u2014 your request body was repaired]**\nIt had a closing tag at the end, which is not valid JSON. The engine removed that tag, and the whitespace around it, before using the body. Do not append a closing tag to a JSON body.`;
 
     // ⚠ The scan reads `input.body` — the ORIGINAL — and not the repaired one, which is the
     // opposite of what the first draft did under "scan what goes out". The repaired body is a
@@ -2293,6 +2400,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     const opts: RequestInit = { method, headers };
+    // ⚠ UNCHANGED from before the repair landed, on purpose — see `bodySent` above for the
+    // measured reason the two predicates are not folded into one.
+    const outboundBody = repairedBody?.body ?? input.body;
     if (outboundBody && method !== 'GET' && method !== 'HEAD') {
       opts.body = outboundBody;
     }
@@ -2464,9 +2574,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // resolved `secret:NAME` can end up inside that tag, and this line is past the point where
       // either the egress scan or `maskSecrets` could catch it. `model-json-body.ts` has the
       // measurement. The model wrote the tag, so repeating it to the model adds nothing anyway.
-      if (repairedBody !== null) {
-        wrapped += `\n\n**[Engine note — your request body was repaired before it was sent]**\nIt ended in a closing tag, which is not valid JSON, so the API would have rejected the call. The engine removed that tag and sent the rest unchanged. Do not append a closing tag to a JSON body.`;
-      }
+      wrapped += repairNote;
 
       // Engine-managed-auth 401-hint. When the engine DECLINED to attach a
       // credential it did not fail the request — a profile that works today keeps
@@ -2604,7 +2712,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // the file needs the region to enforce it, not the reader to remember.
       if (err instanceof ToolSoftFailure) throw err;
       if (timedOut !== null) {
-        throw new Error(httpTimeoutMessage(timeoutMs, method, timedOut === 'wall', answeredStatus));
+        // The note rides the timeout too — see `repairNote` above for why the silent path is
+        // the one that matters here.
+        throw new Error(httpTimeoutMessage(timeoutMs, method, timedOut === 'wall', answeredStatus) + repairNote);
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {

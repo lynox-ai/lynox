@@ -101,7 +101,7 @@ export interface RepairedBody {
  *
  * The right answer is subtractive, and it costs nothing: **the model already knows what it
  * wrote.** Echoing the tag back informs nobody and opens a channel, so the note names the shape
- * ("it ended in a closing tag") and never a value.
+ * ("it had a closing tag at the end") and never a value.
  */
 
 /**

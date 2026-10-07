@@ -550,6 +550,228 @@ describe('httpRequestTool', () => {
       expect(String(result)).not.toContain('</body>');
     });
 
+    it('⭐ a GET whose body ends in a tag gets NO note — nothing was sent to repair', async () => {
+      // ⚠ The defect this pins shipped: the note fired whenever `repairStrayCloseTag` returned
+      // something, and that was computed independently of whether a body leaves at all. `opts`
+      // never carries a body on GET/HEAD, so the engine told the model "your request body was
+      // repaired before it was sent" about a body it had discarded. The sentence was false, and
+      // false in the direction that teaches the model something untrue about its own call.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+      }, agentWithPromptFn());
+
+      // The call count is asserted for LEGIBILITY, not because the witness below needs rescuing.
+      // ⚠ A review round claimed the witness was vacuous on zero requests — that
+      // `expect(undefined).not.toHaveProperty('body')` passes — and that claim is FALSE in this
+      // project: measured against this repo's own matcher chain, it THROWS
+      // `TypeError: Cannot convert undefined or null to object`, while `expect({})` passes and
+      // `expect({body:''})` fails. So a zero-request run was always loud; it was merely
+      // illegible, which is what this line fixes. The wrong diagnosis is recorded because it was
+      // believed and acted on for one commit.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(result)).not.toContain('repaired');
+      // ⚠ ONE witness, deliberately. The init this harness hands the stub is RECONSTRUCTED from
+      // the pinned input, so `calls[0][1]` has a `body` key exactly when `lastPinnedInputs[0]`
+      // does: asserting both is one fact stated twice, and a redundant pair is what makes a later
+      // removal of the real witness look survivable. This is the direct one — what the transport
+      // actually received. A zero-length body would be a `Buffer`, not `undefined`, so an
+      // attached empty body fails here too.
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.body).toBeUndefined();
+    });
+
+    it('⭐ a HEAD whose body ends in a tag gets NO note either — the other dropped half', async () => {
+      // ⚠ Written because a surviving mutant found this exact hole: deleting only
+      // `&& method !== 'HEAD'` from the term killed nothing. The GET half had a witness, the HEAD
+      // half had none, and the consequence is the defect this branch exists to remove — `opts`
+      // drops a HEAD body, so the engine would report repairing a body it discarded. The body
+      // must be REPAIRABLE for this to witness anything: the neighbouring "HEAD suppresses body"
+      // test uses a non-JSON body, which the repair declines on its first condition, so it could
+      // never have caught this.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'HEAD',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+      }, agentWithPromptFn());
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(result)).not.toContain('repaired');
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.body).toBeUndefined();
+    });
+
+    it('⭐ the note survives a timeout — the silent path is the one that mattered', async () => {
+      // On success the note rides the wrapped result; on a timeout the handler THROWS, and the
+      // note used to be lost. The model then retried with the identical broken body and the
+      // repair was invisible to it — the same loop one layer out. One string, two paths.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => { /* never settles */ })));
+
+      // ⚠ It REJECTS — a timeout is a thrown Error, not a returned refusal, so `visible` (which
+      // unwraps blocked calls) does not catch it. Asserting on the rejection is the point: the
+      // note has to be on the error the model receives.
+      await expect(handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+        timeout_ms: 50,
+      }, agentWithPromptFn())).rejects.toThrow(/your request body was repaired/);
+    });
+
+    it('⭐ the note text is pinned EXACTLY — every claim in it is one the engine can support', async () => {
+      // ⚠ Pinned as a whole string rather than swept for forbidden phrases, and that choice is
+      // the finding of a delta round. The first version of this test forbade two spellings
+      // ("before it was sent", "and sent the rest") under a name that claimed the PROPERTY. A
+      // re-wording puts the claim straight back — "transmitted the rest unchanged" passes both
+      // needles — and the house style two hundred lines down ("the request goes out with only
+      // the headers you set yourself") makes that the natural next phrasing. One spelling is not
+      // a property, and the same commit had just renamed another test for exactly that.
+      //
+      // An exact match has no such gap: any edit to a model-visible string fails here and has to
+      // be deliberate. Three claims were removed from this sentence — that the body reached the
+      // network (unprovable from inside the handler: a 1 ms abort lands with nothing on the wire),
+      // that the API would have rejected the call (measured false: HTTP 200 with an
+      // application-level error), and that the rest was left unchanged (the repair also trims
+      // trailing whitespace). `http.ts` carries the reasoning per claim.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => { /* never settles */ })));
+
+      const err = await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+        timeout_ms: 50,
+      }, agentWithPromptFn()).then(() => null, (e: unknown) => e);
+      const msg = String(err instanceof Error ? err.message : err);
+
+      // ⚠ Transcribed here independently of the source, which is the point: a control built by
+      // importing the constant it checks cannot see a wording change at all. The cost is that a
+      // deliberate edit has to be made twice, and that cost IS the gate.
+      const EXPECTED =
+        '\n\n**[Engine note \u2014 your request body was repaired]**\n'
+        + 'It had a closing tag at the end, which is not valid JSON. '
+        + 'The engine removed that tag, and the whitespace around it, '
+        + 'before using the body. '
+        + 'Do not append a closing tag to a JSON body.';
+
+      expect(msg).toContain(EXPECTED);
+      // …and on THIS path the note is the tail, so the engine's own sentence cannot be read as
+      // part of the timeout text it follows. ⚠ Scoped to the timeout path deliberately: on the
+      // SUCCESS path three appenders legitimately come after it (the 401 credential reminder, the
+      // OAuth2 swap hint and the profile warning), so a general "the note is last" would be
+      // false. An earlier version of this comment said it without the scope.
+      expect(msg.endsWith(EXPECTED), 'the note is not the tail of the timeout error').toBe(true);
+    });
+
+    it('⭐ the handler carries no copy of one retired sentence about which body is scanned', async () => {
+      // ⚠ A TEXT sweep of ONE SPELLING, and the title says so rather than claiming the property.
+      // It checks a sentence, not the behaviour; the behaviour has its own witness ("the egress
+      // scan reads the ORIGINAL body"), and the two are not interchangeable — the code was right
+      // and the comment was wrong for two commits, which is exactly the state a behavioural test
+      // cannot see. What this CANNOT do is recognise the same false claim re-worded, and nothing
+      // here should be read as if it could.
+      const { readFileSync } = await import('node:fs');
+      const src = readFileSync(new URL('./http.ts', import.meta.url), 'utf8');
+      const WRONG = 'gets scanned is the body that goes out';
+
+      // ⚠ Positive control FIRST, and it has to identify the PARAGRAPH — not merely prove that
+      // some file was read. Three tokens were tried, and the sequence is the lesson:
+      //
+      //   1. `repairStrayCloseTag` — the gate-record defect verbatim. `model-json-body.ts`
+      //      declares it too, so aiming the read one file sideways left the control satisfied and
+      //      the needle absent: green, having swept nothing. A control token has to be ABSENT
+      //      from every other surface, which is the property `tests/gate-record.test.ts` asserts
+      //      for its own marker.
+      //   2. `export const httpRequestTool` — one occurrence in the handler, but it sits with the
+      //      tool declaration near the top of the file, far from the claim. Split this file and
+      //      move the body-repair region, and the control stays green on a file that no longer
+      //      carries the comment.
+      //   3. `The scan reads the ORIGINAL` — suggested, and rejected by MEASUREMENT: it does not
+      //      occur in this file at all. The sentence reads "The scan reads `input.body` — the
+      //      ORIGINAL —". The control caught that, which is the only reason to write one.
+      //
+      // The token below sits in the sentence that states the CORRECT direction, so it dies when
+      // that correction is deleted. ⚠ It does NOT die when the repair-ordering block moves — that
+      // is a different comment block, so a split between the two still leaves this green. The
+      // residual shrank; it is not zero, and an earlier draft claimed the control "dies exactly
+      // when the correction does", which overstates it.
+      //
+      // ⚠ The distances those two sentences used to quote are GONE on purpose. Both were exact
+      // when written and both went stale — one of them inside the same commit, because another
+      // hunk inserted six lines between the anchors. The comparison that matters is "same
+      // sentence" versus "different block", and that does not drift.
+      //
+      // A moved file, incidentally, is NOT the failure this guards: `readFileSync` throws ENOENT
+      // and the test goes loudly red. The reachable failure was always the wrong TARGET.
+      expect(src, 'the sweep is not reading the paragraph whose claim this is about')
+        .toContain('and not the repaired one');
+      expect(src, 'a comment claims the scan reads the repaired body; it reads the original')
+        .not.toContain(WRONG);
+    });
+
+    it('⭐ an EMPTY body attaches nothing — `opts.body` must not widen what goes out', async () => {
+      // ⚠ This witnesses the TRUTHINESS test at `opts.body`, which is the one thing about the
+      // outbound body this change deliberately did not touch. `''` is falsy, so nothing is
+      // attached; replace that condition with an `!== undefined` and an empty body becomes an
+      // attached zero-length `Buffer`, which is a different request on the wire. The test exists
+      // because a mutation round found the condition unwitnessed — first in an earlier form of
+      // this branch, where the term had its own length test and deleting it SURVIVED.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '',
+      }, agentWithPromptFn());
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.body).toBeUndefined();
+      expect(fetchMock.mock.calls[0]![1]).not.toHaveProperty('body');
+    });
+
+    it('⭐ a non-string body is FORWARDED to the transport, not quietly dropped', async () => {
+      // ⚠ This pins the regression a fix round nearly shipped, which is why it asserts a
+      // behaviour nobody designed: the transport's own refusal. Folding the body-leaves predicate
+      // into the term that the repair reads made a non-string body yield `null` — no `body` key
+      // on `opts`, so a BODYLESS POST went out and returned 200, creating an empty record on the
+      // remote with nothing reporting it. Guarding that with a new refusal site was the second
+      // attempt and cost more than it bought (three comments and fourteen test names in this
+      // repo state the refusal count). So the condition at `opts.body` stays as it was, the value
+      // is handed on, and `materialiseBody` rejects it.
+      //
+      // Unreachable from a model — the validated dispatch checks `body: {type:'string'}` — so
+      // this test is the only thing that can see it, and it is owed precisely because the
+      // duplication above is now deliberate.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        body: 5,
+      } as unknown as Parameters<typeof handler>[0], agentWithPromptFn()))
+        .rejects.toThrow(/unsupported body type/);
+    });
+
     it('a legitimate HTML POST reaches fetch UNCHANGED, tag and all', async () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
