@@ -941,10 +941,17 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // function applies to its own subject a few lines further down. A degraded
     // instance is the reachable case; nothing has to be corrupt.
     //
-    // `partial` and `failed` are deliberately NOT covered: they are outcomes of
-    // attempting a rollback rather than preconditions that can be read first,
-    // and «then try this one again» is the clause that carries them. Said here
-    // so the next round does not read this test as claiming more than it does.
+    // ⚠ WHAT THIS TEST DOES NOT COVER, stated so the next round does not read it
+    // as claiming more than it does — and the first version of this note got the
+    // reason wrong. It said `partial` and `failed` are outcomes of attempting
+    // rather than readable preconditions. True of `partial`; false of `failed`,
+    // which has pure-predicate causes (`isRepointTarget` over `entry.repoints`,
+    // a `'foreign'` `dataStore` record, a dup row whose `kind` drifted). A named
+    // step can therefore still answer «The merge could not be taken back» in a
+    // narrow state. The reason it is left out is duplication risk, not
+    // impossibility — the full argument sits beside the filter in
+    // `subject-merge-runner.ts`, and the gap is registered rather than patched
+    // here. This test covers the two STORE preconditions and nothing more.
     const { dir, sweeps, store, threadStore } = setup();
     const a = store.createSubject({ kind: 'organization', name: 'Fabrikam GmbH' });
     const b = store.createSubject({ kind: 'organization', name: 'Fabrikam' });

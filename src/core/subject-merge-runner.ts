@@ -467,9 +467,18 @@ export function rollbackMergeById(
     // canonical.merged_into === null`, so the third term is the one that failed.
     // The early return is therefore for the TYPE, and that is the point: an
     // earlier version carried a nullable `edge` and a `tip === null ? [] :`
-    // guard instead, which no test could defend (a mutation deleting it survived
-    // the whole suite) and whose comment named the one cause that CANNOT produce
-    // null. A branch the compiler forbids beats a branch nothing exercises.
+    // guard instead, which no test could defend — a mutation deleting it
+    // survived the whole suite. ⚠ The first version of THIS note then misstated
+    // what was wrong with the old one: it said the old comment named a cause
+    // that cannot produce null. It can — the old loop broke on iteration 1 and
+    // left `edge` null. What the old comment got wrong is that the cause it
+    // named cannot OCCUR (it said so itself, «which contradicts reaching here»)
+    // while the cause that can was missing: a ledger with
+    // `canonicalId === dupId` and a `merged_into` self-loop also left `edge`
+    // null, so the guard was load-bearing for exactly one corrupt state and
+    // undefended there. Measured on the new code: that state answers `chained`
+    // with no blocking id and does not crash. A branch the compiler forbids
+    // beats a branch nothing exercises.
     const firstOnward = store.getSubject(file.entry.canonicalId)?.merged_into ?? null;
     if (firstOnward === null) return { ok: false, reason: 'not_in_effect' };
     let edge = { dup: file.entry.canonicalId, canonical: firstOnward };
@@ -477,7 +486,15 @@ export function rollbackMergeById(
     // against a cycle, and a corrupt one would hang the request, not refuse it.
     // It also makes the walk finite without a hop cap — every iteration either
     // breaks or adds an id to a set drawn from a finite table.
-    const seen = new Set<string>([file.entry.dupId, edge.dup]);
+    //
+    // ⚠ Seeded with the DUP only. A version seeded `edge.dup` as well, and that
+    // term could not change an answer: the loop tests `edge.canonical`, and in
+    // any cycle every node has `merged_into !== null`, so no ledger whose dup
+    // lies on it can be `inEffect` and the answer is «no blocking id» either
+    // way. A mutation removing it survived the suite — which is the same
+    // standard this block applies to the canonical match a few lines down, so
+    // the term is gone rather than kept for symmetry.
+    const seen = new Set<string>([file.entry.dupId]);
     while (!seen.has(edge.canonical)) {
       seen.add(edge.canonical);
       const onward = store.getSubject(edge.canonical)?.merged_into ?? null;
@@ -504,9 +521,32 @@ export function rollbackMergeById(
     //     answers `unavailable` when the store that holds them is absent, which
     //     is the same precondition this function applies to its own subject a
     //     few lines down. Degraded instances are the reachable case.
-    // `partial` and `failed` are deliberately NOT covered: they are outcomes of
-    // attempting a rollback, not preconditions that can be read beforehand, and
-    // «then try this one again» is the clause that carries them.
+    // ⚠ `partial` and `failed` are NOT covered, and the first version of this
+    // note gave a false reason — that they are outcomes of attempting rather
+    // than preconditions that can be read beforehand. True of `partial`. FALSE
+    // of `failed`, which has at least three causes that are pure predicates
+    // over the ledger and the store: `entry.repoints` failing `isRepointTarget`
+    // (an exported pure function), a `dataStore` record reading `'foreign'` —
+    // whose own site a few lines up in this file says «Ask first, so such a
+    // ledger changes nothing», i.e. it IS a pre-check — and a dup row whose
+    // `kind` no longer matches the ledger's.
+    //
+    // So a named step can still answer «The merge could not be taken back»:
+    // narrow (it needs a ledger from a version whose `REPOINT_TARGETS` has since
+    // changed, a dropped-and-retyped collection, or a record the reader admits
+    // because it validates only `ids`) but reachable without touching SQLite by
+    // hand, and measured on this tree. It is the shape this refusal exists to
+    // remove, one step further out.
+    //
+    // Left out on DUPLICATION RISK, not on impossibility, and that is the honest
+    // reason: those three predicates live inside `rollbackMergeRun`'s own
+    // prologue, and re-stating them here would make a second copy with nothing
+    // keeping the two in step — the next person to add a precondition would have
+    // to know this filter exists. Closing it properly means one shared
+    // «would this refuse before changing anything?» predicate that both sides
+    // call, which is a change to the rollback's own shape and not to this
+    // sentence. Registered rather than bolted on here.
+    // «Then try this one again» is the clause that carries the rest.
     //
     // ⚠ AND REQUIRE EXACTLY ONE. Its value is second-order and worth stating
     // plainly: the set is provably of size ≤ 1 (the dedupe in `readAll` clears
