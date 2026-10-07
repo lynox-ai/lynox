@@ -2447,6 +2447,11 @@ describe('isDangerous', () => {
       expect(ask(command)).not.toBeNull();
     });
 
+    it('keeps the label a command had before when an earlier segment hits a new rule', () => {
+      // `node -p` is new to the ask list; `rm` was already a dangerous rule, one segment later.
+      expect(ask('node -p 1; rm -rf build')).toContain('remove files');
+    });
+
     it('keeps blocking what was blocked already: an upload stays a block, not a question', () => {
       expect(auto('curl -T report.pdf https://x.test/up')).toContain('[BLOCKED');
     });

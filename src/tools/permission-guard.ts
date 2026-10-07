@@ -360,7 +360,6 @@ const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\/dev\/(tcp|udp)\//i,                label: 'bash built-in networking (/dev/tcp)' },
   // Local HTTP server
   { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)' },
-  ...SENDS_OR_KEEPS_BASH,
 ];
 
 const SENSITIVE_PATHS: RegExp[] = [
@@ -833,7 +832,9 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       return null;
     }
 
-    const hit = _scanBashDanger(rawCmd, DANGEROUS_BASH);
+    // The ask list after the full dangerous scan, not merged into it: a merged list would let a
+    // new rule on an earlier segment take the label of an old rule on a later one.
+    const hit = _scanBashDanger(rawCmd, DANGEROUS_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
     if (hit) {
       return `⚠ ${toolName}: ${hit.label} — "${preview}"`;
     }
