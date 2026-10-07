@@ -1440,7 +1440,9 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
         : p.auth.type === 'bearer' ? 'Bearer Token in Authorization header'
         : p.auth.type === 'header' ? 'API key in a request header (its name is in the stored profile below; X-Api-Key when none is set)'
         : p.auth.type === 'oauth2' ? 'OAuth2 (managed refresh-token flow)'
-        : 'API key in a query parameter (its name is in the stored profile below; key when none is set)';
+        : p.auth.type === 'query'
+          ? 'API key in a query parameter — the engine does NOT attach it, so it is yours to set: put it in the URL as ?<name>=secret:<VAULT_KEY>, where <name> is the parameter name in the stored profile below (key when none is set).'
+          : 'Unrecognised auth.type — the engine attaches nothing for it. Check the profile and fix it with api_setup action="update".';
       head.push(`Auth: ${authDesc}`);
     }
 

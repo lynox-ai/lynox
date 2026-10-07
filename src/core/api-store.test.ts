@@ -606,6 +606,23 @@ describe('ApiStore', () => {
       expect(out).toContain('Do NOT set an Authorization header yourself');
     });
 
+    // `query` is one of the shapes the engine does not attach; the sentence must say whose it
+    // is and how to set it, not only where it goes.
+    it('a query profile is told the parameter is the model\'s to set, and how', () => {
+      store.register({ ...SAMPLE_PROFILE, id: 'q-auth', auth: { type: 'query', query_param: 'api_key', vault_keys: ['Q_KEY'] } });
+      const out = store.formatProfile(store.get('q-auth')!);
+      expect(out).toContain('the engine does NOT attach it');
+      expect(out).toContain('?<name>=secret:<VAULT_KEY>');
+      expect(out).toContain('Auth query parameter: api_key');
+    });
+
+    it('an unrecognised auth.type is not described as query auth', () => {
+      store.register({ ...SAMPLE_PROFILE, id: 'odd-auth', auth: { type: 'digest' as 'bearer' } });
+      const out = store.formatProfile(store.get('odd-auth')!);
+      expect(out).toContain('Unrecognised auth.type');
+      expect(out).not.toContain('query parameter');
+    });
+
     it('pre_encoded_b64 says outright that the engine does not attach it', () => {
       const p: ApiProfile = {
         ...SAMPLE_PROFILE,

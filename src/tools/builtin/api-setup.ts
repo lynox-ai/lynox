@@ -21,7 +21,7 @@ import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGr
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { authTypeForModel, slotNameForModel } from '../../core/profile-value-shape.js';
+import { authTypeForModel, slotNameForModel, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -167,6 +167,15 @@ function validateProfile(profile: ApiProfile): string | null {
   if (profile.auth) {
     if (!VALID_AUTH_TYPES.has(profile.auth.type)) {
       return `Invalid auth.type "${profile.auth.type}": must be none, basic, bearer, header, query, or oauth2`;
+    }
+    // The value is not repeated: a file-loaded profile can hold any text here.
+    const headerName: unknown = profile.auth.header_name;
+    if (headerName !== undefined && (typeof headerName !== 'string' || !HTTP_HEADER_NAME.test(headerName))) {
+      return 'Invalid auth.header_name: must be an HTTP header name, for example "X-Api-Key" (letters, digits and !#$%&\'*+-.^_`|~, no spaces, at most 64 characters).';
+    }
+    const queryParam: unknown = profile.auth.query_param;
+    if (queryParam !== undefined && (typeof queryParam !== 'string' || !QUERY_PARAM_NAME.test(queryParam))) {
+      return 'Invalid auth.query_param: must be a query parameter name, for example "api_key" (letters, digits and . _ ~ -, at most 64 characters).';
     }
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;

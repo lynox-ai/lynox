@@ -75,6 +75,16 @@ export const ISO_TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z
 export const GRANT_TYPE_SHAPE = /^[A-Za-z0-9_:.\-]{1,40}$/;
 
 /**
+ * A header name as HTTP defines one (a `token`), at most 64 characters. Deliberately the
+ * protocol's rule and not a narrower house style: a stored profile with `X_Api_Key` is valid
+ * HTTP, and a narrower check would turn every later `refine` of it into a refusal.
+ */
+export const HTTP_HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/;
+
+/** A query parameter name the engine will name to the model and the model can put in a URL as is. */
+export const QUERY_PARAM_NAME = /^[A-Za-z0-9._~-]{1,64}$/;
+
+/**
  * A vault slot name a profile resolves, as it may appear in a sentence: under the
  * bound of what it is. The engine-derived name gets `DERIVED_NAME_SHAPE`, any other
  * name — one the profile itself named — `VAULT_NAME_SHAPE`.

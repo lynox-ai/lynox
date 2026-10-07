@@ -8,7 +8,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 // assume. The barrel import typechecks as a namespace and fails on the member.
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE } from '../../core/profile-value-shape.js';
+import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -1678,6 +1678,12 @@ async function attachEngineManagedAuth(
     // description shows the model (api-store.ts) and what bootstrap writes
     // (api-setup.ts) — defaulting to Authorization here would put the token in a
     // header the model was told is called something else, i.e. a silent 401.
+    // A stored header_name that is not a header name (an empty string among them, which `??`
+    // does not catch) is refused here rather than sent: the request would otherwise fail in
+    // the HTTP layer with a message that does not name the profile.
+    if (auth.type !== 'bearer' && auth.header_name !== undefined && !HTTP_HEADER_NAME.test(auth.header_name)) {
+      return { refusal: `Error: api_profile "${profile.id}" has an auth.header_name that is not a valid header name, so the credential was not attached. Fix it with api_setup action="update" (for example "X-Api-Key").` };
+    }
     const slot = auth.type === 'bearer' ? 'Authorization' : (auth.header_name ?? 'X-Api-Key');
     const value = auth.type === 'bearer' ? `Bearer ${token}` : token;
     // The handler's CRLF check covers `input.headers` — the agent's own map. These
