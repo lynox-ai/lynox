@@ -120,6 +120,234 @@ function usdLabel(amount: number): string {
   return amount < 0.01 ? amount.toFixed(4) : amount.toFixed(2);
 }
 
+/**
+ * Dollars for an IMPERATIVE — rounded UP to the precision it prints.
+ *
+ * ⛔ MEASURED. `usdLabel` is a DISPLAY helper: `toFixed(2)` rounds to nearest, so a $0.192
+ * floor printed as "$0.19" and the advice "raise max_budget_usd to at least $0.19", followed
+ * literally, produced the byte-identical refusal — a non-terminating loop on the default
+ * tier. 15 of the 39 priced ids round down that way. A figure the reader is told to TYPE has
+ * to work when typed; a figure the reader only READS does not, which is why the two helpers
+ * are separate and why the refusal below uses `usdLabel` throughout.
+ *
+ * ⚠ Its only caller is the exhaustion message, whose figure is a doubling. The number stays
+ * a NUMBER (`String(Number(...))`) rather than a fixed-decimal string: ceiling it to the
+ * printed precision turns `0.38400000000000006` into `0.39`, and leaving it numeric keeps
+ * `2` as `2` instead of `2.00`, which two standing assertions pin and which is the common
+ * case. The `> budget` gate stays on the number, so the clamped-at-maximum case still falls
+ * through to "already at its maximum" rather than prescribing a figure that is not larger.
+ */
+function usdAtLeast(amount: number): string {
+  return usdLabel(amount < 0.01 ? Math.ceil(amount * 10_000) / 10_000 : Math.ceil(amount * 100) / 100);
+}
+
+/**
+ * ⛔ TWO AMOUNTS THAT ROUND ALIKE ARE NEVER PUT IN APPOSITION. `usdLabel` rounds to nearest and
+ * 15 of the 39 priced ids round down, so an ask of $0.19 against a $0.192 floor printed "it may
+ * spend $0.19 and one turn on its model costs about $0.19" — two identical figures with one
+ * declared insufficient against the other, next to an instruction to raise it. A sweep found 73
+ * of 2 717 refusals saying "X is below X".
+ *
+ * ⚠ A per-sentence precision chooser was the first repair and it was the WRONG instrument: it
+ * had to decide when two numbers are "distinguishable", which is a property of the pair AND of
+ * the formatter, and it got both wrong — a pair colliding at four decimals as well as two was
+ * left alone (so the defect survived for every ask in `[0.1915, 0.192)`), and its collision test
+ * compared `toFixed` output against a formatter with two different arms, so a sub-cent pair
+ * printed alike without ever triggering it. Each repair of that function needed another.
+ *
+ * ⛔ So the figures stay at display precision and the SENTENCE states the relation instead —
+ * "and one turn costs more". A reader who sees two figures that round alike is told which way
+ * the comparison goes, in words, which no amount of precision can be wrong about. The class is
+ * removed rather than narrowed.
+ *
+ * The floor refusal, named by what ACTUALLY binds — one sentence per cause.
+ *
+ * ⛔ THREE CAUSES, AND ONLY ONE OF THEM IS SCARCITY. One message served all three and was
+ * false in two of them. Measured at the real handler before anything changed:
+ *   · $0.15 left, one child asking $0.10, floor $0.19 → "which 1 sub-agent(s) cannot
+ *     share … Delegate fewer at once, or run them one after another". With ONE child the
+ *     two remedies are the same remedy and both are impossible.
+ *   · $10.00 left, one child asking $0.10 → the same sentence, claiming $10 cannot be
+ *     shared by one child. The run's remainder is twenty turns' worth.
+ *   · $1.00 left, children asking $0.01 and $10.00 → "which 2 sub-agent(s) cannot share".
+ *     Two floors are $0.38 together: they fit twice over.
+ *
+ * ⛔⛔ AND IT NAMES NO FIGURE TO TYPE. THAT IS THE DESIGN, not an omission — a second cut of
+ * this function prescribed one ("raise max_budget_usd to at least $X") and a review round
+ * swept 3 957 refusals through the real handler, fed each printed figure back, and found
+ * **599 of 1 674 not followable**: 16 printed `$Infinity` at the exact tie, 9 exceeded the
+ * schema maximum, 68 refused the same child again, 506 refused a sibling. Every one of those
+ * lives in the prescription, none in the diagnosis. A prescribed figure is a claim about what
+ * the admission path will do next, and this function cannot make that claim from what it
+ * holds: the share depends on the whole batch, the batch changes when the ask changes, and
+ * whether a cheaper model exists depends on a registry it cannot see. So it says what binds
+ * and which KINDS of move can change it — each of those checked below — and the figure is
+ * deferred to a piece that computes feasibility rather than asserting it.
+ *
+ * ⚠ `factor` DOES NOT ANSWER "DID THE REMAINDER BIND". An earlier attempt split the message
+ * by it and produced a sentence false in its own case: at $0.15 left it said "the run's
+ * remainder is not the constraint here: $0.15 of it is still free" while a turn cost $0.192.
+ * `factor === 1` only says the sum of the asks fits. The dominant test is
+ * `remainingRunUSD < need`, and it comes before the ask — a child whose own ask is also
+ * short is still refused by the remainder.
+ *
+ * ⛔ WHAT THE FLOOR MEANS IS NOT "IT CANNOT FINISH A TURN" — see {@link minChildBudgetUSD},
+ * which records that this sentence is false and was corrected once already: the cost guard
+ * books a turn before it compares, so an admitted child always completes its first turn. A
+ * first cut of this function wrote the false version into a new home and pinned it with two
+ * witnesses. Every branch carries the true one: below its floor a child runs ONE turn and
+ * then stops, so the money buys an abort instead of an answer.
+ *
+ * ⛔ EVERY BRANCH SAYS THAT NOTHING WAS STARTED. Measured in a release walk: after a floor
+ * refusal one model INVENTED the children's results while the ledger showed zero children
+ * started. The throw happens before any child is dispatched, so it is true in every branch.
+ *
+ * ⚠ WHICH MOVES EACH BRANCH NAMES, and why each is true where it is named:
+ *   · raising the ask — named only where `askedFor < need`. It is the ONLY move that can work
+ *     there, because `share = askedFor · factor <= askedFor`, so no reduction of the batch
+ *     lifts this child over its floor. A second cut offered "delegate fewer" here and it was
+ *     false in all 131 measured cases.
+ *   · delegating fewer / running sequentially — named where the siblings are the cause, and
+ *     where the batch cannot fit at all. Sequential works because the hold is released and
+ *     the child's real spend charged when it settles, so the next call reads a remainder
+ *     reduced by what was SPENT; a review finding that said otherwise had measured the
+ *     reservation WHILE HELD, which is the concurrent case.
+ *   · lowering the siblings' asks — named only when the floors together fit the remainder.
+ *     That gate is necessary (`sum(shares) <= R`) and sufficient (asks proportional to the
+ *     floors give every child `floor_i · R / sumFloors >= floor_i`); a round verified 66
+ *     claims against it with no counterexample.
+ *   · a cheaper model, or a narrower `max_tokens` — both named as what they are, a MAY. They
+ *     lower the floor, and whether that is ENOUGH depends on the tier enum, on configured
+ *     profiles this function cannot see, and on the floor's irreducible prefix term: the
+ *     cheapest tier's first turn is about $0.04 and the cheapest priced id's about $0.0008, so
+ *     below those no model and no cap clears it. An earlier revision wrote "would also clear
+ *     it" here and contradicted this very paragraph two screens above it. At a spent ceiling
+ *     neither is named at all, because no priced model has a floor at or below zero.
+ */
+function floorRefusal(opts: {
+  name: string;
+  /** The share this child was granted. */
+  got: number;
+  /** One cold turn on this child's model and cap; `0` when the model has no known price. */
+  need: number;
+  /** What the caller asked for this child (`max_budget_usd`, or the default). */
+  askedFor: number;
+  remainingRunUSD: number;
+  batchSize: number;
+  /** What the whole batch asked for. */
+  batchAsked: number;
+  /** The proportional scaling applied to every ask; `1` when nothing was scaled. */
+  factor: number;
+  /** One turn for every child in the batch, added up. */
+  sumFloors: number;
+  /** Whether any child in the batch runs a model with no known price, i.e. a floor of 0. */
+  anyFloorUnpriced: boolean;
+}): string {
+  const { name, got, need, askedFor, remainingRunUSD, batchSize, batchAsked, factor, sumFloors, anyFloorUnpriced } = opts;
+  const left = usdLabel(remainingRunUSD);
+  // ⚠ `name` IS NOT ESCAPED HERE, AND THAT IS A DECISION. A security round recommended
+  // `escapeXml` because three other outbound paths in this file apply it. Those are composed
+  // into an XML-ish envelope (`compose`/`renderFence`) and need it; this string is thrown, and
+  // a thrown tool error reaches the model as the `content` of a `tool_result`, with no
+  // envelope and so no delimiter to break. What keeps a line break out is the input gate
+  // (`CONTROL_CHARS`, rejected in `validateSpawnInput`), NOT escaping — `escapeXml` does not
+  // touch control characters at all. And escaping would corrupt the identifier the model has
+  // to name on its next call: a child called `a&b` would come back as `a&amp;b`. If this
+  // string is ever composed into an envelope, the escaping belongs at that composition site.
+  const share = `"${name}" would get $${usdLabel(got)}`;
+  const turn = `one turn on its model costs about $${usdLabel(need)}`;
+  const abort = 'below its floor a sub-agent runs a single turn and then stops, so the money '
+    + 'buys an abort instead of an answer';
+  const nothing = ' No sub-agent was started and there are no results to report.';
+  const ceiling = `$${left} left of its own cost ceiling`;
+  /**
+   * True when SOME split of the asks admits the whole batch.
+   *
+   * ⛔ STRICT WHEN A FLOOR IS ZERO, and the proof is why. Sufficiency comes from asks
+   * proportional to the floors: every child then gets `floor_i · R / sumFloors >= floor_i`.
+   * That construction needs `floor_i > 0` for EVERY child — a child on an unpriced model has
+   * a floor of 0, so its proportional ask is 0, and a zero ask is refused by its own rule one
+   * level up. It therefore needs a positive slice that the sum does not account for. Measured:
+   * at a remainder exactly equal to the one priced floor, with an unpriced sibling, all 24
+   * combinations of the two asks were refused while this gate called the batch feasible.
+   */
+  const batchCanFit = anyFloorUnpriced
+    ? sumFloors < remainingRunUSD
+    : sumFloors <= remainingRunUSD;
+
+  // ── (a0) THE RUN IS SPENT. Nothing about the batch changes it, and no model is cheap
+  // enough — the cheapest priced floor in the registry is $0.000898, not $0.
+  if (!(remainingRunUSD > 0)) {
+    return `This run has ${ceiling}, so there is nothing to divide: ${share}. Delegating fewer `
+      + `at once or one after another cannot change that, and no model is cheap enough; a `
+      + `later run gets its own ceiling.${nothing}`;
+  }
+  // ── (z) THE CALLER ASKED FOR NOTHING. Named before the remainder, because it is the cause
+  // the caller controls and the one a remainder sentence would hide: a first cut put it behind
+  // `remainingRunUSD < need` and produced a refusal that never mentioned the $0 ask while
+  // offering two remedies that both leave it at $0.
+  if (!(askedFor > 0)) {
+    const cost = need > 0 ? `, where ${turn}` : '';
+    const fix = need > 0 && remainingRunUSD < need
+      ? `Give "${name}" a positive max_budget_usd — and a cheaper model may be needed too, `
+        + 'because this run has less left than one turn costs. Both bind.'
+      : `Give "${name}" a positive max_budget_usd.`;
+    return `This run has ${ceiling}, and ${share} because it was given no budget at all${cost} — `
+      + 'and a sub-agent with no budget runs a single turn and then stops, so it would buy an '
+      + `abort rather than an answer. ${fix}${nothing}`;
+  }
+  // ── (a) THE RUN CANNOT PAY FOR ONE TURN of this child. The only branch where scarcity is
+  // the true reason and no change to the batch helps.
+  const runCannotPay = `This run has ${ceiling} and ${turn} — more than the whole remainder, so `
+    + `${share} — ${abort}. Delegating `
+    + 'fewer at once cannot change that: even on its own this child cannot be granted one '
+    + `turn's worth. A cheaper model may clear it, or a later run with its own ceiling.${nothing}`;
+  if (remainingRunUSD < need) return runCannotPay;
+  // ── (b) THE CHILD'S OWN BUDGET cannot pay for one turn. The run's remainder covers it,
+  // which is why naming scarcity here sends the caller down a road that does not exist — and
+  // raising the ask is the only move that can work, because the share never exceeds the ask.
+  if (askedFor < need) {
+    const scaled = factor < 1
+      ? `, and the batch's $${usdLabel(batchAsked)} against that remainder scaled it to `
+        + `$${usdLabel(got)}`
+      : '';
+    const also = batchCanFit
+      ? ''
+      : ` The batch cannot fit either, however the asks are split — one turn each costs `
+        + `$${usdLabel(sumFloors)} together, against $${left} — so delegate fewer at once as well.`;
+    return `This run has ${ceiling}, which covers one turn of "${name}" — what binds is its own `
+      + `budget: it may spend $${usdLabel(askedFor)}, and one turn costs more — ${turn}`
+      + `${scaled}. Raise its max_budget_usd — a bigger share cannot come out of the batch, `
+      + `because a share never exceeds the ask it was scaled from. A cheaper model or a narrower `
+      + `max_tokens may also clear it, by lowering what one turn costs.${also}${nothing}`;
+  }
+  // ⛔ A SINGLE CHILD HAS NO SIBLINGS TO BLAME, and this test belongs HERE — a first cut put
+  // it in (a)'s condition, where it swallowed every single-child (b) case and answered "give
+  // it a cheaper model" to a child whose own $0.10 ask was the binding thing. Reaching this
+  // line with one child means its ask cleared its floor and the remainder did too, so the
+  // only way its share came up short is the rounding give-back at an exact tie.
+  if (batchSize === 1) {
+    return `This run has ${ceiling} and ${turn} — the two are too close to fund it, so `
+      + `${share}, ${abort}. There are no siblings to delegate away here. A cheaper model may `
+      + `clear it, or a later run with its own ceiling.${nothing}`;
+  }
+  // ── (c) THE SIBLINGS scaled it under its floor. Its own ask was enough and the run's
+  // remainder is enough; what is not enough is the remainder divided this many ways.
+  //
+  // ⛔ THE FLOOR FIGURE OF THE NAMED CHILD STAYS IN THIS SENTENCE. Two standing witnesses
+  // couple it to the share in one regex, because a mutant quoting `floors[0]` once survived
+  // the whole suite — and a first cut of this rewrite dropped the figure and broke both.
+  const remedy = batchCanFit
+    ? 'Delegate fewer at once, run them one after another, or lower what the others ask for.'
+    : `The whole batch cannot fit however the asks are split — one turn each costs `
+      + `$${usdLabel(sumFloors)} together, against $${left}. Delegate fewer at once, or run `
+      + 'them one after another.';
+  return `${String(batchSize)} sub-agents asked for $${usdLabel(batchAsked)} against the `
+    + `$${left} left of this run's own cost ceiling, so every share was scaled down: `
+    + `${share}, below the $${usdLabel(need)} one turn on its model costs — ${abort}, and on `
+    + `its own it would fit. ${remedy}${nothing}`;
+}
+
 /** The live limit; only tests shorten it (`setSpawnTimeoutMsForTests`). */
 let spawnTimeoutMs = SPAWN_TIMEOUT;
 
@@ -1737,31 +1965,33 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // and removed again, because the child this message names is often the CHEAPEST in
         // the batch, and a remedy it cannot follow is worse than none.
         //
-        // ⛔ The reason clause branches, and only the reason. On a model this instance has
-        // no price for the floor is 0, so quoting it would read "would get $0.0000, and one
-        // turn on its model costs about $0.0000" — a refusal whose own arithmetic cancels
-        // out, and an assertion that a turn is free, which is exactly what an unpriced model
-        // is not known to be. That case is reachable only because of the carve-out above, so
-        // it is this change's to get right.
+        // ⛔ The unpriced shape is why a price is never quoted unconditionally. On a model
+        // this instance has no price for the floor is 0, so quoting it would read "would get
+        // $0.0000, and one turn on its model costs about $0.0000" — a refusal whose own
+        // arithmetic cancels out, and an assertion that a turn is free, which is exactly what
+        // an unpriced model is not known to be. That case is reachable only because of the
+        // carve-out above. (An earlier revision branched the REASON alone and said so here;
+        // the remedy needed branching too, which is what `floorRefusal` now does.)
         //
-        // ⚠ This message is not the subject of this change and is unchanged by it. Its
-        // wording is a question of its own: a case distinction here needs a true sentence
-        // per branch and a witness per branch, and an attempt to split it by `factor` alone
-        // produced a second text that was false in its own case. Whoever takes it on starts
-        // from that.
-        const name = specs[tooSmall]!.name;
-        const got = shares[tooSmall]!;
-        const need = floors[tooSmall]!;
-        throw new Error(
-          `This run has $${usdLabel(remainingRunUSD)} left of its own cost ceiling, which `
-          + `${String(specs.length)} sub-agent(s) cannot share: "${name}" would get `
-          + `$${usdLabel(got)}, `
-          + (need > 0
-            ? `and one turn on its model costs about $${usdLabel(need)}. `
-            : 'and a sub-agent with no budget runs a single turn and then stops, so it '
-              + 'would buy an abort rather than an answer. ')
-          + 'Delegate fewer at once, or run them one after another.',
-        );
+        // ⚠ THE WORDING IS NOW BRANCHED, and the branches live in `floorRefusal` with the
+        // measurement that forced each one. What belongs here is only the handler's half:
+        // every input the message needs is passed EXPLICITLY — `factor` and `sumFloors` as
+        // well, because the REMEDIES are computed from them. A first cut passed a `scaled`
+        // boolean instead and could therefore only assert what scaling implies; two of those
+        // assertions were false, and the figure that makes the advice followable
+        // (`need / factor`) was not derivable from what the function had been given.
+        throw new Error(floorRefusal({
+          name: specs[tooSmall]!.name,
+          got: shares[tooSmall]!,
+          need: floors[tooSmall]!,
+          askedFor: requested[tooSmall]!,
+          remainingRunUSD,
+          batchSize: specs.length,
+          batchAsked: asked,
+          factor,
+          sumFloors: floors.reduce((sum, f) => sum + f, 0),
+          anyFloorUnpriced: floors.some((f) => !(f > 0)),
+        }));
       }
 
       // ⛔ RESERVE, do not merely read — and this is the half an earlier attempt left
@@ -2064,10 +2294,31 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // than it, and placed after it. The announcement that scaling is visible is
           // worth nothing while this line contradicts it.
           const budget = shares?.[i] ?? spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
-          const knob = isBudget ? `max_budget_usd=${String(budget)}` : `max_turns=${String(turns)}`;
+          // ⚠ The SHARE, not the ask, so it carries float noise: a scaled $0.205 printed as
+          // `max_budget_usd=0.20499999999999996` — a description formatted as a parameter
+          // assignment, which reads as typeable. Rounded to display precision and kept a
+          // NUMBER, so `0.5` and `50` print unchanged (two standing assertions pin them).
+          // ⚠ `toPrecision(3)`, not a money format. This reports the ceiling the child RAN
+          // with, and that ceiling can be a scaled share — `0.20499999999999996` as a figure
+          // the parent reads, which is noise. But rounding it to cents is the wrong repair in
+          // two directions, both measured: `0.00001` becomes `0` — asserting the zero-budget
+          // branch this code path deliberately treats as a DIFFERENT diagnosis — and `0.00999`
+          // becomes `0.01`, overstating a ceiling. Significant digits keep a positive value
+          // positive, never overstate by more than a rounding step of its own size, and leave
+          // `0.5`, `2` and `50` exactly as they were (two standing assertions pin those).
+          const knob = isBudget
+            ? `max_budget_usd=${String(Number(budget.toPrecision(3)))}`
+            : `max_turns=${String(turns)}`;
           const tools = stop.pendingTools.map((t) => escapeXml(t)).join(', ');
           const whileDoing = ` and was still calling tools (${tools || 'unnamed'}) when it was stopped`;
           const raisedTurns = Math.min(turns * 2, MAX_SPAWN_TURNS);
+          // ⚠ The PRINT is ceiled to its own precision, the comparison below is not. A
+          // scaled share doubles into float noise — `0.19200000000000003 * 2` printed
+          // `0.38400000000000006` as a figure the parent is told to type. `usdAtLeast`
+          // ceils it to `0.39`; `Number(...)` keeps a clean `2` from printing as `2.00`,
+          // which two standing assertions pin. The gate stays on the raw number so the
+          // clamped-at-maximum case still falls through to "already at its maximum"
+          // instead of prescribing a figure that is not larger than what was asked.
           const raisedBudget = Math.min(budget * 2, MAX_SPAWN_BUDGET_USD);
           const raise = isBudget
             ? (budget <= 0
@@ -2077,7 +2328,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               // than nothing, and why the fix is a budget rather than a retry.
               ? `a positive max_budget_usd (it was 0, so the child stopped after its first turn; the default is ${String(DEFAULT_SPAWN_BUDGET_USD)})`
               : raisedBudget > budget
-                ? `a higher max_budget_usd (at least ${String(raisedBudget)})`
+                ? `a higher max_budget_usd (at least ${String(Number(usdAtLeast(raisedBudget)))})`
                 : `a narrower task (max_budget_usd is already at its maximum of ${String(MAX_SPAWN_BUDGET_USD)})`)
             : (raisedTurns > turns
               ? `a higher max_turns (at least ${String(raisedTurns)})`
