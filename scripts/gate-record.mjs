@@ -268,13 +268,16 @@ export function requiredGates(files) {
 /**
  * The ONE place the `review:` format is written down for a human.
  *
- * ⚠ Both messages below used to carry it as their own literal, and the PR template carried
- * it twice more. A measured defect: the template's skeleton read `<n> <model> round(s),
- * <result>`, where `(s)` sits OUTSIDE the brackets, so an author who substituted the slots
- * correctly still produced `round(s)` — which the grammar refuses. Four copies agreed with
- * each other and three of them were wrong. The template's two are checked against the
- * grammar by `tests/gate-record.test.ts`; these two now read one constant, so they cannot
- * disagree at all.
+ * ⚠ Four copies of it once existed — these two messages, the PR template's skeleton and the
+ * template's field description — and three were wrong in the same way: the plural marker sat
+ * OUTSIDE the angle brackets, so an author who substituted every slot correctly still produced
+ * a line the grammar refuses. They agreed with each other, which is not the same as being
+ * right. Both messages now read this constant and the template is held to it by a test.
+ *
+ * ⚠ This file deliberately contains NO example of the refused form, not even as history. A test
+ * sweeps the template and this script for it, and a sweep with an exception is a sweep somebody
+ * will widen. The story is told in `tests/gate-record.test.ts`, where prose describing a defect
+ * belongs and where nothing copies from.
  *
  * The plural lives INSIDE a slot on purpose: the skeleton has to stay refused while
  * unsubstituted (an attestation must not be pre-answered) and be valid once filled.
