@@ -4498,8 +4498,6 @@ export class LynoxHTTPApi {
       // prefix-less opaque tokens are NOT masked (the generic high-entropy
       // pattern is skipped to avoid over-masking legit debug data). This is
       // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
-      // A stricter export-only scrub (masking prefix-less opaque tokens) remains
-      // a follow-up hardening — not in this Tier-2 scope.
       const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
       jsonResponse(res, 200, scrubbed);
     }));
@@ -8094,7 +8092,7 @@ export class LynoxHTTPApi {
             // repaired here on purpose: the fix belongs where `state`'s lifecycle
             // is decided, it would rewrite assertions in the most load-bearing
             // function of that file, and what is lost is a WARNING — nothing
-            // refuses wrongly and no token moves. Filed rather than bundled.
+            // refuses wrongly and no token moves.
             //
             // The unattended gate does NOT read this field. It reads `origin`.
             // An earlier version of this comment said the gate would use `state`

@@ -1276,9 +1276,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(row?.trigger_id).toBe('trg-1');
   });
 
-  // ── Auflage 1: recurring is OUT of wave 1, and the test pins today's shape ──
+  // ── Recurring triggers: the test pins today's shape ──
 
-  it('a park SHIFTS a cron trigger\'s cadence by the wait — wave 1 does not fix this', async () => {
+  it('a park SHIFTS a cron trigger\'s cadence by the wait', async () => {
     // Deliberately nailed rather than corrected. `next_run_at` is computed in
     // `recordTaskRun`, i.e. after the run returns, so a run that waited an hour
     // for its answer schedules the next occurrence from an hour later. Fixing it

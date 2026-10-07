@@ -878,8 +878,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // and `buildTierPresetSignal` omits the key when undefined — so the one preset
     // that exists to make EU processing EXPLICIT could not show the chip on the slot
     // this model serves. NOT every Mistral entry carries the field — `ministral-3b`
-    // and the older/legacy entries still lack it, so the same gap is open wherever
-    // they are catalog-selectable. Nothing enforces it registry-wide; the guard that
+    // and the older/legacy entries still lack it. Nothing enforces it registry-wide; the guard that
     // exists covers preset slots only (tier-presets.test.ts).
     provenance: 'EU',
   },
@@ -1134,7 +1133,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // -0731 was genuinely text-only, so this object is INHERITED, not measured — the one
     // thing this change otherwise avoided. The flip needs `FIREWORKS_VISION_FEATURES`
     // plus the house procedure (`tests/online/fireworks-vision.test.ts` validates vision
-    // on the wire before a model claims it), so it is filed rather than guessed. The
+    // on the wire before a model claims it), so it stays text-only until that has run. The
     // direction is safe: images are refused on this slot, not silently mishandled.
     features: FIREWORKS_TEXT_FEATURES,
     // Read off the provider's public MODEL PAGE 2026-09-30 (the pricing OVERVIEW
@@ -1259,9 +1258,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // It is pinned by no preset — but it IS served and it IS an option in the Fireworks
     // per-tier picker, so a user who selects it for the fast tier reaches `session.ts`
     // (64) and `retrieval-engine.ts` (256), where both budgets are inside the silent
-    // region and four of the six callers swallow the result. That made this a LIVE gap on
-    // a selectable model rather than a filed one, which is why the bound became per-model
-    // here instead of later.
+    // region and four of the six callers swallow the result. That is why the bound is
+    // per-model and set here.
     thinkingOnly: { emptyAtOrBelow: 256 },
   },
   'accounts/fireworks/models/kimi-k2p6': {

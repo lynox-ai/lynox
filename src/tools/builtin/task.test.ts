@@ -532,8 +532,7 @@ describe('Task Tools', () => {
     it('scans a workflow task even when neither schedule nor assignee is given', async () => {
       // createPipelineTask forces `assignee: 'lynox'` and a lynox task with no
       // run_at fires immediately — so before `workflow_id` joined `willFire`, this
-      // exact shape created a FIRING trigger that no scan ever saw. Pre-existing;
-      // it only became worth closing once `params` gave it a payload.
+      // exact shape created a FIRING trigger that no scan ever saw.
       history.insertPlannedPipeline({
         id: 'wf-bare', name: 'Bare', goal: 'bare', steps: [],
         reasoning: '', estimatedCost: 0, createdAt: '2026-08-18T00:00:00.000Z', template: true,

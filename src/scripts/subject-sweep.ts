@@ -568,7 +568,7 @@ export function main(): void {
       // at-erase reap — archiving would leave the plaintext name behind, so the backlog would
       // not actually reach zero) but deliberately NOT shipped in this change: a delete needs a
       // before-image ledger whose restore is verified to put the STATE back in force, not
-      // merely to re-insert rows. That is its own change with its own review. Refusing loudly
+      // merely to re-insert rows. Refusing loudly
       // beats shipping the half someone would then run against a tenant.
       if (args.apply) {
         process.stderr.write('[subject-sweep] --orphans --apply is not built yet: the delete phase lands with its before-image ledger in a separate change. This flag reports only.\n');

@@ -10697,8 +10697,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   });
 
   /**
-   * Callback → unattended renewal, with nobody in between. This is the clause
-   * the register row states, and it is one test rather than two because the
+   * Callback → unattended renewal, with nobody in between. It is one test
+   * rather than two because the
    * interesting part is the HANDOVER: the route writes a field, and a predicate
    * in another module reads it and reaches a different answer than before.
    *

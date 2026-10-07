@@ -9,7 +9,7 @@ import { RunHistory } from './run-history.js';
 import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
 
 /**
- * The per-call connection stamp (source-connection PRD, first build cut).
+ * The per-call connection stamp.
  *
  * Three properties the stamp has to carry, each with its own witness below:
  *  (a) only the engine's resolver writes it — a value the model supplies does not
@@ -17,7 +17,7 @@ import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connect
  *      handed, and it is isolated per call; the http resolver half is in http.test.ts);
  *  (b) it outlives the `connections` row it names;
  *  (c) a connection deleted and set up again is told apart from the old one — and
- *      where it is NOT (a re-authorisation of the same row), the gap is pinned.
+ *      where it is NOT (a re-authorisation of the same row), that is pinned too.
  */
 describe('call-connection slot', () => {
   it('is a no-op outside a call', () => {
@@ -138,12 +138,12 @@ describe('connection stamp — persistence and identity', () => {
     expect(after).not.toBe(before);
   });
 
-  it('(c) KNOWN GAP: re-authorising the same row under another account keeps the stamp', () => {
+  it('(c) re-authorising the same row under another account keeps the stamp', () => {
     // The upsert keeps created_at by design (connection-store.ts), so a profile
     // whose token is replaced by one for a different account — without deleting
     // the profile — carries the same (id, created_at) as before. The stamp tells
-    // apart connection ROWS, not grants. A grant identity is the PRD's open Q1 key
-    // question; this test pins the gap so a fix has to change it on purpose.
+    // apart connection ROWS, not grants. This test pins that, so a change to it has
+    // to be made on purpose.
     const { engine, store } = setup();
     store.save(profile('shop'));
     age(engine, 'shop');

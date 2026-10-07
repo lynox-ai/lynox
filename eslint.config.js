@@ -109,8 +109,7 @@ export default [
     // block and all three were wrong — an unsourced denominator, then one that mixed
     // the two channels, then one whose halves summed to twelve. A count is a sample of
     // what somebody tried, it ages the moment anybody tries another shape, and nothing
-    // in the build checks it. The measured list with its dates is the register row,
-    // which is where an open set can be kept honest.
+    // in the build checks it.
     //
     // ⛔ THE HAZARD THIS BLOCK CREATES, both ways. Flat config REPLACES a rule's options
     // instead of merging them, so this block and a repo-wide `no-restricted-syntax`
@@ -127,8 +126,8 @@ export default [
     // Why this is a lint rule and not a test: earlier mechanisms for the same property
     // were built and retired, each defeated by a shape its author had not enumerated.
     // (No count: this comment said seven retired while the source file said six, and
-    // neither was checkable against the tree.) That history, the open shapes, and the hazard above are a register row;
-    // this comment states the rule's reach and stops there, because every review finding
+    // neither was checkable against the tree.) This comment states the rule's reach and
+    // stops there, because every review finding
     // on this block has been a sentence claiming more than it measured.
     files: ['src/core/speak/mistral-voxtral-tts.ts'],
     rules: {

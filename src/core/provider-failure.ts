@@ -21,7 +21,7 @@
  *   - Anthropic: HTTP 400 invalid_request_error — "Your credit balance is too low
  *     to access the Anthropic API".
  *   - Mistral: no documented billing code (its docs list only 429 for limits), so
- *     it is caught by the generic 402 / vocabulary path and measured as a follow-up.
+ *     it is caught by the generic 402 / vocabulary path.
  *
  * DEFENCE (why `host` is a parameter, not read from the error): body vocabulary is
  * trusted ONLY from a vetted provider host. `host` is where WE sent the request —

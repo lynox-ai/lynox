@@ -1066,8 +1066,8 @@ describe('OpenAIAdapter', () => {
 
       // The user-visible text must survive the split intact. (The next request's
       // history does NOT — `translateMessages` joins text parts with a newline
-      // and plants one mid-sentence. Pre-existing; asserted here only so the
-      // split itself is not blamed for it later.)
+      // and plants one mid-sentence. That is `translateMessages`, not the split,
+      // so it is not asserted here.)
       const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
       const result = await processor.process(
         (async function* () { for (const e of events) yield e; })(),

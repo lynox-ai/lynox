@@ -249,7 +249,7 @@ describe('configureBudgetAndRateLimits — http-tool security wiring', () => {
     expect(ctx.allowedHosts).toBeUndefined();
   });
 
-  it('wires enforce_https from config (pre-existing gap, now covered)', () => {
+  it('wires enforce_https from config', () => {
     const ctx = createToolContext(base);
     configureBudgetAndRateLimits(mockRunHistory, { ...base, enforce_https: true }, ctx);
     expect(ctx.enforceHttps).toBe(true);

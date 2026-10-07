@@ -2648,8 +2648,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
    * EMPTY — `return !hasStoredRefreshToken`, the shape this whole piece exists
    * for — was never driven.
    *
-   * A pre-existing gap rather than one this change opened, and closed here
-   * because the clause it leaves unpinned is the one that decides whether
+   * Driven here because that clause is the one that decides whether
    * Shopify renews at all.
    */
   it('renews an app-only profile whose refresh slot is empty, which is the shape this exists for', async () => {

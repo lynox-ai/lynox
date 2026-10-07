@@ -145,11 +145,11 @@ function hasSpeakableContent(s: string): boolean {
  * for the requested language. Today that is not a corner case — it is the GERMAN
  * case, every time, because the provider has no German voice at all. The behaviour
  * of this branch therefore IS the answer to "browser `SpeechSynthesis` or a second
- * provider", which is rafael's call and is tracked as an open register row.
+ * provider", and that is a product decision, not this function's.
  *
- * Until he answers, this falls back to the provider's default voice AND says so. That
- * is strictly today's behaviour plus a diagnostic — the register row's own words are
- * that the surface "reads German text with an English speaker voice" — so it adds no
+ * Until it is made, this falls back to the provider's default voice AND says so. That
+ * is strictly today's behaviour plus a diagnostic — the surface reads German text with
+ * an English speaker voice — so it adds no
  * promise. Throwing instead would take a working feature away from German users,
  * which is the wrong direction for an unanswered question.
  */

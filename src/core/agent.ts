@@ -504,13 +504,12 @@ export class Agent implements IAgent {
   /** Per-conversation blob store for tool results recallable after compaction. */
   readonly toolResultBlobStore: import('./tool-result-blob-store.js').ToolResultBlobStore | undefined;
   /**
-   * H-024 shadow-mode tracker — per-conversation behavioural anomaly detector.
+   * Shadow-mode tracker — per-conversation behavioural anomaly detector.
    * Threaded from the Session (owns it across Agent recreation). When set, the
    * agent records every successful tool dispatch and calls `checkAnomaly()`
    * for channel-side-effect publishing. Return value intentionally discarded:
    * shadow mode does NOT block dispatch or surface a warning to the user.
-   * Enforcement-mode follow-up is deferred to v1.7.3 / v1.8.0 after we observe
-   * false-positive rate in production. Undefined for ad-hoc agents built
+   * Undefined for ad-hoc agents built
    * outside a Session (CLI smoke harness, sub-agents in legacy tests).
    */
   readonly toolCallTracker: ToolCallTracker | undefined;
@@ -3743,29 +3742,6 @@ export class Agent implements IAgent {
    * the same column with neither the flatten nor the bound — the narrow door
    * shut, the wide one open, and the commit claiming the threat closed.
    *
-   * ⚠⚠ And there is a THIRD writer of that column which this does NOT reach, so
-   * do not read the paragraph above as coverage. Pipeline steps build their
-   * Agent with no `recordToolCall` in its config, so `_recordToolCall` is a
-   * no-op for them and their row is written by `createStepStreamHandler` →
-   * `runner.ts` → `insertToolCall` from the STREAM event:
-   * `boundedJson(event.result)`, a different cap, no masking order, no flatten,
-   * no cut mark. `http_request` is in `INLINE_CORE_TOOLS`, so that path is live
-   * for the very tool this change is about.
-   *
-   * ⚠ And the forged-line threat is LIVE there, not merely a different meaning
-   * for the same field. On a soft failure the pipeline row carries the payload,
-   * which is a semantics problem. On a HARD throw the stream event carries the
-   * error text (`result: message` below), and `boundedJson` passes strings
-   * through verbatim — so `read_file`'s ENOENT with a model-chosen path writes
-   * its CRLF straight into that row. An earlier version of this comment said
-   * the column "carries the RESULT, not a reason" and made a live hole read as
-   * a schema question. It is not fixed here because the same sink
-   * needs one decision — what that column MEANS on that path — and flattening
-   * it alone would harden a field whose meaning is still wrong.
-   *
-   * The count in this comment was wrong twice (`two writers`, then `a third
-   * would call this`) in the change whose own lesson was to count the writers.
-   *
    * Order is load-bearing. Mask FIRST: truncating first hands the masker a
    * fragment its pattern no longer matches, leaving the tail verbatim. Flatten
    * is length-preserving, so it cannot move the cut. Replace rather than strip:
@@ -4108,11 +4084,10 @@ export class Agent implements IAgent {
         this._conversationSawUntrusted = true;
       }
 
-      // H-024 shadow mode: observe tool-call sequences for anomaly patterns.
+      // Shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard
       // the return value — shadow mode does NOT block dispatch or surface a
-      // warning to the user. Enforcement is deferred to v1.7.3 after we
-      // observe false-positive rate in production. The preview is built via
+      // warning to the user. The preview is built via
       // formatToolCallPreview (secret-safe: URL-only for http_request, path-
       // only for read_file/write_file, strips known secret-bearing fields
       // from the catch-all). record() + checkAnomaly() are O(1) per call.
