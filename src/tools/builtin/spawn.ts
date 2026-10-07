@@ -1707,9 +1707,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // shape one layer over and gets it wrong: there the release sits after the
           // `await`, so a step that throws keeps its reservation for good.
           //
-          // ⚠ What this cannot release is a child that never settles. A hung child holds
-          // its share for as long as it hangs, so the spawn timeout being dead is the
-          // other half of this bound, not an unrelated resilience issue.
+          // ⚠ What this cannot release is a child that never settles. The spawn time limit
+          // is the other half of this bound: it settles a hung child, so its share comes
+          // back. Time the child spends waiting on a human does not count (`SpawnDeadline`),
+          // so a child whose question nobody answers holds its share until the question's
+          // TTL ends it.
           if (shares !== null) {
             agent.releaseExternalCost?.(shares[i]!);
             heldForBatch -= shares[i]!;
