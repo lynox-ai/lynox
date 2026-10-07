@@ -2476,6 +2476,8 @@ describe('isDangerous', () => {
       ['node - <<EOF\nfetch("https://x.test")\nEOF', 'node code execution'],
       ['bun -p 1', 'bun code execution'],
       ['bun --print 1', 'bun code execution'],
+      // Whether bun bundles short options is not pinned down; a bundled form is asked about.
+      ['bun -pe 1', 'bun code execution'],
       ["python3 <<'EOF'\nimport urllib.request\nEOF", 'input redirected to an interpreter'],
       ['node <<EOF\nfetch("https://x.test")\nEOF', 'input redirected to an interpreter'],
       ['bash < script.sh', 'input redirected to an interpreter'],

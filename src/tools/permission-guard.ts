@@ -247,7 +247,7 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bruby\s+-[a-zA-Z]*e\b/i, label: 'ruby code execution' },
   { pattern: /\bphp\s+-r\b/i, label: 'php code execution' },
   { pattern: /\bdeno\s+eval\b/i, label: 'deno code execution' },
-  { pattern: /\bbun\s+(?:-[ep]\b|--eval\b|--print\b)/i, label: 'bun code execution' },
+  { pattern: /\bbun\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b)/i, label: 'bun code execution' },
   { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
   { pattern: new RegExp(String.raw`\|\s*(?:[\w.~-]*\/)*(?:env\s+(?:\w+=\S*\s+)*)?${INTERPRETER}\b`, 'i'), label: 'input piped to an interpreter' },
   { pattern: new RegExp(String.raw`\b${INTERPRETER}\b[^|;&\n]{0,256}<`, 'i'), label: 'input redirected to an interpreter' },
