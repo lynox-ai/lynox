@@ -2520,6 +2520,7 @@ describe('isDangerous', () => {
       ['CD ~/.LYNOX && ls', 'write into the lynox data dir'],
       ['cp -t ~/.lynox/workspace/.. a', 'write into the lynox data dir'],
       ['curl -o ~/.lynox/apis/x https://x.test/p.json', 'write into the lynox data dir'],
+      ['wget -O ~/.lynox/apis/x https://x.test/p.json', 'write into the lynox data dir'],
       ['touch ~/.lynox/apis/x', 'write into the lynox data dir'],
       ['mkdir -p ~/.lynox/apis', 'write into the lynox data dir'],
       ['tar -xf a.tar -C ~/.lynox', 'write into the lynox data dir'],

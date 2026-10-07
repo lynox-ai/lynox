@@ -238,7 +238,7 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
  */
 const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:$|[\s'"]|\/(?!\.\.)))|(?=$|[\s'"]))`;
 /** The interpreters that run code they are handed. */
-const INTERPRETER = String.raw`(?:sh|bash|dash|zsh|ksh|node|python[23]?(?:\.\d+)?|perl|ruby|php|bun|deno)`;
+const INTERPRETER = String.raw`(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php|bun|deno)`;
 const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // Code passed inline to an interpreter, or fed to one on stdin.
   { pattern: /\bnode\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b|-(?=\s|$))/i, label: 'node code execution' },
@@ -247,22 +247,22 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bruby\s+-[a-zA-Z]*e\b/i, label: 'ruby code execution' },
   { pattern: /\bphp\s+-r\b/i, label: 'php code execution' },
   { pattern: /\bdeno\s+eval\b/i, label: 'deno code execution' },
-  { pattern: /\bbun\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b)/i, label: 'bun code execution' },
+  { pattern: /\bbun\s+(?:-[ep]\b|--eval\b|--print\b)/i, label: 'bun code execution' },
   { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
   { pattern: new RegExp(String.raw`\|\s*(?:[\w.~-]*\/)*(?:env\s+(?:\w+=\S*\s+)*)?${INTERPRETER}\b`, 'i'), label: 'input piped to an interpreter' },
   { pattern: new RegExp(String.raw`\b${INTERPRETER}\b[^|;&\n]{0,256}<`, 'i'), label: 'input redirected to an interpreter' },
   // Data sent out over HTTP. (A DELETE is already blocked in autonomous mode and asked about in
   // interactive mode by the rules above.) Short options are case-sensitive: `-d`, `-F` and `-T`
   // send, `-D` and `-f` do not; a short option may be bundled or carry its value glued.
-  { pattern: /\bcurl\b.*(?:\s-[a-zA-Z]*X\s*['"]?|\s--request(?:\s+|=)['"]?)(?:POST|PUT|PATCH)\b/i, label: 'HTTP mutation via curl' },
+  { pattern: /\bcurl\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?:POST|PUT|PATCH)\b/i, label: 'HTTP mutation via curl' },
   { pattern: /\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|-[a-zA-Z]*[dFT])/, label: 'HTTP data submission via curl' },
   { pattern: /\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/i, label: 'HTTP mutation via wget' },
   // Writes into the lynox data dir outside the workspace: profiles there are read back as
-  // configuration. A line that names a writing verb and such a path is asked about, in either
-  // order: read from each line's start, so the rule costs one pass per line, not one per verb.
+  // configuration. A command that names a writing verb and such a path is asked about, in
+  // either order: read from its start, so the rule costs one pass, not one per verb.
   // The path before `.lynox` in a redirection holds no `>`, for the same reason.
   { pattern: new RegExp(String.raw`>\|?\s*[^\s<>|;&]*${LYNOX_OUTSIDE_WORKSPACE}`, 'i'), label: 'write into the lynox data dir' },
-  { pattern: new RegExp(String.raw`^(?=[^\n]*?\b(?:cp|mv|install|ln|rsync|dd|tee|touch|mkdir|tar|unzip|sed|curl|wget|git|rm|rmdir|unlink|patch)\b)(?=[^\n]*?${LYNOX_OUTSIDE_WORKSPACE})`, 'mi'), label: 'write into the lynox data dir' },
+  { pattern: new RegExp(String.raw`^(?=[^\n]*?\b(?:cp|mv|install|ln|rsync|dd|tee|touch|mkdir|tar|unzip|sed|curl|wget|git|rm|rmdir|unlink|patch)\b)(?=[^\n]*?${LYNOX_OUTSIDE_WORKSPACE})`, 'i'), label: 'write into the lynox data dir' },
   { pattern: new RegExp(String.raw`\b(?:cd|pushd)\s+['"]?[^\s;&|]*${LYNOX_OUTSIDE_WORKSPACE}`, 'i'), label: 'write into the lynox data dir' },
 ];
 
