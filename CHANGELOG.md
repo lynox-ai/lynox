@@ -1,5 +1,130 @@
 # Changelog
 
+## 2.15.1 — 2026-10-07
+
+### Fixed: scheduled agent tasks start again under a daily spend cap
+
+- The background worker reserved every scheduled agent task's worst case — the
+  most such a run may spend, $15 for an ordinary scheduled task — against the
+  daily and monthly spend caps. Where the daily cap equalled that, the first cent of
+  recorded spend made the reservation exceed the cap, and no such task started
+  again until the day rolled over; where the daily cap was smaller, such a task never started at
+  all. The worker now reserves the smallest of the run's worst case, the headroom
+  still free under the caps, and the per-run session ceiling, and lowers the
+  run's own cost cap to that same amount. With less than $0.05 of headroom the
+  task waits. (#1537)
+- A scheduled task held back for budget now says so in the log, with the
+  reason, at most once every ten minutes while it waits, and once more when it
+  is admitted again. Before, it waited without a word.
+- A scheduled agent task that stops at its cost cap or its turn limit with tool
+  calls still pending is recorded as failed, and its notification is marked as
+  a failure. It used to be recorded as a success.
+
+### Fixed: a model profile sets endpoint and model as one pair
+
+- An agent whose connection comes from a model profile — a background task or a watch's analysis
+  run with `worker_profile`, or a sub-agent without a profile of its own spawned
+  by a profiled agent — used the profile's endpoint and key but took its model
+  from the tier. The OpenAI-compatible wire sends any model id that is not a `claude-` id
+  unchanged, so on an instance whose tier resolves to such a model (a Fireworks
+  model, for example) the request named a model the profile's endpoint does not
+  serve, and failed. Whenever a profile supplies the endpoint, the profile's model
+  is now sent with it; without a profile, the tier decides as before. (#1541)
+- The same holds for work that inherits a profiled agent's connection: workflow
+  steps, the planner, workflow extraction on save, search reranking and
+  structured-output helper calls.
+- The run record and the cost of such a run name the model that actually ran,
+  including a workflow step pinned to the profile's model.
+
+### Fixed: a sub-agent's cost counts against the run that started it
+
+- A spawned sub-agent's spend reached the daily total but not the cost cap of the
+  run that delegated to it, so that run's next turn computed with more room than
+  it had. The sub-agent's actual cost is now booked on the delegating run's cost
+  cap, on self-hosted, BYOK and managed instances alike. (#1542)
+
+### Changed — BREAKING (library consumers): `IAgent` gains `chargeExternalCost`
+
+- `IAgent` has a new required method, `chargeExternalCost(usd)`, used to book a
+  spawned sub-agent's cost on the run that delegated to it. An `IAgent`
+  implemented outside this package needs it to compile. (#1542)
+
+### Fixed: credential masking catches a key glued to an identifier or an escape
+
+- Credential shapes with a known vendor prefix (Anthropic, OpenAI, Stripe,
+  GitHub, AWS, Google, Slack, Shopify) only matched at a word boundary, so the
+  vendor rules did not recognise a key written directly after `_` — as part of a
+  variable name — or after a JSON or URL escape; where only those rules apply it
+  was neither masked nor detected, and could come back whole in an API error. It is now masked and
+  detected there too. A snake_case name that merely contains such a prefix, with no digit in the letters and digits right after it, is still not taken
+  for a key. (#1540)
+- The same rule applies to the web UI's pasted-key guard and display masking, and to the redaction applied before a conversation is turned into a saved
+  workflow.
+
+### Changed: rendering hardening for chat Markdown
+
+- Code fences in a rendered message are found on the parsed, sanitized DOM
+  rather than by a pattern over the sanitized string, and replaced as nodes.
+  When highlighting fails, the fence shows the escaped code. (#1534)
+- The diagram buttons and artifact cards in a message act only on controls the
+  renderer built itself, not on similar-looking markup in the message
+  content. (#1544)
+- Saving a diagram as an artifact reports a failed save; before, it said
+  nothing. (#1543)
+
+### Fixed: a scheduled workflow inherits what its creator had taken in
+
+- A workflow task created with `task_create` runs later from the background
+  worker, with no conversation of its own, so its run started as if nothing
+  untrusted had been seen — although its parameters came from the conversation
+  that scheduled it. The task now records whether that conversation had taken in
+  untrusted content (for example web or mail content, or an external tool's
+  result) and its run
+  starts from that state: each step's actions are judged with the untrusted-content state of that
+  conversation. A task created from a conversation that had taken in nothing
+  runs as before. (#1528)
+- The record lives in the new `engine.db` column `triggers.created_untrusted`
+  (schema v19). A task that is saved again never loses a recorded state, and a
+  stored value this version does not recognise is read as untrusted.
+
+### Fixed: web UI errors that went unreported
+
+- Chat: an answer to a question prompt that cannot be delivered after one retry
+  is reported. A stop whose request fails is reported and leaves the run
+  stoppable again. A dismissed secret or mail-connect prompt whose dismissal does
+  not arrive comes back in the same thread with an error, so it can be dismissed
+  again. Copying reports a clipboard the browser refused. (#1536)
+- Elsewhere: a failed read of the backup settings, of an entity's relations in
+  the knowledge graph, or of an artifact is shown as an error instead of as
+  empty. (#1539)
+
+### Internal
+
+- The Svelte components of the web UI are linted, the Markdown renderer
+  included, and floating promises in the web UI outside the chat view are handled or marked; in
+  the chat view, the prompt-answer, stop, dismissal and copy calls are handled.
+  (#1527, #1536, #1539, #1543)
+- `tests/online/` calls real provider APIs and now runs only with
+  `LYNOX_ONLINE=1`; an ordinary local run leaves it out and says so. The checks
+  in it that need no provider moved to `tests/online-guards.test.ts`. (#1538)
+- A data-store test fixture removes the temporary directories it creates.
+  (#1533)
+
+### Upgrade and rollback
+
+The upgrade moves `engine.db` from schema **18** to **19** on first start: one
+additive column, `triggers.created_untrusted`. `history.db` (54) and the mail
+state (17) do not change. There is no down path.
+
+Rolling back to 2.15.0: 2.15.0 opens an `engine.db` at schema 19 without
+complaint and leaves the column alone, but does not read it. A workflow task
+created from a conversation that had taken in untrusted content therefore runs
+with a clean state again after a rollback, as it did before this release.
+
+Rolling back further, to 2.14.x: the two steps under 2.15.0's **Upgrade and
+rollback** still apply — settle every parked trigger, and check scheduled mails
+already claimed for sending — as does its note on the withdrawn preset models.
+
 ## 2.15.0 — 2026-10-07
 
 ### Changed: stopping one conversation no longer stops work in another
