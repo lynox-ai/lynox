@@ -112,9 +112,13 @@ pre-push for what actually runs at pre-commit):
   "Generated with Claude Code". It strips silently rather than failing (the harness inserts
   those trailers, so failing would only teach `--no-verify`); the `no-ai-attribution` CI job
   is the gate for the bypassed case. A human `Co-Authored-By` is left alone.
-- **pre-commit**: gitleaks, pattern-scan, typecheck, hex-guard, token-contract, shape-contract.
+- **pre-commit**: gitleaks, pattern-scan, disclosure-vocabulary, typecheck, hex-guard,
+  token-contract, shape-contract.
   gitleaks/pattern-scan belong here, not pre-push: they read the *index*, which is empty at
   push time — at pre-push they were no-ops.
+  disclosure-vocabulary only WARNS: added lines that point at internal tracking or mark work as
+  put off ("filed rather than built here"). It cannot tell a feature's honest limit from a
+  disclosed gap in a check, so the author decides; a moved line is not reported.
 - **pre-push**: security-scan, public-repo-guard (internal-infra leaks), public-repo-guard-meta
   (customer names in commit messages), public-repo-guard-files (customer names in file paths and
   file contents), drift-guard (doc/code drift), positioning-guard.
@@ -135,7 +139,8 @@ pre-push for what actually runs at pre-commit):
   down. Second line, independent of any of it: `businessplan-2026/` is gitignored.
 
 Every hook above re-runs as a **required CI check** — except `public-repo-guard-meta`, whose
-class is pre-push-only by design (see above) — so `git commit/push --no-verify` cannot bypass
+class is pre-push-only by design (see above), and `disclosure-vocabulary`, which is a warning
+and refuses nothing anywhere — so `git commit/push --no-verify` cannot bypass
 them; that is what makes them gates rather than suggestions. (`security-scan` and
 `hex-guard` got theirs on 2026-07-14, in `hook-guards.yml`; before that they were hook-only, so
 `--no-verify` removed them entirely. The same workflow adds `web-ui-typecheck`, because the root

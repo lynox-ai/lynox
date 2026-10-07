@@ -377,6 +377,12 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'stripped, the index is empty: a commit with nothing staged is clean, so 0 is the right answer. The failed-producer door (not a work tree → 2) and the planted/clean cases are covered by tests/secret-pattern-scan.test.ts',
     expectStrippedExit: 0,
   },
+  'disclosure-vocabulary': {
+    kind: 'exempt',
+    reason:
+      'a WARNING that never refuses: stripped, the index is empty and there is nothing to warn about, so 0 is the right answer. The failed-producer door (not a work tree → 2), a planted line warned about, a clean and a moved line not, are covered by tests/disclosure-vocabulary-scan.test.ts',
+    expectStrippedExit: 0,
+  },
   typecheck: { kind: 'external', reason: 'inline `tsc` invocation, not a scanning guard' },
   'token-contract': { kind: 'external', reason: 'node .mjs design-token check; its own suite covers it' },
   'shape-contract': { kind: 'external', reason: 'node .mjs design-shape check; its own suite covers it' },
@@ -424,6 +430,7 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'pattern-scan': { cmd: 'bash', args: [join(repoRoot, 'scripts/secret-pattern-scan.sh')] },
+  'disclosure-vocabulary': { cmd: 'node', args: [join(repoRoot, 'scripts/disclosure-vocabulary-scan.mjs')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
   'push-lands-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/push-lands-guard.mjs'), 'hook'] },
   'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },

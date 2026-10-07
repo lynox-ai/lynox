@@ -132,7 +132,16 @@ export function findingsIn(line) {
  * lines silently.
  */
 export function addedLines(diff) {
+  return diffLines(diff).added;
+}
+
+/**
+ * The added and the removed lines of a diff, read as `addedLines` describes. A
+ * removed line carries { commit, text }.
+ */
+export function diffLines(diff) {
   const added = [];
+  const removed = [];
   let commit = null;
   let path = null;
   let line = 0;
@@ -145,6 +154,7 @@ export function addedLines(diff) {
         line++;
         newLeft--;
       } else if (l.startsWith('-')) {
+        removed.push({ commit, text: l.slice(1) });
         oldLeft--;
       } else if (l.startsWith(' ')) {
         line++;
@@ -173,7 +183,7 @@ export function addedLines(diff) {
       newLeft = h[3] === undefined ? 1 : Number(h[3]);
     }
   }
-  return added;
+  return { added, removed };
 }
 
 function git(args) {
