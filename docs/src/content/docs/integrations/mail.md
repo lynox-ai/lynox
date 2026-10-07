@@ -110,7 +110,7 @@ Searches across all configured accounts by default, or specify one: *"Search my 
 - *"Reply all to the team update"*
 
 :::caution[Send confirmation]
-Sending and replying always require your explicit confirmation. lynox shows you the full message before sending — nothing goes out without your approval.
+Sending and replying ask for your explicit confirmation: lynox shows you the recipients, the subject and the message (very long text shortened, with a note) and waits for your answer. A scheduled task asks you the same way and waits up to a day; a saved workflow has no one to ask, so the mail tools refuse to send.
 :::
 
 ### Follow-Up Tracking
