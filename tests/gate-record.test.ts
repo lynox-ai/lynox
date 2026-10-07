@@ -577,6 +577,27 @@ describe('gate-record — the shipped template does not answer its own questions
     expect(shipped['review'], 'the template teaches a different format than the script prescribes').toBe(REVIEW_FORMAT);
   });
 
+  it('⭐ …and so is the template\'s PROSE copy, which was the fourth and had no witness', () => {
+    // ⚠ The assertion above reads `extractRecord(…).fields` — the SKELETON inside the fence, and
+    // nothing else. The field DESCRIPTION above that fence quotes the same format in prose, and
+    // it was one of the four copies this change set out to unify. It was also the only one left
+    // that no test read: the sweep below greps the single literal `round(s)`, which the template
+    // no longer contains anywhere, so reverting the description to any other wrong spelling —
+    // `<round|round>`, `rounds(s)`, or deleting the quotation entirely — left all tests green.
+    // Found by a delta round on the fix, not by the fix.
+    //
+    // Keyed on the text OUTSIDE the fence, or this would pass on the skeleton the test above
+    // already covers and witness nothing new.
+    const fence = TEMPLATE.indexOf('```gate-record');
+    expect(fence, 'the template no longer contains a gate-record fence — this test is reading the wrong file').toBeGreaterThan(-1);
+    const fenceEnd = TEMPLATE.indexOf('```', fence + 3);
+    const prose = TEMPLATE.slice(0, fence) + TEMPLATE.slice(fenceEnd + 3);
+    expect(prose, 'the field description no longer quotes the format the script prescribes').toContain(REVIEW_FORMAT);
+    // Positive control for the slicing: the fence's own content must be GONE from `prose`, or
+    // the assertion above could be satisfied by the skeleton it is meant to exclude.
+    expect(prose).not.toContain('head: <40-hex sha of this PR\'s head commit>');
+  });
+
   it('is rejected on `security:` too, which needs a diff that OWES that gate', () => {
     // ⚠ The test above runs against `CODE`, which does not owe `security` — so the template's
     // `security:` placeholder is not read there at all. Without this case the field could be added
