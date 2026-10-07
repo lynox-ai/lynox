@@ -48,6 +48,12 @@ describe('workflow run claim — the state space on a real history.db', () => {
     const cols = (h.getDb().prepare('PRAGMA table_info(workflow_run_claims)').all() as { name: string }[])
       .map(c => c.name);
     expect(cols).toEqual(expect.arrayContaining(['workflow_id', 'key', 'run_id', 'started_at']));
+    // `created_at` exists so a bounded sweep could be written without a migration, and
+    // NOTHING reads it — a started claim is permanent until that decision is taken (PRD
+    // §3.2 point 6). Asserted here so the column is not mistaken for dead weight and
+    // dropped, and so its absence from every query is a stated fact rather than an
+    // oversight somebody has to rediscover.
+    expect(cols).toContain('created_at');
     // The primary key IS the refusal, and it must not span run_id: a restart swaps that
     // column, so an index over all three would make every restart a fresh claim and a
     // repeated call would never be refused. `pk` > 0 marks a key member.
@@ -61,6 +67,20 @@ describe('workflow run claim — the state space on a real history.db', () => {
     expect(h.claimWorkflowRun('wf-1', 'k-1', 'run-a')).toBe(true);
     expect(h.claimWorkflowRun('wf-1', 'k-1', 'run-b')).toBe(false);
     expect(h.readWorkflowRunClaim('wf-1', 'k-1')).toEqual({ runId: 'run-a', startedAt: null });
+  });
+
+  it('two claims cannot share a run id — the index makes it a property, not a convention', () => {
+    // `markWorkflowRunStarted` is keyed on `run_id` ALONE, so with a non-unique index one
+    // stamp would set `started_at` on two claims at once (measured on a probe: two rows
+    // stamped by one call). Every producer mints a fresh UUID, so this cannot happen today
+    // — which is exactly why it needs to be the table's property rather than the single
+    // writer's habit, and why a violation has to be a loud error.
+    const h = make();
+    expect(h.claimWorkflowRun('wf-1', 'k-1', 'run-shared')).toBe(true);
+    expect(() => h.claimWorkflowRun('wf-2', 'k-2', 'run-shared')).toThrow(/UNIQUE|constraint/i);
+    // and the first claim is untouched by the refused insert
+    expect(h.readWorkflowRunClaim('wf-1', 'k-1')).toEqual({ runId: 'run-shared', startedAt: null });
+    expect(h.readWorkflowRunClaim('wf-2', 'k-2')).toBeNull();
   });
 
   it('a different key on the same workflow is a different claim', () => {
@@ -84,7 +104,11 @@ describe('workflow run claim — the state space on a real history.db', () => {
     const h = make();
     h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
     h.markWorkflowRunStarted('run-a');
-    expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt).not.toBeNull();
+    // ⚠ Row FIRST, then the field. `expect(undefined).not.toBeNull()` PASSES, so
+    // `expect(row?.startedAt).not.toBeNull()` alone is satisfied by a row that is not
+    // there — the opposite of what it looks like it checks.
+    expect(h.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
+    expect(h.readWorkflowRunClaim('wf-1', 'k-1')!.startedAt).not.toBeNull();
     // Both release paths must decline. This is the half that keeps a paid crash from
     // handing out a second run.
     expect(h.releaseUnstartedWorkflowRunClaim('wf-1', 'k-1', 'run-a')).toBe(false);
@@ -158,7 +182,8 @@ describe('workflow run claim — the state space on a real history.db', () => {
       const h = make();
       h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
       h.markWorkflowRunStarted('run-a');
-      expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt).not.toBeNull();
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')!.startedAt).not.toBeNull();
       expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b')).toBe(false);
       // and the claim is untouched: still the old run, still marked as having spent
       expect(h.readWorkflowRunClaim('wf-1', 'k-1')).toEqual({ runId: 'run-a', startedAt: expect.any(String) });
@@ -204,6 +229,10 @@ describe('workflow run claim — the state space on a real history.db', () => {
     });
 
     it('only ONE of two concurrent retries wins the restart', () => {
+      // ⚠ This witnesses the OUTCOME, and it is overdetermined: after the first restart
+      // `started_at` is NULL *and* `run_id` is 'run-b', so two independent terms each make
+      // the second call false. Which one did the work is invisible here — the separable
+      // case is the next test.
       const h = make();
       h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
       h.markWorkflowRunStarted('run-a');
@@ -212,6 +241,45 @@ describe('workflow run claim — the state space on a real history.db', () => {
       const second = h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-c');
       expect([first, second]).toEqual([true, false]);
       expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.runId).toBe('run-b');
+    });
+
+    it('a LATE retry holding the stale run id cannot swap a live run away', () => {
+      // The term `run_id = ?` on its own, with every other condition satisfied — a mutant
+      // dropping it survived the whole file until this case existed.
+      //
+      // The reachable damage: the restarted run `run-b` is live and spending, and a request
+      // that read the claim before the swap still holds `run-a`. `started_at IS NOT NULL` is
+      // true (run-b started) and the status subquery still reads run-a's `failed`, so only
+      // the run-id term stands between that late call and swapping a paying run's claim
+      // away — which hands out a second paid run.
+      const h = make();
+      h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
+      h.markWorkflowRunStarted('run-a');
+      seedRun(h, 'run-a', 'failed');
+      expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b')).toBe(true);
+      h.markWorkflowRunStarted('run-b');
+      // Fixture guard: the two OTHER conditions are satisfied, so only the run id can refuse.
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')!.startedAt).not.toBeNull();
+      expect(h.getPipelineRun('run-a')?.status).toBe('failed');
+      expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-c')).toBe(false);
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')!.runId).toBe('run-b');
+    });
+
+    it('a release holding the stale run id cannot drop another attempt\'s claim', () => {
+      // The same term in `releaseUnstartedWorkflowRunClaim`, and the same gap: its only
+      // `false` expectation elsewhere has `started_at` set, so that guard decides it alone.
+      // Here the claim is UNSTARTED — `started_at IS NULL` is satisfied — and the run id is
+      // the only thing that may refuse.
+      const h = make();
+      h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
+      h.markWorkflowRunStarted('run-a');
+      seedRun(h, 'run-a', 'failed');
+      h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b');
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')!.startedAt).toBeNull();
+      expect(h.releaseUnstartedWorkflowRunClaim('wf-1', 'k-1', 'run-a')).toBe(false);
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
+      // and the owner of the current id still can
+      expect(h.releaseUnstartedWorkflowRunClaim('wf-1', 'k-1', 'run-b')).toBe(true);
     });
 
     it('a restarted claim can be released again if the new attempt spends nothing', () => {
@@ -223,6 +291,33 @@ describe('workflow run claim — the state space on a real history.db', () => {
       // The restart clears started_at, so the new attempt starts from "nothing spent".
       expect(h.releaseUnstartedWorkflowRunClaim('wf-1', 'k-1', 'run-b')).toBe(true);
     });
+  });
+
+  it('a database reset takes the claims with it, like every other table', () => {
+    // `resetDatabase` keeps a hand-maintained table list — the kind every new table has to
+    // remember to join, and v55 did not. A claim left behind by a wipe that took
+    // `pipeline_runs` has `started_at` set and no run row, which the route reads as "it may
+    // still be running": a sentence that is false about a run the reset destroyed.
+    // No production caller today, so this is the witness that keeps it true anyway.
+    const h = make();
+    // ⚠ FIXTURE COMPENSATING FOR A PRE-EXISTING DEFECT, and asserting it so it stays
+    // visible. `resetDatabase`'s list names `memory_embeddings`, which a fresh `history.db`
+    // does NOT have — measured: 14 of its 15 tables exist, and the method throws on that
+    // one before reaching any later entry. It has no production caller, which is why that
+    // went unnoticed. The assertion is what makes this stub removable: the day the list is
+    // corrected, this line fails and the stub goes with it.
+    expect(
+      h.getDb().prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").get(),
+      'if this table now exists, resetDatabase was fixed — drop the stub below',
+    ).toBeUndefined();
+    h.getDb().exec('CREATE TABLE memory_embeddings (id INTEGER PRIMARY KEY)');
+
+    h.claimWorkflowRun('wf-1', 'spent', 'run-a');
+    h.markWorkflowRunStarted('run-a');
+    h.claimWorkflowRun('wf-1', 'unspent', 'run-b');
+    h.resetDatabase();
+    expect(h.readWorkflowRunClaim('wf-1', 'spent')).toBeNull();
+    expect(h.readWorkflowRunClaim('wf-1', 'unspent')).toBeNull();
   });
 
   it('survives a restart of the process: a started claim is still there', () => {
@@ -237,7 +332,8 @@ describe('workflow run claim — the state space on a real history.db', () => {
     histories.push(after);
     // The discriminator is persisted, which is the reason it is a column: a process that
     // dies between the run's start and its answer leaves no return value behind.
-    expect(after.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt).not.toBeNull();
+    expect(after.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
+    expect(after.readWorkflowRunClaim('wf-1', 'k-1')!.startedAt).not.toBeNull();
     expect(after.sweepUnstartedWorkflowRunClaims()).toBe(0);
     expect(after.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
   });

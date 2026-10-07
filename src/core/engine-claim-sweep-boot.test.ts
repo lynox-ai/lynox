@@ -17,9 +17,14 @@ import type { LynoxConfig } from '../types/index.js';
  * a claim held by a request that died before its run started would answer 409 for good,
  * so a client that persisted its key could never run that workflow again.
  *
- * ONE boot, and one `it`. Each Engine boot is a heavy fixture; both facts this file has
- * to establish are facts about the SAME boot, so splitting them would double the cost and
- * prove nothing extra.
+ * ONE boot, and one `it`, because an Engine boot is a heavy fixture.
+ *
+ * ⚠ Of its two assertions only the FIRST carries the wiring proof, and the docblock said
+ * otherwise until a refuter checked it. A mutation that breaks only the second has to make
+ * the sweep delete started claims — and `workflow-run-claim.test.ts` already kills that,
+ * twice, without a boot. The second assertion is re-established here rather than
+ * established; it is kept because it is free on a boot that happens anyway, and because
+ * the asymmetry is the whole design and reads better stated together.
  */
 describe('Engine boot — the run-claim sweep is actually wired', () => {
   const dirs: string[] = [];
@@ -49,7 +54,11 @@ describe('Engine boot — the run-claim sweep is actually wired', () => {
     seed.claimWorkflowRun('wf-1', 'paid', 'run-b');
     seed.markWorkflowRunStarted('run-b');
     expect(seed.readWorkflowRunClaim('wf-1', 'nothing-spent')?.startedAt, 'fixture guard').toBeNull();
-    expect(seed.readWorkflowRunClaim('wf-1', 'paid')?.startedAt, 'fixture guard').not.toBeNull();
+    // ⚠ Row first, then the field: `expect(undefined).not.toBeNull()` PASSES, so the
+    // `?.startedAt` form alone is satisfied by a claim that was never written — which is
+    // the opposite of what a line labelled "fixture guard" is there to rule out.
+    expect(seed.readWorkflowRunClaim('wf-1', 'paid'), 'fixture guard').not.toBeNull();
+    expect(seed.readWorkflowRunClaim('wf-1', 'paid')!.startedAt, 'fixture guard').not.toBeNull();
     seed.close();
 
     process.env['LYNOX_DATA_DIR'] = dir;
@@ -58,15 +67,19 @@ describe('Engine boot — the run-claim sweep is actually wired', () => {
     engines.push(engine);
     await engine.init();
 
-    const history = engine.getRunHistory()!;
-    expect(history, 'the engine must have opened the history it just swept').not.toBeNull();
+    const history = engine.getRunHistory();
+    // `toBeDefined`, not `not.toBeNull()`: the latter passes for `undefined`, so it would
+    // have named a property it cannot check. What actually fails on a missing history is
+    // the method call two lines down — this says so before that happens.
+    expect(history, 'the engine must have opened the history it just swept').toBeDefined();
+    expect(history).not.toBeNull();
 
-    expect(history.readWorkflowRunClaim('wf-1', 'nothing-spent'),
+    expect(history!.readWorkflowRunClaim('wf-1', 'nothing-spent'),
       'a claim whose run never started has no holder left alive — boot is the only thing that can free it')
       .toBeNull();
-    expect(history.readWorkflowRunClaim('wf-1', 'paid'),
+    expect(history!.readWorkflowRunClaim('wf-1', 'paid'),
       'its run spent money: the route has to be able to read that and refuse, so the sweep must not touch it')
       .not.toBeNull();
-    expect(history.readWorkflowRunClaim('wf-1', 'paid')?.runId).toBe('run-b');
+    expect(history!.readWorkflowRunClaim('wf-1', 'paid')!.runId).toBe('run-b');
   });
 });

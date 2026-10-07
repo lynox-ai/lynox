@@ -1308,8 +1308,17 @@ const MIGRATIONS: string[] = [
   //
   // `(workflow_id, key)` is the PRIMARY KEY and therefore the refusal: a second call
   // with the same key loses the INSERT, which is how the route learns it is a repeat.
-  // The index must NOT span `run_id` — a restart swaps that column, and an index over
+  // The PRIMARY KEY must NOT span `run_id` — a restart swaps that column, and a key over
   // all three would make every restart a fresh claim, so the refusal would never fire.
+  // (This said "the index" until a refuter read it against the line four below, which
+  // creates an index ON `run_id`. Two different things; only the KEY is the refusal.)
+  //
+  // That secondary index is UNIQUE, and not merely for lookup speed: `markWorkflowRunStarted`
+  // is keyed on `run_id` alone, so with a non-unique index one stamp could set `started_at`
+  // on two claims at once — measured on a probe, two rows stamped by one call. Every
+  // producer mints a fresh UUID, so a collision cannot happen today; UNIQUE turns "one
+  // claim per run id" from a convention of the single writer into a property of the table,
+  // and a violation becomes a loud INSERT error instead of a silent double stamp.
   //
   // `started_at` is the DISCRIMINATOR, and it is a column rather than a return value
   // because a process that dies between the run's start and its answer leaves no return
@@ -1317,8 +1326,16 @@ const MIGRATIONS: string[] = [
   // anything is spent. Its two states are not symmetric:
   //   NULL     — nothing was spent; the claim may be released (boot sweep, request end).
   //   set      — spent. Even with no `pipeline_runs` row (the SQLITE_BUSY case, where the
-  //              run's own insert was swallowed) the claim is NEVER silently released; it
-  //              counts as `interrupted`, and a restart is allowed.
+  //              run's own insert was swallowed) the claim is NEVER silently released.
+  //              A restart needs a row naming a definitive end; a missing row does not.
+  //
+  // ⚠ A claim with `started_at` set is PERMANENT: nothing deletes it. Both deletes are
+  // gated on `started_at IS NULL`, and there is no other writer. That is one row per keyed
+  // run, forever, holding the client's key and a run id — and it is what makes the replay
+  // of a completed run possible at all. Whether it should instead expire is an open
+  // decision in the PRD (§3.2, point 6), not an oversight. `created_at` exists so that a
+  // bounded sweep can be written without a migration; until that decision is taken,
+  // nothing reads it, and that is deliberate rather than forgotten.
   //
   // No FK to `pipeline_runs`: the claim is written BEFORE that row exists, and it has to
   // outlive a row whose insert was lost. The soft reference is the point.
@@ -1331,7 +1348,7 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      PRIMARY KEY (workflow_id, key)
    );
-   CREATE INDEX IF NOT EXISTS idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
 ];
 
 export class RunHistory {
@@ -3272,6 +3289,11 @@ export class RunHistory {
       'run_tool_calls', 'run_spawns', 'prompt_snapshots', 'memory_embeddings',
       'pre_approval_sets', 'pre_approval_events', 'pipeline_runs', 'pipeline_step_results',
       'advisor_suggestions', 'tasks', 'security_events', 'processes', 'wire_snapshots', 'runs',
+      // A claim left behind by a wipe that took `pipeline_runs` with it has `started_at`
+      // set and no run row, which the route reads as "it may still be running" — a
+      // sentence that is false about a run the reset destroyed. This list is the
+      // hand-maintained kind every new table has to remember to join, and v55 did not.
+      'workflow_run_claims',
     ];
     this.db.pragma('foreign_keys = OFF');
     for (const table of tables) {

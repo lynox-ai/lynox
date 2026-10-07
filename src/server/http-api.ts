@@ -834,8 +834,14 @@ function errorResponse(
   /** Extra top-level fields for a refusal that carries DATA the client must act on —
    *  the run claim's 409 returns the id of the run already holding the key. It rides
    *  here rather than in a hand-written `jsonResponse` for the reason below: the one
-   *  place that masks and caps the message stays the one place that builds the body. */
-  extra?: Record<string, unknown>,
+   *  place that masks and caps the message stays the one place that builds the body.
+   *
+   *  ⚠ `error` and `code` are typed OUT of it, so a caller cannot pass either. The spread
+   *  order below already protects them, but an order is a thing the next edit can move and
+   *  no test can see — nothing passes an `extra.error`, so nothing would fail. The type
+   *  refuses it at compile time instead, which is where a bypass of the one masking site
+   *  belongs. */
+  extra?: Record<string, unknown> & { error?: never; code?: never },
 ): void {
   // ⭐ `code` is for the refusals a CLIENT has to tell apart. Two 409s on the same route
   // can need opposite next moves from the owner — wait, or go and answer a question — and
@@ -845,9 +851,12 @@ function errorResponse(
   // string in it. Omitted by default, so the 264 existing callers are unchanged and a
   // client's default branch keeps its meaning.
   jsonResponse(res, status, {
+    // ⚠ `extra` is spread FIRST on purpose. Spread last — as the first version of this
+    // was — an `extra.error` would silently replace the masked, capped message, i.e. the
+    // parameter would create the bypass its own docblock gives as the reason for existing.
+    ...(extra ?? {}),
     error: capForClient(maskForClient(message)),
     ...(code !== undefined ? { code } : {}),
-    ...(extra ?? {}),
   });
 }
 
@@ -6174,6 +6183,13 @@ export class LynoxHTTPApi {
         );
         return;
       }
+      // Loaded BEFORE the claim is taken, and that order is load-bearing: this was the one
+      // statement between taking the claim and the `try` below, so a rejected import left
+      // an unstarted claim standing until the next boot sweep — and the view KEEPS its key
+      // on the 409 that state produces, so the owner would click forever on a run that
+      // never started. (Cached after the first request, so the move costs nothing.)
+      const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
+
       // ── The run claim (PRD idempotency-bulk-first §3.1) ──────────────────────────
       // Keyed on the RESOLVED workflow id: `getPipeline` accepts a prefix, so keying on
       // the path segment would file one workflow's attempts under two different claims.
@@ -6187,6 +6203,12 @@ export class LynoxHTTPApi {
       // Set only for the request that OWNS a claim; `undefined` means "no claim held",
       // which is both the no-key path and every refusal below.
       let claimedRunId: string | undefined;
+      // Set only when this request RESTARTED a claim, so the answer can disclose that an
+      // earlier attempt under the same key already spent something. Without it a second
+      // paid run reads as a first one: the 200 carries this run's cost and nothing else,
+      // and the person who clicked again after a lost answer has no way to see the first
+      // charge. Decided 2026-10-07 — honesty towards the owner, not a new contract.
+      let restartedFrom: { runId: string; costUsd: number } | undefined;
       if (idempotencyKey !== undefined && plannedForRun) {
         if (history.claimWorkflowRun(claimWorkflowId, idempotencyKey, mintedRunId)) {
           claimedRunId = mintedRunId;
@@ -6243,10 +6265,14 @@ export class LynoxHTTPApi {
                 // plane's cost dedup drops a report whose run id it has already seen, so
                 // reusing it would lose both the row and the billing.
                 if (!history.restartWorkflowRunClaim(claimWorkflowId, idempotencyKey, held.runId, mintedRunId)) {
-                  errorResponse(res, 409, 'A run for this key is already in progress.', 'run_in_progress');
+                  // Another retry won the swap. Same `code` as the branch above, so the same
+                  // body shape: a client that switches on `code` must not find the run id
+                  // present on one 409 and missing on the other.
+                  errorResponse(res, 409, 'A run for this key is already in progress.', 'run_in_progress', { runId: held.runId });
                   return;
                 }
                 claimedRunId = mintedRunId;
+                restartedFrom = { runId: held.runId, costUsd: heldRun?.total_cost_usd ?? 0 };
                 break;
               case 'unknown-outcome':
                 // `started_at` is set and no run row ever landed: the insert is
@@ -6265,6 +6291,12 @@ export class LynoxHTTPApi {
               case 'held':
                 // A status this route does not act on. Refusing is the default arm on
                 // purpose: a value nobody enumerated must not reach the restart.
+                //
+                // ⚠ What refusing buys, stated exactly, because the sentence above reads
+                // like more: it keeps THIS request from starting a second run. It does not
+                // keep the key's owner from paying again — the view discards the key on this
+                // code, so the next click is a new attempt. Of the six verdicts only
+                // `completed` (replay) and `running` (wait) actually prevent a second spend.
                 errorResponse(
                   res, 409,
                   `A run for this key is held in status "${heldRun?.status ?? 'unknown'}".`,
@@ -6277,31 +6309,46 @@ export class LynoxHTTPApi {
       }
 
       // Route through the budget + managed-credit lifecycle (cap, credit gate,
-      // cost report) — runSavedWorkflow alone bypasses all three.
-      const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
-      // A person pressed Run over this authenticated route: the workflow's write grant may
-      // apply, with the cron and values of the schedule it was accepted for, never the request's.
-      //
-      // ⚠ TWO independent things ride in this one options object and a rebase has to keep
-      // BOTH. `origin` is passed ALWAYS — it decides whether the stored write grant applies,
-      // and an absent one silently falls back to "no contract". The claim fields are passed
-      // only when this request owns a claim. An earlier shape handed `undefined` for the
-      // whole object when there was no claim, which would have dropped `origin` for every
-      // keyless call: the cheapest way to lose a security decision is to make it the sibling
-      // of an optional one.
-      //
+      // cost report) — runSavedWorkflow alone bypasses all three. (Imported above the
+      // claim block, for the reason stated there.)
       // `const`, so the narrowing below survives into the hook's closure.
       const ownedRunId = claimedRunId;
       let result: Awaited<ReturnType<typeof runGuardedSavedWorkflow>>;
       try {
-        result = await runGuardedSavedWorkflow(engine, params['id']!, runParams, {
+        // `claimWorkflowId`, not `params['id']`, and that matters: `getPipeline` resolves a
+        // prefix, so passing the raw segment would have the runner resolve it a SECOND time.
+        // If the resolution changed in between — a workflow created or deleted concurrently
+        // — the claim filed under workflow A would guard, and later replay, a run of
+        // workflow B. One resolution, used for both.
+        //
+        // ⚠ TWO independent things ride in this one options object and a rebase has to keep
+        // BOTH. `origin` says a person pressed Run over this authenticated route, so the
+        // workflow's stored write grant may apply — with the cron and values of the schedule
+        // it was accepted for, never the request's. It is passed ALWAYS, and an absent one
+        // falls back to "no contract" silently. The claim fields are passed only when this
+        // request owns a claim. An earlier shape handed `undefined` for the whole object when
+        // there was none, which would have dropped `origin` for every keyless call: the
+        // cheapest way to lose a security decision is to make it the sibling of an optional one.
+        result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
           origin: { kind: 'library' },
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
-            // The stamp that turns "nothing spent" into "spent". `runManifest` fires this
-            // after every precondition that throws before the run and before the first
-            // spend, synchronously on this same history handle — so a process that dies
-            // mid-run still leaves the mark behind.
+            // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
+            // the first spend and before the run row is inserted, synchronously on this same
+            // history handle — so a process that dies mid-run still leaves the mark behind.
+            //
+            // ⚠ Precisely "before the first spend", and NOT "after every precondition that
+            // throws", which this comment claimed until a refuter checked it: a step that uses
+            // inline runtime without parentTools throws from inside step execution, i.e. AFTER
+            // the stamp and before any spend. Such a run is then recorded as having spent
+            // nothing-that-it-spent. It is not stuck — the run row reaches `failed`, so the
+            // next request with that key restarts — but the claim is no longer releasable.
+            //
+            // ⚠ And the stamp is deliberately NOT wrapped in a try/catch, unlike its guarded
+            // neighbours in `runManifest` whose comment says a history failure must never break
+            // the run. Here it must: a swallowed stamp lets the run proceed and spend while the
+            // claim still reads "nothing spent", so this request's own cleanup would release a
+            // paid claim and the retry would pay twice. Do not "fix" the asymmetry.
             hooks: { onRunStart: () => { history.markWorkflowRunStarted(ownedRunId); } },
           }),
         });
@@ -6311,8 +6358,16 @@ export class LynoxHTTPApi {
         // add a race for no gain. In a `finally` because a throw out of the wrapper would
         // otherwise strand the key — not every path through it is caught, and a stranded
         // key is indistinguishable from a paid one from the next request's point of view.
+        //
+        // ⚠ And it is wrapped, like every other history write on this path. A throw from a
+        // `finally` REPLACES the result that was already computed: a run that completed and
+        // spent would come back as a 500, the view would read that as a failure, discard its
+        // key, and the next click would pay for the whole workflow again. The claim row is
+        // correct either way; the damage would travel entirely through the wrong answer.
         if (ownedRunId !== undefined && idempotencyKey !== undefined) {
-          history.releaseUnstartedWorkflowRunClaim(claimWorkflowId, idempotencyKey, ownedRunId);
+          try {
+            history.releaseUnstartedWorkflowRunClaim(claimWorkflowId, idempotencyKey, ownedRunId);
+          } catch { /* the boot sweep releases it instead — never at the cost of the answer */ }
         }
       }
       if (!result.ok) {
@@ -6326,6 +6381,13 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         ran: true,
         runId: result.runId,
+        // Absent on a first run, so a client can branch on presence. `previousCostUsd` is
+        // read off the earlier run's row, which the boot sweep backfills from the step
+        // rows — so an interrupted run's PARTIAL spend is what it reports, not zero.
+        ...(restartedFrom === undefined ? {} : {
+          restartedFrom: restartedFrom.runId,
+          previousCostUsd: restartedFrom.costUsd,
+        }),
         status: result.status,
         // Workflow step errors come from tools, i.e. from whatever a remote
         // service said. Array-valued, so each entry is treated like any other

@@ -4,7 +4,7 @@
 	import { t } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
-	import { attemptKey, clearAttemptKey } from '../utils/run-attempt-key.js';
+	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
@@ -271,22 +271,24 @@
 	}
 
 	/**
-	 * The TERMINAL rule for an attempt's key lives here, because only this function sees
-	 * the response. `attemptKey`/`clearAttemptKey` hold the key itself (utils module, so
-	 * the lifecycle can be tested — a Svelte component cannot be imported in vitest here).
+	 * The attempt's key travels in the body; whether it SURVIVES the answer is decided by
+	 * `attemptIsOver` in the utils module beside it — not by a flag here. A refuter killed
+	 * nothing with the flag version: "never clear" and "keep on every 409" both survived,
+	 * because the only witness was a regex over this file's text. The rule is a function of
+	 * the answer, so it can be driven exhaustively.
 	 *
-	 * Kept on exactly three answers: the two 409s that mean "your attempt is still alive",
-	 * and a thrown fetch. The third is the case the key exists for — a request whose answer
-	 * never arrived is precisely when the client does not know whether money was spent, and
-	 * throwing the key away there would defeat the mechanism.
+	 * A thrown fetch is the one case with no answer to pass, and it is the case the key
+	 * exists for: the request may have reached the engine and started spending.
 	 */
 	async function runWorkflow(id: string, params?: Record<string, string>): Promise<void> {
 		if (runningId) return;
 		runningId = id;
 		error = '';
 		notice = t('workflow_library.run_started');
-		const idempotencyKey = attemptKey(id);
-		let keepKey = false;
+		// Keyed on the INPUTS too: a key kept across a lost answer and then sent with
+		// different values would replay the earlier run and ignore the new ones.
+		const idempotencyKey = attemptKey(id, params);
+		let keepKey = true;
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${id}/run`, {
 				method: 'POST',
@@ -299,28 +301,36 @@
 				// running" would have shown as "run failed" — a red box for the one case
 				// where nothing went wrong.
 				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
-				if (msg?.code === 'run_claim_in_flight' || msg?.code === 'run_in_progress') {
-					// The attempt is alive. Keep its key so a later click asks about THIS
-					// attempt instead of starting a second one.
-					keepKey = true;
+				keepKey = !attemptIsOver({ httpStatus: 409, code: msg?.code });
+				if (keepKey) {
 					notice = t('workflow_library.run_already_running');
 					error = '';
 				} else {
-					// `run_outcome_unknown` / `run_claim_held`: this attempt is over as far as
-					// its key goes, and no further click on the same key could change that.
-					// Discard it, so the next click is honestly a NEW attempt — which is the
-					// person's decision to make, after being told.
+					// The attempt is over for this key, and the LOCAL sentence is preferred over
+					// the server's: the route always sends an `error`, so a `?? t(…)` fallback
+					// never fired and a German user read the English message. The server's text
+					// is kept for a code this build does not know.
 					notice = '';
-					error = msg?.error ?? t('workflow_library.run_outcome_unknown');
+					error = msg?.code === 'run_outcome_unknown'
+						? t('workflow_library.run_outcome_unknown')
+						: msg?.code === 'run_claim_held'
+							? t('workflow_library.run_claim_held')
+							: (msg?.error ?? t('workflow_library.run_failed'));
 				}
 				return;
 			}
 			if (!res.ok) {
+				// ⚠ `attemptIsOver` decides, NOT `res.ok`. A 502/503/504 from a proxy, or a
+				// 429, is an answer the route never produced — the engine may still be running
+				// and spending. Discarding the key there is what lets the next click pay for
+				// the whole workflow a second time.
+				keepKey = !attemptIsOver({ httpStatus: res.status });
 				const msg = (await res.json().catch(() => null)) as { error?: string } | null;
 				error = msg?.error ?? t('workflow_library.run_failed');
 				notice = '';
 				return;
 			}
+			keepKey = false;
 			// A2: the run endpoint now returns cost + per-step failures, so the
 			// library shows WHICH step failed and the spend right where the run was
 			// triggered — not just a terminal status.
@@ -329,6 +339,8 @@
 				costUsd?: number;
 				error?: string;
 				idempotent?: boolean;
+				restartedFrom?: string;
+				previousCostUsd?: number;
 				stepErrors?: Array<{ stepId: string; error?: string; costUsd: number }>;
 			};
 			const failedSteps = (data.stepErrors ?? []).filter((s) => s.error);
@@ -337,27 +349,43 @@
 					? ` ($${data.costUsd.toFixed(4)})`
 					: '';
 			const stepDetail = failedSteps.map((s) => `${s.stepId}: ${s.error}`).join('; ');
+			// The marker goes BEFORE the cost and carries the "earlier" sense, because the
+			// cost shown on a replay is the EARLIER run's and would otherwise read as a fresh
+			// charge. Appended in both outcome branches — a replayed FAILED run had no marker
+			// at all in the first version.
 			const replayed = data.idempotent === true ? ` ${t('workflow_library.run_replayed')}` : '';
+			// A RESTART is the opposite case: this run really ran, and an earlier attempt
+			// under the same key already cost something. Saying so is the whole point — a
+			// second paid run otherwise reads exactly like a first one.
+			const restarted =
+				data.restartedFrom !== undefined
+					? ` ${t('workflow_library.run_restarted')}${
+							typeof data.previousCostUsd === 'number' && data.previousCostUsd > 0
+								? ` ($${data.previousCostUsd.toFixed(4)})`
+								: ''
+						}`
+					: '';
 			if (data.status === 'completed') {
 				// The run finished successfully. Non-fatal step errors (on_failure:
 				// 'continue'/'notify') are appended as a caveat — they did NOT fail
 				// the run, so they belong in the success notice, not a red error box.
-				notice = `${t('workflow_library.run_done')}${replayed}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`;
+				notice = `${t('workflow_library.run_done')}${replayed}${restarted}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`;
 				error = '';
 			} else {
 				const detail = stepDetail || (data.error ?? '');
-				error = detail ? `${t('workflow_library.run_failed')} — ${detail}` : t('workflow_library.run_failed');
+				const failed = `${t('workflow_library.run_failed')}${replayed}${restarted}`;
+				error = detail ? `${failed} — ${detail}` : failed;
 				notice = '';
 			}
 		} catch {
-			// The answer never arrived, so whether the run started is unknown HERE — and
-			// that is precisely the case the key is for. Keep it: the next click asks the
-			// server, which does know, instead of paying for a second run.
-			keepKey = true;
+			// The answer never arrived, so whether the run started is unknown HERE — and that
+			// is precisely the case the key is for. `keepKey` starts true, so this needs no
+			// assignment: every exit that does NOT reach an answer keeps the key, which is the
+			// safe default and the reason the initial value is `true` rather than `false`.
 			error = t('workflow_library.run_failed');
 			notice = '';
 		} finally {
-			if (!keepKey) clearAttemptKey(id);
+			if (!keepKey) clearAttemptKey(id, params);
 			runningId = null;
 		}
 	}
@@ -397,6 +425,9 @@
 		try {
 			const res = await fetch(`${getApiBase()}/workflows/${id}`, { method: 'DELETE' });
 			if (!res.ok) { error = t('common.save_failed'); return; }
+			// No answer can ever be terminal for a workflow that is gone, so its attempt keys
+			// would stay in storage for good. Nothing else removes them.
+			clearAllAttemptKeys(id);
 			await loadWorkflows();
 		} catch {
 			error = t('common.save_failed');

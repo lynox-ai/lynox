@@ -1183,6 +1183,47 @@ describe('runSavedWorkflow', () => {
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
+  describe('the claim seam: runSavedWorkflow hands the run id and the hooks through', () => {
+    // ⛔ THE SEAM NO OTHER TEST CAN SEE, and a refuter found it unwitnessed. The route
+    // suite mocks `runSavedWorkflow`, so it proves the route CALLS it with a runtime
+    // carrying `runId`/`hooks`; `runner.test.ts` proves `buildRunCtx` passes them on. The
+    // two lines in between — this function reading them off `runtime` — were covered by
+    // nothing, and deleting them is a SILENT fail-open: the run mints its own id, so the
+    // claim's id names no run, and nothing fires `onRunStart`, so `started_at` stays NULL
+    // and the route releases a claim whose run already spent money. The whole suite stays
+    // green. That is verbatim the damage this delivery exists to prevent.
+    //
+    // By VALUE, not by presence: `buildRunCtx` emits both keys either way, so a presence
+    // check in RUN_CTX_KEYS above cannot tell a forwarded value from an `undefined`.
+
+    it('passes the caller\'s runId into the run context', async () => {
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValue(makeRunState());
+      const handed = '11111111-2222-4333-8444-555555555555';
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { runId: handed });
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['runId']).toBe(handed);
+    });
+
+    it('passes the caller\'s hooks object through, by identity', async () => {
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValue(makeRunState());
+      const hooks = { onRunStart: (): void => { /* the stamp, in production */ } };
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { hooks });
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['hooks']).toBe(hooks);
+    });
+
+    it('emits BOTH keys as undefined for a caller that holds no claim', async () => {
+      // The other direction, so "always forward a fixed object" cannot satisfy the two
+      // above: the cron executor passes neither, and must keep minting its own id.
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValue(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['runId']).toBeUndefined();
+      expect(ctx['hooks']).toBeUndefined();
+    });
+  });
+
   it('does not consume the template — a saved workflow stays re-runnable', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockResolvedValue(makeRunState());
@@ -1549,6 +1590,11 @@ const RUN_CTX_KEYS = [
   // because the key was never added. The scoped abort shipped inert for workflows: the
   // step executors register conditionally, and no producer set the field.
   'limits', 'secretStore', 'runTaint', 'parentActiveScopes', 'abortScope',
+  // `runId` joined when the run claim made the id something a caller can hand in. It is
+  // listed here the same day the drift class above caught nobody, because this list only
+  // works if every new field joins it — and `hooks` shows that presence alone is not
+  // enough: the value witness below is what protects a field that is always emitted.
+  'runId',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
