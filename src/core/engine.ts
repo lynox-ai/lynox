@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
-import { createLLMClient, initLLMProvider } from './llm-client.js';
+import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
 import { resolveProviderApiKey, enrichTierSetCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
@@ -14,7 +14,7 @@ import type {
   ContextSource,
 } from '../types/index.js';
 import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
-import { setTierSetResolver, resolveDefaultChatTier } from './tier-resolver.js';
+import { setTierSetResolver, resolveDefaultChatTier, resolveAgentModel } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -113,7 +113,7 @@ import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter } from './notification-router.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
-import { Session } from './session.js';
+import { Session, sessionInitialTier, resolveNamedProfile } from './session.js';
 import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
@@ -433,6 +433,34 @@ export class Engine {
 
   getUserConfig(): LynoxUserConfig {
     return this.userConfig;
+  }
+
+  /**
+   * The model and serving provider a WorkerLoop run will use — for the budget
+   * admission, which prices a run before its session exists. Resolved exactly as
+   * that run's own session will resolve it, through the same helpers: the session's
+   * initial tier (`sessionInitialTier`; a watch analysis asks for `fast`), the user's
+   * `worker_profile` applied the way the loop applies it, and `resolveAgentModel`.
+   * An unknown profile throws here, as it would in the run.
+   *
+   * Not for "the model of this agent now": a running agent carries what it sends
+   * (`agent.model`), and a spawned child's model is decided in spawn.ts — read those.
+   */
+  resolveWorkerRunModel(kind: 'standard' | 'watch'): { modelId: string; provider: ReturnType<typeof resolveAgentModel>['provider'] } {
+    const userConfig = this.userConfig;
+    const name = userConfig.worker_profile;
+    // The loop applies the profile differently per kind, and this mirrors it: the
+    // standard run passes it through as given (an empty name throws there), the watch
+    // analysis only when it is set.
+    const applies = kind === 'standard' ? name !== undefined : Boolean(name);
+    const profile = applies && name !== undefined ? resolveNamedProfile(userConfig, name) : undefined;
+    const { modelId, provider } = resolveAgentModel({
+      tier: sessionInitialTier(this, kind === 'watch' ? 'fast' : undefined),
+      baseProvider: getActiveProvider(),
+      profile,
+      configProvider: userConfig.provider,
+    });
+    return { modelId, provider };
   }
 
   /** Reload config from disk, update cached reference, and recreate API client if credentials/provider changed. */

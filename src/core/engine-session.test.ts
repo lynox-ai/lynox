@@ -1859,6 +1859,127 @@ describe('Engine + Session (Orchestrator)', () => {
       });
     });
 
+    describe('the worker admission resolves the pair the worker run then uses', () => {
+      // The admission prices a worker run before its session exists; it must name the
+      // model that run will actually send. Each case builds the run the way worker-loop
+      // does (executeStandard: a default session, then the profile as given; the watch
+      // analysis: a `fast` session, then the profile only when set) and compares the
+      // admission's answer with the agent that run builds and the run record it writes.
+      const MISTRAL_PROFILE = {
+        provider: 'openai' as const,
+        api_base_url: 'https://api.mistral.ai/v1',
+        api_key: 'test-profile-key',
+        model_id: 'ministral-14b-2512',
+      };
+      afterEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
+
+      async function compare(kind: 'standard' | 'watch', setup: (engine: Engine) => void): Promise<{ admitted: { modelId: string; provider: string }; agentModel: string; row: { modelId: string; provider: string } }> {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        setup(engine);
+        try {
+          const admitted = engine.resolveWorkerRunModel(kind);
+          const workerProfile = engine.getUserConfig().worker_profile;
+          const session = engine.createSession(kind === 'watch' ? { model: 'fast' } : {});
+          vi.mocked(Agent).mockClear();
+          if (kind === 'standard') session._recreateAgent({ autonomy: 'autonomous', profile: workerProfile });
+          else if (workerProfile) session._recreateAgent({ profile: workerProfile });
+          else session._recreateAgent({});
+          const agentModel = vi.mocked(Agent).mock.calls.at(-1)![0].model as string;
+          mockSend.mockResolvedValueOnce('done');
+          await session.run('go');
+          const row = vi.mocked(engine.getRunHistory()!.insertRun).mock.calls.at(-1)![0] as { modelId: string; provider: string };
+          return { admitted, agentModel, row };
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+          delete engine.getUserConfig().worker_profile;
+        }
+      }
+
+      it('a worker profile: the profile\'s model and wire, though the tier points elsewhere', async () => {
+        const r = await compare('standard', (engine) => {
+          engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+          engine.getUserConfig().worker_profile = 'worker';
+          setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: 'accounts/fireworks/models/minimax-m3' } } });
+        });
+        expect(r.admitted).toEqual({ modelId: 'ministral-14b-2512', provider: 'openai' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('no profile: the default tier\'s model', async () => {
+        const r = await compare('standard', () => undefined);
+        expect(r.admitted.modelId).toBe(resolveTierModel('balanced', 'anthropic').modelId);
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('no profile, a tier slot on another provider: that slot\'s model and provider', async () => {
+        const r = await compare('standard', () => {
+          setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: 'accounts/fireworks/models/minimax-m3' } } });
+        });
+        expect(r.admitted).toEqual({ modelId: 'accounts/fireworks/models/minimax-m3', provider: 'fireworks' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('the watch analysis with a profile: the profile\'s model, not the fast slot\'s', async () => {
+        const r = await compare('watch', (engine) => {
+          engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+          engine.getUserConfig().worker_profile = 'worker';
+          setTierSetResolver({ routingMode: 'hybrid', tierSet: { fast: { provider: 'fireworks', model_id: 'accounts/fireworks/models/deepseek-v4p1-flash' } } });
+        });
+        expect(r.admitted).toEqual({ modelId: 'ministral-14b-2512', provider: 'openai' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('the watch analysis without a profile: the fast tier, not the default tier', async () => {
+        const r = await compare('watch', () => {
+          setTierSetResolver({ routingMode: 'hybrid', tierSet: { fast: { provider: 'fireworks', model_id: 'accounts/fireworks/models/deepseek-v4p1-flash' } } });
+        });
+        expect(r.admitted).toEqual({ modelId: 'accounts/fireworks/models/deepseek-v4p1-flash', provider: 'fireworks' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('the engine\'s own default tier, not a constant', async () => {
+        const engine = new Engine({ model: 'fast' } as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        const admitted = engine.resolveWorkerRunModel('standard');
+        const session = engine.createSession({});
+        vi.mocked(Agent).mockClear();
+        session._recreateAgent({ autonomy: 'autonomous', profile: undefined });
+        expect(admitted.modelId).toBe(resolveTierModel('fast', 'anthropic').modelId);
+        expect(vi.mocked(Agent).mock.calls.at(-1)![0].model).toBe(admitted.modelId);
+      });
+
+      it('an empty worker profile name: the standard run fails on it, the watch analysis skips it — the admission follows each', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().worker_profile = '';
+        try {
+          expect(() => engine.resolveWorkerRunModel('standard')).toThrow(/Unknown model profile ""/);
+          expect(() => engine.createSession({})._recreateAgent({ profile: '' })).toThrow(/Unknown model profile ""/);
+          expect(engine.resolveWorkerRunModel('watch').modelId).toBe(resolveTierModel('fast', 'anthropic').modelId);
+        } finally {
+          delete engine.getUserConfig().worker_profile;
+        }
+      });
+
+      it('an unknown worker profile fails the admission the way it fails the run', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().worker_profile = 'missing';
+        try {
+          expect(() => engine.resolveWorkerRunModel('standard')).toThrow(/Unknown model profile "missing"/);
+          expect(() => engine.createSession({})._recreateAgent({ profile: 'missing' })).toThrow(/Unknown model profile "missing"/);
+        } finally {
+          delete engine.getUserConfig().worker_profile;
+        }
+      });
+    });
+
     it('a partial override changes only what it supplies (worker-loop.ts:752 shape)', async () => {
       const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       await engine.init();

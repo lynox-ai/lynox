@@ -19,7 +19,7 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, type LynoxUserConfig, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../types/index.js';
+import { type ModelTier, type LLMProvider, type ModelProfile, type ProviderKey, type TierSet, type LynoxUserConfig, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
 import { channels } from './observability.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
@@ -345,6 +345,38 @@ export function effectiveProviderForRun(
   return slotCfg.crossProviderSlot
     ? slotCfg.provider
     : (opts.profileOverrideProvider ?? opts.configProvider);
+}
+
+/**
+ * The model an agent on `tier` sends, and the provider that serves it — the one rule
+ * for both, for a session that exists and for a caller that has none yet (the worker
+ * admission, see `Engine.resolveWorkerRunModel`).
+ *
+ * A model profile pins endpoint AND model as one pair: with a profile the agent's
+ * client points at the profile's endpoint, so the model is the profile's `model_id`
+ * (a tier id at a profile's endpoint asks for a model that host does not serve) and
+ * the provider is the one that client is wired to. Without one, the tier decides —
+ * a hybrid slot's model and provider included.
+ *
+ * `provider` is the SERVING provider (what a run record and a price name), not the
+ * wire config `_createAgent` passes, which can be undefined to mean "the engine's".
+ * Resolves the tier once, so a caller reuses `tierSnap` instead of resolving again.
+ */
+export function resolveAgentModel(input: {
+  tier: ModelTier;
+  baseProvider: LLMProvider;
+  profile: ModelProfile | null | undefined;
+  configProvider: LLMProvider | undefined;
+}): { modelId: string; provider: ProviderKey; tierSnap: TierProviderSnapshot } {
+  const tierSnap = resolveTierModel(input.tier, input.baseProvider);
+  const profile = input.profile ?? undefined;
+  if (!profile) return { modelId: tierSnap.modelId, provider: tierSnap.provider, tierSnap };
+  const provider = effectiveProviderForRun(tierSnap, input.baseProvider, {
+    profileOverrideProvider: profile.provider,
+    hasProfileOverride: true,
+    configProvider: input.configProvider,
+  }) ?? tierSnap.provider;
+  return { modelId: profile.model_id, provider, tierSnap };
 }
 
 /**

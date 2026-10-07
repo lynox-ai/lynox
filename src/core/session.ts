@@ -27,7 +27,7 @@ import type {
   ToolCallRecorder,
 } from '../types/index.js';
 import { effectiveContextWindow } from '../types/index.js';
-import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
+import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
@@ -265,6 +265,40 @@ export function applyPluginToolGate(entries: ToolEntry[], pluginManager: PluginM
  * Holds Agent, messages, mode, callbacks, and run tracking.
  * Created via engine.createSession().
  */
+/**
+ * The tier a new session starts on — the one derivation, shared by the constructor and
+ * by a caller that needs the tier before the session exists (`Engine.resolveWorkerRunModel`).
+ * A requested tier is CLAMPED to the tenant's ceiling through the run-path chokepoint,
+ * reading the FRESH user config; no request means the engine default, which is already
+ * clamped at engine init.
+ */
+export function sessionInitialTier(
+  engine: { readonly config: { model?: ModelTier | undefined }; getUserConfig(): import('../types/index.js').LynoxUserConfig },
+  requested: ModelTier | undefined,
+): ModelTier {
+  if (!requested) return engine.config.model ?? 'balanced';
+  const uc = engine.getUserConfig();
+  return resolveRunModel({
+    requested,
+    defaultTier: engine.config.model ?? 'balanced',
+    accountTier: uc.account_tier,
+    maxTier: uc.max_tier,
+    blockedModelIds: uc.blocked_model_ids,
+    provider: uc.provider ?? 'anthropic',
+  }).tier;
+}
+
+/** A named model profile from the user config; an unknown name throws, listing the known ones. */
+export function resolveNamedProfile(
+  userConfig: import('../types/index.js').LynoxUserConfig,
+  name: string,
+): import('../types/index.js').ModelProfile {
+  const profiles = userConfig.model_profiles;
+  const resolved = profiles?.[name];
+  if (!resolved) throw new Error(`Unknown model profile "${name}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
+  return resolved;
+}
+
 export class Session {
   readonly engine: Engine;
   private agent: Agent | null = null;
@@ -405,19 +439,7 @@ export class Session {
     // reference trap the compaction clamp has) so this can never disagree
     // with the run-path clamp. `engine.config.model` is already clamped at engine
     // init, so only the request-supplied branch needs it.
-    if (opts?.model) {
-      const uc = engine.getUserConfig();
-      this._model = resolveRunModel({
-        requested: opts.model,
-        defaultTier: engine.config.model ?? 'balanced',
-        accountTier: uc.account_tier,
-        maxTier: uc.max_tier,
-        blockedModelIds: uc.blocked_model_ids,
-        provider: uc.provider ?? 'anthropic',
-      }).tier;
-    } else {
-      this._model = engine.config.model ?? 'balanced';
-    }
+    this._model = sessionInitialTier(engine, opts?.model);
     this._effort = opts?.effort ?? engine.config.effort ?? 'medium';
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
@@ -841,8 +863,9 @@ export class Session {
     // record attributes the provider the tier ACTUALLY resolved to (e.g. a
     // hybrid `balanced→Mistral` slot → provider 'mistral'), not the base.
     const runBaseProvider = getActiveProvider();
-    const runSnap = resolveTierModel(this._model, runBaseProvider);
-    const model = this._pairedModelId(runSnap);
+    const runModel = this._resolveModel(this._model, runBaseProvider);
+    const runSnap = runModel.tierSnap;
+    const model = runModel.modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._foreignRunSeq.clear();
@@ -889,7 +912,7 @@ export class Session {
           // Same pair as `model`: a profiled run names the provider its agent is wired
           // to, not the tier slot's — otherwise the record pairs the profile's model
           // with a provider that never served it.
-          provider: this._profileOverride ? (this._identityProvider(runSnap, runBaseProvider) ?? runSnap.provider) : runSnap.provider,
+          provider: runModel.provider,
           promptHash,
           contextId: context?.id ?? '',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
@@ -1948,11 +1971,18 @@ export class Session {
   setModel(tier: ModelTier): string {
     this._model = tier;
     this._rebuildAgentKeepingConversation();
-    return this._pairedModelId(resolveTierModel(tier, getActiveProvider()));
+    return this._resolveModel(tier, getActiveProvider()).modelId;
   }
 
   /**
-   * The model id this session's agent sends — the one source for it.
+   * The model this session's agent sends and the provider that serves it, through
+   * {@link resolveAgentModel} — the rule the worker admission also resolves through
+   * before any session exists (`Engine.resolveWorkerRunModel`). The agent's model, the
+   * run record and `setModel` read it here. Two sites still read the profile's
+   * `model_id` directly and must change with it: `checkTierWindowFit` (left alone so a
+   * profiled check does not add a tier resolution) and the `openaiModelId` wire field
+   * in `_createAgent` (a different fallback: without a profile it is the configured
+   * OpenAI model, not the tier's).
    *
    * A model profile pins endpoint AND model as one pair. With a `_profileOverride`
    * the agent's client points at the profile's endpoint (`api_base_url`, `provider`,
@@ -1962,8 +1992,13 @@ export class Session {
    * tier's model, exactly as before. The run record and its cost read the same value,
    * so they name the model that actually ran.
    */
-  private _pairedModelId(tierSnap: ReturnType<typeof resolveTierModel>): string {
-    return this._profileOverride?.model_id ?? tierSnap.modelId;
+  private _resolveModel(tier: ModelTier, baseProvider: LLMProvider): ReturnType<typeof resolveAgentModel> {
+    return resolveAgentModel({
+      tier,
+      baseProvider,
+      profile: this._profileOverride,
+      configProvider: this.engine.getUserConfig().provider,
+    });
   }
 
   /**
@@ -2200,10 +2235,7 @@ export class Session {
     // one re-resolves it; omitting one leaves it in place. Nothing clears it — a
     // bare rebuild that dropped it WAS the bug above.
     if (profile !== undefined) {
-      const profiles = this.engine.getUserConfig().model_profiles;
-      const resolved = profiles?.[profile];
-      if (!resolved) throw new Error(`Unknown model profile "${profile}". Available: ${Object.keys(profiles ?? {}).join(', ') || 'none'}.`);
-      this._profileOverride = resolved;
+      this._profileOverride = resolveNamedProfile(this.engine.getUserConfig(), profile);
     }
     this._rebuildAgentKeepingConversation();
   }
@@ -2324,8 +2356,9 @@ export class Session {
     // same-provider → crossProviderSlot=false → the base values below are
     // byte-identical to the previous single-provider behavior.
     const baseProvider = getActiveProvider();
-    const tierSnap = resolveTierModel(this._model, baseProvider);
-    const model = this._pairedModelId(tierSnap);
+    const agentModel = this._resolveModel(this._model, baseProvider);
+    const tierSnap = agentModel.tierSnap;
+    const model = agentModel.modelId;
     const slotCfg = this._profileOverride
       ? { crossProviderSlot: false as const }
       : hybridSlotClientConfig(tierSnap, baseProvider);
