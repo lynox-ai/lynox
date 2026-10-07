@@ -501,6 +501,22 @@ describe('gate-record — the shipped template does not answer its own questions
     }
     // The marker the loop greps is the one the grammar refuses — now the same value.
     expect(refused).toBe('<n> <model> round(s), <result>');
+
+    // ⚠ AND THE RULE KEYED ON THE CLASS, not on this one historical string. The sweep above
+    // only ever finds the defect we already fixed; if the constant's head changed, a partial
+    // copy would quietly become an example the grammar refuses and the sweep would not see it.
+    // So: every backticked span on a prescribing surface that mentions a slot AND the word
+    // `round` must be a SUBSTRING of the prescribed format. That allows a head-only copy
+    // (the script's docblock) while catching any copy that says something the format does not.
+    for (const [label, text] of [['the PR template', TEMPLATE], ['scripts/gate-record.mjs', SCRIPT]] as Array<[string, string]>) {
+      const spans = [...text.matchAll(/`([^`\n]*)`/g)]
+        .map((mm) => mm[1] ?? '')
+        .filter((s) => s.includes('<') && s.includes('round'));
+      expect(spans.length, `${label} carries no format span at all — this rule is blind there`).toBeGreaterThan(0);
+      for (const s of spans) {
+        expect(REVIEW_FORMAT, `${label} teaches \`${s}\`, which is not part of the prescribed format`).toContain(s);
+      }
+    }
   });
 
   /**
@@ -562,11 +578,14 @@ describe('gate-record — the shipped template does not answer its own questions
    * skeleton that DROPPED the comma would still match this fill while being unfillable. Measured.
    * The alternative — a bare `round` literal — keeps that one anchor but makes the test's own
    * doctrine false for a legitimate `3 opus rounds`, so the anchor is the cheaper thing to lose.
-   * ⚠ And it buys less than it looks: of three drifts measured as missed — comma dropped, a
-   * trailing extra slot, slots reordered — only the first is recovered by keeping a literal. The
-   * other two are a property of `(.+?)` absorbing whatever sits between slots and are missed by
-   * BOTH options, so they are not a reason to re-litigate the choice. The structure still kills
-   * the drifts that change a separator (`;` for the comma, or an inserted ` on <date>`).
+   * ⚠ But the cost is recovered ELSEWHERE, measured, so this is not a live gap: a comma-dropped
+   * SKELETON fails the one-string case (it stops equalling the constant), and a comma-dropped
+   * PROSE copy fails the substring rule in the sweep. What this shape alone misses — a trailing
+   * extra slot and reordered slots — is a property of `(.+?)` absorbing whatever sits between
+   * slots, missed by a word literal too, and caught by the same two cases for the same reason.
+   * The structure here still kills the drifts that change a separator (`;` for the comma, or an
+   * inserted ` on <date>`). So the three tests overlap on purpose: none of them is the one that
+   * has to be right.
    * For four of the seven fields the shape is `^(.+?)$` and checks nothing; it does real work on
    * `review`, `security` and `mutations`. The loop stays uniform so a NEW field is covered
    * without anyone remembering to add it.
