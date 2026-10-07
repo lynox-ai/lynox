@@ -228,30 +228,38 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
  * with a one-line interpreter what `http_request` would have asked about.
  *
  * A list of commands, so it is never complete: a script written first and run afterwards, or a
- * binary with its own network access, reads as harmless text.
+ * binary with its own network access, reads as harmless text. Within its classes it errs toward
+ * asking: a later command's `-d`, or a copy OUT of the lynox dir, is asked about too.
  */
+/** A path into the lynox data dir outside `workspace/` (case-sensitive, and `workspace/..` is outside). */
+const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:$|[\s'"]|\/(?!\.\.)))|(?=$|[\s'"]))`;
+/** The interpreters that run code they are handed. */
+const INTERPRETER = String.raw`(?:sh|bash|dash|zsh|ksh|node|python[23]?(?:\.\d+)?|perl|ruby|php|bun|deno)`;
 const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // Code passed inline to an interpreter, or fed to one on stdin.
-  { pattern: /\bnode\s+(?:-e|-p|--eval|--print)\b/i, label: 'node code execution' },
-  { pattern: /\bpython(?:[23](?:\.\d+)?)?\s+(?:-[a-zA-Z]*c\b|-(?=\s|$))/i, label: 'python code execution' },
+  { pattern: /\bnode\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b|-(?=\s|$))/, label: 'node code execution' },
+  { pattern: /\bpython(?:[23](?:\.\d+)?)?\s+(?:-[a-zA-Z]*c\b|-(?=\s|$))/, label: 'python code execution' },
   { pattern: /\bperl\s+-[a-zA-Z]*e\b/i, label: 'perl code execution' },
-  { pattern: /\bruby\s+-[a-zA-Z]*e\b/i, label: 'ruby code execution' },
-  { pattern: /\bphp\s+-r\b/i, label: 'php code execution' },
-  { pattern: /\bdeno\s+eval\b/i, label: 'deno code execution' },
-  { pattern: /\bbun\s+(?:-e|--eval)\b/i, label: 'bun code execution' },
-  { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
-  { pattern: /\|\s*(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php)\b\s*(?:-\s*)?(?:$|[;&|)])/im, label: 'input piped to an interpreter' },
-  // Data sent out over HTTP. (A DELETE is already blocked in autonomous mode and asked about
-  // in interactive mode by the rules above.) Short options are case-sensitive: `-d`, `-F` and
-  // `-T` send, `-D` and `-f` do not, and a short option may be bundled or carry its value glued.
-  // Options are read up to the end of the curl/wget command (an operator outside quotes and not
-  // escaped), not the line: a later command's `cut -d` or `gh --json` is not curl sending data.
-  { pattern: /\bcurl\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s-X\s*(POST|PUT|PATCH)\b/i, label: 'HTTP mutation via curl' },
-  { pattern: /\bcurl\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s(?:--data\b|--form\b|--upload-file\b|--json\b|-[a-zA-Z]*[dFT])/, label: 'HTTP data submission via curl' },
-  { pattern: /\bwget\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s(--post-data|--post-file|--method|--body-data|--body-file)/i, label: 'HTTP mutation via wget' },
-  // Writes into the lynox data dir outside the workspace: profiles there are read back as configuration.
-  { pattern: /(?:>|\btee\s)\s*\S*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
-  { pattern: /\b(?:cp|mv|install|ln|rsync|dd)\b[^\n;&|]*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
+  { pattern: /\bruby\s+-[a-zA-Z]*e\b/, label: 'ruby code execution' },
+  { pattern: /\bphp\s+-r\b/, label: 'php code execution' },
+  { pattern: /\bdeno\s+eval\b/, label: 'deno code execution' },
+  { pattern: /\bbun\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b)/, label: 'bun code execution' },
+  { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/, label: 'shell -c (inline script)' },
+  { pattern: new RegExp(String.raw`\|\s*(?:[\w.~-]*\/)*(?:env\s+(?:\w+=\S*\s+)*)?${INTERPRETER}\b`), label: 'input piped to an interpreter' },
+  { pattern: new RegExp(String.raw`\b${INTERPRETER}\b[^|;&\n]{0,256}<`), label: 'input redirected to an interpreter' },
+  // Data sent out over HTTP. (A DELETE is already blocked in autonomous mode and asked about in
+  // interactive mode by the rules above.) Short options are case-sensitive: `-d`, `-F` and `-T`
+  // send, `-D` and `-f` do not; a short option may be bundled or carry its value glued.
+  { pattern: /\bcurl\b.*(?:\s-[a-zA-Z]*X\s*['"]?|\s--request(?:\s+|=)['"]?)(?:POST|PUT|PATCH)\b/i, label: 'HTTP mutation via curl' },
+  { pattern: /\bcurl\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|-[a-zA-Z]*[dFT])/, label: 'HTTP data submission via curl' },
+  { pattern: /\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/i, label: 'HTTP mutation via wget' },
+  // Writes into the lynox data dir outside the workspace: profiles there are read back as
+  // configuration. A line that names a writing verb and such a path is asked about, in either
+  // order: read from each line's start, so the rule costs one pass per line, not one per verb.
+  // The path before `.lynox` in a redirection holds no `>`, for the same reason.
+  { pattern: new RegExp(String.raw`>\|?\s*[^\s<>|;&]*${LYNOX_OUTSIDE_WORKSPACE}`), label: 'write into the lynox data dir' },
+  { pattern: new RegExp(String.raw`^(?=[^\n]*?\b(?:cp|mv|install|ln|rsync|dd|tee|touch|mkdir|tar|unzip|sed|curl|wget|git|rm|rmdir|unlink|patch)\b)(?=[^\n]*?${LYNOX_OUTSIDE_WORKSPACE})`, 'm'), label: 'write into the lynox data dir' },
+  { pattern: new RegExp(String.raw`\b(?:cd|pushd)\s+['"]?[^\s;&|]*${LYNOX_OUTSIDE_WORKSPACE}`), label: 'write into the lynox data dir' },
 ];
 
 const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
