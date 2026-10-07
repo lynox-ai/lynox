@@ -144,6 +144,20 @@ pre-commit:
       # diff could not be read. The script prints which, above this line.
       run: bash scripts/secret-pattern-scan.sh
       fail_text: "secret-pattern-scan refused the commit — see its output above"
+    disclosure-vocabulary:
+      # A WARNING, never a refusal: lines this commit adds that point at internal tracking
+      # or mark work as put off ("filed rather than built here"). This repo is public, and
+      # such a sentence tells every reader that a known gap exists. The script cannot tell
+      # an honest note on a feature's limit from a disclosed gap in a check, so the author
+      # decides; a refusal would teach rewording, and a reworded gap is harder to find.
+      # Exit 2 only when the staged diff cannot be read. No CI twin, on purpose: a warning
+      # in a CI log reaches nobody. added-lines-guard refuses only two narrow forms (a
+      # `DEF-` register id, and a short list of phrases about security findings) at push
+      # time and in CI.
+      run: node scripts/disclosure-vocabulary-scan.mjs
+      skip:
+        - merge
+        - rebase
     typecheck:
       # A fresh worktree has no node_modules, and the typecheck then dies deep inside
       # tsc/pnpm output where the real cause is invisible. What the operator sees is not

@@ -6014,15 +6014,9 @@ describe('LynoxHTTPApi', () => {
     // "already running", which is a true-ish sentence about a run that is not running
     // and tells the owner nothing about the question waiting for them. Delete the branch
     // and an existing trigger gets a 404, which is worse than what it replaced.
-    // ⚠ AND THIS BLOCK REPAYS ITS OWN RATE-LIMIT SPEND. The per-IP window is 600
-    // requests / 60 s and every request in this file comes from 127.0.0.1, so the whole
-    // file shares ONE bucket — and it already sits within ten requests of the ceiling.
-    // Measured: these two cases alone made a `GET /api/oauth/callback` test several
-    // thousand lines below fail with `expected 429 to be 200`. A SNAPSHOT and restore,
-    // not a `clear()`: clearing the whole window would hand a later describe 300-odd
-    // requests of headroom it is not supposed to have, which would hide a regression in
-    // the limit itself. The general problem is filed; the fix is the harness's (a fresh
-    // server per describe), not this route's.
+    // ⚠ This block writes back the request counts it found when it started: every request
+    // in this file comes from 127.0.0.1 and shares one window, and these two cases should
+    // not use up what later tests in the file count on.
     const rateCounts = (): Map<string, { count: number }> =>
       (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
     let windowBefore = new Map<string, number>();

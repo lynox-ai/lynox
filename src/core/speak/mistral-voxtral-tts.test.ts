@@ -139,7 +139,7 @@ const warned = (fragment: string): boolean =>
  *     `Object.getPrototypeOf(process.stderr).write.call(…)`: open on both.
  *   · a branch no test walks, which is the ordinary path-dependence.
  * The static half belongs in a lint rule (`no-restricted-properties` on
- * `process.std*.write` for this file); filed as a register row rather than built here.
+ * `process.std*.write` for this file).
  */
 let otherChannels: Record<string, ReturnType<typeof vi.spyOn>>;
 
