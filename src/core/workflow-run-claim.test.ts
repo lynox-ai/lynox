@@ -123,7 +123,7 @@ describe('workflow run claim — the state space on a real history.db', () => {
     expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt).toBe(seeded);
   });
 
-  describe('the restart, and the hang it would cause without COALESCE', () => {
+  describe('the restart, and what is deliberately NOT restartable', () => {
     it('restarts a claim whose run FAILED, onto a new run id', () => {
       const h = make();
       h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
@@ -141,17 +141,27 @@ describe('workflow run claim — the state space on a real history.db', () => {
       expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b')).toBe(true);
     });
 
-    it('restarts a claim with NO run row at all — the SQLITE_BUSY case', () => {
-      // This is the case the PRD's earlier draft would have hung on: the run spent money,
-      // its own fire-and-forget insert was swallowed, so there is no status to read. Without
-      // COALESCE the subquery is NULL, the comparison never matches, and a client holding
-      // the persisted key waits at 409 forever.
+    it('REFUSES to restart a claim with no run row at all — the SQLITE_BUSY case', () => {
+      // ⚠ This witness asserted the OPPOSITE in its first version, and the method was
+      // written to satisfy it: the subquery was wrapped in `COALESCE(..., 'interrupted')`
+      // so a row-less claim would restart, on the argument that otherwise a client holding
+      // the key hangs at 409 forever.
+      //
+      // The argument was right about the hang and wrong about the remedy. The run spent
+      // money and its fire-and-forget insert was swallowed — so a run that DIED and one
+      // that is STILL SPENDING arrive here in the same shape, and restarting is a second
+      // paid run in the second case. The hang is prevented where the key lives instead:
+      // the route answers `run_outcome_unknown`, the view discards the key, and the next
+      // click is a new attempt a person chose. Decided with the orchestrator, 2026-10-07.
+      //
+      // The mutant this kills is "put COALESCE back".
       const h = make();
       h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
       h.markWorkflowRunStarted('run-a');
       expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt).not.toBeNull();
-      expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b')).toBe(true);
-      expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.runId).toBe('run-b');
+      expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b')).toBe(false);
+      // and the claim is untouched: still the old run, still marked as having spent
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')).toEqual({ runId: 'run-a', startedAt: expect.any(String) });
     });
 
     it('refuses to restart a RUNNING run', () => {
@@ -172,12 +182,25 @@ describe('workflow run claim — the state space on a real history.db', () => {
     });
 
     it('refuses to restart a claim that never spent anything — that one is released', () => {
-      // Without the `started_at IS NOT NULL` precondition, a claim with no row would look
-      // like the BUSY case and be restarted, when what it needs is release.
+      // ⚠ The first version of this witness seeded no run row, and a mutant that DELETED
+      // the `started_at IS NOT NULL` precondition survived it: with no row the status
+      // subquery is NULL and refuses on its own, so the guard under test contributed
+      // nothing to the outcome. The fixture has to make the two conditions separable —
+      // hence a `failed` row beside an UNSTARTED claim, which is the only combination in
+      // which `started_at` is the deciding term (memory/fb_probe_vs_survivor.md).
+      //
+      // The production path should not produce that combination: the run row is inserted
+      // after `onRunStart` fires, so a row implies a stamp. The guard exists for the case
+      // where that stops being true, and a guard whose claim no test can falsify is a
+      // guard nobody can rely on.
       const h = make();
       h.claimWorkflowRun('wf-1', 'k-1', 'run-a');
+      seedRun(h, 'run-a', 'failed');
+      expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt, 'fixture guard').toBeNull();
       expect(h.restartWorkflowRunClaim('wf-1', 'k-1', 'run-a', 'run-b')).toBe(false);
       expect(h.readWorkflowRunClaim('wf-1', 'k-1')?.runId).toBe('run-a');
+      // and it is the RELEASE that applies to it, which is the whole point of refusing
+      expect(h.releaseUnstartedWorkflowRunClaim('wf-1', 'k-1', 'run-a')).toBe(true);
     });
 
     it('only ONE of two concurrent retries wins the restart', () => {

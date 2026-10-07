@@ -2222,20 +2222,29 @@ export class RunHistory {
 
   /** Hand the claim to a NEW run id after the old run ended without a result.
    *
-   *  The `COALESCE` is load-bearing: a claim whose run row never landed (the
-   *  `SQLITE_BUSY` case) has no status, and a bare subquery would yield NULL, the
-   *  comparison would never match, and a client holding the key would wait at 409
-   *  forever. A missing row with `started_at` set therefore reads as `interrupted`.
+   *  ⚠ The status subquery is DELIBERATELY not NULL-safe, and an earlier version of this
+   *  method was. It wrapped the subquery in `COALESCE(..., 'interrupted')` so that a claim
+   *  whose run row never landed (the `SQLITE_BUSY` case) would restart, and the docblock
+   *  argued that without it a client holding the key would wait at 409 forever. Both the
+   *  mechanism and the argument were wrong, in the dangerous direction: a missing row
+   *  cannot tell a run that DIED from one that is still spending, so an automatic restart
+   *  there is a second paid run — the exact damage the claim exists to prevent. A missing
+   *  row therefore yields NULL, `NULL IN (...)` is not true, and nothing is restarted.
    *
-   *  `started_at IS NOT NULL` is the precondition: a claim that never spent anything
-   *  is released, not restarted. Returns true only for the caller that won the swap,
-   *  so two retries cannot both restart. */
+   *  What actually prevents the forever-409 is the KEY'S LIFETIME in the client: the route
+   *  answers `run_outcome_unknown`, the library view discards the key, and the next click
+   *  is a new attempt that a person chose after being told (PRD §3.3). The way out of that
+   *  state is a new key, not a silent restart of an unknown run.
+   *
+   *  So what restarts is a run with a DEFINITIVE end: a `pipeline_runs` row saying `failed`
+   *  or `interrupted`. `started_at IS NOT NULL` is the other precondition — a claim that
+   *  never spent anything is released, not restarted. Returns true only for the caller that
+   *  won the swap, so two retries cannot both restart. */
   restartWorkflowRunClaim(workflowId: string, key: string, oldRunId: string, newRunId: string): boolean {
     return this.db.prepare(
       `UPDATE workflow_run_claims SET run_id = ?, started_at = NULL
          WHERE workflow_id = ? AND key = ? AND run_id = ? AND started_at IS NOT NULL
-           AND COALESCE((SELECT status FROM pipeline_runs WHERE id = ?), 'interrupted')
-               IN ('failed','interrupted')`,
+           AND (SELECT status FROM pipeline_runs WHERE id = ?) IN ('failed','interrupted')`,
     ).run(newRunId, workflowId, key, oldRunId, oldRunId).changes === 1;
   }
 
