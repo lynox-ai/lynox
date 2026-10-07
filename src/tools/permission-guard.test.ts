@@ -2298,6 +2298,10 @@ describe('isDangerous', () => {
       ['terraform -chdir=infra apply -auto-approve', 'infrastructure change'],
       ['docker -H tcp://build:2375 push registry/app:1', 'docker push'],
       ['python3 -u -m http.server 8000', 'local HTTP server'],
+      ['git -C "/srv/my repo" push', 'git push'],
+      ["git -C '/srv/my repo' -c a=b commit -m msg", 'git commit'],
+      ['git -C /repo \\\n  push origin main', 'git push'],
+      ['git -C /srv/a\\"b push', 'git push'],
     ])('blocks %s in autonomous mode', (command, label) => {
       const result = auto(command);
       expect(result).toContain(label);

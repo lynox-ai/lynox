@@ -683,6 +683,12 @@ const isOptionToken = (token: string): boolean =>
   token.length > 1 && token.startsWith('-') && !/[|;&<>()]/.test(token);
 /** Tokens of the remainder kept per variant — enough for any rule's subcommand and arguments. */
 const OPTION_VARIANT_TAIL = 64;
+/**
+ * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
+ * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
+ * the line; that word falls back to plain whitespace splitting.
+ */
+const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+|\S+/g;
 
 /**
  * The same segment with the options between a command and its subcommand dropped.
@@ -698,15 +704,16 @@ const OPTION_VARIANT_TAIL = 64;
  *
  * Only ever ADDS scan surface: the original segment is still scanned, so nothing that was
  * caught before can stop being caught. A variant never leaves the command without a word after
- * it (`set -e` does not become `set`, `set -e x | head` not `set | head`), and each keeps a bounded tail, so the work stays linear in the
- * command's length. A variant stays on its line and keeps the line's own text: options never
- * continue a command across a line break, and joining lines would let a rule read a `>` or a
- * `|` from the next line as part of this command.
+ * it (`set -e` does not become `set`, `set -e x | head` not `set | head`), and each keeps a
+ * bounded tail, so the work stays linear in the command's length. A variant stays on its line
+ * and keeps the line's own text: options never continue a command across a line break (only
+ * across an escaped one), and joining lines would let a rule read a `>` or a `|` from the next
+ * line as part of this command.
  */
 export function withoutLeadingOptions(segment: string): string[] {
   const variants: string[] = [];
-  for (const line of segment.split('\n')) {
-    const tokens = [...line.matchAll(/\S+/g)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
+  for (const line of segment.replace(/\\\n/g, ' ').split('\n')) {
+    const tokens = [...line.matchAll(SHELL_WORD)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
     for (let i = 0; i < tokens.length - 1; i++) {
       const word = tokens[i]!.text;
       // A command word: not an option itself, and not the value of the option before it.
@@ -736,7 +743,9 @@ function _bashScanSegments(chunk: string): string[] {
   // work for the common unquoted command).
   const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
   const all = [...segments, ...strippedSegments];
-  return [normalized, stripped, ...all, ...all.flatMap(withoutLeadingOptions)];
+  // The whole chunk too: a segment ends at every line break, an escaped one included.
+  const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
+  return [normalized, stripped, ...all, ...[...wholes, ...all].flatMap(withoutLeadingOptions)];
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
