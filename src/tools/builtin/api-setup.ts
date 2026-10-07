@@ -1441,7 +1441,19 @@ Next steps before calling create:
 
       const merged = applyRefine(existing, input.refine);
       const err = validateProfile(merged);
-      if (err) return `Validation error after refine: ${err}`;
+      if (err) {
+        // Whose value failed decides what the message may say. A profile loaded from a
+        // file is not validated on the way in, so the STORED half can hold any text, and
+        // `validateProfile` quotes the value it refuses. If the stored profile fails on
+        // its own, the error may be about a value the model never wrote: refuse without
+        // repeating any of it. Otherwise the failure came from the patch, the model's own
+        // input, and the specific message is what it needs to correct it. Checked after
+        // the merge, not before, so a patch that repairs a stored field still saves.
+        if (validateProfile(existing) !== null) {
+          return `Error: the stored profile "${input.id}" does not pass validation on its own, so it cannot be refined. Its values are not repeated here. Replace it with api_setup action="update" and a complete profile.`;
+        }
+        return `Validation error after refine: ${err}`;
+      }
 
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
       const mergedSave = apiStore.save(merged, apisDir);
