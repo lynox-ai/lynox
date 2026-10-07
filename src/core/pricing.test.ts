@@ -122,6 +122,54 @@ describe('Pricing', () => {
       expect(estimateFirstTurnUSD('claude-haiku-4-5-20251001')).toBeCloseTo(0.052288, 6);
     });
 
+    it('prices the cap the call will carry, in both directions', () => {
+      // ⛔ The argument exists because a caller's cap reaches the provider unclamped. Both
+      // directions are asserted, because narrowing a cap LOWERS the floor and that half is
+      // as reachable as the other — the mistake this change corrects was to tell only one.
+      const dflt = estimateFirstTurnUSD('claude-sonnet-4-6');
+      expect(dflt, "the model's own 16k ceiling").toBeCloseTo(0.192, 6);
+      expect(estimateFirstTurnUSD('claude-sonnet-4-6', 64_000), 'a wider cap costs more')
+        .toBeCloseTo(0.408, 6);
+      expect(estimateFirstTurnUSD('claude-sonnet-4-6', 500), 'a narrower cap costs less')
+        .toBeCloseTo(0.12225, 6);
+      // ⚠ A cap that is absent, zero, negative or non-finite falls back to the model's own
+      // ceiling. Neither 0 (a floor of 0 admits everything) nor NaN (it absorbs the
+      // comparison that uses it) may come out of here, and `max_tokens` is otherwise
+      // unvalidated: `JSON.parse('{"max_tokens":1e999}')` is Infinity.
+      for (const bad of [0, -1, -0, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        const usd = estimateFirstTurnUSD('claude-sonnet-4-6', bad);
+        expect(Number.isFinite(usd), `cap ${String(bad)} stays finite`).toBe(true);
+        expect(usd, `cap ${String(bad)} falls back to the model ceiling`).toBeCloseTo(dflt, 10);
+      }
+      // ⛔ A huge but finite cap is honoured rather than clamped, and the assertion is the
+      // EXACT figure rather than an inequality. `toBeGreaterThan(dflt)` was the first
+      // version and a round broke it: any monotone mutation satisfies it, so a silent clamp
+      // to five times the model ceiling priced a 1 000 000 cap at $0.48 instead of $4.62 —
+      // 9.6x too low — and passed. A weak assertion on the one leg that has no upper bound
+      // is where a fail-open hides.
+      //
+      // ⚠ $4.62 is this floor's own method (the 0.3 fill), NOT what the child could spend:
+      // emitting the whole cap costs $15.12. An earlier version of this comment conflated
+      // the two, which is the same fill-vs-whole-cap mix the figures above are careful to
+      // keep apart.
+      expect(estimateFirstTurnUSD('claude-sonnet-4-6', 1_000_000), 'the 0.3-fill figure')
+        .toBeCloseTo(4.62, 6);
+      // ⛔ A NON-INTEGER cap is honoured as given, and this pins it because the alternative
+      // survived as a mutant: `Number.isFinite` → `Number.isInteger` sends 500.5 to the
+      // model's ceiling instead, i.e. $0.192 rather than $0.1223. Fail-closed, so it was
+      // harmless — but a design choice nothing held is a design choice nobody can rely on.
+      expect(estimateFirstTurnUSD('claude-sonnet-4-6', 500.5), 'priced as given')
+        .toBeCloseTo((20_000 / 1e6) * 6 + (500.5 * 0.3 / 1e6) * 15, 10);
+      // ⛔ AND BELOW ONE, because that is where the guard's lower edge sits and a mutant
+      // found it unwitnessed: `> 0` → `>= 1` survived every test, since the non-integer
+      // assertion above uses 500.5 — well inside the range. A cap in (0, 1) is the only
+      // input where "honoured as given" and "falls back" differ under that mutation.
+      // Fail-closed, so harmless in production; unheld, so not a design choice anyone
+      // could rely on.
+      expect(estimateFirstTurnUSD('claude-sonnet-4-6', 0.5), 'a sub-1 cap is still honoured')
+        .toBeCloseTo((20_000 / 1e6) * 6 + (0.5 * 0.3 / 1e6) * 15, 10);
+    });
+
     it('stays finite for an id that resolves to a prototype member', () => {
       // ⛔ WHAT THIS WITNESSES CHANGED UNDER IT, and the honest version is worth more than
       // the tidy one. A bracket read of a model-keyed object literal answers for `toString`
