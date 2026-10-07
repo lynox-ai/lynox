@@ -56,7 +56,10 @@ function withoutTrailingCloseTag(body: string): string | null {
   // `{"a":1}<NBSP></body>` parses only once that character is gone too. Without this the repair
   // silently declines exactly those and the broken body goes out. Measured on a corpus of
   // 1 082 408 inputs: 366 bodies where the regex this replaced DID repair and an untrimmed
-  // version does not, and 0 the other way. The prefix property survives: this trims a string
+  // version does not, and 0 the other way (that corpus and those counts come from a review
+  // round, not from this file; an independent round later ran 1 892 888 inputs against the
+  // regex this replaced and found 0 divergences in either direction). The prefix property
+  // survives: this trims a string
   // that is already a prefix of `trimmed`, which is a prefix of `body`.
   return trimmed.slice(0, open).trimEnd();
 }

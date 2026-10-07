@@ -26,8 +26,16 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
     // ⚠ A timing assertion, which is normally a bad test. It is the right one here because the
     // defect it guards is a wall-clock defect and nothing else observes it. The original
     // `/\s*<\/[A-Za-z][\w:-]*>\s*$/.replace(body)` retried from every position in a whitespace
-    // run: measured 7652 ms on this input, synchronous, inside the tool handler. The margin is
-    // four orders of magnitude, so the bound is not delicate.
+    // run: ~6.6–7.7 s on these inputs, synchronous, inside the tool handler.
+    //
+    // ⚠ TWO margins, and they are not the same number — an earlier version of this comment gave
+    // one figure and it was the wrong one for the question being asked.
+    //   · FLAKE margin, linear run to the bound: 0.45 ms against 1000 ms, ≈2200×. This is what
+    //     says the bound is not delicate.
+    //   · KILL margin, bound to the quadratic run: 1000 ms against ~6600 ms, ≈6.6×. This is the
+    //     one that could in principle shrink, on a machine ~6× slower than this one, and it is
+    //     the smaller of the two, so it is the one to quote when asking whether the test still
+    //     witnesses anything.
     // ⚠ The input set is the whole point here, and two earlier versions of it could not fail.
     //
     // The backtrack only happens when the pattern FAILS: on a match the engine stops at the
@@ -45,6 +53,12 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
       `{${' '.repeat(80_000)}>`,
       `{${' '.repeat(80_000)}</>`,
       `{${' '.repeat(80_000)}</1x>`,
+      // ⚠ The sixth, and it covers a DIFFERENT quadratic site: the `trimEnd()` on the part before
+      // the tag. Written as `.replace(/\s+$/, '')` that is the same backtracking shape, and the
+      // five inputs above all miss it — their prefix is pure whitespace, which that pattern
+      // matches immediately. This one ends the prefix with a non-space, so the pattern fails
+      // there too: 4148 ms measured against the regex form, 0 ms against `trimEnd`.
+      `{${' '.repeat(80_000)}x</x>`,
     ]) {
       const started = Date.now();
       repairStrayCloseTag(body, JSON_CT);
