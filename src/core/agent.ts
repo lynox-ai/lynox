@@ -862,6 +862,26 @@ export class Agent implements IAgent {
     return this._lastStop;
   }
 
+  /**
+   * Charge a dollar amount that was spent OUTSIDE this agent's own turns against its
+   * cost ceiling — a spawned child's actual cost, priced on the child's own model.
+   *
+   * The same booking the in-run helpers already make below (`web_research` rerank, the
+   * follow-up chips): those reach `costGuard.recordExternalCost` from inside. A spawned
+   * child could not, because `spawn.ts` holds an `IAgent` and the guard is private — so
+   * a child's spend reached the tenant's daily total through its own run row while the
+   * delegating run's ceiling never saw a cent of it.
+   *
+   * ⚠ WHAT THIS DOES AND DOES NOT DO. It makes the spend visible to the run's NEXT
+   * turn, which is where `isExceeded()` is consulted. It does not stop the child that
+   * caused it: children run in parallel and the parent blocks on all of them, so a
+   * bound on a fan-out's total has to be established before dispatch. That is a
+   * separate piece of work and is NOT in this change.
+   */
+  chargeExternalCost(usd: number): void {
+    this.costGuard?.recordExternalCost(usd);
+  }
+
   /** A provider billing/quota stop from the last send's LLM call, or `null`. */
   getLastProviderFailure(): RunFailure | null {
     return this._lastProviderFailure;

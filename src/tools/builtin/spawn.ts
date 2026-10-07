@@ -1404,7 +1404,25 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const childStart = Date.now();
         const sub = subAgents[i]!;
 
-        return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd) => { costBySub[sub.id] = usd; })
+        return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd) => {
+          costBySub[sub.id] = usd;
+          // ⛔ The child's ACTUAL cost, onto the delegating run's own ceiling. Without
+          // it the run keeps counting only its own turns while the tenant's daily total
+          // carries the children too, so its next turn believes it has more room than
+          // it has.
+          //
+          // Outside the `meteredHost` branch that reports the same figure to the
+          // control plane: that one is managed-only, and this ceiling exists on
+          // self-host and BYOK as well.
+          //
+          // ⚠ FENCED, and that is not caution for its own sake: this callback runs in a
+          // `finally`, where a throw REPLACES the error the catch is rethrowing — the
+          // child's real failure would be lost and the message would point at
+          // bookkeeping. It is the same hazard the `abortScope?.` on the line above was
+          // softened for. The real `Agent` cannot throw here; an `IAgent` from outside
+          // this repo can.
+          try { agent.chargeExternalCost?.(usd); } catch { /* never mask the child's own outcome */ }
+        })
           .then(
             (value) => {
               running.delete(sub.id);
