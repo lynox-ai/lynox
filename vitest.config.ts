@@ -28,8 +28,9 @@ export default defineConfig({
     maxWorkers: 2,
     projects: [
       {
-        // No Svelte module loads here: it would compile for the server. A test that reaches one,
-        // directly or through a helper, fails with a message naming the fix (`*.svelte.test.ts`).
+        // No Svelte compiler here, so no Svelte module may load: it would not run as the browser
+        // runs it. A test that reaches one, directly or through a helper, fails with a message
+        // naming where such a test belongs (`packages/<package>/src/**/*.svelte.test.ts`).
         plugins: [rejectSvelteModules()],
         test: {
           ...SHARED,

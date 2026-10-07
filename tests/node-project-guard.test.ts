@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { asksForSourceOrUrl, isSvelteModuleId } from '../scripts/vitest-node-project-guard.js';
 
-// This file runs in the node project. A test there that loads a Svelte module would see Svelte
-// compiled for the server, not as the browser runs it, so the node project refuses to load one.
+// This file runs in the node project. That project runs no Svelte compiler, so a test there that
+// loaded a Svelte module would not see it run as the browser runs it: the project refuses to load one.
 
 describe('a test in the node project', () => {
 	it('cannot load a Svelte rune module: the load fails and names the fix', async () => {
@@ -18,7 +18,7 @@ describe('a test in the node project', () => {
 		await expect(import('./fixtures/imports-a-svelte-store.js')).rejects.toThrow(/svelte\.test\.ts/);
 	});
 
-	it('can still read a Svelte file\'s text: that compiles nothing', async () => {
+	it('can still read a Svelte file\'s text: that runs nothing of it', async () => {
 		const source = await import('../packages/web-ui/src/lib/stores/toast.svelte.ts?raw');
 		expect(typeof source.default).toBe('string');
 		expect(source.default).toContain('addToast');
@@ -47,7 +47,7 @@ describe('which imports ask for a file\'s text or URL rather than its module', (
 	});
 
 	it('not a module import that only carries a version or a look-alike name', () => {
-		for (const id of ['/a/chat.svelte.ts', '/a/chat.svelte.ts?v=123', '/a/chat.svelte.ts?rawish', '/a/raw.svelte.ts', '/a/chat.svelte.ts?curl']) {
+		for (const id of ['/a/chat.svelte.ts', '/a/chat.svelte.ts?v=123', '/a/chat.svelte.ts?rawish', '/a/raw.svelte.ts', '/a/chat.svelte.ts?curl', '/a/chat.svelte.ts?raw=1', '/a/chat.svelte.ts?url=1', '/a/chat.svelte.ts?raw?x', '/a/chat.svelte.ts?x?raw']) {
 			expect(asksForSourceOrUrl(id), id).toBe(false);
 		}
 	});

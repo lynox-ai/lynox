@@ -9,16 +9,21 @@ export function isSvelteModuleId(id: string): boolean {
   return /\.svelte(\.[cm]?[jt]s)?$/.test(path);
 }
 
-/** Imports that ask for a file's text or URL, not its module: nothing is compiled for them. */
+/**
+ * Imports that ask for a file's text or URL, not its module: nothing of the file runs for them.
+ * Only a bare `raw` or `url` parameter counts — vite runs the module for `?raw=1` or `?raw?x` —
+ * and anything this does not recognise is treated as a module import, so it is refused.
+ */
 export function asksForSourceOrUrl(id: string): boolean {
-  const query = id.split('?')[1] ?? '';
-  return /(^|&)(raw|url)(&|=|$)/.test(query);
+  const [, query, ...more] = id.split('?');
+  if (query === undefined || more.length > 0) return false;
+  return query.split('&').some((param) => param === 'raw' || param === 'url');
 }
 
 /**
- * For the `node` test project: refuse to load a Svelte module. There it would compile for the
- * server, where Svelte state behaves differently from the browser, and the test would pass for
- * the wrong reason. Keyed on what is loaded, so it also catches a Svelte module reached through
+ * For the `node` test project: refuse to load a Svelte module. That project runs no Svelte
+ * compiler, so the module would not run as the browser runs it, and a test that happens to load
+ * it anyway would pass for the wrong reason. Keyed on what is loaded, so it also catches a Svelte module reached through
  * a helper; a type-only import is erased before anything loads and is not affected, and an
  * import of the file's text (`?raw`) or URL (`?url`) compiles nothing and is let through.
  */
@@ -29,8 +34,8 @@ export function rejectSvelteModules(): Plugin {
     load(id) {
       if (!isSvelteModuleId(id) || asksForSourceOrUrl(id)) return null;
       throw new Error(
-        `${id} is a Svelte module, loaded by a test in the node project, where it would be compiled ` +
-        'for the server rather than as the browser runs it. A test that drives a Svelte module ' +
+        `${id} is a Svelte module, loaded by a test in the node project. That project runs no ` +
+        'Svelte compiler, so the module would not run as the browser runs it. A test that drives a Svelte module ' +
         'belongs in its package, as `packages/<package>/src/**/*.svelte.test.ts`: those run in the ' +
         'browser-compile project (see vitest.config.ts).',
       );
