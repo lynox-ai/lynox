@@ -86,8 +86,9 @@ describe('LinearJwtRegExp — same matches as the regex it stands for', () => {
       text.replace(new LinearJwtRegExp(spec, 'g'), 'x');
       new LinearJwtRegExp(spec).test(text);
     }
-    // 1 MB per run: a quadratic scan takes minutes here; the budget leaves room for a slow,
-    // coverage-instrumented CI run.
-    expect(performance.now() - started).toBeLessThan(3_000);
+    // 1 MB per run. A quadratic scan takes minutes here; the linear one well under a second, but
+    // the CI run measures with coverage on, which slows this loop about twentyfold. Ten seconds
+    // keeps a wide margin on both sides.
+    expect(performance.now() - started).toBeLessThan(10_000);
   }, 60_000);
 });
