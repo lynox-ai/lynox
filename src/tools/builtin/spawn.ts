@@ -32,6 +32,23 @@ import {
 } from '../../core/limits.js';
 
 const SPAWN_TIMEOUT = 10 * 60 * 1000;
+
+/**
+ * The least a child may be granted. Below it the batch is refused rather than scaled
+ * down further.
+ *
+ * ⚠ A SETTING, not a measurement — and its justification is NOT "a child this small
+ * cannot finish a turn". That sentence is false and had to be corrected once already at
+ * the worker's own threshold: the cost guard books a turn BEFORE it compares, so a child
+ * always completes its first turn whatever it was granted. What is true is the step
+ * after: below this a child stops right after that turn, so the money buys an abort
+ * instead of an answer, and the parent is handed a truncated child to reason about.
+ *
+ * ⚠ FLAT, which is a known weakness: a first turn costs different amounts per tier, so
+ * one figure is generous for some models and tight for others. Deriving it from the run's
+ * resolved pricing would be the honest version of this constant; it is not built here.
+ */
+const MIN_CHILD_BUDGET_USD = 0.05;
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
 
 /** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
@@ -83,6 +100,35 @@ export function ledgerStopReason(stop: SendStop | null): string {
  * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
  * and output as {@link SPAWN_OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
  */
+/**
+ * What the MODEL is told when a fan-out's budgets were scaled down, or `''` when none
+ * were.
+ *
+ * ⛔ A shared helper because TWO paths carry it, and that is the point rather than
+ * tidiness: the ordinary result prepends it, and the all-children-failed path has to
+ * append it to its own message — a trimmed batch where every child rejects is exactly
+ * the case where "stopped at its budget" and "failed" are indistinguishable from the
+ * parent's side.
+ *
+ * It names both figures and says a truncated child did not fail, because a tool result
+ * is prompt surface: without the second sentence the model's next move is to delegate
+ * more of them, which buys no budget and is the opposite of what the ceiling wanted.
+ */
+function budgetNote(
+  trimmed: ReadonlyArray<{ name: string; asked: number; got: number }>,
+  remainingUSD: number | null,
+): string {
+  if (trimmed.length === 0) return '';
+  const lines = trimmed
+    .map((t) => `- \`${escapeXml(t.name)}\`: asked $${t.asked.toFixed(2)}, got $${t.got.toFixed(2)}`)
+    .join('\n');
+  return '\n\n## Budget note\n\n'
+    + `This run had $${(remainingUSD ?? 0).toFixed(2)} left of its cost ceiling, so the `
+    + `sub-agent budgets were scaled down to fit:\n${lines}\n\n`
+    + 'A sub-agent that stopped at its budget reports what it had and did NOT fail. '
+    + 'Delegating more of them would not buy more budget — the ceiling belongs to this run.';
+}
+
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
   const expectedOutput = getDefaultMaxTokens(model) * SPAWN_OUTPUT_FILL_RATIO;
@@ -685,6 +731,17 @@ async function executeThinker(
    * and the caller needs that number even though it never receives a result.
    */
   onSettled?: (costUsd: number) => void,
+  /**
+   * The slice of the PARENT run's remaining ceiling this child was granted, or
+   * `undefined` when the parent has no ceiling to divide — then the child keeps its own
+   * budget and nothing about this path changes.
+   *
+   * ⛔ This is what makes a fan-out's total bounded by CONSTRUCTION rather than by the
+   * accuracy of an estimate: the handler reserved the sum of the shares against the
+   * parent's remainder before dispatch, and each child's own guard holds it to its
+   * share. A share reserved and not enforced would be a number nothing holds.
+   */
+  capUSD?: number,
 ): Promise<{ result: string; childRunId: string | undefined; model: string; stop: SendStop | null }> {
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
@@ -822,7 +879,11 @@ async function executeThinker(
   }
 
   // Cost guard: use explicit budget from spec, or default
-  const budgetUSD = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
+  // ⛔ The granted share wins when there is one — see `capUSD`. It can be SMALLER than
+  // the spec asked for, deliberately: a caller wanting $5 inside a run with $0.40 left
+  // gets a scaled share, and the result says so. The refusal happens one level up, when
+  // even the scaled shares do not clear the floor.
+  const budgetUSD = capUSD ?? spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
   const costGuard: CostGuardConfig = {
     maxBudgetUSD: budgetUSD,
     maxIterations: maxIterations ?? DEFAULT_SPAWN_MAX_TURNS,
@@ -1312,6 +1373,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       }
       return spec;
     });
+    /** What each child asked for, index-aligned with `specs`. */
+    const requested: number[] = [];
     specs.forEach((spec, i) => {
       const { model, tier } = resolveSpawnChildRouting({
         spec,
@@ -1323,6 +1386,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       });
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
       totalEstimate += estimateSpawnCost(model, iters);
+      // What this child ASKED for — its own budget or the default. Deliberately NOT the
+      // estimate: an earlier attempt used `min(budget, estimate)` and called the result a
+      // share of the parent's remainder, which it was not. It cut every child's ceiling to
+      // its estimate even on a run with plenty of room, and the estimate ignores three
+      // multipliers a child actually gets (adaptive thinking is on by default, a role may
+      // ask for max effort, and `max_tokens` is unvalidated).
+      requested.push(spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD);
       // The SAME check the identity block and the result header use. This site
       // had its own charset — one that stripped `/` and cut at 64 — so a
       // Fireworks child was announced to the UI as
@@ -1345,6 +1415,102 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // Sessions don't see each other's reservations.
     checkSessionBudget(agent.sessionCounters, totalEstimate);
 
+    // ⛔ AND the delegating RUN's own ceiling — a different barrier from the one above.
+    // The session ceiling is per session; this is the dollar cap on the single run that
+    // is delegating, the one the worker's budget admission grants against the tenant's
+    // daily total. Children bill that daily total through their own run rows, while
+    // `checkSessionBudget` only ever charged the session, so the run's own ceiling never
+    // saw them.
+    //
+    // ⚠ BEFORE dispatch, because the children run in PARALLEL and the parent blocks on
+    // all of them below. A charge-back afterwards reports an overspend that has already
+    // happened; it cannot bound the batch that caused it.
+    //
+    // ⚠ `null` means the run has NO CEILING — self-host or BYOK with no configured
+    // budget. It does NOT mean "interactive": a managed session is given a per-run
+    // ceiling by the engine unless its caller supplied one, so there this is never
+    // `null`. An earlier attempt equated the two in six places, which made its control
+    // case describe a configuration the product rarely runs in.
+    const remainingRunUSD = agent.getRemainingRunBudgetUSD?.() ?? null;
+    /** Per child, when it was granted less than it asked for. Announced in the result. */
+    const trimmed: Array<{ name: string; asked: number; got: number }> = [];
+    /** The granted ceilings, or `null` when the run has none to divide. */
+    let shares: number[] | null = null;
+    /**
+     * What of the batch's hold is still taken. Each child subtracts its own share when
+     * it settles; whatever is left belongs to children that never got that far, and the
+     * `finally` below gives it back.
+     */
+    let heldForBatch = 0;
+    if (remainingRunUSD !== null) {
+      const asked = requested.reduce((sum, usd) => sum + usd, 0);
+      // SCALED proportionally rather than refused outright. Refusing reads as the
+      // stricter choice and was the first design, but the default per child is larger
+      // than a typical budgeted run's whole remainder — so it would refuse nearly every
+      // fan-out, and a child asking for little would be refused on account of a
+      // neighbour asking for much. Scaling keeps the sum inside the remainder by
+      // construction; the floor below is what stops it scaling into uselessness.
+      const factor = asked > remainingRunUSD && asked > 0 ? remainingRunUSD / asked : 1;
+      shares = requested.map((usd) => usd * factor);
+      // ⛔ THE ROUNDING ERROR IS GIVEN BACK, and without this the bound refuses work it
+      // should admit. `sum(requested[i] * factor)` does not reproduce `remainingRunUSD`
+      // in binary floating point: measured over 200 000 randomly drawn trimmed batches
+      // that clear the floor, **23 %** came out a few ULPs above the remainder, and the
+      // reservation below compares strictly. The result was a refusal blaming a
+      // concurrent batch that does not exist — deterministic, so the retry its message
+      // advises fails identically. Minimal case: two default children against $0.103
+      // give shares of $0.051500000000000004 each, summing to $0.10300000000000001.
+      //
+      // The last child absorbs the difference rather than a tolerance being added to the
+      // comparison: a tolerance would make the bound inexact for every caller, while
+      // this keeps `sum <= remainder` true as arithmetic. The floor is checked AFTER, so
+      // a child pushed under it by the correction is still refused.
+      const built = shares.reduce((sum, usd) => sum + usd, 0);
+      if (built > remainingRunUSD && shares.length > 0) {
+        shares[shares.length - 1] = Math.max(0, shares[shares.length - 1]! - (built - remainingRunUSD));
+      }
+      const tooSmall = shares.findIndex((usd) => usd < MIN_CHILD_BUDGET_USD);
+      if (tooSmall >= 0) {
+        throw new Error(
+          `This run has $${remainingRunUSD.toFixed(2)} left of its own cost ceiling, which `
+          + `${String(specs.length)} sub-agent(s) cannot share: "${specs[tooSmall]!.name}" would get `
+          + `$${shares[tooSmall]!.toFixed(2)}, under the $${MIN_CHILD_BUDGET_USD.toFixed(2)} a sub-agent `
+          + 'needs to return anything. Delegate fewer at once, or run them one after another.',
+        );
+      }
+      // ⛔ RESERVE, do not merely read — and this is the half an earlier attempt left
+      // out. The agent dispatches up to ten tool calls in parallel, so a second
+      // `spawn_agent` in this same turn can be admitted in this very instant; two
+      // callers that only READ would see the same room and each claim it. Its neighbour
+      // `checkSessionBudget` has always reserved on the spot, for exactly this reason.
+      //
+      // `false` means someone took it between the read above and this line. Refusing is
+      // the honest answer — re-reading and trying again would be the same race with
+      // more steps.
+      if (!(agent.reserveExternalCost?.(shares.reduce((sum, usd) => sum + usd, 0)) ?? true)) {
+        throw new Error(
+          'Another sub-agent batch in this same turn claimed what was left of this run\'s '
+          + 'cost ceiling. Wait for it to finish, then delegate again.',
+        );
+      }
+      specs.forEach((spec, i) => {
+        if (shares![i]! < requested[i]!) trimmed.push({ name: spec.name, asked: requested[i]!, got: shares![i]! });
+      });
+      heldForBatch = shares.reduce((sum, usd) => sum + usd, 0);
+    }
+
+    // ⛔ FROM HERE THE HOLD HAS AN OWNER, and it needs one: between the reservation
+    // above and the per-child releases in `onSettled`, two HOST-SUPPLIED `onStream`
+    // callbacks are awaited below. A rejection in either throws out of this handler with
+    // the whole batch's hold still taken — and a leaked hold is silent and permanent for
+    // the run, because `reservedUSD` is cleared only by a guard reset while
+    // `isExceeded()` never reads it. The parent would keep running, and every later
+    // fan-out on that run would be refused for room nobody is using.
+    //
+    // Released per child in `onSettled` on the happy path; this `finally` only fires for
+    // what is left when something threw before or during dispatch, which is why it
+    // subtracts what was already given back rather than releasing the sum again.
+    try {
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
 
     if (agent.onStream) {
@@ -1399,7 +1565,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     // Heartbeat: while any child is running, emit a spawn_progress event every
     // 5s so the UI can show elapsed time + last tool per sub-agent + soft
-    // timeout warning. Cleared in finally below.
+    // timeout warning. Cleared after the dispatch settles below — a bare statement, not a `finally`, so anything that throws between here and there leaks the interval.
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     if (parentStream) {
       heartbeat = setInterval(() => {
@@ -1425,6 +1591,21 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
         return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd) => {
           costBySub[sub.id] = usd;
+          // ⛔ The hold goes back BEFORE the actual cost is booked, and the order is not
+          // cosmetic: holding and spending at once would count this child twice against
+          // the ceiling, so the run's next turn would see room it had already given up.
+          // Released on every exit, because `onSettled` runs from the `finally` —
+          // success, failure and abort alike. The orchestrator's step path has the same
+          // shape one layer over and gets it wrong: there the release sits after the
+          // `await`, so a step that throws keeps its reservation for good.
+          //
+          // ⚠ What this cannot release is a child that never settles. A hung child holds
+          // its share for as long as it hangs, so the spawn timeout being dead is the
+          // other half of this bound, not an unrelated resilience issue.
+          if (shares !== null) {
+            agent.releaseExternalCost?.(shares[i]!);
+            heldForBatch -= shares[i]!;
+          }
           // ⛔ The child's ACTUAL cost, onto the delegating run's own ceiling. Without
           // it the run keeps counting only its own turns while the tenant's daily total
           // carries the children too, so its next turn believes it has more room than
@@ -1441,7 +1622,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // softened for. The real `Agent` cannot throw here; an `IAgent` from outside
           // this repo can.
           try { agent.chargeExternalCost?.(usd); } catch { /* never mask the child's own outcome */ }
-        })
+        }, shares === null ? undefined : shares[i])
           .then(
             (value) => {
               running.delete(sub.id);
@@ -1589,7 +1770,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // an error instead.
           const isBudget = stop.cause === 'budget_cap';
           const turns = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
-          const budget = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
+          // ⛔ The ceiling the child ACTUALLY ran with, which is its scaled share when
+          // the batch was trimmed. Naming `spec.max_budget_usd` here told the model a
+          // child held to $0.40 had `max_budget_usd=5` and should be re-run with 10 —
+          // the direct opposite of the budget note in the same string, more specific
+          // than it, and placed after it. The announcement that scaling is visible is
+          // worth nothing while this line contradicts it.
+          const budget = shares?.[i] ?? spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
           const knob = isBudget ? `max_budget_usd=${String(budget)}` : `max_turns=${String(turns)}`;
           const tools = stop.pendingTools.map((t) => escapeXml(t)).join(', ');
           const whileDoing = ` and was still calling tools (${tools || 'unnamed'}) when it was stopped`;
@@ -1597,7 +1784,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           const raisedBudget = Math.min(budget * 2, MAX_SPAWN_BUDGET_USD);
           const raise = isBudget
             ? (budget <= 0
-              ? `a positive max_budget_usd (it was 0, so the child could not complete a single call; the default is ${String(DEFAULT_SPAWN_BUDGET_USD)})`
+              // ⚠ Corrected: a zero budget does NOT stop the child from completing a
+              // call. The cost guard books a turn before it compares, so the child runs
+              // one turn and stops — which is why it returns something truncated rather
+              // than nothing, and why the fix is a budget rather than a retry.
+              ? `a positive max_budget_usd (it was 0, so the child stopped after its first turn; the default is ${String(DEFAULT_SPAWN_BUDGET_USD)})`
               : raisedBudget > budget
                 ? `a higher max_budget_usd (at least ${String(raisedBudget)})`
                 : `a narrower task (max_budget_usd is already at its maximum of ${String(MAX_SPAWN_BUDGET_USD)})`)
@@ -1666,10 +1857,33 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     });
 
     if (errors.length === specs.length) {
-      throw new AggregateError(errors, formatAllFailedMessage(failures));
+      // ⚠ The trim has to travel on THIS path too. The note below is never reached when
+      // every child rejects — and that is exactly the case the note exists for: the
+      // model is told the batch failed, with nothing to say their budgets had been cut.
+      // A `budget_cap` stop is a FULFILLED child, so the common trimmed case keeps the
+      // note; this is the all-reject one (a parent abort reaching every child, a
+      // provider outage).
+      throw new AggregateError(errors, formatAllFailedMessage(failures) + budgetNote(trimmed, remainingRunUSD));
     }
 
+    // ⛔ THE TRIM IS ANNOUNCED TO THE MODEL, not only logged — and that was made a
+    // condition of scaling rather than refusing, for a measured-shaped reason: this
+    // string is what the parent agent reads back, and from there a child that stopped at
+    // a scaled-down ceiling looks exactly like a child that failed. Without this note
+    // the model's next move is to delegate MORE of them, which is the opposite of what
+    // the ceiling wanted. So the note names both figures AND says a truncated child is
+    // not a failed one — a refusal text is prompt surface, and it teaches a rule.
+    const note = budgetNote(trimmed, remainingRunUSD);
+    if (note) sections.unshift(note.replace(/^\n\n/, ''));
+
     return sections.join('\n\n---\n\n');
+    } finally {
+      // Only what no child gave back — a throw before or during dispatch, or a child
+      // that never reached its `onSettled`. On the ordinary path this is 0 and the call
+      // is a no-op; `releaseExternalCost` floors at 0 either way, so a miscount cannot
+      // mint budget.
+      if (heldForBatch > 0) agent.releaseExternalCost?.(heldForBatch);
+    }
   },
   destructive: {
     mode: 'external',

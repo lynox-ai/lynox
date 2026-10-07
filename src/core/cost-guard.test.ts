@@ -210,6 +210,89 @@ describe('CostGuard', () => {
    * run's ceiling, but their TOKENS must never be priced here: this guard holds a
    * single `pricePerM`, the run's own.
    */
+  describe('the remainder, and holding against it', () => {
+    it('is null without a ceiling, and the remainder with one', () => {
+      expect(new CostGuard({}, 'claude-sonnet-4-6').remainingBudgetUSD()).toBeNull();
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-sonnet-4-6');
+      expect(cg.remainingBudgetUSD()).toBe(1);
+      cg.recordExternalCost(0.25);
+      expect(cg.remainingBudgetUSD()).toBeCloseTo(0.75, 6);
+    });
+
+    it('reports 0 — not NaN — when the spend cannot be known', () => {
+      // ⛔ THE FAIL DIRECTION, and a previous attempt had it backwards. Without the
+      // finite check this returned `NaN`, and every comparison against `NaN` is false,
+      // so a caller asking "does this fit?" was told YES. The input is reachable:
+      // `recordTurn` sums `usage.*` unguarded, so a provider adapter omitting a field —
+      // or a malformed pricing override — poisons the estimate.
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-sonnet-4-6');
+      cg.recordTurn({ input_tokens: NaN, output_tokens: 0 } as unknown as Parameters<typeof cg.recordTurn>[0]);
+      expect(cg.remainingBudgetUSD(), 'unknown means nothing free, not everything').toBe(0);
+      // And the consequence a caller depends on: a hold is refused rather than granted.
+      expect(cg.reserveExternalCost(0.1)).toBe(false);
+    });
+
+    it('reports 0 for a ceiling that is not a finite number', () => {
+      // ⛔ The OTHER input. The first version checked the spend and not the ceiling, so a
+      // non-finite-but-not-`Infinity` ceiling produced `NaN` — and every comparison
+      // against `NaN` is false, so a caller asking "does this fit?" was told yes and a
+      // fan-out went unbounded. The constructor takes `maxBudgetUSD` straight from its
+      // config, so this is reachable here even while every production caller clamps:
+      // reachability is a property of the callers, and callers change.
+      const cg = new CostGuard({ maxBudgetUSD: NaN }, 'claude-sonnet-4-6');
+      expect(cg.remainingBudgetUSD(), 'unknown ceiling means nothing free').toBe(0);
+      expect(cg.reserveExternalCost(0.01), 'and nothing may be held against it').toBe(false);
+    });
+
+    it('never goes negative', () => {
+      // The estimate can pass the ceiling, because a turn is booked before it is
+      // compared. A negative remainder would read as a debt to anyone comparing it.
+      const cg = new CostGuard({ maxBudgetUSD: 0.1 }, 'claude-sonnet-4-6');
+      cg.recordExternalCost(0.5);
+      expect(cg.remainingBudgetUSD()).toBe(0);
+    });
+
+    it('subtracts a hold, so two callers in one instant cannot claim the same room', () => {
+      // ⛔ THE RACE THIS EXISTS FOR. The agent dispatches up to ten tool calls in
+      // parallel, so two fan-outs can be admitted in the same instant. A caller that
+      // only READ the remainder would see the full room twice; the hold is what makes
+      // the second one see the first.
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-sonnet-4-6');
+      expect(cg.reserveExternalCost(0.6), 'the first fits').toBe(true);
+      expect(cg.remainingBudgetUSD(), 'and is subtracted at once').toBeCloseTo(0.4, 6);
+      expect(cg.reserveExternalCost(0.6), 'the second no longer fits').toBe(false);
+      expect(cg.remainingBudgetUSD(), 'and a refused hold holds nothing').toBeCloseTo(0.4, 6);
+    });
+
+    it('gives a hold back, and a double release mints nothing', () => {
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-sonnet-4-6');
+      cg.reserveExternalCost(0.6);
+      cg.releaseExternalCost(0.6);
+      expect(cg.remainingBudgetUSD(), 'back to the full ceiling').toBe(1);
+      cg.releaseExternalCost(0.6);
+      expect(cg.remainingBudgetUSD(), 'a second release cannot mint budget').toBe(1);
+    });
+
+    it('treats a non-positive or non-finite hold as nothing to hold', () => {
+      // A rounding artefact must not become an error, and must not become a hold
+      // either — `0` admitted as a hold would be a claim on nothing that still has to
+      // be released by someone.
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-sonnet-4-6');
+      expect(cg.reserveExternalCost(0)).toBe(true);
+      expect(cg.reserveExternalCost(NaN)).toBe(true);
+      expect(cg.remainingBudgetUSD(), 'nothing was held').toBe(1);
+    });
+
+    it('a reset clears holds as well as spend', () => {
+      // A hold belongs to work in flight; after a reset there is none, and a phantom
+      // hold would shrink the ceiling for the rest of the process.
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-sonnet-4-6');
+      cg.reserveExternalCost(0.6);
+      cg.reset();
+      expect(cg.remainingBudgetUSD()).toBe(1);
+    });
+  });
+
   describe('recordExternalCost', () => {
     it('charges the ceiling in dollars, at no token price of its own', () => {
       const cg = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');

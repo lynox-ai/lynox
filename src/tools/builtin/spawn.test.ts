@@ -149,6 +149,7 @@ vi.mock('../../core/roles.js', async (importOriginal) => {
 
 import { RunAbortedError, ToolLoopBreakError } from '../../core/agent.js';
 import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, formatAllFailedMessage, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
+import { CostGuard } from '../../core/cost-guard.js';
 import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
@@ -1615,6 +1616,254 @@ describe('spawn_agent tool', () => {
     expect(cg).toBeDefined();
     expect(cg.maxBudgetUSD).toBe(5);
     expect(cg.maxIterations).toBe(10);
+  });
+
+  describe('a fan-out is bounded by what the delegating run has left', () => {
+    /**
+     * A parent whose budget methods run against a REAL `CostGuard`.
+     *
+     * ⛔ Not `vi.fn()`s, and that is the lesson from the charge-back half of this work:
+     * a mocked agent witnesses that the tool CALLS a method, never that the arithmetic
+     * behind it holds. A real guard here means these cases exercise the reservation,
+     * the subtraction and the floor — the same code the product runs.
+     */
+    function parentWithCeiling(maxBudgetUSD: number): { agent: IAgent; guard: CostGuard } {
+      const guard = new CostGuard({ maxBudgetUSD }, 'claude-sonnet-4-6');
+      const agent = makeAgent({
+        getRemainingRunBudgetUSD: () => guard.remainingBudgetUSD(),
+        reserveExternalCost: (usd: number) => guard.reserveExternalCost(usd),
+        releaseExternalCost: (usd: number) => { guard.releaseExternalCost(usd); },
+        chargeExternalCost: (usd: number) => { guard.recordExternalCost(usd); },
+      });
+      return { agent, guard };
+    }
+
+    /** The ceilings handed to the children of the last handler call, in order. */
+    function childCaps(MockAgent: unknown): number[] {
+      const calls = (MockAgent as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+      return calls.map((c) => (c[0]['costGuard'] as { maxBudgetUSD: number }).maxBudgetUSD);
+    }
+
+    it('leaves the children alone when the whole batch fits', async () => {
+      // Three children at the $5 default need $15; a run with $20 left can pay for them,
+      // so nothing is scaled and nothing is announced.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(20);
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] },
+        agent,
+      );
+      expect(childCaps(MockAgent), 'untouched defaults').toEqual([5, 5, 5]);
+      expect(result, 'and no note, because nothing was trimmed').not.toContain('Budget note');
+    });
+
+    it('scales the children down to fit, and says so where the MODEL reads it', async () => {
+      // ⛔ THE CASE SCALING EXISTS FOR, and the announcement is half of it. Three $5
+      // children against $6 left → factor 0.4 → $2 each. From the parent's side a child
+      // that stopped at $2 looks exactly like a child that failed, so without the note
+      // the model's next move is to delegate MORE — the opposite of what the ceiling
+      // wanted.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(6);
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] },
+        agent,
+      );
+      const caps = childCaps(MockAgent);
+      expect(caps.reduce((sum, c) => sum + c, 0), 'the sum fits what the run had left').toBeLessThanOrEqual(6);
+      expect(caps.every((c) => c > 0 && c < 5), 'each one scaled, none left at the default').toBe(true);
+      expect(result, 'the note reaches the model').toContain('Budget note');
+      expect(result, 'with what was asked').toContain('asked $5.00');
+      expect(result, 'and what was granted').toContain('got $2.00');
+      expect(result, 'and the rule it has to learn').toContain('did NOT fail');
+    });
+
+    it('refuses when even the scaled shares are too small, naming both figures', async () => {
+      // The floor. Ten children — the batch maximum — against $0.40 would get four cents
+      // each: enough to start a turn and nothing else, so the money buys aborts.
+      // Refusing is the honest answer, and the message has to carry the figures or the
+      // owner cannot tell a budget refusal from a bug.
+      //
+      // ⚠ Ten, not twenty: the handler caps a batch at ten before it reaches the budget
+      // at all, so a larger fixture tests the batch cap and not this floor. Measured —
+      // the first version used twenty and failed on `accepts at most 10 agents`.
+      const { agent } = parentWithCeiling(0.4);
+      const agents = Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, task: 'A' }));
+      await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/cost ceiling/);
+      await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/\$0\.40 left/);
+      await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/under the \$0\.05/);
+    });
+
+    it('refuses a child whose caller asked for nothing', async () => {
+      // ⛔ `max_budget_usd` is set by the CALLER — the model, or anything that got into
+      // it. `0 ?? default` is `0`, not the default, so a zero-budget batch used to claim
+      // nothing and be admitted against any remainder, while each child still ran one
+      // full turn. The floor is what refuses it; there was no floor before.
+      const { agent } = parentWithCeiling(10);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'free', task: 'A', max_budget_usd: 0 }] },
+        agent,
+      )).rejects.toThrow(/under the \$0\.05/);
+    });
+
+    it('refuses the second of two batches that would claim the same room', async () => {
+      // ⛔ THE RACE. Up to ten tool calls run in parallel, so a second `spawn_agent` in
+      // the same turn is admitted in the same instant. The first batch RESERVES its
+      // shares, so the second finds the room gone — a version that only READ the
+      // remainder granted it twice.
+      // ⚠ The window is between the READ and the RESERVE, and nothing else can open it:
+      // the shares are scaled against the remainder that was just read, so they always
+      // fit it. A first version of this case held room BEFORE the handler ran and the
+      // batch simply scaled to what was left — correct behaviour, and no witness at all.
+      // The double therefore takes the room away at the moment of the read, which is
+      // exactly what a concurrent batch does.
+      const guard = new CostGuard({ maxBudgetUSD: 6 }, 'claude-sonnet-4-6');
+      let read = 0;
+      const agent = makeAgent({
+        getRemainingRunBudgetUSD: () => {
+          const remaining = guard.remainingBudgetUSD();
+          // The neighbour batch lands here, after this read and before the reserve.
+          if (read++ === 0) guard.reserveExternalCost(5.9);
+          return remaining;
+        },
+        reserveExternalCost: (usd: number) => guard.reserveExternalCost(usd),
+        releaseExternalCost: (usd: number) => { guard.releaseExternalCost(usd); },
+        chargeExternalCost: (usd: number) => { guard.recordExternalCost(usd); },
+      });
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        agent,
+      )).rejects.toThrow(/claimed what was left/);
+    });
+
+    it('gives the hold back when the children settle', async () => {
+      // Reserved before dispatch, released on settle, actual cost booked instead. If the
+      // hold stayed, the run's next turn would see room it had already given up — and
+      // the release runs from the `finally`, so it covers failure and abort too.
+      mockCostSnapshot = {
+        inputTokens: 0, outputTokens: 0, estimatedCostUSD: 0.02, iterationsUsed: 1, budgetPercent: 0,
+      };
+      const { agent, guard } = parentWithCeiling(10);
+      await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A' }] }, agent);
+      // $10 minus the child's ACTUAL $0.02 — not minus the $5 that was held for it.
+      expect(guard.remainingBudgetUSD(), 'the hold is gone, the real cost remains').toBeCloseTo(9.98, 6);
+    });
+
+    it('admits a trimmed batch whose shares do not sum back exactly', async () => {
+      // ⛔ FOUND BY A REFUTER WITH A MEASUREMENT, and it was the worst defect in this
+      // work: `sum(requested[i] * factor)` does not reproduce the remainder in binary
+      // floating point. Over 200 000 randomly drawn trimmed batches that clear the
+      // floor, 23 % came out a few ULPs above it — and the reservation compares
+      // strictly, so nearly a quarter of legitimate fan-outs were refused with a message
+      // blaming a concurrent batch that does not exist. Deterministic, so the retry that
+      // message advises fails identically.
+      //
+      // $0.103 against two default children is the minimal case: the shares are
+      // $0.051500000000000004 each and sum to $0.10300000000000001. The sibling scaling
+      // test could not see it because 6/15 and 5×0.4 are both exact in binary.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(0.103);
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        agent,
+      );
+      expect(result, 'admitted, not refused').toContain('Budget note');
+      const caps = childCaps(MockAgent);
+      expect(caps).toHaveLength(2);
+      expect(caps.reduce((sum, c) => sum + c, 0), 'and the sum still fits, as arithmetic')
+        .toBeLessThanOrEqual(0.103);
+    });
+
+    it('names the share a trimmed child actually ran with, not what it asked for', async () => {
+      // ⛔ The announcement that scaling is visible is worth nothing while the per-child
+      // cap section contradicts it. A child trimmed from $5 to $2 that stops on
+      // `budget_cap` was announced as `max_budget_usd=5` with "re-run with at least 10"
+      // — more specific than the budget note, placed after it, and the exact behaviour
+      // the note exists to prevent.
+      mockLastStop = { cause: 'budget_cap', pendingTools: ['web_research'], pendingToolCount: 1, text: '' };
+      const { agent } = parentWithCeiling(6);
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] },
+        agent,
+      );
+      expect(result, 'the ceiling it ran with').toContain('max_budget_usd=2');
+      expect(result, 'not the one it asked for').not.toContain('max_budget_usd=5');
+    });
+
+    it('gives the whole hold back when something throws before dispatch', async () => {
+      // ⛔ Between the reservation and the per-child releases sit two awaited,
+      // HOST-SUPPLIED `onStream` callbacks. A rejection there threw out of the handler
+      // with the batch's whole hold still taken — and a leaked hold is silent and
+      // permanent for the run, because only a guard reset clears it while `isExceeded`
+      // never reads it. The parent keeps running and every later fan-out is refused for
+      // room nobody is using.
+      const guard = new CostGuard({ maxBudgetUSD: 20 }, 'claude-sonnet-4-6');
+      const agent = makeAgent({
+        getRemainingRunBudgetUSD: () => guard.remainingBudgetUSD(),
+        reserveExternalCost: (usd: number) => guard.reserveExternalCost(usd),
+        releaseExternalCost: (usd: number) => { guard.releaseExternalCost(usd); },
+        chargeExternalCost: (usd: number) => { guard.recordExternalCost(usd); },
+        onStream: (() => Promise.reject(new Error('the host stream exploded'))) as unknown as StreamHandler,
+      });
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        agent,
+      )).rejects.toThrow(/exploded/);
+      expect(guard.remainingBudgetUSD(), 'the hold is back, nothing is stranded').toBe(20);
+    });
+
+    it('carries the trim into the message when every child fails', async () => {
+      // ⛔ The all-reject path throws before the note is prepended — and that is exactly
+      // the case the note exists for: the model is told the batch failed, with nothing to
+      // say their budgets had been cut. A `budget_cap` stop is a FULFILLED child, so the
+      // common trimmed case keeps the note; this is a parent abort or a provider outage
+      // reaching all of them.
+      mockSend.mockRejectedValue(new Error('provider is down'));
+      const { agent } = parentWithCeiling(6);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] },
+        agent,
+      )).rejects.toThrow(/Budget note/);
+    });
+
+    it('does not give back a concurrent batch\'s hold when its own children settle', async () => {
+      // ⛔ FOUND BY A SURVIVING MUTANT, and it is the reason the counter exists rather
+      // than being hygiene. Each child subtracts its own share as it settles; the
+      // `finally` gives back only what is LEFT. Drop the subtraction and the `finally`
+      // releases the batch's sum a second time — which on its own looks harmless,
+      // because the release floors at 0, but a second fan-out holding room at that
+      // moment loses it. The hold it never took would be given away.
+      mockCostSnapshot = {
+        inputTokens: 0, outputTokens: 0, estimatedCostUSD: 0.01, iterationsUsed: 1, budgetPercent: 0,
+      };
+      const guard = new CostGuard({ maxBudgetUSD: 20 }, 'claude-sonnet-4-6');
+      const agent = makeAgent({
+        getRemainingRunBudgetUSD: () => guard.remainingBudgetUSD(),
+        reserveExternalCost: (usd: number) => guard.reserveExternalCost(usd),
+        releaseExternalCost: (usd: number) => { guard.releaseExternalCost(usd); },
+        chargeExternalCost: (usd: number) => { guard.recordExternalCost(usd); },
+      });
+      // A neighbour batch is in flight and holding $8 of the same ceiling.
+      expect(guard.reserveExternalCost(8)).toBe(true);
+      await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A' }] }, agent);
+      // $20 − the neighbour's $8 still held − this child's actual $0.01 = $11.99. Under
+      // the mutant the batch releases its own $5 a second time, cutting the neighbour's
+      // hold to $3, and this reads $16.99 — room that belongs to someone else.
+      expect(guard.remainingBudgetUSD(), "the neighbour's hold survives").toBeCloseTo(11.99, 6);
+    });
+
+    it('refuses when the remainder cannot be known', async () => {
+      // ⛔ FAIL CLOSED. A non-finite estimate — a malformed pricing override, a provider
+      // adapter omitting a token field — used to make the comparison `claimed > NaN`,
+      // which is false, so the batch was admitted unchecked. The guard now reports 0 for
+      // an unknown remainder, and 0 cannot clear the floor.
+      const { agent, guard } = parentWithCeiling(10);
+      guard.recordTurn({ input_tokens: NaN, output_tokens: 0 } as unknown as Parameters<typeof guard.recordTurn>[0]);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }] },
+        agent,
+      )).rejects.toThrow(/cost ceiling/);
+    });
   });
 
   describe("a child's cost reaches the delegating run's ceiling", () => {
