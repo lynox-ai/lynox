@@ -8,7 +8,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 // assume. The barrel import typechecks as a namespace and fails on the member.
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE } from '../../core/profile-value-shape.js';
+import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -1678,6 +1678,12 @@ async function attachEngineManagedAuth(
     // description shows the model (api-store.ts) and what bootstrap writes
     // (api-setup.ts) — defaulting to Authorization here would put the token in a
     // header the model was told is called something else, i.e. a silent 401.
+    // A stored header_name that is not a header name (an empty string among them, which `??`
+    // does not catch) is refused here rather than sent: the request would otherwise fail in
+    // the HTTP layer with a message that does not name the profile.
+    if (auth.type !== 'bearer' && auth.header_name !== undefined && !HTTP_HEADER_NAME.test(auth.header_name)) {
+      return { refusal: `Error: api_profile "${profile.id}" has an auth.header_name that is not a valid header name, so the credential was not attached. Fix it with api_setup action="update" (for example "X-Api-Key").` };
+    }
     const slot = auth.type === 'bearer' ? 'Authorization' : (auth.header_name ?? 'X-Api-Key');
     const value = auth.type === 'bearer' ? `Bearer ${token}` : token;
     // The handler's CRLF check covers `input.headers` — the agent's own map. These
@@ -1710,16 +1716,12 @@ async function attachEngineManagedAuth(
 
 /**
  * Header, query-param and vault-key names come from the PROFILE, and a
- * prompt-injected agent can author one: `validateProfile` shape-checks
- * `username_key`/`password_key`, checks `vault_keys` only for being a list of
- * strings, and never checks `header_name` or `query_param`. These land in a
- * hint that is appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the model is meant to
- * trust — so a name carrying newlines can forge a reminder of its own.
- *
- * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`
- * since they were written, and the root fix belongs in `validateProfile`, not here).
- * What IS new is widening it to two fields never interpolated before across three
- * more shapes.
+ * prompt-injected agent can author one. `validateProfile` now shape-checks all of
+ * them at create/update, but a profile loaded from a file is not validated, so these
+ * names still reach this hint unchecked unless this file shapes them. The hint is
+ * appended OUTSIDE the `untrusted_data` wrap on purpose — system guidance, which the
+ * model is meant to trust — so a name carrying newlines could forge a reminder of its
+ * own; `safeToken` below is what stops that here.
  *
  * ⚠ The sentence here used to end "so the filter goes on everything this file
  * prints, old hints included". **That was false when it was written and a review
@@ -1739,8 +1741,8 @@ async function attachEngineManagedAuth(
  *     wider because `refreshTokenKey` builds a 78-character name and admits a
  *     digit-leading id, `ISO_TIMESTAMP_SHAPE` for `revoked_at`.
  * Neither is applied by default. Any NEW interpolation of a profile value into a
- * model-facing string needs one of them chosen deliberately, and `validateProfile`
- * remains the root fix nobody has made.
+ * model-facing string needs one of them chosen deliberately: `validateProfile` checks
+ * the names on create, update and refine, but a profile loaded from a file never passes it.
  */
 const SAFE_PROFILE_TOKEN = /^[A-Za-z0-9._-]{1,64}$/;
 function safeToken(value: string | undefined): string | undefined {
@@ -1780,7 +1782,7 @@ function modelFilledSlot(
  * Which header this shape expects the model to fill.
  *
  * `basic` is `Authorization` by protocol — NOT `auth.header_name`. That field is
- * meant for `auth.type: 'header'`, `validateProfile` neither validates it nor binds
+ * meant for `auth.type: 'header'`; `validateProfile` checks its shape but does not bind
  * it to a type, and reading it here produced `headers: { "X-Foo": "Basic secret:K" }`
  * for a profile that had set it: an instruction that cannot work, in the engine's
  * own trusted voice, at the moment the model is looking for one to follow.

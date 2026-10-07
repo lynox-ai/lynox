@@ -570,6 +570,27 @@ describe('api_setup tool', () => {
     });
   });
 
+  describe('auth name checks on create', () => {
+    it.each([
+      ['an empty header_name', { type: 'header' as const, header_name: '' }, 'Invalid auth.header_name'],
+      ['a header_name with a space', { type: 'header' as const, header_name: 'X Key' }, 'Invalid auth.header_name'],
+      ['a query_param with an ampersand', { type: 'query' as const, query_param: 'k&evil=1' }, 'Invalid auth.query_param'],
+    ])('refuses %s without repeating it', async (_case, auth, message) => {
+      const result = await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, auth } }, createMockAgent(new ApiStore()));
+      expect(result).toContain(message);
+      expect(result).not.toContain('X Key');
+      expect(result).not.toContain('evil');
+    });
+
+    it('accepts a header name HTTP allows, underscore included', async () => {
+      const result = await apiSetupTool.handler(
+        { action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type: 'header', header_name: 'X_Api_Key' } } },
+        createMockAgent(new ApiStore()),
+      );
+      expect(result).not.toContain('Invalid auth.header_name');
+    });
+  });
+
   describe('list', () => {
     it('shows empty message when no profiles', async () => {
       const agent = createMockAgent(new ApiStore());

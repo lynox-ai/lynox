@@ -3942,7 +3942,17 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
       const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
-      expect(result).toContain('CRLF');
+      // Caught by the header-name check, which runs first: a name with CRLF is not a name.
+      expect(result).toContain('not a valid header name');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('an empty header_name is refused, not sent under an empty name', async () => {
+      const store = await storeWith({ type: 'header', header_name: '', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      expect(result).toContain('not a valid header name');
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
