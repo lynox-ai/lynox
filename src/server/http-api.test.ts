@@ -4749,6 +4749,115 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('an aborted asking run withdraws its question: the prompt expires and the wait ends', async () => {
+      await withStores(async (ps) => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        const askingRun = new AbortController();
+        let parked: Promise<unknown> | undefined;
+        mockSessionRun.mockImplementationOnce(async () => {
+          parked = (mockSessionInstance.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>))(
+            'Which contact?', ['A', 'B'], { signal: askingRun.signal });
+          await new Promise((r) => setImmediate(r));
+          return 'done';
+        });
+        await (await jsonFetch('/api/sessions/sse-withdraw/run', { method: 'POST', body: JSON.stringify({ task: 'ask', protocol: 2 }) })).text();
+        expect(ps.getPending('sse-withdraw'), 'the question is pending before the abort').toBeDefined();
+
+        askingRun.abort();
+        await expect(parked).resolves.toBe('__dismissed__');
+        // Withdrawn, not left pending for its TTL — the session's slot is free again.
+        expect(ps.getPending('sse-withdraw')).toBeUndefined();
+
+        // A run that was already aborted when it asked never leaves a question behind.
+        const late = (mockSessionInstance.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>))(
+          'Still there?', ['A', 'B'], { signal: askingRun.signal });
+        await expect(late).resolves.toBe('__dismissed__');
+        expect(ps.getPending('sse-withdraw')).toBeUndefined();
+      });
+    });
+
+    it('a question raised by an already-stopped run is never announced on the stream, of any prompt kind', async () => {
+      await withStores(async (ps) => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        const stopped = new AbortController();
+        stopped.abort();
+        const live = new AbortController();
+        mockSessionRun.mockImplementationOnce(async () => {
+          const s = mockSessionInstance as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+          await s['promptUser']!('Ghost user?', ['A'], { signal: stopped.signal });
+          await s['promptTabs']!([{ question: 'Ghost tabs?', options: ['A'] }], { signal: stopped.signal });
+          await s['promptSecret']!('GHOST_KEY', 'Ghost secret?', undefined, { signal: stopped.signal });
+          // Positive control on the same stream: a live run's question IS announced.
+          void s['promptUser']!('Live question?', ['A'], { signal: live.signal });
+          await new Promise((r) => setImmediate(r));
+          live.abort();
+          return 'done';
+        });
+        const body = await (await jsonFetch('/api/sessions/sse-ghost/run', { method: 'POST', body: JSON.stringify({ task: 'ask', protocol: 2 }) })).text();
+        expect(body).toContain('Live question?');
+        expect(body).not.toMatch(/Ghost (user|tabs|secret)\?/);
+        expect(ps.getPending('sse-ghost')).toBeUndefined();
+      });
+    });
+
+    it('withdrawPromptOnAbort: a failing expire never escapes the abort listener, and release drops the listener', async () => {
+      const { withdrawPromptOnAbort } = await import('./http-api.js');
+      const failing = { expirePrompt: vi.fn(() => { throw new Error('SQLITE_BUSY'); }) };
+      const run = new AbortController();
+      withdrawPromptOnAbort(failing, 'p1', run.signal);
+      expect(() => run.abort()).not.toThrow();
+      expect(failing.expirePrompt).toHaveBeenCalledWith('p1');
+
+      const store = { expirePrompt: vi.fn(() => true) };
+      const later = new AbortController();
+      const added = vi.spyOn(later.signal, 'addEventListener');
+      const removed = vi.spyOn(later.signal, 'removeEventListener');
+      const release = withdrawPromptOnAbort(store, 'p2', later.signal);
+      release();
+      expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]![1]);
+      later.abort();
+      expect(store.expirePrompt).not.toHaveBeenCalled();
+    });
+
+    it('an Allow and a stop in the same moment: exactly one wins, and a withdrawn question never runs', async () => {
+      await withStores(async (ps) => {
+        mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        mockSessionRun.mockImplementationOnce(async () => 'done');
+        await (await jsonFetch('/api/sessions/sse-race/run', { method: 'POST', body: JSON.stringify({ task: 'race', protocol: 2 }) })).text();
+        const ask = mockSessionInstance.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>);
+        const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+        // Answer lands first, the stop in the same tick: the answer stands — the tool
+        // goes on (the run told the model it "may still complete").
+        const first = new AbortController();
+        const answered = ask('Send the mail?', ['Allow', 'Deny'], { signal: first.signal });
+        await tick();
+        const p1 = ps.getPending('sse-race')!;
+        expect(ps.answerUser(p1.id, 'Allow')).toBe(true);
+        first.abort();
+        await expect(answered).resolves.toBe('Allow');
+
+        // Stop lands first, the Allow in the same tick: the question is withdrawn and
+        // the Allow is refused — nothing runs.
+        const second = new AbortController();
+        const withdrawn = ask('Send the mail?', ['Allow', 'Deny'], { signal: second.signal });
+        await tick();
+        const p2 = ps.getPending('sse-race')!;
+        second.abort();
+        expect(ps.answerUser(p2.id, 'Allow')).toBe(false);
+        await expect(withdrawn).resolves.toBe('__dismissed__');
+        expect(ps.getPending('sse-race')).toBeUndefined();
+
+        // The other prompt kinds withdraw the same way.
+        const third = new AbortController();
+        third.abort();
+        await (mockSessionInstance.promptTabs as ((q: unknown[], m?: Record<string, unknown>) => Promise<string[]>))([{ question: 'Which?' }], { signal: third.signal });
+        expect(ps.getPending('sse-race')).toBeUndefined();
+        await (mockSessionInstance.promptSecret as ((n: string, p: string, k?: string, m?: Record<string, unknown>) => Promise<string>))('SOME_KEY', 'key?', 'api_key', { signal: third.signal });
+        expect(ps.getPending('sse-race')).toBeUndefined();
+      });
+    });
+
     it('POST /derive-domain returns a search candidate, 400 on no company, degrades to null', async () => {
       await withStores(async () => {
         const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
@@ -8807,9 +8916,11 @@ describe('LynoxHTTPApi', () => {
   describe('rate limiting', () => {
     it('loopback gets higher rate limit (spoofed X-Forwarded-For ignored for limit tier)', async () => {
       // Security: rate limiter uses socket IP (not X-Forwarded-For) for loopback detection.
-      // Loopback gets RATE_MAX_LOOPBACK (600), so 130 requests should all succeed.
+      // Loopback gets RATE_MAX_LOOPBACK (600), so 127 requests should all succeed. The whole
+      // file shares one per-IP window; this count pays back the three requests the
+      // prompt-withdraw tests above add (it was 130).
       const fakeIp = '203.0.113.42';
-      const promises = Array.from({ length: 130 }, () =>
+      const promises = Array.from({ length: 127 }, () =>
         fetch(`${baseUrl}/api/secrets`, {
           headers: { ...authHeaders(), 'X-Forwarded-For': fakeIp },
         }).then(r => r.status)

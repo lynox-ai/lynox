@@ -5,7 +5,7 @@ import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, Is
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
-import { Agent, RunAbortedError, type SendStop } from '../../core/agent.js';
+import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
@@ -49,6 +49,68 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
  * resolved pricing would be the honest version of this constant; it is not built here.
  */
 const MIN_CHILD_BUDGET_USD = 0.05;
+
+/** The live limit; only tests shorten it (`setSpawnTimeoutMsForTests`). */
+let spawnTimeoutMs = SPAWN_TIMEOUT;
+
+/** Shorten the per-child time limit (for testing). `null` restores the default. */
+export function setSpawnTimeoutMsForTests(ms: number | null): void {
+  spawnTimeoutMs = ms ?? SPAWN_TIMEOUT;
+}
+
+/**
+ * One child's spawn time limit, on the same measure as the HTTP run's wall clock: time
+ * the child spends waiting on a HUMAN (a question, a confirmation, a secret) does not
+ * count. A limit that counted the user's reading time would end exactly the children
+ * that correctly stopped to ask. Overlapping waits hold it until the last one ends.
+ */
+export interface SpawnDeadline {
+  readonly signal: AbortSignal;
+  /** Stop the clock until the returned release is called (idempotent). */
+  holdForHuman(): () => void;
+  /** Whether the child is waiting on a human right now (any question still open) — for
+   *  a caller that parks other per-child resources while it waits. */
+  readonly isHeldForHuman: boolean;
+  /** The child settled: the limit no longer applies. */
+  clear(): void;
+}
+
+export function createSpawnDeadline(ms: number): SpawnDeadline {
+  const controller = new AbortController();
+  let remaining = ms;
+  let runningSince = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => controller.abort(), ms);
+  let holds = 0;
+  let cleared = false;
+  return {
+    signal: controller.signal,
+    get isHeldForHuman() { return holds > 0; },
+    holdForHuman() {
+      if (cleared || controller.signal.aborted) return () => undefined;
+      if (holds === 0 && timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+        remaining -= Date.now() - runningSince;
+      }
+      holds++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        holds--;
+        if (holds === 0 && !cleared && !controller.signal.aborted) {
+          runningSince = Date.now();
+          timer = setTimeout(() => controller.abort(), Math.max(0, remaining));
+        }
+      };
+    },
+    clear() {
+      cleared = true;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
 
 /** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
@@ -680,6 +742,8 @@ function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfi
 function promptCallbacksWithOrigin(
   parent: IAgent,
   spec: SpawnSpec,
+  childGone: AbortSignal,
+  holdForHuman: (() => () => void) | undefined,
 ): { promptUser?: PromptUserFn | undefined; promptSecret?: PromptSecretFn | undefined; promptTabs?: PromptTabsFn | undefined } {
   // `subagent: true` is the claim; the two names are decoration on it. Keep them
   // in that order in your head, because the first version had only the names and
@@ -690,10 +754,35 @@ function promptCallbacksWithOrigin(
     // Each stays undefined when the parent had none — an autonomous or headless
     // parent has no channel, and manufacturing a callback here would turn every
     // tool's "no interactive channel" refusal into a hang.
-    promptUser: promptUser ? (q, opts, m) => promptUser(q, opts, { ...origin, ...m }) : undefined,
-    promptSecret: promptSecret ? (n, p, k, m) => promptSecret(n, p, k, { ...origin, ...m }) : undefined,
-    promptTabs: promptTabs ? (qs, m) => promptTabs(qs, { ...origin, ...m }) : undefined,
+    //
+    // `childGone` stands in when the child's own run signal is gone: a call the child
+    // abandoned can still ask after the child settled, and without it the parent's
+    // getter would hand the question the PARENT's live run signal — answerable, by
+    // nobody the child could report to. Aborted at settle, it withdraws it at birth.
+    //
+    // `holdForHuman` stops the spawn time limit while the question is open (see
+    // `SpawnDeadline`).
+    //
+    // And a question raised once the child has settled is not forwarded at all: it
+    // answers itself as not-given (the same value an unanswered question settles to),
+    // whatever the parent's channel does with a stopped signal — the worker loop's,
+    // for one, ignores it, and would leave the question answerable for its TTL.
+    promptUser: promptUser ? (q, opts, m) => (childGone.aborted ? Promise.resolve('__dismissed__')
+      : whileHeld(holdForHuman, () => promptUser(q, opts, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
+    promptSecret: promptSecret ? (n, p, k, m) => (childGone.aborted ? Promise.resolve('canceled' as const)
+      : whileHeld(holdForHuman, () => promptSecret(n, p, k, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
+    promptTabs: promptTabs ? (qs, m) => (childGone.aborted ? Promise.resolve([])
+      : whileHeld(holdForHuman, () => promptTabs(qs, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
   };
+}
+
+async function whileHeld<T>(holdForHuman: (() => () => void) | undefined, ask: () => Promise<T>): Promise<T> {
+  const release = holdForHuman?.();
+  try {
+    return await ask();
+  } finally {
+    release?.();
+  }
 }
 
 /**
@@ -742,7 +831,15 @@ async function executeThinker(
    * share. A share reserved and not enforced would be a number nothing holds.
    */
   capUSD?: number,
+  /**
+   * The spawn time limit for this child (paused while the child waits on a human, see
+   * `SpawnDeadline`). Its abort aborts the child's run (`Agent.send`'s `disposableDeadline`), and the child then fails with a reason that names the limit — distinct
+   * from an abort the parent's own stop sends through the abort scope.
+   */
+  deadline?: SpawnDeadline,
 ): Promise<{ result: string; childRunId: string | undefined; model: string; stop: SendStop | null }> {
+  // Aborted once this child settles, for any reason — see promptCallbacksWithOrigin.
+  const childGone = new AbortController();
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
 
@@ -944,7 +1041,9 @@ async function executeThinker(
     // Inherit the parent's memory scopes: task and memory tools the child inherits check
     // `agent.activeScopes`, and a child should check against the same scopes as its parent.
     activeScopes: parentAgent.activeScopes,
-    onStream: parentOnStream ?? undefined,
+    // Cut at settle: a call the child abandoned may still emit, and the parent's
+    // stream is re-bound per run — its late events would land in the parent's NEXT run.
+    onStream: parentOnStream ? (event) => (childGone.signal.aborted ? undefined : parentOnStream(event)) : undefined,
     spawnDepth: childDepth,
     maxIterations,
     isolation: childIsolation,
@@ -1023,7 +1122,7 @@ async function executeThinker(
     // every consent surface at once — there are fourteen `promptUser` call
     // sites across thirteen modules, and putting the sentence in any one tool
     // would leave the other thirteen exactly as they are.
-    ...promptCallbacksWithOrigin(parentAgent, spec),
+    ...promptCallbacksWithOrigin(parentAgent, spec, childGone.signal, deadline ? () => deadline.holdForHuman() : undefined),
     // ⛔ AFTER BOTH SPREADS. The first version of this line sat above
     // `...childProviderCfg` and the second below it but above this one — and the argument
     // is the same for either: a key added to one of those sources later would rebind the
@@ -1085,7 +1184,7 @@ async function executeThinker(
     }
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
-    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
+    const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });
     // Built HERE, not at the return: `runHistory.updateRun` below stores
     // `responseText`, and appending the note only on the way out left the run row
     // holding a version of the result the parent never saw — the one place
@@ -1180,6 +1279,10 @@ async function executeThinker(
     // returning '' (which mis-recorded the child 'completed'); mark it 'aborted'
     // — an intentional interruption, not a failure.
     const childAborted = err instanceof RunAbortedError;
+    // The time limit ended it — not the parent's stop and not a loop guard (both
+    // guards' errors are RunAbortedErrors too). A failure, not an interruption.
+    const timedOut = childAborted && !(err instanceof ToolLoopBreakError) && !(err instanceof ContinuationLoopError) && deadline?.signal.aborted === true;
+    const timeoutReason = `Stopped after the ${String(Math.round(spawnTimeoutMs / 60_000) || 1)}-minute spawn time limit without finishing.`;
     if (runHistory && childRunId) {
       try {
         const snap = childAgent?.getCostSnapshot() ?? null;
@@ -1192,15 +1295,15 @@ async function executeThinker(
           // and then died must not read as "0 tools", which is exactly the
           // misreading that started this whole investigation (a customer instance, 2026-08-10).
           toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
-          status: childAborted ? 'aborted' : 'failed',
-          stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
+          status: timedOut ? 'failed' : (childAborted ? 'aborted' : 'failed'),
+          stopReason: timedOut ? 'spawn_timeout' : (childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error')),
           // Record the FULL structured error so a failed sub-agent is diagnosable
           // (not just status=failed + a null error_text). Skipped for an abort —
           // an intentional interruption isn't an error to store.
           // A child that died after being refused a key still owes that reason:
           // "it failed" and "it failed after the vault refused it X" send the
           // reader to different repairs.
-          errorText: childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys),
+          errorText: timedOut ? timeoutReason : (childAborted ? undefined : appendDeniedKeyNote(formatSpawnError(err), deniedKeys)),
         });
       } catch { /* swallow */ }
     }
@@ -1217,6 +1320,9 @@ async function executeThinker(
         reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
       }
     }
+    // The time limit, not the parent's stop: say so, or the parent reads an interruption
+    // it never asked for and cannot tell a hung child from a cancelled one.
+    if (timedOut) throw new Error(timeoutReason, { cause: err });
     throw err;
   } finally {
     // `?.` here and NOT at the register site above, deliberately. This runs in a
@@ -1230,6 +1336,9 @@ async function executeThinker(
     // the required-ness. (An earlier version of this comment said "one of exactly two",
     // which was the count from before the line it sits on.)
     if (childAgent) parentAgent.abortScope?.members.delete(childAgent);
+    // The child is settled: whatever it abandoned may not ask or stream through the
+    // parent any more (see `childGone` where the callbacks are built).
+    childGone.abort();
     // One place for all three exits. The success and failure branches above
     // each read the same snapshot for their own bookkeeping; reporting it here
     // means an abort — which takes neither branch's `return` — is still counted.
@@ -1584,8 +1693,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     const results = await Promise.allSettled(
       specs.map((spec, i) => {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), SPAWN_TIMEOUT);
+        const deadline = createSpawnDeadline(spawnTimeoutMs);
         const childStart = Date.now();
         const sub = subAgents[i]!;
 
@@ -1599,9 +1707,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // shape one layer over and gets it wrong: there the release sits after the
           // `await`, so a step that throws keeps its reservation for good.
           //
-          // ⚠ What this cannot release is a child that never settles. A hung child holds
-          // its share for as long as it hangs, so the spawn timeout being dead is the
-          // other half of this bound, not an unrelated resilience issue.
+          // ⚠ What this cannot release is a child that never settles. The spawn time limit
+          // is the other half of this bound: it settles a hung child, so its share comes
+          // back. Time the child spends waiting on a human does not count (`SpawnDeadline`),
+          // so a child whose question nobody answers holds its share until the question's
+          // TTL ends it.
           if (shares !== null) {
             agent.releaseExternalCost?.(shares[i]!);
             heldForBatch -= shares[i]!;
@@ -1622,7 +1732,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // softened for. The real `Agent` cannot throw here; an `IAgent` from outside
           // this repo can.
           try { agent.chargeExternalCost?.(usd); } catch { /* never mask the child's own outcome */ }
-        }, shares === null ? undefined : shares[i])
+        }, shares === null ? undefined : shares[i], deadline)
           .then(
             (value) => {
               running.delete(sub.id);
@@ -1657,7 +1767,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               throw err;
             },
           )
-          .finally(() => clearTimeout(timeout));
+          .finally(() => deadline.clear());
       }),
     );
     if (heartbeat) clearInterval(heartbeat);

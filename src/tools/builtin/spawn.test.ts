@@ -102,6 +102,12 @@ vi.mock('../../core/agent.js', () => ({
       this.name = 'ToolLoopBreakError';
     }
   },
+  ContinuationLoopError: class ContinuationLoopError extends MockRunAbortedError {
+    constructor(prefix: string) {
+      super(prefix);
+      this.name = 'ContinuationLoopError';
+    }
+  },
 }));
 
 vi.mock('../../core/observability.js', () => ({
@@ -148,7 +154,7 @@ vi.mock('../../core/roles.js', async (importOriginal) => {
 });
 
 import { RunAbortedError, ToolLoopBreakError } from '../../core/agent.js';
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, formatAllFailedMessage, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, formatAllFailedMessage, profileExceedsMaxTier, ledgerStopReason, setSpawnTimeoutMsForTests, createSpawnDeadline } from './spawn.js';
 import { CostGuard } from '../../core/cost-guard.js';
 import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
@@ -167,6 +173,22 @@ function makeTool(name: string): ToolEntry {
 // reference assigned in beforeEach; makeAgent stamps the live reference onto
 // the returned agent stub.
 let testCounters: import('../../types/index.js').SessionCounters;
+
+/**
+ * Drive the child's prompt callbacks WHILE the child runs. A settled child's
+ * callbacks are cut on purpose (a question from what it abandoned must not reach
+ * the parent — see "once the child settles…"), so a test that calls them after the
+ * handler returned tests the cut, not the wiring. `body` only makes the calls;
+ * assert after the handler, because a throw inside a child's send is swallowed.
+ */
+type ChildCallbacks = { promptUser: PromptUserFn; promptSecret: PromptSecretFn; promptTabs: PromptTabsFn };
+async function whileChildRuns(body: (cfg: ChildCallbacks) => Promise<void>): Promise<void> {
+  const { Agent: MockAgent } = await import('../../core/agent.js');
+  mockSend.mockImplementationOnce(async () => {
+    await body(vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as ChildCallbacks);
+    return 'done';
+  });
+}
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   const tools = overrides.tools ?? [
@@ -464,6 +486,280 @@ describe('spawn_agent tool', () => {
     } finally {
       setTierSetResolver({ routingMode: 'standard', tierSet: null });
     }
+  });
+
+  describe('the spawn time limit reaches the child', () => {
+    afterEach(() => { setSpawnTimeoutMsForTests(null); });
+
+    it('the limit does not count time spent waiting on a human, and keeps what was left', () => {
+      vi.useFakeTimers();
+      try {
+        const deadline = createSpawnDeadline(100);
+        vi.advanceTimersByTime(40);
+        const release = deadline.holdForHuman();
+        vi.advanceTimersByTime(60_000); // the user reads for a minute
+        expect(deadline.signal.aborted).toBe(false);
+        release();
+        release(); // idempotent: a second call must not resume twice or go negative
+        vi.advanceTimersByTime(30);
+        // The double release left the count where it was: the next question still holds.
+        const again = deadline.holdForHuman();
+        vi.advanceTimersByTime(60_000);
+        expect(deadline.signal.aborted).toBe(false);
+        again();
+        vi.advanceTimersByTime(29);
+        expect(deadline.signal.aborted).toBe(false);
+        vi.advanceTimersByTime(1);
+        expect(deadline.signal.aborted).toBe(true);
+        // Cleared: a settled child's limit never fires.
+        const settled = createSpawnDeadline(10);
+        settled.clear();
+        vi.advanceTimersByTime(1000);
+        expect(settled.signal.aborted).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('overlapping questions hold the limit until the LAST one is answered', () => {
+      vi.useFakeTimers();
+      try {
+        const deadline = createSpawnDeadline(100);
+        expect(deadline.isHeldForHuman).toBe(false);
+        const first = deadline.holdForHuman();
+        const second = deadline.holdForHuman();
+        expect(deadline.isHeldForHuman).toBe(true);
+        vi.advanceTimersByTime(500);
+        first();
+        expect(deadline.isHeldForHuman).toBe(true);
+        vi.advanceTimersByTime(500); // the second question is still open
+        expect(deadline.signal.aborted).toBe(false);
+        second();
+        expect(deadline.isHeldForHuman).toBe(false);
+        vi.advanceTimersByTime(99);
+        expect(deadline.signal.aborted).toBe(false);
+        vi.advanceTimersByTime(1);
+        expect(deadline.signal.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a child whose question is answered after the limit would have passed keeps running and finishes', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      // The user takes longer than the whole limit to answer.
+      const later = <T,>(v: T) => new Promise<T>((resolve) => { setTimeout(() => resolve(v), 120); });
+      const parent = makeAgent({
+        promptUser: vi.fn(() => later('Yes')),
+        promptTabs: vi.fn(() => later(['A'])),
+        promptSecret: vi.fn(() => later('saved' as const)),
+      });
+      mockSend.mockImplementationOnce(async (_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => {
+        const cfg = vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as {
+          promptUser: (q: string, o?: string[]) => Promise<string>;
+          promptTabs: (q: unknown[]) => Promise<string[]>;
+          promptSecret: (n: string, p: string) => Promise<unknown>;
+        };
+        // Each kind of wait on a human holds the limit, each longer than the limit.
+        const answer = await cfg.promptUser('Send it?', ['Yes', 'No']);
+        if (opts?.disposableDeadline?.aborted) throw new MockRunAbortedError();
+        await cfg.promptTabs([{ question: 'Which?' }]);
+        if (opts?.disposableDeadline?.aborted) throw new MockRunAbortedError();
+        await cfg.promptSecret('K', 'Key?');
+        if (opts?.disposableDeadline?.aborted) throw new MockRunAbortedError();
+        return `sent after ${answer}`;
+      });
+      setSpawnTimeoutMsForTests(30);
+      const out = await spawnAgentTool.handler({ agents: [{ name: 'asker', task: 'Mail' }] }, parent);
+      expect(out).toContain('sent after Yes');
+      expect(out).not.toMatch(/spawn time limit/);
+    }, 3000);
+
+    it('a child that hangs is stopped at the limit, and the parent gets a result naming why', async () => {
+      // A provider call that never returns on its own — only the deadline ends it.
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+      }));
+      mockSend.mockResolvedValueOnce('the other child finished');
+      setSpawnTimeoutMsForTests(30);
+      const out = await spawnAgentTool.handler({ agents: [{ name: 'stuck', task: 'Analyze' }, { name: 'quick', task: 'Summarize' }] }, makeAgent());
+      // The parent run goes on: it gets the other child's result …
+      expect(out).toContain('the other child finished');
+      // … and the stuck one's reason, naming the limit.
+      expect(out).toContain('stuck');
+      expect(out).toMatch(/spawn time limit/);
+    }, 3000);
+
+    it('when the only child hangs, the refusal the parent gets names the limit', async () => {
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+      }));
+      setSpawnTimeoutMsForTests(30);
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'stuck', task: 'Analyze' }] }, makeAgent())).rejects.toThrow(/spawn time limit/);
+    }, 3000);
+
+    it('the child\'s run row records a timeout as a failure with its own reason, a stop as an interruption', async () => {
+      const rowsFor = async (send: () => void, ms: number): Promise<Record<string, unknown>> => {
+        const runHistory = { insertRun: vi.fn(() => 'child-run-1'), updateRun: vi.fn() };
+        const ctx = { sessionCounters: testCounters, runHistory, knowledgeLayer: null } as unknown as import('../../core/tool-context.js').ToolContext;
+        send();
+        setSpawnTimeoutMsForTests(ms);
+        await spawnAgentTool.handler({ agents: [{ name: 'c', task: 'Analyze' }] }, makeAgent({ toolContext: ctx })).catch(() => undefined);
+        return runHistory.updateRun.mock.calls.at(-1)![1] as Record<string, unknown>;
+      };
+      const timedOut = await rowsFor(() => mockSend.mockImplementationOnce((_t: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_r, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+      })), 30);
+      expect(timedOut).toEqual(expect.objectContaining({ status: 'failed', stopReason: 'spawn_timeout' }));
+      expect(String(timedOut['errorText'])).toMatch(/spawn time limit/);
+
+      const stopped = await rowsFor(() => mockSend.mockImplementationOnce(() => Promise.reject(new MockRunAbortedError())), 60_000);
+      expect(stopped).toEqual(expect.objectContaining({ status: 'aborted', stopReason: 'aborted' }));
+    }, 3000);
+
+    it('a loop break that lands after the limit fired is still a loop break, not a timeout', async () => {
+      const { ToolLoopBreakError } = await import('../../core/agent.js');
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ToolLoopBreakError('repeat:x')), { once: true });
+      }));
+      setSpawnTimeoutMsForTests(30);
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'looping', task: 'Analyze' }] }, makeAgent())).rejects.not.toThrow(/spawn time limit/);
+    }, 3000);
+
+    it('a continuation-loop stop that lands after the limit fired is not a timeout either', async () => {
+      const { ContinuationLoopError } = await import('../../core/agent.js');
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new ContinuationLoopError('prefix')), { once: true });
+      }));
+      setSpawnTimeoutMsForTests(30);
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'continuing', task: 'Analyze' }] }, makeAgent())).rejects.not.toThrow(/spawn time limit/);
+    }, 3000);
+
+    it('once the child settles, a late question from what it abandoned never reaches the parent, on any channel', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const seen: (AbortSignal | undefined)[] = [];
+      const parent = makeAgent({
+        promptUser: vi.fn(async (_q: unknown, _o?: string[], m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return 'Yes'; }),
+        promptTabs: vi.fn(async (_q: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return ['A']; }),
+        promptSecret: vi.fn(async (_n: unknown, _p: unknown, _k?: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return 'saved' as const; }),
+      });
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+      }));
+      setSpawnTimeoutMsForTests(30);
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'late', task: 'Analyze' }] }, parent)).rejects.toThrow(/spawn time limit/);
+      type Ask = (q: string, o?: string[], m?: { signal?: AbortSignal | undefined }) => Promise<string>;
+      type Tabs = (q: unknown[], m?: { signal?: AbortSignal | undefined }) => Promise<string[]>;
+      type Secret = (n: string, p: string, k?: string, m?: { signal?: AbortSignal | undefined }) => Promise<unknown>;
+      const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as { promptUser: Ask; promptTabs: Tabs; promptSecret: Secret };
+      // Not given — and the parent's channel (which might ignore a stopped signal, as the
+      // worker loop's does) is never asked, so nobody can answer it.
+      await expect(cfg.promptUser('late?', ['Yes', 'No'])).resolves.toBe('__dismissed__');
+      await expect(cfg.promptTabs([{ question: 'late?' }])).resolves.toEqual([]);
+      await expect(cfg.promptSecret('K', 'late?')).resolves.toBe('canceled');
+      expect(seen).toHaveLength(0);
+    }, 3000);
+
+    it('a question still open when the child settles carries a signal that stops at the settle', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const seen: (AbortSignal | undefined)[] = [];
+      const never = <T,>() => new Promise<T>(() => { /* nobody answers */ });
+      const parent = makeAgent({
+        promptUser: vi.fn((_q: unknown, _o?: string[], m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return never<string>(); }),
+        promptTabs: vi.fn((_q: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return never<string[]>(); }),
+        promptSecret: vi.fn((_n: unknown, _p: unknown, _k?: unknown, m?: { signal?: AbortSignal }) => { seen.push(m?.signal); return never<'saved'>(); }),
+      });
+      const own = new AbortController();
+      mockSend.mockImplementationOnce(async () => {
+        const cfg = vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as {
+          promptUser: (q: string, o?: string[], m?: { signal?: AbortSignal | undefined }) => Promise<string>;
+          promptTabs: (q: unknown[], m?: { signal?: AbortSignal | undefined }) => Promise<string[]>;
+          promptSecret: (n: string, p: string, k?: string, m?: { signal?: AbortSignal | undefined }) => Promise<unknown>;
+        };
+        // Raised while the child lives, with no run signal of its own, and left open.
+        void cfg.promptUser('q?', undefined, { signal: undefined });
+        void cfg.promptTabs([{ question: 'q?' }], { signal: undefined });
+        void cfg.promptSecret('K', 'q?', undefined, { signal: undefined });
+        void cfg.promptUser('own?', undefined, { signal: own.signal });
+        return 'done';
+      });
+      await spawnAgentTool.handler({ agents: [{ name: 'open', task: 'Analyze' }] }, parent);
+      expect(seen).toHaveLength(4);
+      expect(seen.slice(0, 3).every(sig => sig?.aborted === true)).toBe(true);
+      // A signal the call did carry still wins.
+      expect(seen[3]).toBe(own.signal);
+    }, 3000);
+
+    it('once the child settles, what it abandoned no longer streams into the parent', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const parentStream = vi.fn();
+      const parent = makeAgent({ onStream: parentStream });
+      type Emit = (e: unknown) => unknown;
+      mockSend.mockImplementationOnce(async (_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => {
+        const cfg = vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as { onStream: Emit };
+        await cfg.onStream({ type: 'tool_result', name: 'http', result: 'early', agent: 'late' });
+        return new Promise((_resolve, reject) => {
+          opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+        });
+      });
+      setSpawnTimeoutMsForTests(30);
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'late', task: 'Analyze' }] }, parent)).rejects.toThrow(/spawn time limit/);
+      const cfg = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as { onStream: Emit };
+      await cfg.onStream({ type: 'tool_result', name: 'http', result: 'late', agent: 'late' });
+      const results = parentStream.mock.calls.map(c => c[0] as { type: string; result?: string }).filter(e => e.type === 'tool_result').map(e => e.result);
+      // Positive control: while the child lived, its events did reach the parent.
+      expect(results).toContain('early');
+      expect(results).not.toContain('late');
+    }, 3000);
+
+    it('a question that fails still gives the limit back: the child then hangs and is stopped at it', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const parent = makeAgent({ promptUser: vi.fn(() => Promise.reject(new Error('channel gone'))) });
+      mockSend.mockImplementationOnce(async (_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => {
+        const cfg = vi.mocked(MockAgent).mock.calls.at(-1)![0] as unknown as { promptUser: (q: string) => Promise<string> };
+        await cfg.promptUser('Send it?').catch(() => undefined);
+        return new Promise((_resolve, reject) => {
+          opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+        });
+      });
+      setSpawnTimeoutMsForTests(30);
+      await expect(spawnAgentTool.handler({ agents: [{ name: 'asker', task: 'Mail' }] }, parent)).rejects.toThrow(/spawn time limit/);
+    }, 3000);
+
+    it('a child that finished leaves no limit timer behind', async () => {
+      const spy = vi.spyOn(globalThis, 'clearTimeout');
+      mockSend.mockResolvedValueOnce('done');
+      setSpawnTimeoutMsForTests(60_000);
+      const created: unknown[] = [];
+      const realSetTimeout = globalThis.setTimeout;
+      const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        const handle = realSetTimeout(fn, ms);
+        if (ms === 60_000) created.push(handle);
+        return handle;
+      }) as typeof setTimeout);
+      try {
+        await spawnAgentTool.handler({ agents: [{ name: 'done', task: 'Analyze' }] }, makeAgent());
+      } finally {
+        setSpy.mockRestore();
+      }
+      expect(created).toHaveLength(1);
+      expect(spy).toHaveBeenCalledWith(created[0]);
+      spy.mockRestore();
+    });
+
+    it('a stop from the parent is not reported as the time limit', async () => {
+      mockSend.mockImplementationOnce(() => Promise.reject(new MockRunAbortedError()));
+      setSpawnTimeoutMsForTests(60_000);
+      const outcome = spawnAgentTool.handler({ agents: [{ name: 'stopped', task: 'Analyze' }] }, makeAgent());
+      await expect(outcome).rejects.not.toThrow(/spawn time limit/);
+      // Positively the stop, and the run row says aborted, not a timeout.
+      await expect(outcome).rejects.toThrow(/interrupt|abort/i);
+    });
   });
 
   it('REFUSES a spawn profile pinning a blocked model (cannot be substituted)', async () => {
@@ -988,6 +1284,16 @@ describe('spawn_agent tool', () => {
     it('tags a child tool_call with both its display name and its id', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const onStream = vi.fn();
+      // Replay child events through the wrapper the child agent was handed — while the
+      // child runs. This test used to replay them AFTER the handler returned; that path
+      // is cut ON PURPOSE (a settled child's abandoned calls must not stream into the
+      // parent's next run — see "once the child settles…"). Do not "fix" it back.
+      mockSend.mockImplementationOnce(async () => {
+        const childCfg = vi.mocked(MockAgent).mock.calls.at(-1)![0] as { onStream: StreamHandler };
+        await childCfg.onStream({ type: 'tool_call', name: 'read_file', input: { path: 'x' }, agent: 'digger' });
+        await childCfg.onStream({ type: 'tool_result', name: 'read_file', result: 'ok', agent: 'digger' });
+        return 'done';
+      });
       await spawnAgentTool.handler(
         { agents: [{ name: 'digger', task: 'dig' }] },
         makeAgent({ onStream: onStream as StreamHandler }),
@@ -996,13 +1302,7 @@ describe('spawn_agent tool', () => {
       const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
       const sub = (spawn['subAgents'] as Array<{ id: string; name: string }>)[0]!;
 
-      // Replay a child event through the wrapper the child agent was handed.
-      const childCfg = vi.mocked(MockAgent).mock.calls[0]![0] as { onStream: StreamHandler };
-      onStream.mockClear();
-      await childCfg.onStream({ type: 'tool_call', name: 'read_file', input: { path: 'x' }, agent: 'digger' });
-      await childCfg.onStream({ type: 'tool_result', name: 'read_file', result: 'ok', agent: 'digger' });
-
-      const [call, result] = streamEvents(onStream);
+      const [call, result] = streamEvents(onStream).filter((e) => e['name'] === 'read_file');
       expect(call).toMatchObject({ type: 'tool_call', name: 'read_file', subAgent: 'digger', subAgentId: sub.id });
       expect(result).toMatchObject({ type: 'tool_result', name: 'read_file', subAgent: 'digger', subAgentId: sub.id });
     });
@@ -1551,6 +1851,8 @@ describe('spawn_agent tool', () => {
       expect.stringMatching(
         /^\[Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\]\n\n<context>\nThe codebase uses TypeScript\.\n<\/context>\n\nAnalyze this$/,
       ),
+      // The spawn time limit travels with the task (see executeThinker's `deadline`).
+      expect.objectContaining({ disposableDeadline: expect.any(AbortSignal) }),
     );
   });
 
@@ -1643,6 +1945,25 @@ describe('spawn_agent tool', () => {
       const calls = (MockAgent as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
       return calls.map((c) => (c[0]['costGuard'] as { maxBudgetUSD: number }).maxBudgetUSD);
     }
+
+    it('a child that hangs gives its share back once the spawn time limit ends it', async () => {
+      // The hold is released when a child settles, so a hung child would hold its share
+      // for as long as it hangs. The time limit is what makes it settle.
+      const { agent, guard } = parentWithCeiling(20);
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+      }));
+      setSpawnTimeoutMsForTests(30);
+      try {
+        const run = spawnAgentTool.handler({ agents: [{ name: 'stuck', task: 'Analyze' }] }, agent);
+        await vi.waitFor(() => { expect(guard.remainingBudgetUSD()).toBe(15); });
+        await expect(run).rejects.toThrow(/spawn time limit/);
+        // The $5 share is back; the child spent nothing (no cost snapshot).
+        expect(guard.remainingBudgetUSD()).toBe(20);
+      } finally {
+        setSpawnTimeoutMsForTests(null);
+      }
+    }, 3000);
 
     it('leaves the children alone when the whole batch fits', async () => {
       // Three children at the $5 default need $15; a run with $20 left can pay for them,
@@ -2432,16 +2753,20 @@ describe('spawn_agent tool', () => {
         promptSecret: promptSecret as unknown as IAgent['promptSecret'],
         promptTabs: promptTabs as unknown as IAgent['promptTabs'],
       });
+      promptUser.mockResolvedValue('Yes');
+      promptSecret.mockResolvedValue('saved');
+      promptTabs.mockResolvedValue(['picked']);
+      const answers: unknown[] = [];
+      await whileChildRuns(async (child) => {
+        answers.push(await child.promptUser('Proceed?', ['Yes', 'No']));
+        answers.push(await child.promptSecret('STRIPE_KEY', 'Paste it', 'api_key'));
+        answers.push(await child.promptTabs([{ question: 'Which one?' }]));
+      });
       await spawnAgentTool.handler(
         { agents: [{ name: 'asker', task: 'Maybe ask the user' }] },
         agent,
       );
-
-      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as {
-        promptUser: PromptUserFn;
-        promptSecret: PromptSecretFn;
-        promptTabs: PromptTabsFn;
-      };
+      expect(vi.mocked(MockAgent)).toHaveBeenCalled();
       // All three must REACH the parent's channel so ask_user / ask_secret /
       // ask_tabs invoked by the sub-agent surface to the same UI.
       //
@@ -2452,15 +2777,10 @@ describe('spawn_agent tool', () => {
       // actually needs, so that is what is pinned — and the arguments are pinned
       // with it, because a wrapper that dropped the options would be invisible to
       // a bare "was called".
-      promptUser.mockResolvedValue('Yes');
-      promptSecret.mockResolvedValue('saved');
-      promptTabs.mockResolvedValue(['picked']);
       // The ANSWER has to come back, not just the call go out. A wrapper with a
       // block body that forgets its `return` calls through perfectly and hands
       // every consent decision back as undefined — invisible to "was called".
-      await expect(ctorArg.promptUser('Proceed?', ['Yes', 'No'])).resolves.toBe('Yes');
-      await expect(ctorArg.promptSecret('STRIPE_KEY', 'Paste it', 'api_key')).resolves.toBe('saved');
-      await expect(ctorArg.promptTabs([{ question: 'Which one?' }])).resolves.toEqual(['picked']);
+      expect(answers).toEqual(['Yes', 'saved', ['picked']]);
       expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No'], expect.anything());
       expect(promptSecret).toHaveBeenCalledWith('STRIPE_KEY', 'Paste it', 'api_key', expect.anything());
       expect(promptTabs).toHaveBeenCalledWith([{ question: 'Which one?' }], expect.anything());
@@ -2491,6 +2811,7 @@ describe('spawn_agent tool', () => {
         tools: [makeTool('bash'), askSecretTool as unknown as ToolEntry<unknown>, makeTool('spawn_agent')],
       });
 
+      await whileChildRuns(async (child) => { await child.promptSecret('STRIPE_KEY', 'Paste it'); });
       await spawnAgentTool.handler(
         { agents: [{ name: 'asker', task: 'Set up an integration' }] },
         parent,
@@ -2500,7 +2821,6 @@ describe('spawn_agent tool', () => {
         promptSecret: PromptSecretFn;
         tools: ToolEntry<unknown>[];
       };
-      await ctorArg.promptSecret('STRIPE_KEY', 'Paste it');
       expect(promptSecret, 'the child must reach the parent channel').toHaveBeenCalled();
       const names = ctorArg.tools.map((t) => t.definition.name);
       expect(names, 'a spawned child must keep ask_secret').toContain(
@@ -4138,6 +4458,7 @@ describe('spawn_agent tool', () => {
     it('stamps the child name and task onto a prompt the child raises', async () => {
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Merge');
       const agent = makeAgent({ promptUser });
+      await whileChildRuns(async (child) => { await child.promptUser('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']); });
       await spawnAgentTool.handler(
         { agents: [{ name: 'inbox-triage', task: 'Fold duplicate contacts' }] },
         agent,
@@ -4146,11 +4467,10 @@ describe('spawn_agent tool', () => {
       // The parent's OWN prompt carries nothing — the cause of that one is the
       // message directly above it, and an "asked by" line there is noise.
       await agent.promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
-      expect(promptUser.mock.calls[0]![2]).toBeUndefined();
+      expect(promptUser.mock.calls[1]![2]).toBeUndefined();
 
       // The child's does.
-      await (await childConfig()).promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
-      expect(promptUser.mock.calls[1]![2]).toMatchObject({
+      expect(promptUser.mock.calls[0]![2]).toMatchObject({
         subagent: true,
         subagentName: 'inbox-triage',
         subagentTask: 'Fold duplicate contacts',
@@ -4166,25 +4486,25 @@ describe('spawn_agent tool', () => {
       // client's `clean()` reduces it to '' — so a renderer keyed on the NAME
       // shows nothing at all for exactly the parent it exists to warn about.
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await whileChildRuns(async (child) => { await child.promptUser('Merge?', ['Merge', 'Cancel']); });
       await spawnAgentTool.handler(
         { agents: [{ name: '​', task: 'Fold duplicate contacts' }] },
         makeAgent({ promptUser }),
       );
-      await (await childConfig()).promptUser!('Merge?', ['Merge', 'Cancel']);
       expect(promptUser.mock.calls[0]![2]!.subagent, 'the flag is the engine\'s, not the spec\'s').toBe(true);
     });
 
     it('stamps promptSecret and promptTabs too, not only promptUser', async () => {
       const promptSecret = vi.fn().mockResolvedValue('saved');
       const promptTabs = vi.fn().mockResolvedValue([]);
+      await whileChildRuns(async (child) => {
+        await child.promptSecret('STRIPE_KEY', 'Paste the key');
+        await child.promptTabs([{ question: 'Which account?' }]);
+      });
       await spawnAgentTool.handler(
         { agents: [{ name: 'connector', task: 'Wire the Stripe key' }] },
         makeAgent({ promptSecret, promptTabs }),
       );
-
-      const child = await childConfig();
-      await child.promptSecret!('STRIPE_KEY', 'Paste the key');
-      await child.promptTabs!([{ question: 'Which account?' }]);
       expect(promptSecret.mock.calls[0]![3]).toMatchObject({ subagentName: 'connector' });
       expect(promptTabs.mock.calls[0]![1]).toMatchObject({ subagentName: 'connector' });
     });
@@ -4208,11 +4528,11 @@ describe('spawn_agent tool', () => {
 
     it('lets a caller-supplied meta win, so a step inside a child keeps its own', async () => {
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await whileChildRuns(async (child) => { await child.promptUser('Proceed?', ['Yes'], { subagentName: 'inner', stepId: 'load' }); });
       await spawnAgentTool.handler(
         { agents: [{ name: 'outer', task: 'Run the pipeline' }] },
         makeAgent({ promptUser }),
       );
-      await (await childConfig()).promptUser!('Proceed?', ['Yes'], { subagentName: 'inner', stepId: 'load' });
 
       const meta = promptUser.mock.calls[0]![2]!;
       expect(meta.subagentName, 'the nearer wrapper must not overwrite the nearer caller').toBe('inner');

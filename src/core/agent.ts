@@ -288,6 +288,25 @@ export class ContinuationLoopError extends RunAbortedError {
   }
 }
 
+/** What the model reads for a tool call the run stopped waiting for. Deliberately not
+ *  "failed": the call keeps running and may still complete (a mail, an HTTP write). */
+export const TOOL_ABANDONED_MESSAGE = 'The run was stopped while this tool was still running; it stopped waiting for the result. The tool may still complete.';
+
+/** `work`, unless `signal` aborts first — then a rejection carrying
+ *  {@link TOOL_ABANDONED_MESSAGE}. The losing side is observed, so neither rejects unhandled. */
+export function raceRunAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  void work.catch(() => undefined);
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = (): void => { reject(new Error(TOOL_ABANDONED_MESSAGE)); };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return Promise.race([work, aborted]).finally(() => {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  });
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   /** The agents this agent's chain may abort — see `AbortScope`. Inherited by children. */
@@ -307,9 +326,30 @@ export class Agent implements IAgent {
   }
   /** See `AgentConfig.onWireSnapshot` — operator extended-debug-capture persist sink. */
   private readonly onWireSnapshot?: ((snapshot: WireSnapshot) => void) | undefined;
-  promptUser?: PromptUserFn | undefined;
-  promptTabs?: PromptTabsFn | undefined;
-  promptSecret?: PromptSecretFn | undefined;
+  // Every prompt this agent raises carries its run's abort signal (`PromptMeta.signal`),
+  // so an aborted run — a Stop, or a sub-agent past its spawn time limit — withdraws
+  // its question instead of leaving it answerable after nobody waits for it. Set
+  // here, once, rather than at each of the call sites (tools, consent gates, the
+  // secret gate): a call site that forgot would be the one that leaks. A caller's own
+  // `signal` wins, so a child's prompt forwarded through a parent keeps the child's.
+  private _promptUser: PromptUserFn | undefined;
+  private _promptTabs: PromptTabsFn | undefined;
+  private _promptSecret: PromptSecretFn | undefined;
+  get promptUser(): PromptUserFn | undefined {
+    const raw = this._promptUser;
+    return raw ? (question, options, meta) => raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+  }
+  set promptUser(fn: PromptUserFn | undefined) { this._promptUser = fn; }
+  get promptTabs(): PromptTabsFn | undefined {
+    const raw = this._promptTabs;
+    return raw ? (questions, meta) => raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+  }
+  set promptTabs(fn: PromptTabsFn | undefined) { this._promptTabs = fn; }
+  get promptSecret(): PromptSecretFn | undefined {
+    const raw = this._promptSecret;
+    return raw ? (name, prompt, keyType, meta) => raw(name, prompt, keyType, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+  }
+  set promptSecret(fn: PromptSecretFn | undefined) { this._promptSecret = fn; }
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
@@ -1276,6 +1316,15 @@ export class Agent implements IAgent {
     this.abortController?.abort();
   }
 
+  /** The current run's abort signal; `undefined` between runs. A tool that waits on a
+   *  human (ask_user) hands it to the prompt so an aborted run withdraws its question. */
+  get runSignal(): AbortSignal | undefined {
+    return this.abortController?.signal ?? undefined;
+  }
+
+  /** Whether the current run was started with a `disposableDeadline` (set per `send`). */
+  private _abandonsCallsOnAbort = false;
+
   /** Schedule a memory extraction, draining oldest if at concurrency cap. */
   /**
    * Turn-end capture hook. Legacy behaviour when the DK flag is OFF: auto-extract
@@ -1994,7 +2043,19 @@ export class Agent implements IAgent {
 
   async send(
     userMessage: string | unknown[],
-    opts?: { suppressTools?: boolean; userMessagePrePersisted?: boolean },
+    opts?: {
+      suppressTools?: boolean;
+      userMessagePrePersisted?: boolean;
+      /**
+       * A caller's deadline for THIS run, on an agent the caller THROWS AWAY after it
+       * (a spawned child). Its abort aborts the run like `abort()`, and — the part the
+       * name is for — the run then stops waiting for tool calls still in flight: they
+       * keep running on an agent nobody reads again. On a long-lived agent that would
+       * land their late state, stream events and cost in its NEXT run, so only a
+       * single-use agent may get one (a test pins spawn.ts as the only caller).
+       */
+      disposableDeadline?: AbortSignal | undefined;
+    },
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
@@ -2058,7 +2119,22 @@ export class Agent implements IAgent {
     this.costGuard?.reset();
     this._turnToolNames.clear();
     this._suppressTools = opts?.suppressTools === true;
+    // Linked to THIS run's controller (created above): an abort that already happened
+    // is not lost (a listener on a controller that `send` then replaces would be). Added
+    // just before the `try` so its `finally` always removes it — a later abort of a
+    // long-lived signal then leaves no listener behind.
+    const runController = this.abortController;
+    const externalSignal = opts?.disposableDeadline;
+    this._abandonsCallsOnAbort = externalSignal !== undefined;
+    const onExternalAbort = (): void => { runController.abort(); };
+    if (externalSignal) {
+      if (externalSignal.aborted) runController.abort();
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     try {
+      // Already aborted before the run began → no provider call; the catch below turns
+      // it into the same `RunAbortedError` (and rollback) as an abort mid-run.
+      if (this.abortController.signal.aborted) throw new RunAbortedError();
       return await this._loop();
     } catch (err: unknown) {
       if (this.abortController.signal.aborted) {
@@ -2106,6 +2182,7 @@ export class Agent implements IAgent {
       this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
     } finally {
+      externalSignal?.removeEventListener('abort', onExternalAbort);
       // Drain fire-and-forget memory extraction so the stream isn't orphaned (avoids 499)
       if (this._pendingMemory.length > 0) {
         await Promise.allSettled(this._pendingMemory);
@@ -3528,8 +3605,18 @@ export class Agent implements IAgent {
     const toExecute = toolCalls.slice(0, limit);
     const truncated = toolCalls.slice(limit);
 
+    // A disposable run (`send`'s `disposableDeadline`, i.e. a spawned child) stops
+    // waiting for its tool calls when it is aborted — the whole call, including the
+    // consent and secret gates that prompt BEFORE the handler, and the tools exempt
+    // from the tool timeout (ask_user, ask_secret, run_workflow): those are exactly the
+    // waits that had no end. The call itself is not cancelled; it finishes on an agent
+    // nobody reads again, and the model is told the truth (`TOOL_ABANDONED_MESSAGE`).
+    // A long-lived agent keeps waiting, as before: abandoning there would land the
+    // call's late state in the agent's next run. Its waits on a human still end on a
+    // stop, because the prompt itself is withdrawn (`PromptMeta.signal`, see `promptUser`).
+    const raceSignal = this._abandonsCallsOnAbort ? this.abortController?.signal : undefined;
     const settled = await Promise.allSettled(
-      toExecute.map(tc => this._executeOne(tc)),
+      toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
     );
     this._taintBeforeBatch = undefined;
 

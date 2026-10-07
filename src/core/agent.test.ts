@@ -59,7 +59,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import { Agent, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
 import type { PromptText } from '../types/index.js';
@@ -1495,7 +1495,8 @@ describe('Agent', () => {
       });
       const result = await agent.send('Delete everything');
       expect(result).toBe('Done');
-      expect(promptUser).toHaveBeenCalledWith('Dangerous: rm -rf /', ['Allow', 'Deny', '\x00']);
+      // The consent prompt carries the run's signal, so a stopped run withdraws it.
+      expect(promptUser).toHaveBeenCalledWith('Dangerous: rm -rf /', ['Allow', 'Deny', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
     });
 
@@ -1571,7 +1572,7 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
       await agent.send('Spawn deep');
-      expect(promptUser).toHaveBeenCalledWith('⚠ spawn_agent: deep', ['Allow deep', 'Run on balanced', 'Cancel', '\x00']);
+      expect(promptUser).toHaveBeenCalledWith('⚠ spawn_agent: deep', ['Allow deep', 'Run on balanced', 'Cancel', '\x00'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(tool.handler).toHaveBeenCalled();
       expect(consumed).toBe('balanced');
     });
@@ -2549,6 +2550,182 @@ describe('Agent', () => {
       const data = call![0] as { input?: string };
       expect(data.input!.length).toBeLessThanOrEqual(2000);
     });
+  });
+
+  describe('an external signal on send (a caller\'s deadline)', () => {
+    it('an already-aborted signal stops the run before any provider call', async () => {
+      mockProcess.mockClear();
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      const deadline = new AbortController();
+      deadline.abort();
+      await expect(agent.send('go', { disposableDeadline: deadline.signal })).rejects.toBeInstanceOf(RunAbortedError);
+      expect(mockProcess).not.toHaveBeenCalled();
+    });
+
+    it('an abort during the run aborts it like abort() does', async () => {
+      const deadline = new AbortController();
+      // The provider call is in flight when the deadline fires; the stream then fails.
+      mockProcess.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        setTimeout(() => { deadline.abort(); reject(new Error('stream closed')); }, 5);
+      }));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await expect(agent.send('go', { disposableDeadline: deadline.signal })).rejects.toBeInstanceOf(RunAbortedError);
+    });
+
+    it('releases a run parked on a tool with no time limit (ask_user) when the signal fires', async () => {
+      const deadline = new AbortController();
+      // ask_user is exempt from the tool timeout: before, nothing ended this wait.
+      const parked = makeTool('ask_user', vi.fn(() => new Promise<string>(() => { /* never answered */ })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-ask', name: 'ask_user', input: { question: 'q' } }]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [parked] });
+      const run = agent.send('go', { disposableDeadline: deadline.signal });
+      setTimeout(() => deadline.abort(), 20);
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+    }, 3000);
+
+    it('releases a run parked on an ordinary tool long before its own time limit', async () => {
+      const deadline = new AbortController();
+      const slow = makeTool('slow_tool', vi.fn(() => new Promise<string>(() => { /* hangs */ })));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-slow', name: 'slow_tool', input: {} }]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [slow] });
+      const run = agent.send('go', { disposableDeadline: deadline.signal });
+      setTimeout(() => deadline.abort(), 20);
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+    }, 3000);
+
+    it('a run aborted just before its tool is dispatched does not wait for the tool', async () => {
+      const deadline = new AbortController();
+      const parked = makeTool('ask_user', vi.fn(() => new Promise<string>(() => { /* never answered */ })));
+      // The abort lands while the provider answer is being produced — before dispatch.
+      mockProcess.mockImplementationOnce(() => { deadline.abort(); return Promise.resolve(toolUseResponse([{ id: 'tu-late', name: 'ask_user', input: { question: 'q' } }])); });
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [parked] });
+      await expect(agent.send('go', { disposableDeadline: deadline.signal })).rejects.toBeInstanceOf(RunAbortedError);
+    }, 3000);
+
+    it('releases a run parked on a consent prompt raised BEFORE the tool handler', async () => {
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      const deadline = new AbortController();
+      let consentSignal: AbortSignal | undefined;
+      const promptUser = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => {
+        consentSignal = meta?.signal;
+        return new Promise<string>(() => { /* nobody answers */ });
+      });
+      const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-c', name: 'bash', input: { command: 'rm -rf /' } }]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      const run = agent.send('go', { disposableDeadline: deadline.signal });
+      setTimeout(() => deadline.abort(), 20);
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+      expect(tool.handler).not.toHaveBeenCalled();
+      // The consent prompt got the run's signal — the HTTP side withdraws on it.
+      expect(consentSignal?.aborted).toBe(true);
+    }, 3000);
+
+    it('attaches the run signal to every prompt kind it raises, and keeps a caller\'s own', async () => {
+      const seen: Record<string, AbortSignal | undefined> = {};
+      const own = new AbortController();
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6',
+        promptUser: vi.fn(async (_q, _o, m) => { seen['user'] = m?.signal; return 'ok'; }),
+        promptTabs: vi.fn(async (_q, m) => { seen['tabs'] = m?.signal; return ['ok']; }),
+        promptSecret: vi.fn(async (_n, _p, _k, m) => { seen['secret'] = m?.signal; return 'saved' as const; }),
+      });
+      const tool = makeTool('asker', vi.fn(async () => {
+        await agent.promptUser!('q');
+        await agent.promptTabs!([{ question: 'q' }]);
+        await agent.promptSecret!('K', 'p');
+        await agent.promptUser!('q2', undefined, { signal: own.signal });
+        return 'done';
+      }));
+      (agent as unknown as { tools: unknown[] }).tools = [tool];
+      let runSignal: AbortSignal | undefined;
+      mockProcess
+        .mockImplementationOnce(() => { runSignal = agent.runSignal; return Promise.resolve(toolUseResponse([{ id: 'tu-a', name: 'asker', input: {} }])); })
+        .mockResolvedValueOnce(endTurnResponse('end'));
+      await agent.send('go');
+      expect(runSignal).toBeInstanceOf(AbortSignal);
+      expect(seen['tabs']).toBe(runSignal);
+      expect(seen['secret']).toBe(runSignal);
+      // The last promptUser call passed its own signal — that one wins.
+      expect(seen['user']).toBe(own.signal);
+    });
+
+    it('the race says the tool may still complete, and leaves no listener on the run signal', async () => {
+      const run = new AbortController();
+      const added = vi.spyOn(run.signal, 'addEventListener');
+      const removed = vi.spyOn(run.signal, 'removeEventListener');
+      const pending = raceRunAbort(new Promise<string>(() => { /* still running */ }), run.signal);
+      run.abort();
+      await expect(pending).rejects.toThrow(TOOL_ABANDONED_MESSAGE);
+      expect(TOOL_ABANDONED_MESSAGE).toMatch(/may still complete/);
+      const finished = new AbortController();
+      const fAdded = vi.spyOn(finished.signal, 'addEventListener');
+      const fRemoved = vi.spyOn(finished.signal, 'removeEventListener');
+      await expect(raceRunAbort(Promise.resolve('ok'), finished.signal)).resolves.toBe('ok');
+      expect(fRemoved).toHaveBeenCalledWith('abort', fAdded.mock.calls[0]![1]);
+      expect(added).toHaveBeenCalledTimes(1);
+      expect(removed).toHaveBeenCalledTimes(1);
+    });
+
+    it('exposes the run signal while a run is active, and none between runs', async () => {
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      expect(agent.runSignal).toBeUndefined();
+      let seen: AbortSignal | undefined;
+      mockProcess.mockImplementationOnce(() => { seen = agent.runSignal; return Promise.resolve(endTurnResponse('ok')); });
+      await agent.send('go');
+      expect(seen).toBeInstanceOf(AbortSignal);
+      expect(agent.runSignal).toBeUndefined();
+    });
+
+    it('removes its listener when the run ends, so a long-lived signal collects none', async () => {
+      const deadline = new AbortController();
+      const added = vi.spyOn(deadline.signal, 'addEventListener');
+      const removed = vi.spyOn(deadline.signal, 'removeEventListener');
+      mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      await agent.send('go', { disposableDeadline: deadline.signal });
+      expect(added).toHaveBeenCalledTimes(1);
+      expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]![1]);
+      // And a later abort of that signal leaves the finished agent's next run alone.
+      mockProcess.mockResolvedValueOnce(endTurnResponse('again'));
+      const next = agent.send('next');
+      deadline.abort();
+      await expect(next).resolves.toBe('again');
+    });
+
+    it('a long-lived agent (no disposable deadline) still waits for its tool on abort(), as before', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const slow = makeTool('slow_tool', vi.fn(async () => { await gate; return 'finished'; }));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-wait', name: 'slow_tool', input: {} }]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [slow] });
+      let settled = false;
+      const run = agent.send('go').finally(() => { settled = true; });
+      await vi.waitFor(() => { expect(slow.handler).toHaveBeenCalled(); });
+      agent.abort();
+      await new Promise((r) => setTimeout(r, 40));
+      // Abandoning here would land the call's late state in this agent's NEXT run.
+      expect(settled).toBe(false);
+      release();
+      await run.catch(() => undefined);
+      expect(settled).toBe(true);
+    }, 3000);
+
+    it('a long-lived agent\'s pending confirmation ends on a stop: the question is withdrawn and the tool never runs', async () => {
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
+      // Stands in for the HTTP prompt: withdrawn on its signal, it settles as dismissed.
+      const promptUser = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => new Promise<string>((resolve) => {
+        meta?.signal?.addEventListener('abort', () => resolve('__dismissed__'), { once: true });
+      }));
+      const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
+      mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu-stop', name: 'bash', input: { command: 'rm -rf /' } }]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      const run = agent.send('go');
+      await vi.waitFor(() => { expect(promptUser).toHaveBeenCalled(); });
+      agent.abort();
+      await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+      expect(tool.handler).not.toHaveBeenCalled();
+    }, 3000);
   });
 
   describe('recordToolCall sink', () => {
