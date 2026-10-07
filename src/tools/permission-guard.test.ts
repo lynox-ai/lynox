@@ -2304,8 +2304,9 @@ describe('isDangerous', () => {
       ['git -C /srv/a\\"b push', 'git push'],
       ['git -C . "push"', 'git push'],
       ["git -C . p''ush", 'git push'],
-      // Each surface carries its own share: the segments split at `;`, and quote removal
-      // turns `p''ush`, a quoted option and a command inside quotes into what the shell runs.
+      // Each surface carries its own share: the segments split at `;`; quote removal turns
+      // `p''ush`, a quoted option and a command inside quotes into what the shell runs; and the
+      // unsplit chunk keeps a quoted `;` (`'a;b'`) from splitting the command in two.
       ['echo -n hi;git -C . push', 'git push'],
       ["git -C 'a;b' p''ush", 'git push'],
       ["echo -n hi;git -C . p''ush", 'git push'],
