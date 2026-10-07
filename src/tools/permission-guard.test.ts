@@ -2333,6 +2333,21 @@ describe('isDangerous', () => {
       expect(auto(command)).toBeNull();
     });
 
+    // Reaching `git <subcommand>` behind `-C` must not drag in the plumbing commands whose names
+    // merely start with a ruled one: `merge-base` and `commit-tree` read, they do not merge or commit.
+    describe.each(['', '-C /repo '])('git %s<subcommand>', (opts) => {
+      it.each(['merge-base HEAD origin/main', 'merge-tree --write-tree a b', 'commit-tree -p HEAD t', 'commit-graph verify'])(
+        'leaves %s free', (sub) => {
+          expect(auto(`git ${opts}${sub}`)).toBeNull();
+          expect(ask(`git ${opts}${sub}`)).toBeNull();
+        },
+      );
+      it.each([['merge origin/main', 'git merge'], ['commit -m msg', 'git commit']])('still stops %s', (sub, label) => {
+        expect(auto(`git ${opts}${sub}`)).toContain(label);
+        expect(ask(`git ${opts}${sub}`)).toContain(label);
+      });
+    });
+
     it('drops the options for a CLI the rules have never heard of', () => {
       // No tool is listed in the mechanism, so an unknown CLI's subcommand surfaces the same way.
       expect(withoutLeadingOptions('frobctl --region eu-1 -v --dry-run=false deploy now')).toContain('frobctl deploy now');
