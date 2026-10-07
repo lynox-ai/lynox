@@ -52,7 +52,7 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   yours to run. It reaches wider than it strictly must, on purpose — too narrow
   fails open, too broad costs one gate run.
 - `review` — what the `code-review` round FOUND, which is the one thing `gates:` cannot
-  say. `<n> <model> round(s), <result>`, where the result is `no findings` or
+  say. `<n> <model> <round|rounds>, <result>`, where the result is `no findings` or
   `<N> findings, <breakdown>`; the breakdown is `all fixed` or counts that **sum to N**:
   `3 fixed` · `2 fixed, 1 filed` · `3 fixed, 1 filed, 1 refuted`. A finding is fixed in
   this diff, **filed** as a register row, or **refuted** on inspection — the third slot
@@ -80,7 +80,7 @@ fabricated line is worse than none.)
 ```gate-record
 head: <short SHA>
 gates: <which gates ran>
-review: <n> <model> round(s), <result>
+review: <n> <model> <round|rounds>, <result>
 security: <origin>, <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived

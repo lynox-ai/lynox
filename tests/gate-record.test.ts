@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -418,10 +418,207 @@ describe('gate-record — the shipped template does not answer its own questions
     expect(errors).toContain('unknown gate');
     expect(errors).toContain('`delta:`');
     expect(errors).toContain('`mutations:`');
-    // ⭐ This assertion is why the field is in the template at all. Without it, adding a mandatory
-    // field and forgetting the template leaves the perfectly-filled template REJECTED — measured:
-    // that is what happened on pro's first cut, and this test is the one that would have caught it.
-    expect(errors).toContain('`review: <n> <model> round(s), <result>`');
+    // ⚠ WHAT THIS UNIQUELY BINDS is that the message ECHOES THE FIELD NAME with the author's
+    // value — measured: dropping the `review: ` prefix from the echo kills this assertion and
+    // nothing else. The file treats that as load-bearing elsewhere (`roundResultErrors` throws
+    // when its `quoted` argument is missing, so that a message can never name no field).
+    //
+    // It reads `REVIEW_FORMAT`, so there is no typed second copy; and the «skeleton equals the
+    // prescribed format» property it used to stand in for is now owned outright by the
+    // one-string case below. An earlier version of this comment claimed to be the sole witness
+    // for a half-filled field and called itself «two copies to keep in step» — both true of the
+    // design before the constant existed, and stale within the commit that introduced it.
+    expect(errors).toContain(`\`review: ${REVIEW_FORMAT}\``);
+  });
+
+  /**
+   * ⭐ The per-FIELD half of "answers nothing in advance". The test above reads the aggregate
+   * message, which goes red as long as ANY field is still a placeholder — so a single field
+   * quietly pre-filled (`review: <n> opus round, no findings`) leaves it green.
+   *
+   * ⚠ An assertion pinning the message's echo of the template line used to stand in for this.
+   * It worked, by mirroring `.github/pull_request_template.md` into a string here — two copies
+   * to keep in lockstep, which is the shape this whole change exists to remove. And it covered
+   * one field where the property holds for all of them.
+   */
+  it('⭐ every field is still refused when it is the ONLY placeholder left', () => {
+    const shipped = (extractRecord(TEMPLATE) as { fields: Record<string, string> }).fields;
+    // A base that PASSES, so the only thing under test is the one substituted field. It owes the
+    // security gate, so `security:` is live here too — on a code diff that field is not read at
+    // all and this test would silently skip it.
+    const base = { gates: 'code-review, delta, security', security: 'own round, no findings' };
+    expect(evaluate({ body: record(base), head: HEAD, files: SEC }).ok, 'the base is not valid — every case below would pass for the wrong reason').toBe(true);
+    for (const [field, line] of Object.entries(shipped)) {
+      const v = evaluate({ body: record({ ...base, [field]: line }), head: HEAD, files: SEC });
+      expect(v.ok, `template field \`${field}:\` is ACCEPTED as shipped — it answers its own question`).toBe(false);
+    }
+  });
+
+  /**
+   * ⭐ THE MECHANISM for the two copies this change fixed BY HAND, which is the same omission it
+   * exists to repair one level up: a correction without a guard is prose, and prose loses.
+   * Measured before this test existed — reverting either copy to the refused form left all 143
+   * tests green, so the author-facing description could drift straight back.
+   *
+   * ⚠ It sweeps for the refused LITERAL rather than comparing each copy to the constant, because
+   * the copies are not all the same shape: the template's skeleton and its field description
+   * carry the whole format, the script's docblock carries only its head. One absolute rule covers
+   * every shape: **the two PRESCRIBING surfaces contain no example of the refused form at all.**
+   *
+   * That is why the script's docblock no longer tells the story — a sweep with an exception is a
+   * sweep somebody widens. This FILE may describe the defect freely and does; it prescribes
+   * nothing, and nobody copies a test comment into a PR body. The scope is the point, not an
+   * oversight: `expect(TEST_FILE).not.toContain(...)` would be the wrong rule.
+   */
+  it('⭐ neither prescribing surface carries an example of the refused form', () => {
+    const SCRIPT = readFileSync(
+      fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url)),
+      'utf-8',
+    );
+    // ⚠ ONE value feeds both the sweep and its control. A previous version built `refused` from
+    // the constant, asserted THAT, and then grepped a separately typed `'round(s)'` — so the
+    // literal actually swept was covered by nothing, and weakening it to `'ROUND(S)'` passed
+    // silently. Measured. The sweep greps the bare marker rather than the whole format on
+    // purpose: the script's docblock carried only the format's HEAD, so a whole-format
+    // `not.toContain` would have missed it.
+    const PLURAL = 'round(s)';
+
+    // ⚠ THE PREMISE, and it needs the pair. Asserting only that the record is refused is two
+    // causes for one observation — a stale `head:` refuses it too. So: refused WITH the
+    // parenthesised plural, accepted with the form the skeleton teaches, same base record.
+    expect(evaluate({ body: record({ review: `1 opus ${PLURAL}, no findings` }), head: HEAD, files: CODE }).ok,
+      'the grammar now ACCEPTS the parenthesised plural — this sweep guards nothing').toBe(false);
+    expect(evaluate({ body: record({ review: '1 opus round, no findings' }), head: HEAD, files: CODE }).ok,
+      'the base record is broken for some other reason, so the refusal above proves nothing').toBe(true);
+
+    // ⚠ Each surface carries its OWN token, and each token is absent from the other. A shared
+    // one does not identify anything: with `gate-record` for both, pointing the script read at
+    // the template left all 145 green — the guard satisfied, the template swept twice and the
+    // script never swept at all. Measured, and silent, which is the direction that matters.
+    //
+    // ⚠ And each token is STRUCTURAL, not prose: the fence is what `extractRecord` parses, the
+    // export is the declaration this file imports at the top. Structural does NOT mean unloseable,
+    // and an earlier version of this comment claimed it did — «it cannot vanish while the test
+    // compiles» was wrong, and wrong in the expensive direction, because it promised an absence of
+    // false reds. `const REVIEW_FORMAT = …; export { REVIEW_FORMAT }` compiles, imports fine, and
+    // deletes the token: this guard CAN red while the sweep is reading the right file. What is
+    // true is the narrower thing — the message names the token, so that red costs one second to
+    // diagnose. Prose would be worse, not better: the script keeps the string `gate-record` out of
+    // its own code (it assembles `MARK` from parts), so every occurrence there is a COMMENT, and
+    // the comments in that file are rewritten most commits. Measured: rewording those five
+    // comments reds a comment-anchored guard while the sweep reads the right file.
+    const surfaces: Array<[string, string, string]> = [
+      ['the PR template', TEMPLATE, '```gate-record'],
+      ['scripts/gate-record.mjs', SCRIPT, 'export const REVIEW_FORMAT'],
+    ];
+
+    // ⚠ The property that makes a token IDENTIFY its surface, asserted instead of entrusted to the
+    // choice of value: a token must be ABSENT from every other surface. Without this the whole
+    // repair has no witness — set both tokens back to the shared `gate-record` and all 145 stay
+    // green while the hole described above is silently restored. Measured, both directions: each
+    // token occurs exactly once in its own surface and zero times in the other.
+    for (const [label, , token] of surfaces) {
+      for (const [otherLabel, otherText] of surfaces) {
+        if (otherLabel === label) continue;
+        expect(
+          otherText,
+          `the token chosen for ${label} (\`${token}\`) also occurs in ${otherLabel}, so it cannot tell the two reads apart — a shared token satisfies this guard without identifying anything`,
+        ).not.toContain(token);
+      }
+    }
+
+    for (const [label, text, token] of surfaces) {
+      expect(text, `the sweep is not reading ${label} — it found no \`${token}\``).toContain(token);
+      expect(text, `${label} contains an example of the form the grammar refuses — an author who reads it writes a record that fails`)
+        .not.toContain(PLURAL);
+    }
+    // ⚠ The marker itself, pinned directly. It used to be checked by asserting a whole format
+    // derived from it — which was a SECOND typed format literal, and a format tripwire sitting in
+    // a test about something else, which is exactly what the named pin below exists to replace.
+    // Measured: this form still kills every change to the marker, with a message that names the
+    // subject instead of printing two near-identical formats, and it takes the sweep test out of
+    // the red set when the CONSTANT drifts.
+    //
+    // ⚠ It is load-bearing for the premise pair above too, not just for the grep: change the
+    // marker to something absent from both surfaces and the pair stays green on its own (the
+    // negative leg still refuses, the positive still passes, the grep finds nothing). Measured —
+    // so this is not a tidiness assertion.
+    expect(PLURAL, 'the swept marker is not the parenthesised plural').toBe('round(s)');
+  });
+
+  /**
+   * ⭐ THE ONE TYPED COPY in this file, deliberately, and it is here rather than buried in an
+   * assertion about something else.
+   *
+   * Detecting «the source moved» needs a reference outside the source, and any such reference is
+   * either typed or another copy — one typed copy is the floor, not a smell. Wiring every reader
+   * to `REVIEW_FORMAT` was tried and measured VACUOUS for exactly this: a reader that reads the
+   * constant cannot notice the constant changing.
+   *
+   * ⚠ It lives in a test NAMED for it because of a diagnosis problem, and the honest version of
+   * that claim is narrower than the first one written here. A drifted constant does NOT red one
+   * test; it reds three, because the format legitimately appears in three different facts — this
+   * pin, «the template teaches the same format», and the aggregate placeholder message. What
+   * changed is that exactly one of them is NAMED for a format change, so the cause is readable
+   * instead of inferred from near-identical `Object.is` output. Measured: four before, three
+   * after, one self-announcing. The one that left the set is the free-text assertion, which now
+   * reads the constant — and it did not go vacuous doing so, which was the risk: it still has its
+   * own witness for its own purpose, that the message prescribes the format at all.
+   */
+  it('⭐ REVIEW_FORMAT is this exact string — changing it is a deliberate act', () => {
+    expect(REVIEW_FORMAT).toBe('<n> <model> <round|rounds>, <result>');
+  });
+
+  it('⭐ the format in the script and the one in the template are one string, not two', () => {
+    // Four copies of this format once agreed with each other and three were wrong. The script's
+    // two messages now interpolate `REVIEW_FORMAT`; this holds the template to the same value, so
+    // there is no pair left that can drift.
+    const shipped = (extractRecord(TEMPLATE) as { fields: Record<string, string> }).fields;
+    expect(shipped['review'], 'the template teaches a different format than the script prescribes').toBe(REVIEW_FORMAT);
+  });
+
+  it('⭐ …and so is the template\'s PROSE copy, which was the fourth and had no witness', () => {
+    // ⚠ The assertion above reads `extractRecord(…).fields` — the SKELETON inside the fence, and
+    // nothing else. The field DESCRIPTION above that fence quotes the same format in prose, and
+    // it was one of the four copies this change set out to unify. It was also the only one left
+    // that no test read: the sweep below greps the single literal `round(s)`, which the template
+    // no longer contains anywhere, so reverting the description to any other wrong spelling —
+    // `<round|round>`, `rounds(s)`, or deleting the quotation entirely — left all tests green.
+    // Found by a delta round on the fix, not by the fix.
+    //
+    // Keyed on the text OUTSIDE the fence, or this would pass on the skeleton the test above
+    // already covers and witness nothing new.
+    const FENCE = '```gate-record';
+    // ⚠ Exactly ONE fence, asserted rather than assumed. With two, `indexOf` finds the first and
+    // `indexOf('```', …)` its close, so the second survives the cut and the assertion below can
+    // be satisfied by a skeleton again.
+    //
+    // ⚠ What it covers, stated narrowly because an earlier version of this comment claimed it
+    // "closes the class": it counts this ONE spelling. A `~~~gate-record` fence is invisible to
+    // it — and to `extractRecord`, which anchors on ```` ```gate-record ```` at line start, so the
+    // two agree on that. Where they DIVERGE: this count is the broader of the two, because it
+    // counts the marker anywhere, including inside prose. An inline mention would redden this
+    // test while the parser sees one fence. That direction is the safe one — a false red, not a
+    // false green — and it is the reason this is a count and not a parse.
+    expect(TEMPLATE.split(FENCE).length - 1, 'the template no longer has exactly one gate-record fence').toBe(1);
+    const fence = TEMPLATE.indexOf(FENCE);
+    const fenceEnd = TEMPLATE.indexOf('```', fence + 3);
+    expect(fenceEnd, 'the gate-record fence is never closed').toBeGreaterThan(fence);
+    const prose = TEMPLATE.slice(0, fence) + TEMPLATE.slice(fenceEnd + 3);
+
+    expect(prose, 'the field description no longer quotes the format the script prescribes').toContain(REVIEW_FORMAT);
+
+    // ⚠ The control for the slicing, and its OWN control above it — which is the part worth
+    // keeping. The first version of this asserted that `prose` does not contain
+    // `head: <40-hex sha of this PR's head commit>`. That string is not in the template and never
+    // was; the skeleton reads `head: <short SHA>`. I wrote the marker from memory, so the control
+    // was green against any slicing whatsoever, including none. A `not.toContain` whose needle
+    // does not exist is not a weak control, it is NO control — and it looks exactly like a
+    // passing one. So the needle is proven present in the whole file before its absence in the
+    // slice means anything.
+    const SKELETON_LINE = `review: ${REVIEW_FORMAT}`;
+    expect(TEMPLATE, 'the control marker is not in the template at all — this assertion proves nothing').toContain(SKELETON_LINE);
+    expect(prose, 'the fence was not cut out, so the assertion above may be reading the skeleton').not.toContain(SKELETON_LINE);
   });
 
   it('is rejected on `security:` too, which needs a diff that OWES that gate', () => {
@@ -431,6 +628,93 @@ describe('gate-record — the shipped template does not answer its own questions
     // reasoning as the assertion above, one gate further.
     const errors = evaluate({ body: TEMPLATE, head: HEAD, files: SEC }).errors.join(' ');
     expect(errors).toContain('`security: <origin>, <result>`');
+  });
+
+  /**
+   * ⭐ THE OTHER HALF OF THE SAME PROPERTY, and its absence cost a real PR a red check on a
+   * record whose author had filled the template in correctly.
+   *
+   * Everything above pins that the skeleton is REJECTED as shipped — deliberately, so that no
+   * attestation is answered in advance by the file asking the question. That says nothing about
+   * what happens when an author DOES fill it in, and the two can disagree: `review:` shipped as
+   * `<n> <model> round(s), <result>`, where `(s)` is notation sitting OUTSIDE the angle brackets.
+   * Replace every bracketed slot correctly and the literal `round(s)` stays, which the grammar
+   * refuses (`rounds?` — `round` or `rounds`). Three places carried that string: the skeleton, the
+   * message prescribing the format, and the assertion above pinning the message. Agreeing with each
+   * other is not the same as being right.
+   *
+   * ⚠ The regex built FROM the skeleton is what makes this test mean something. Substituting a
+   * whole line would pass whatever the skeleton said — it would never read the literals. Freeing
+   * only the bracketed parts makes the fill prove it kept every other character, so a skeleton
+   * literal that is not valid input cannot satisfy both this and the grammar.
+   *
+   * ⚠ WHAT IT GIVES UP, since the fix moved the plural inside a slot: `review:` now has no word
+   * literal left, so its shape is pure structure (`^(.+?) (.+?) (.+?), (.+?)$`) and a future
+   * skeleton that DROPPED the comma would still match this fill while being unfillable. Measured.
+   * The alternative — a bare `round` literal — keeps that one anchor but makes the test's own
+   * doctrine false for a legitimate `3 opus rounds`, so the anchor is the cheaper thing to lose.
+   * ⚠ And it buys less than it looks: of three drifts measured as missed — comma dropped, a
+   * trailing extra slot, slots reordered — only the first is recovered by keeping a literal. The
+   * other two are a property of `(.+?)` absorbing whatever sits between slots and are missed by
+   * BOTH options, so they are not a reason to re-litigate the choice. The structure still kills
+   * the drifts that change a separator (`;` for the comma, or an inserted ` on <date>`).
+   * For four of the seven fields the shape is `^(.+?)$` and checks nothing; it does real work on
+   * `review`, `security` and `mutations`. The loop stays uniform so a NEW field is covered
+   * without anyone remembering to add it.
+   */
+  it('⭐ is ACCEPTED once its bracketed slots are filled, keeping what sits outside them', () => {
+    // One value per field, in the form an author would write. Keyed BY FIELD on purpose: a field
+    // added to the template without a value here fails below by name, which is the drift this
+    // exists to catch — in the direction the rejection tests structurally cannot see.
+    const FILLED: Record<string, string> = {
+      head: HEAD.slice(0, 8),
+      gates: 'code-review, delta, security',
+      review: '1 opus round, no findings',
+      security: 'own round, no findings',
+      delta: 'clean',
+      mutations: '12 killed, 0 survived',
+      closes: 'none',
+    };
+    const parsed = extractRecord(TEMPLATE) as { fields: Record<string, string> } | null;
+    expect(parsed, 'the template no longer carries a gate-record block at all').not.toBeNull();
+    const shipped = parsed!.fields;
+    const fields = Object.keys(shipped);
+    expect(fields.length, 'an empty block would make every assertion below vacuous').toBeGreaterThan(3);
+
+    for (const f of fields) {
+      const line = shipped[f]!;
+      // Still a question rather than an answer — checked here for EVERY field, where the
+      // rejection test above names four.
+      expect(line, `template field \`${f}:\` ships an answer, not a placeholder`).toContain('<');
+      expect(FILLED[f], `no fill value for template field \`${f}:\` — add one to FILLED`).toBeDefined();
+      // Escape first, THEN free the slots: `mutations:`'s ` killed, ` survives as literal text
+      // while `<n>` becomes a group. Reversing the order would free nothing — the inserted
+      // `(.+?)` would itself be escaped. (The defect that prompted all this was a parenthesised
+      // plural, whose parentheses this escape is what keeps literal; the example is deliberately
+      // a literal that still exists in the skeleton rather than the removed one.)
+      const shape = new RegExp(
+        `^${line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/<[^>]*>/g, '(.+?)')}$`,
+      );
+      expect(
+        FILLED[f]!,
+        `the fill for \`${f}:\` does not keep the skeleton's literal text — skeleton says \`${line}\``,
+      ).toMatch(shape);
+    }
+
+    // ⚠ ONE diff, and it is the one that owes `security` — because that field is only READ
+    // when the gate is due, so a code-only run leaves the template's security line unexercised.
+    // An earlier version evaluated both. The code leg was measured redundant: the gates a code
+    // diff owes are a subset of a security diff's, every ungated check runs identically, and
+    // listing a gate that is not owed is not an error — so its errors are always a subset.
+    // A case that cannot change the answer is one this file removes on sight.
+    // ⚠ `evaluate` returns `{ok, notes}` on success and carries `errors` only on failure —
+    // measured, not assumed. So the assertion reads `ok` and quotes the errors when it fails,
+    // because «expected false to be true» would not say WHICH field refused.
+    const body = `## Summary\n\nSomething.\n\n\`\`\`gate-record\n${fields
+      .map((f) => `${f}: ${FILLED[f]}`)
+      .join('\n')}\n\`\`\`\n`;
+    const v = evaluate({ body, head: HEAD, files: SEC });
+    expect(v.ok, `the filled template was refused: ${(v.errors ?? []).join(' ')}`).toBe(true);
   });
 });
 
@@ -846,7 +1130,10 @@ describe('gate-record — the `review:` evidence line', () => {
     // the third against my own PR body. If a pattern cannot find it, a gate cannot demand it.
     const v = evaluate({ body: record({ review: 'a reviewer looked at it and was happy' }), head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/is not `<n> <model> round\(s\), <result>`/);
+    // Reads the constant: the tripwire for a changed format now lives in its own named test, so
+    // this one is free to assert what it is actually about — that the message prescribes the
+    // format at all. (It was typed out for one commit, when the tripwire had no other home.)
+    expect(v.errors.join(' ')).toContain(`is not \`${REVIEW_FORMAT}\``);
   });
 
   it('rejects a model slot that does not START with a letter', () => {

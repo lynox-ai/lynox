@@ -247,11 +247,30 @@ export function requiredGates(files) {
 }
 
 /**
+ * The ONE place the `review:` format is written down for a human.
+ *
+ * ⚠ Four copies of it once existed — these two messages, the PR template's skeleton and the
+ * template's field description — and three were wrong in the same way: the plural marker sat
+ * OUTSIDE the angle brackets, so an author who substituted every slot correctly still produced
+ * a line the grammar refuses. They agreed with each other, which is not the same as being
+ * right. Both messages now read this constant and the template is held to it by a test.
+ *
+ * ⚠ This file deliberately contains NO example of the refused form, not even as history. A test
+ * sweeps the template and this script for it, and a sweep with an exception is a sweep somebody
+ * will widen. The story is told in `tests/gate-record.test.ts`, where prose describing a defect
+ * belongs and where nothing copies from.
+ *
+ * The plural lives INSIDE a slot on purpose: the skeleton has to stay refused while
+ * unsubstituted (an attestation must not be pre-answered) and be valid once filled.
+ */
+export const REVIEW_FORMAT = '<n> <model> <round|rounds>, <result>';
+
+/**
  * roundResultErrors — the RESULT half of a round field, as a pure function.
  *
  * WHY IT IS ITS OWN FUNCTION. `review:` was the first field to demand what a round FOUND, and
  * the `security` gate is getting the same demand. The two differ in their HEAD —
- * `<n> <model> round(s)` against an origin vocabulary — and agree completely on their TAIL:
+ * `<n> <model> <round|rounds>` against an origin vocabulary — and agree completely on their TAIL:
  * `no findings`, or `<N> findings` followed by `all fixed` or counts that sum to N. Copying
  * that tail would produce two grammars that drift, and the copy nobody tests is the one that
  * drifts first. Naming it once means the mutants that witness it keep witnessing it for every
@@ -686,7 +705,7 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
     if (!raw) {
       errors.push(
         'this diff owes the `code-review` gate, so the record needs a `review:` line saying what the round FOUND.',
-        'Format: `review: <n> <model> round(s), <result>` — e.g. `review: 1 opus round, no findings`,',
+        `Format: \`review: ${REVIEW_FORMAT}\` — e.g. \`review: 1 opus round, no findings\`,`,
         '`review: 1 opus round, 5 findings, all fixed`, or `review: 1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted`.',
         'The model is the one that RAN the round (your own, if you reviewed it yourself).',
       );
@@ -694,7 +713,7 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
       const m = /^(\d+)\s+([a-z][a-z0-9.+-]{1,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
       if (!m) {
         errors.push(
-          `\`review: ${raw}\` is not \`<n> <model> round(s), <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
+          `\`review: ${raw}\` is not \`${REVIEW_FORMAT}\` — e.g. \`review: 1 opus round, no findings\`.`,
           'The model slot takes a short HANDLE: a letter, then at least one more character from',
           '`[a-z0-9.+-]` — so neither `1 x round` nor `1 ... round` passes as evidence. Two characters,',
           'not three, because a floor of three refused `o3` and `r1`.',
