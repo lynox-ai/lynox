@@ -686,9 +686,8 @@ const isOptionToken = (token: string): boolean =>
 /**
  * Characters of the remainder kept per variant — enough for any rule's subcommand and
  * arguments, and bounded in characters rather than words so that one oversized word cannot
- * make every variant long. The cut falls between words, never inside one (`2>/dev/null` cut to
- * `2>/dev/nu` reads as a write to a device), and never right after a redirection whose target
- * it would drop (`> /tmp/x` cut to `>` reads as a write anywhere).
+ * make every variant long. The cut falls between words, never inside one: `2>/dev/null` cut to
+ * `2>/dev/nu` reads as a write to a device.
  */
 const OPTION_VARIANT_CHARS = 192;
 /**
@@ -742,10 +741,7 @@ export function withoutLeadingOptions(segment: string): string[] {
         for (let j = k + 2; j < tokens.length && tokens[j]!.end - from <= OPTION_VARIANT_CHARS; j++) {
           end = tokens[j]!.end;
         }
-        const cut = end < tokens[tokens.length - 1]!.end;
-        let text = line.slice(from, Math.min(end, from + OPTION_VARIANT_CHARS));
-        if (cut) text = text.replace(/\s+\S*[<>]$/, '');
-        variants.push(`${word} ${text}`);
+        variants.push(`${word} ${line.slice(from, Math.min(end, from + OPTION_VARIANT_CHARS))}`);
       }
     }
   }

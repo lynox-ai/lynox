@@ -2383,11 +2383,9 @@ describe('isDangerous', () => {
       });
     });
 
-    it('cuts a long reading between words, never inside a redirection', () => {
-      // The 192-character cut falls inside `2>/dev/null`, and right after a bare `>`.
-      const filler = 'w '.repeat(93);
-      expect(ask(`ls -a ${filler}2>/dev/null`)).toBeNull();
-      expect(ask(`echo -n ${filler}> /tmp/out.txt`)).toBeNull();
+    it('cuts a long reading between words, never inside one', () => {
+      // The 192-character cut falls inside `2>/dev/null`; cut there, it reads as a device write.
+      expect(ask(`ls -a ${'w '.repeat(93)}2>/dev/null`)).toBeNull();
     });
 
     it('drops the options for a CLI the rules have never heard of', () => {
