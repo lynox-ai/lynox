@@ -7371,13 +7371,33 @@ describe('LynoxHTTPApi', () => {
       });
 
       it('takes no claim for a workflow that does not resolve', async () => {
-        // A claim row for a non-existent workflow is a row any caller could create at
-        // will; the request ends in the runner's 404 either way.
+        // ⚠ The first version of this witness asserted the claim TABLE was empty
+        // afterwards, and a mutant that removed the guard SURVIVED it: an unresolved
+        // workflow can never start, so the request's own cleanup released the row before
+        // the assertion could see it. The route deleted the evidence. The property is
+        // "no claim is TAKEN", so the observable has to be the call, counted at a point
+        // where it still exists (memory/fb_probe_vs_survivor.md).
+        const taken: string[][] = [];
+        const spy = new Proxy(claimHistory, {
+          get(target, prop) {
+            // Bind to the TARGET, not the proxy: RunHistory reaches its own sqlite handle
+            // through `this`, and handing it the proxy breaks every other method.
+            if (prop === 'claimWorkflowRun') {
+              return (wf: string, key: string, runId: string): boolean => {
+                taken.push([wf, key, runId]);
+                return claimHistory.claimWorkflowRun(wf, key, runId);
+              };
+            }
+            const v = Reflect.get(target, prop, target);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
         mockGetPipeline.mockReturnValue(undefined);
         mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow "ghost" not found.' });
-        await withClaimDb(async () => {
+        await swapEngine({ getRunHistory: () => spy }, async () => {
           const res = await jsonFetch('/api/workflows/ghost/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
           expect(res.status).toBe(404);
+          expect(taken).toEqual([]);
           expect(claimHistory.getDb().prepare('SELECT COUNT(*) AS n FROM workflow_run_claims').get()).toEqual({ n: 0 });
         });
       });

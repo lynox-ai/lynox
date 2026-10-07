@@ -6177,9 +6177,11 @@ export class LynoxHTTPApi {
       // ── The run claim (PRD idempotency-bulk-first §3.1) ──────────────────────────
       // Keyed on the RESOLVED workflow id: `getPipeline` accepts a prefix, so keying on
       // the path segment would file one workflow's attempts under two different claims.
-      // Nothing is claimed when the id resolves to nothing — that request ends in the
-      // runner's 404, and a claim row for a workflow that does not exist is a row any
-      // caller could create at will.
+      // Nothing is claimed when the id resolves to nothing. Precisely: such a row would
+      // not LINGER — an unresolved workflow never starts, so the release at the end of the
+      // request takes it away again. What the guard prevents is a write for an id that
+      // names nothing, and a concurrent second call answering 409 for a workflow that does
+      // not exist instead of the 404 it has coming.
       const claimWorkflowId = plannedForRun?.id ?? params['id']!;
       const mintedRunId = randomUUID();
       // Set only for the request that OWNS a claim; `undefined` means "no claim held",
