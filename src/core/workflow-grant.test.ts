@@ -87,6 +87,11 @@ describe('the shape of a reviewed grant on a saved workflow', () => {
     expect(built).toEqual({ error: expect.stringContaining('mail API') });
   });
 
+  it('refuses a sending service in the entry', () => {
+    const built = buildReviewedContract({ method: 'POST', host: 'api.sendgrid.com', paths: ['/v3/mail/send'] }, [], {});
+    expect(built).toEqual({ error: expect.stringContaining('mail API') });
+  });
+
   it('accepts the bulk form it is modelled on: a stored bulk contract passes the same shape', () => {
     // Same form as `mintBulkContract`; the check only runs on a workflow's save, but if it
     // ran elsewhere it would not be the thing that differs.
@@ -142,6 +147,14 @@ describe('what a reviewed grant admits at dispatch', () => {
     };
     expect(contractGrants('http_request', { url: 'https://gmail.googleapis.com/gmail/v1/users/me/settings/vacation', method: 'PUT' }, mail)).toBe(false);
     expect(contractGrants('http_request', { url: 'https://gmail.googleapis.com/gmail/v1/users/me/settings/vacation', method: 'PUT' }, { ...mail, origin: 'reviewed' })).toBe(false);
+  });
+
+  it('never grants a sending service, though the contract names it exactly', () => {
+    const sender: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+      hostPatterns: ['api.resend.com'], pathPatterns: ['/emails'], paramConstraints: {},
+    };
+    expect(contractGrants('http_request', { url: 'https://api.resend.com/emails', method: 'POST' }, sender)).toBe(false);
   });
 });
 
