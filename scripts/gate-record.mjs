@@ -247,25 +247,6 @@ export function requiredGates(files) {
 }
 
 /**
- * roundResultErrors — the RESULT half of a round field, as a pure function.
- *
- * WHY IT IS ITS OWN FUNCTION. `review:` was the first field to demand what a round FOUND, and
- * the `security` gate is getting the same demand. The two differ in their HEAD —
- * `<n> <model> <round|rounds>` against an origin vocabulary — and agree completely on their TAIL:
- * `no findings`, or `<N> findings` followed by `all fixed` or counts that sum to N. Copying
- * that tail would produce two grammars that drift, and the copy nobody tests is the one that
- * drifts first. Naming it once means the mutants that witness it keep witnessing it for every
- * caller, instead of witnessing one caller's copy of it.
- *
- * `quoted` is what a message should cite — e.g. `review: 1 opus round, 2 findings` — so the
- * error names the field the author actually wrote rather than this function's idea of it.
- *
- * ⚠ PURE on purpose: strings in, messages out, nothing touched. That is what makes it testable
- * DIRECTLY instead of through a caller, and the difference is not cosmetic — a test that drives
- * it through `evaluate` witnesses one caller's WIRING, not the grammar. Both assertions are
- * worth having and they are not the same one, so the tests carry both.
- */
-/**
  * The ONE place the `review:` format is written down for a human.
  *
  * ⚠ Four copies of it once existed — these two messages, the PR template's skeleton and the
@@ -284,6 +265,25 @@ export function requiredGates(files) {
  */
 export const REVIEW_FORMAT = '<n> <model> <round|rounds>, <result>';
 
+/**
+ * roundResultErrors — the RESULT half of a round field, as a pure function.
+ *
+ * WHY IT IS ITS OWN FUNCTION. `review:` was the first field to demand what a round FOUND, and
+ * the `security` gate is getting the same demand. The two differ in their HEAD —
+ * `<n> <model> <round|rounds>` against an origin vocabulary — and agree completely on their TAIL:
+ * `no findings`, or `<N> findings` followed by `all fixed` or counts that sum to N. Copying
+ * that tail would produce two grammars that drift, and the copy nobody tests is the one that
+ * drifts first. Naming it once means the mutants that witness it keep witnessing it for every
+ * caller, instead of witnessing one caller's copy of it.
+ *
+ * `quoted` is what a message should cite — e.g. `review: 1 opus round, 2 findings` — so the
+ * error names the field the author actually wrote rather than this function's idea of it.
+ *
+ * ⚠ PURE on purpose: strings in, messages out, nothing touched. That is what makes it testable
+ * DIRECTLY instead of through a caller, and the difference is not cosmetic — a test that drives
+ * it through `evaluate` witnesses one caller's WIRING, not the grammar. Both assertions are
+ * worth having and they are not the same one, so the tests carry both.
+ */
 export function roundResultErrors(result, quoted) {
   // ⛔ Loud about a missing `quoted`, and that is the point of the check rather than a formality:
   // without it the three interpolating messages read `\`undefined\` — the result must read …`,
