@@ -18,7 +18,8 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
-import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
@@ -1317,7 +1318,12 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         const shapeStr = p.response_shape && p.response_shape.kind !== 'passthrough' ? ' {shape}' : '';
         return `- ${p.id}: ${p.name} (${p.base_url})${limitStr}${shapeStr}`;
       });
-      return `Registered APIs (${String(profiles.length)}):\n${lines.join('\n')}`;
+      // Every name and address here is stored profile text, so it goes inside the same
+      // declared fence `view` uses; only the count is the engine's.
+      return compose([
+        engineText(`Registered APIs (${String(profiles.length)}):`),
+        renderFence('api_profiles_stored', lines.join('\n'), { preamble: STORED_PROFILE_PREAMBLE }),
+      ], '\n');
     }
 
     if (input.action === 'view') {
