@@ -245,6 +245,27 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     expect(posts().map((p) => p.url)).toEqual([TARGET]);
   });
 
+  it('a number parameter left at a text default runs on its schedule under the grant', async () => {
+    // The binder keeps a default as written ("10") but coerces a supplied value (10); the
+    // schedule's run supplies the stored values. Granted as "10", it would be refused by
+    // its own enum on every run.
+    history.insertPlannedPipeline({
+      id: 'wf-default', name: 'wf-default', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true,
+      steps: [{ id: 's1', task: 'post the batch', tools: ['http_request'], input_template: { url: TARGET, body: '{{params.limit}}' } }],
+      ...{ mode: 'autonomous', parameters: [{ name: 'limit', description: '', type: 'number', source: 'user_input', defaultValue: '10' }] },
+    } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+    forgetPipeline('wf-default');
+    const wf = getPipeline('wf-default', history)!;
+    const shown = prepareWorkflowGrant(wf, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false }, engineDb);
+    if (!shown.ok) throw new Error(shown.error);
+    const r = acceptWorkflowGrant(wf, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: undefined, title: 't' }, 'local', { history, taskManager: tm, hasher: engineDb });
+    if (!r.ok) throw new Error(r.error);
+    forgetPipeline('wf-default');
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '10' })).mockResolvedValueOnce(endTurn('done'));
+    await fire(r.task);
+    expect(posts().map((p) => p.url)).toEqual([TARGET]);
+  });
+
   describe('a library start of a workflow with parameters', () => {
     // `withTaskParam`: a second parameter that reaches only the step's task text. Such a
     // value is wrapped as untrusted data in the step's prompt (`resolveTaskTemplate`), which

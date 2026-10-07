@@ -566,6 +566,11 @@ export interface RunSavedWorkflowResult {
  * lines into the owner's run record and notifications.
  */
 const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): http_request\\n|Blocked: outbound [^\\n]*\\n|${WRITE_POSSIBLY_LANDED_PREFIX} )`);
+/** The warning `scanToolResult` puts in front of a result that resembles an injection. A
+ *  refusal carries a URL the model or a redirecting server chose, so it can trip the scan;
+ *  the head is tested after one such warning is set aside. A response body still cannot
+ *  start a note: behind the warning it begins with the untrusted-data wrapper. */
+const SCAN_WARNING = /^⚠ WARNING: This tool result contains text that resembles prompt injection[^\n]*\n\n/;
 const MAX_WRITE_NOTES = 10;
 const MAX_WRITE_NOTE_CHARS = 300;
 
@@ -577,8 +582,9 @@ const MAX_WRITE_NOTE_CHARS = 300;
 export function collectWriteNotes(into: Set<string>): (call: { toolName: string; outputJson: string }) => void {
   return (call) => {
     if (call.toolName !== 'http_request' || into.size >= MAX_WRITE_NOTES) return;
-    if (!REFUSAL_HEAD.test(call.outputJson)) return;
-    const line = call.outputJson.split('\n').find((l) => l.startsWith(UNGRANTED_WRITE_PREFIX) || l.startsWith(WRITE_POSSIBLY_LANDED_PREFIX));
+    const output = call.outputJson.replace(SCAN_WARNING, '');
+    if (!REFUSAL_HEAD.test(output)) return;
+    const line = output.split('\n').find((l) => l.startsWith(UNGRANTED_WRITE_PREFIX) || l.startsWith(WRITE_POSSIBLY_LANDED_PREFIX));
     if (line !== undefined) into.add(maskSecretPatterns(line.trim()).slice(0, MAX_WRITE_NOTE_CHARS));
   };
 }

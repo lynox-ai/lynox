@@ -504,11 +504,15 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
 
 /**
  * Request headers that re-target a call past the tuple a person was shown: a caller-set
- * `Host` routes the request to another virtual host on the same address (TLS and the pin
- * still follow the URL), and the method-override headers make a server that honours them
- * run another verb — DELETE included — under a granted POST.
+ * `Host` (or a forwarded host, or a rewritten URL a front end honours) routes the request
+ * to another virtual host or path on the same address (TLS and the pin still follow the
+ * URL), and the method-override headers make a server that honours them run another verb —
+ * DELETE included — under a granted POST.
  */
-const TARGET_OVERRIDE_HEADERS = new Set(['host', 'x-http-method-override', 'x-http-method', 'x-method-override']);
+const TARGET_OVERRIDE_HEADERS = new Set([
+  'host', 'x-forwarded-host', 'x-original-url', 'x-rewrite-url',
+  'x-http-method-override', 'x-http-method', 'x-method-override',
+]);
 
 function carriesTargetOverride(headers: unknown): boolean {
   if (headers === null || typeof headers !== 'object') return false;

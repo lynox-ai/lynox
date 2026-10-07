@@ -197,7 +197,13 @@ export function prepareWorkflowGrant(planned: PlannedPipeline, req: WorkflowGran
   if (req.params !== undefined && (typeof req.params !== 'object' || req.params === null || Array.isArray(req.params))) {
     return { ok: false, error: 'Invalid "params" — expected an object of name to value.' };
   }
-  const bound = bindWorkflowParameters(planned.parameters ?? [], req.params as Record<string, unknown> | undefined, { requireAll: true });
+  const first = bindWorkflowParameters(planned.parameters ?? [], req.params as Record<string, unknown> | undefined, { requireAll: true });
+  if (!first.ok) return { ok: false, error: first.error };
+  // Bound once more, from its own output: the binder keeps a default as written but coerces
+  // a supplied value, and every run re-binds the stored values as supplied. A number
+  // parameter defaulting to "10" would otherwise be granted as "10" and run as 10 — refused
+  // by its own enum, or read as "other values". After this pass the values are a fixed point.
+  const bound = bindWorkflowParameters(planned.parameters ?? [], first.params, { requireAll: true });
   if (!bound.ok) return { ok: false, error: bound.error };
   const built = buildReviewedContract({ method: req.method, host: req.host, paths: req.paths }, planned.steps, bound.params);
   if ('error' in built) return { ok: false, error: built.error };
@@ -223,7 +229,7 @@ export function prepareWorkflowGrant(planned: PlannedPipeline, req: WorkflowGran
 export function grantName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const cleaned = raw
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
     .replace(/\s+/g, ' ').trim().slice(0, 120);
   return cleaned === '' ? undefined : cleaned;
