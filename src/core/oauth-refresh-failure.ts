@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { ISO_TIMESTAMP_SHAPE, shapedForLog, slotNameForModel } from './profile-value-shape.js';
 
 /**
  * How a failed token-endpoint call is read, for every OAuth path in the engine:
@@ -141,18 +142,29 @@ export function reclassifyForeignGrant(
  * link from `api_setup connect`; asking the user to paste a refresh token there
  * would send them looking for a value no provider UI shows. Any other profile
  * holds a token someone stored, and gets a new one the same way.
+ *
+ * SHAPED HERE, for every caller, because the model reads this in the engine's own
+ * voice, outside the untrusted-data wrap, and two of its values come from the profile.
+ * `refreshKey` is `auth.oauth.refresh_token_key` when the profile names one, and a
+ * name only has to look like a vault key to be saved, so it can spell an imperative;
+ * it gets the bound of what it is (`slotNameForModel`: the engine-derived name its own
+ * wider bound, any other the vault key's). `revokedAt` is written by the engine as an
+ * ISO timestamp, but a profile loaded from a file is not re-validated, so it is
+ * checked against that shape. A value that does not fit is printed as
+ * `<unprintable>`. The id needs no shaping: every path into the store checks it.
  */
 export function revokedGrantMessage(
   id: string,
   refreshKey: string,
-  revokedAt: string | undefined,
+  derivedRefreshKey: string,
+  revokedAt: unknown,
   viaPreset: boolean,
 ): string {
-  const since = revokedAt ? ` (recorded ${revokedAt})` : '';
+  const since = revokedAt === undefined ? '' : ` (recorded ${shapedForLog(revokedAt, ISO_TIMESTAMP_SHAPE, 30)})`;
   const head = `Error: the provider rejected the stored refresh token of api_profile "${id}" as revoked or expired${since}. This is not an expired access token — fetching again with the same refresh token cannot work, and fetch_token will not resend it.`;
   return viaPreset
     ? `${head} The user has to consent again at the provider: call api_setup with action "connect" for this profile and give the user the link it returns. Do not ask the user for a token.`
-    : `${head} The user has to authorize the app again at the provider; store the new refresh token under "${refreshKey}" with ask_secret, then call fetch_token once.`;
+    : `${head} The user has to authorize the app again at the provider; store the new refresh token under "${slotNameForModel(refreshKey, derivedRefreshKey)}" with ask_secret, then call fetch_token once.`;
 }
 
 /**

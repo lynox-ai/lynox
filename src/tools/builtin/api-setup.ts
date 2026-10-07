@@ -20,6 +20,7 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
+import { slotNameForModel } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -1962,7 +1963,13 @@ Next steps before calling create:
         // SecretStoreLike doesn't expose `resolve()` on the interface; use
         // the same indirection as resolveSecretRefs (extract + resolve via
         // a single-key probe).
-        const probe = { _: `secret:${name}` };
+        // Only a name the reference pattern matches WHOLE. It matches the longest
+        // identifier at the start, so `CRM_X then …` would resolve `CRM_X` and
+        // hand back its value with the rest of the name glued on — posted as the
+        // token, and printed raw in every sentence after the check below.
+        const ref = `secret:${name}`;
+        if (new RegExp(SECRET_REF_PATTERN.source).exec(ref)?.[0] !== ref) return null;
+        const probe = { _: ref };
         const probed = secretStore.resolveSecretRefs(probe) as { _: string };
         return probed._ === `secret:${name}` ? null : probed._;
       };
@@ -1977,12 +1984,18 @@ Next steps before calling create:
       // the token was stored under a name nothing read, because no engine path
       // ever set the field and only a model-authored profile edit could.
       const refreshKey = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      // The model reads these refusals as the engine speaking, and the slot names come
+      // from the profile, which a file can fill with any text. Until a name has
+      // RESOLVED, it is printed shaped (`slotNameForModel`); see the note after the
+      // missing-credentials check for why the sentences after it need no shaping.
+      const derivedRefreshKey = refreshTokenKey(input.id);
+      const shownSlot = (name: string): string => slotNameForModel(name, derivedRefreshKey);
       // The same guard the attach applies to its derived key (`http.ts`) and the
       // write applies below. It covers BOTH shapes: a derived name that lands in a
       // protected prefix, and an explicit `refresh_token_key` naming one — the
       // profile is model-authorable, and this value is POSTed to `token_url`.
       if (grantType === 'refresh_token' && isProtectedSecretWrite(refreshKey)) {
-        return `Error: profile "${input.id}" resolves its refresh token from "${refreshKey}", which is a protected credential slot — refusing to send it to ${new URL(tokenUrl).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
+        return `Error: profile "${input.id}" resolves its refresh token from "${shownSlot(refreshKey)}", which is a protected credential slot — refusing to send it to ${new URL(tokenUrl).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
       }
       // Resolved once: the token this exchange presents is also the one a failure
       // is judged against — the rotation check and the revocation fingerprint
@@ -1990,8 +2003,13 @@ Next steps before calling create:
       const presentedRefresh = grantType === 'refresh_token' ? resolveOne(refreshKey) : null;
       if (grantType === 'refresh_token' && presentedRefresh === null) missing.push(refreshKey);
       if (missing.length > 0) {
-        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${n}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
       }
+      // Past this point every slot name has resolved, and `resolveOne` resolves only a
+      // name that is, as a whole, an identifier (`SECRET_REF_PATTERN`): a name that
+      // holds a value here is never prose.
+      // The revocation refusal still shapes its values, because `revoked_at` is not a
+      // name (`revokedGrantMessage`).
       // A revocation verdict stands until the refresh token changes. Posting the
       // very token the provider already rejected only repeats the rejection, and
       // a 401 loop would do exactly that. A DIFFERENT token in the slot is the
@@ -2000,7 +2018,7 @@ Next steps before calling create:
       const grant = profile.oauth_grant;
       if (presentedRefresh !== null && grant?.state === 'revoked'
           && grant.revoked_fp === tokenFingerprint(presentedRefresh)) {
-        return revokedGrantMessage(input.id, refreshKey, grant.revoked_at, tokenPreset !== undefined);
+        return revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), grant.revoked_at, tokenPreset !== undefined);
       }
       // Where the access token will go, checked BEFORE the POST: a refusal after it
       // would throw away a freshly minted token, and with a provider that rotates,
@@ -2175,7 +2193,7 @@ Next steps before calling create:
             revoked_fp: presentedFp,
             revoked_at: new Date().toISOString(),
           }));
-          return `${revokedGrantMessage(input.id, refreshKey, undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
+          return `${revokedGrantMessage(input.id, refreshKey, refreshTokenKey(input.id), undefined, tokenPreset !== undefined)}\n\n${responseBody}`;
         }
         if (kind === 'client-misconfigured') {
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;
