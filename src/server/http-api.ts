@@ -6508,12 +6508,33 @@ export class LynoxHTTPApi {
     // holds both subjects' detail rows (email, phone, domain, vat_id) for the rollback's sake.
     // A merge whose ledger the 90-day retention removed is not listed: without the ledger there
     // is nothing to take it back with, and it must not read as "taken back".
-    const MERGE_REFUSALS: Record<string, [number, string]> = {
+    // ⚠ Keyed on the UNION, not on `string`. As `Record<string, …>` a new member
+    // of `MergeRollbackRefusal` fell through to the bare 'Refused.' with nothing
+    // to notice it — and this change is the one adding a member, so it is the
+    // moment to close that. Now the table is a compile error until it covers them
+    // all, which also makes the `??` fallback below unnecessary.
+    const MERGE_REFUSALS: Record<
+      import('../core/subject-merge-runner.js').MergeRollbackRefusal,
+      [number, string]
+    > = {
       not_found: [404, 'No merge with this id can be taken back.'],
       not_applied: [409, 'This merge did not complete, so there is nothing to take back.'],
       missing: [409, 'The entries of this merge are no longer in the contact graph, so it cannot be taken back here.'],
       superseded: [409, 'The same two entries were merged again later. Only the newest merge can be taken back.'],
       not_in_effect: [409, 'This merge is no longer in effect — it was taken back already, or the entry was merged elsewhere since.'],
+      // ⚠ The wording for when the blocking merge CANNOT BE NAMED, and TWO
+      // versions of it have now been false — in the one case each was written
+      // for. The first promised a step («Take that newer merge back first; then
+      // this one can be taken back») that does not exist when nothing can be
+      // named. The second stated the dead end but gave a false reason for it:
+      // «that newer merge is no longer on record». A blocking merge left
+      // `applied:false` by `runMerge`'s crash window IS on record — on disk, and
+      // listed by `GET /api/merges` — and answers `not_applied`, so the sentence
+      // contradicted the API's own listing in the opposite direction.
+      //
+      // What the unnamed states share is only that the blocking merge cannot be
+      // taken back. That is what this says, and it says nothing about the record.
+      chained: [409, 'The entry this merge led to has since been merged into another one, and that newer merge cannot be taken back here — so this merge cannot be taken back either.'],
       unavailable: [409, 'This merge moved data rows or conversation links, and that part of the instance is not available right now. Nothing was taken back.'],
       partial: [409, 'The merge was taken back in the contact graph, but data rows or conversation links still point at the merged entry. Taking it back again will not repair that.'],
       failed: [409, 'The merge could not be taken back.'],
@@ -6539,8 +6560,50 @@ export class LynoxHTTPApi {
       const { rollbackMergeById } = await import('../core/subject-merge-runner.js');
       const out = rollbackMergeById(stores.store, stores.dataStore, stores.threadStore, join(getLynoxDir(), 'sweeps'), params['id']!);
       if (!out.ok) {
-        const [code, msg] = MERGE_REFUSALS[out.reason] ?? [409, 'Refused.'];
-        errorResponse(res, code, msg);
+        // ⚠ `chained` is the one refusal with a NEXT STEP the owner can take, so
+        // it is the one that must name its object.
+        //
+        // ⚠ «THEN TRY THIS ONE AGAIN», not «then this merge can be taken back».
+        // The named merge is the LAST link of the chain (see the walk in
+        // `rollbackMergeById`), so in a chain of three it is not the only one in
+        // the way: taking it back shortens the chain, and this merge then names
+        // the new last link. Promising that this one becomes takeable is true for
+        // a two-link chain and false for a longer one, and the shorter promise is
+        // true for every length.
+        //
+        // ⚠ IT NAMES NO ENTRY, and that is the correction a round forced. The
+        // sentence used to end «…has since been merged onward to <name>», with
+        // the name taken from the blocking merge's canonical — and because the
+        // blocking merge is the chain's LAST link, that name is where the data
+        // ENDED UP, not what the entry this merge led to was merged into. The
+        // merge that moved that entry is the middle link, which this refusal
+        // deliberately does not name. So the clause was true at two links and
+        // false at every length from three, i.e. wrong exactly in the case the
+        // walk exists for — the third false clause in this one sentence's
+        // history.
+        //
+        // The clause went rather than growing a second name, and that was the
+        // cheaper half of the choice as well: the cap, the `trim()`, the
+        // code-point slicing and the arithmetic against `capForClient` existed
+        // ONLY to carry a name safely, and all of it left with it. What remains
+        // is bounded by construction — one id, 47 characters at the most that
+        // `isMergeLedgerFileName` admits, plus fixed text. An owner holding the
+        // id can read both of its entries from the `GET /api/merges` row it
+        // belongs to, which already returns them.
+        if (out.reason === 'chained' && out.blocking) {
+          errorResponse(
+            res,
+            409,
+            `Take merge ${out.blocking.id} back first: the entry this merge led to has been merged `
+            + 'onward since. Then try this one again.',
+            'merge_chained',
+          );
+          return;
+        }
+        const [code, msg] = MERGE_REFUSALS[out.reason];
+        // The same code rides the no-blocker wording, so a client branches on the
+        // category rather than on whether the sentence happened to carry an id.
+        errorResponse(res, code, msg, out.reason === 'chained' ? 'merge_chained' : undefined);
         return;
       }
       jsonResponse(res, 200, { merge: out.view });

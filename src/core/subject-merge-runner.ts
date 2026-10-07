@@ -335,7 +335,37 @@ export function listMergeRuns(store: SubjectStore, sweepsDir: string): MergeRunV
 
 /** Why a rollback did not happen, in a fixed vocabulary — the store's own reasons name ids. */
 export type MergeRollbackRefusal =
-  | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'unavailable' | 'partial' | 'failed';
+  | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'chained'
+  | 'unavailable' | 'partial' | 'failed';
+
+/**
+ * The newer merge that has to be taken back before a `chained` one can be.
+ *
+ * `not_in_effect` used to carry this case, and the owner-facing sentence for it
+ * says the merge «was taken back already, or the entry was merged elsewhere
+ * since». In a chain BOTH halves are wrong — nothing was taken back, and the
+ * entry was not merged *elsewhere*: the entry this merge LED TO was merged
+ * onward. The one thing the owner needs, which merge to take back first, was
+ * not in the sentence at all, because the refusal is a category and the store's
+ * own message («…has since been merged into C. Reverse that newer merge first»)
+ * stops at this boundary by design.
+ */
+export interface MergeRollbackBlocker {
+  /**
+   * The newer merge's run id — what the owner can actually act on, and now the
+   * ONLY field. It used to carry the blocking merge's canonical name too, for a
+   * clause reading «the entry this merge led to has since been merged onward to
+   * <name>». That clause was FALSE from three links on: the blocking merge is
+   * the chain's LAST link, so its canonical is where the data ended up, not what
+   * the entry this merge led to was merged into — the merge that moved that
+   * entry is the middle one, which the refusal deliberately does not name.
+   * True at length 2, false at every length ≥3, i.e. wrong exactly in the case
+   * the walk was built for. The name went rather than the sentence growing a
+   * second one: `GET /api/merges` already returns both ends of every merge, so
+   * an owner holding the id can read the names from the row it belongs to.
+   */
+  readonly id: string;
+}
 
 /**
  * Take one merge back for its owner. Refuses up front what the store would refuse, or get
@@ -351,8 +381,39 @@ export type MergeRollbackRefusal =
  */
 export function rollbackMergeById(
   store: SubjectStore, dataStore: DataStore | null, threadStore: ThreadStore | null, sweepsDir: string, id: string,
-): { ok: true; view: MergeRunView } | { ok: false; reason: MergeRollbackRefusal } {
-  const record = readAll(store, sweepsDir).find((r) => r.view.id === id);
+):
+  | { ok: true; view: MergeRunView }
+  | { ok: false; reason: Exclude<MergeRollbackRefusal, 'chained'> }
+  // ⚠ `blocking` is NULLABLE on purpose, and the reason first given for it was
+  // WRONG: «the 90-day retention removes it». `pruneExpiredLedgers` keeps the
+  // newest ledger in the directory and deletes older ones, and in a chain the
+  // blocking ledger is normally the newer — so a prune that removed it removed
+  // this one first. Retention is an unlikely route, not an impossible one: the
+  // prune ages by the ledger's own `createdAt`, written from `new Date()` at
+  // merge time, and nothing enforces that those stamps increase. If the clock
+  // steps backwards between two merges of a chain, the blocking ledger is the
+  // older one by `createdAt` and the «keep the newest» rail protects the wrong
+  // file.
+  //
+  // Plainly reachable: a `createdAt` the prune cannot parse (it keeps what
+  // `Date.parse` rejects, while `readMergeLedger` only wants a string), a
+  // hand-deleted file, an import whose source had already pruned, and a blocking
+  // merge left `applied:false` by the crash window below. The type is right; the
+  // story was not. ⚠ What the unnamed states have in common is only that the
+  // blocking merge CANNOT BE TAKEN BACK — not that it is absent: the
+  // `applied:false` one is on disk and `GET /api/merges` lists it. The wording
+  // may therefore say the dead end, and may not say «no longer on record».
+  | { ok: false; reason: 'chained'; blocking: MergeRollbackBlocker | null } {
+  // ⚠ READ THE DIRECTORY ONCE. `readAll` is `readdirSync` plus a `readFileSync`,
+  // a `JSON.parse` and two subject lookups per ledger, and the `chained` branch
+  // below needs the same set to find the blocking merge. Calling it twice made
+  // one refusal cost 2 × O(ledgers in the sweeps directory) — bounded by the
+  // 90-day retention but by nothing else, and a request an owner can repeat.
+  // Hoisting is equivalence, not a shortcut: nothing between here and that
+  // filter writes to the store or the directory, so a second read would return
+  // the same rows.
+  const records = readAll(store, sweepsDir);
+  const record = records.find((r) => r.view.id === id);
   if (!record) return { ok: false, reason: 'not_found' };
   const { view, file } = record;
   if (!view.applied) return { ok: false, reason: 'not_applied' };
@@ -360,7 +421,175 @@ export function rollbackMergeById(
     return { ok: false, reason: 'missing' };
   }
   if (view.superseded) return { ok: false, reason: 'superseded' };
-  if (!view.inEffect) return { ok: false, reason: 'not_in_effect' };
+  if (!view.inEffect) {
+    // WHY is it not in effect? `inEffect` is a conjunction and collapsing it to
+    // one category threw that away. The canonical having been merged onward is
+    // the chain case, and it is the only one with a next step the owner can take.
+    // ⚠ ONE term decides it, and working out WHICH took two corrections.
+    //
+    // First I read only «the canonical moved on», which answered `chained` for a
+    // merge that was ALREADY taken back and whose canonical merged onward
+    // afterwards — «take that newer merge back first» is plainly wrong advice
+    // there, since this one is already undone.
+    //
+    // Then I added the other term as a disjunct and called both load-bearing.
+    // They are not: here `dup` and `canonical` are non-null, so `!inEffect` means
+    // `dup.merged_into !== canonicalId ∨ canonical.merged_into !== null`. If the
+    // merge still stands, the left side is false, so the right side holds — the
+    // canonical HAS moved on. `stillStands` alone is exact, and a mutation that
+    // dropped the second disjunct survived every test, which is what a condition
+    // that cannot change an answer looks like.
+    const stillStands = store.getSubject(file.entry.dupId)?.merged_into === file.entry.canonicalId;
+    if (!stillStands) return { ok: false, reason: 'not_in_effect' };
+    // ⚠ WALK TO THE END OF THE CHAIN — do not look one step ahead. Looking one
+    // step ahead is what the first version of this block did, and it is the THIRD
+    // time this refusal promised a step the owner cannot take, so the reasoning
+    // is written out rather than summarised.
+    //
+    // With `A→B, B→C` the blocking merge is `B→C` and the owner can take it back.
+    // Add `C→D` and `B→C` is not takeable either: its own canonical moved on, so
+    // it answers `chained` in turn. The one-step filter asked for `inEffect` of
+    // that next link, found none and fell through to the no-id wording — the
+    // owner read the dead-end sentence while a perfectly reversible merge (`C→D`)
+    // sat on record. Measured on this tree before this walk existed.
+    //
+    // The LAST link is the one that is always takeable: it is the only merge in
+    // the chain whose canonical still stands on its own. Taking it back shortens
+    // the chain by one and the next attempt names the new last link, so an owner
+    // is walked down a chain of any length by steps that each work.
+    //
+    // `merged_into` is single-valued, so there is exactly one path to follow.
+    //
+    // ⚠ The FIRST step cannot be absent, and that is a consequence, not an
+    // assumption: control reaches here with `stillStands` true, both rows
+    // non-null (the `missing` guard above) and `inEffect` false — and `inEffect`
+    // is `dup.merged_into === canonicalId && canonical !== null &&
+    // canonical.merged_into === null`, so the third term is the one that failed.
+    // The early return is therefore for the TYPE, and that is the point: an
+    // earlier version carried a nullable `edge` and a `tip === null ? [] :`
+    // guard instead, which no test could defend — a mutation deleting it
+    // survived the whole suite. ⚠ The first version of THIS note then misstated
+    // what was wrong with the old one: it said the old comment named a cause
+    // that cannot produce null. It can — the old loop broke on iteration 1 and
+    // left `edge` null. What the old comment got wrong is that the cause it
+    // named cannot OCCUR (it said so itself, «which contradicts reaching here»)
+    // while the cause that can was missing: a ledger with
+    // `canonicalId === dupId` and a `merged_into` self-loop also left `edge`
+    // null, so the guard was load-bearing for exactly one corrupt state and
+    // undefended there. Measured on the new code: that state answers `chained`
+    // with no blocking id and does not crash. A branch the compiler forbids
+    // beats a branch nothing exercises.
+    const firstOnward = store.getSubject(file.entry.canonicalId)?.merged_into ?? null;
+    if (firstOnward === null) return { ok: false, reason: 'not_in_effect' };
+    let edge = { dup: file.entry.canonicalId, canonical: firstOnward };
+    // `seen` is not decoration: the column is a self-referencing FK with no check
+    // against a cycle, and a corrupt one would hang the request, not refuse it.
+    //
+    // ⚠ IT STARTS EMPTY, and that took two corrections to arrive at. The set started as
+    // `{dupId, edge.dup}`; the second term could not change an answer, so it
+    // went — and then a mutation emptying the set ENTIRELY also survived, which
+    // meant the remaining seed was unobservable too. Two symmetric terms, one
+    // removed by a rule that applied equally to the other: that is a rule applied
+    // to whichever half was noticed first.
+    //
+    // A seed short-circuits the walk at entry; the in-loop `add` catches a cycle
+    // reached later. EITHER alone terminates, which is why no single-term
+    // mutation of `seen` dies — and why the honest cut is to keep exactly one.
+    // The in-loop add is the one that generalises, so the seed is gone and the
+    // cycle fixture below exercises the loop rather than short-circuiting past it
+    // (the old seed made the committed cycle test exit before the loop ran, so
+    // the loop's cycle detection had no coverage at all).
+    //
+    // Termination without a hop cap: every pass either breaks or adds an id to a
+    // set drawn from a finite table, so the walk is bounded by the subject count.
+    const seen = new Set<string>();
+    while (!seen.has(edge.canonical)) {
+      seen.add(edge.canonical);
+      const onward = store.getSubject(edge.canonical)?.merged_into ?? null;
+      if (onward === null) break;
+      edge = { dup: edge.canonical, canonical: onward };
+    }
+    const tip = edge;
+    // ⚠ Matching the tip's DUP is the whole graph half of the filter; also
+    // matching its canonical would be a condition that cannot change an answer,
+    // and such a condition is one no test can defend. `merged_into` is
+    // single-valued and `tip.dup` points at `tip.canonical` by construction of
+    // the walk, so an in-effect ledger with that dup has that canonical.
+    //
+    // ⚠ EVERY OTHER TERM EXISTS TO MAKE THE NAMED STEP ONE THE OWNER CAN TAKE,
+    // because that is the single thing this refusal is for. Each has its own
+    // refusal on the other side, and naming a merge that answers one of them
+    // would be two API answers pointing at each other with no way out:
+    //   · `applied` — `inEffect` is a pure GRAPH predicate and never looks at
+    //     whether the ledger finished. `runMerge` has a documented crash window
+    //     leaving exactly this state (ledger `applied:false`, graph change
+    //     committed, a satellite store throwing before the applied stamp), and
+    //     that merge answers `not_applied`.
+    //   · the store check — a ledger that moved data rows or thread anchors
+    //     answers `unavailable` when the store that holds them is absent, which
+    //     is the same precondition this function applies to its own subject a
+    //     few lines down. Degraded instances are the reachable case.
+    // ⚠ `partial` and `failed` are NOT covered, and the first version of this
+    // note gave a false reason — that they are outcomes of attempting rather
+    // than preconditions that can be read beforehand. True of `partial`. FALSE
+    // of `failed`, which has at least three causes that are pure predicates
+    // over the ledger and the store: `entry.repoints` failing `isRepointTarget`
+    // (an exported pure function), a `dataStore` record reading `'foreign'` —
+    // whose own site in `rollbackMergeRun` says «Ask first, so such a ledger
+    // changes nothing», i.e. it IS a pre-check — and a dup row whose `kind` no
+    // longer matches the ledger's. A named step can therefore still answer «The
+    // merge could not be taken back»: the shape this refusal exists to remove,
+    // one step further out.
+    //
+    // ⚠ WHAT IS MEASURED HERE IS THE CONSEQUENCE, NOT THE ROUTES. The dead-end
+    // pair of answers was reproduced on this tree, through a hand-written ledger.
+    // The ways a real instance gets there are read off the code, and they are not
+    // equal: a dropped-and-retyped collection is reachable from the shipped
+    // `data_store` tool; a record the reader admits (it validates only `ids`)
+    // needs a hand-written or imported ledger, as does a drifted `kind`, since
+    // `subjects.kind` is never written after creation; and a ledger from a
+    // version whose `REPOINT_TARGETS` had an entry since removed is EMPTY TODAY
+    // — measured over that constant's whole history, 22 additions and zero
+    // removals. That route is a future removal, not a current state. Said apart
+    // from the measurement because a measured consequence next to a route list
+    // lends the list a credibility it has not earned.
+    //
+    // Left out on DUPLICATION RISK, not on impossibility — and the first version
+    // of this paragraph got the premise wrong while reaching the right
+    // conclusion. It said all three predicates live in `rollbackMergeRun`'s
+    // prologue. Only the `'foreign'` one does; `isRepointTarget` and the `kind`
+    // comparison sit inside `SubjectStore.rollbackMerge`'s transaction, which
+    // makes the argument STRONGER: they are behind another module's boundary.
+    //
+    // ⚠ And the remedy relocates the duplication rather than removing it, which
+    // the first version promised away with «both sides». There are THREE sites,
+    // and the two in-transaction ones must stay: their own comment says they are
+    // «Checked INSIDE the transaction so nothing can change these rows between
+    // the check and the writes». So the shape is one shared «would this refuse
+    // before changing anything?» predicate called by this filter and by the
+    // prologue, with the in-transaction checks remaining as defence in depth.
+    // That is a change to the rollback's own shape, not to this sentence.
+    // «Then try this one again» is the clause that carries the rest.
+    //
+    // ⚠ AND REQUIRE EXACTLY ONE. Its value is second-order and worth stating
+    // plainly: the set is provably of size ≤ 1 (the dedupe in `readAll` clears
+    // `inEffect` on all but the newest ledger of a pair, and `merged_into` is
+    // single-valued, so there is no fork), and a mutation of the count ALONE
+    // therefore survives the suite. What it buys is that dropping `inEffect`
+    // becomes observable: that mutation admits both ledgers of a
+    // pair-merged-twice, the count turns them into «no id», and a test sees it —
+    // whereas a plain pick would take the newest match, which happens to be the
+    // right one, and pass unnoticed. It is a discriminator for a neighbouring
+    // mutation, not a guard against an ambiguous match the schema forbids.
+    const candidates = records.filter(
+      (r) => r.file.entry.dupId === tip.dup
+        && r.view.inEffect && r.view.applied
+        && !(r.file.dataStore.length > 0 && !dataStore)
+        && !((r.file.threadAnchors?.length ?? 0) > 0 && !threadStore),
+    );
+    const blocking = candidates.length === 1 ? candidates[0]! : null;
+    return { ok: false, reason: 'chained', blocking: blocking ? { id: blocking.view.id } : null };
+  }
   if ((file.dataStore.length > 0 && !dataStore) || ((file.threadAnchors?.length ?? 0) > 0 && !threadStore)) {
     return { ok: false, reason: 'unavailable' };
   }

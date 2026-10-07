@@ -5960,6 +5960,305 @@ describe('LynoxHTTPApi', () => {
   // PRD bulk-changes-reversible §3.4/§3.5 — the human side of a bulk run.
   describe('subject merges as runs an owner can take back', () => {
     const EMAIL = 'zxq-route@example.invalid';
+    // ⚠ These two restore LYNOX_DATA_DIR by hand instead of `vi.unstubAllEnvs()`.
+    // The first version used the sledgehammer, and it wiped the env the SUITE
+    // stubs in `beforeAll` — `LYNOX_HTTP_SECRET`, `LYNOX_TRUST_PROXY`,
+    // `LYNOX_ALLOW_PLAIN_HTTP` — for every test that runs after these. Measured
+    // with the same probe placed before and after: intact before, all three
+    // `undefined` after. `beforeEach` only resets mocks, so nothing puts them
+    // back. The sibling test below does it correctly; these copies dropped that
+    // line.
+    //
+    // ⚠ And they talk to the HTTP surface as little as possible. The file shares
+    // one loopback rate-limit budget (600/60s) across ~570 tests in one run, so
+    // the margin is thin; how thin is not recorded here, because a number without
+    // a run to show for it is worse than the rule it is meant to support. Ids and
+    // outcomes come from the store directly; only the refusal itself has to be an
+    // actual request, because the sentence is what is under test.
+    const withMergeRoute = async (
+      body: (ctx: { store: import('../core/subject-store.js').SubjectStore; dir: string; db: EngineDb }) => Promise<void>,
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-merge-chain-'));
+      const { SubjectStore } = await import('../core/subject-store.js');
+      const db = new EngineDb(join(dir, 'engine.db'), '');
+      const store = new SubjectStore(db);
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = { s: engineRef['getSubjectStore'], d: engineRef['getDataStore'], t: engineRef['getThreadStore'] };
+      const dataDirBefore = process.env['LYNOX_DATA_DIR'];
+      engineRef['getSubjectStore'] = () => store;
+      engineRef['getDataStore'] = () => null;
+      engineRef['getThreadStore'] = () => null;
+      vi.stubEnv('LYNOX_DATA_DIR', dir);
+      try {
+        await body({ store, dir, db });
+      } finally {
+        engineRef['getSubjectStore'] = orig.s;
+        engineRef['getDataStore'] = orig.d;
+        engineRef['getThreadStore'] = orig.t;
+        // ⚠ Pass `dataDirBefore` THROUGH, including when it is `undefined` —
+        // vitest reads that as "delete the key", which is the restore. The first
+        // version of this helper substituted `''` for `undefined`, and `''` is not
+        // `undefined`: the file's own `getLynoxDir` mock resolves it with `??`,
+        // which does not fall through on an empty string, so the data dir
+        // afterwards was `''` and the sweeps dir the RELATIVE path `sweeps` in the
+        // process cwd. Measured with a probe `it` before and after this describe:
+        // `undefined` before, `""` after. That is the same leak this comment block
+        // condemns, reintroduced by the fix for it, and the only thing cleaning up
+        // after it was an unrelated `vi.unstubAllEnvs()` further down the file.
+        // `vi.stubEnv(KEY, undefined)` is already the idiom in this file.
+        vi.stubEnv('LYNOX_DATA_DIR', dataDirBefore);
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    it('⭐ names the blocking merge when a chain refuses, not just a 409', async () => {
+      // ⚠ THE WITNESS IS THE SENTENCE, not the status. The refusal was already a
+      // 409 before this change — what was missing is WHICH merge blocks it. A
+      // test on the status alone passes against the defect.
+      await withMergeRoute(async ({ store, dir }) => {
+        const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
+        const a = store.createSubject({ kind: 'organization', name: 'Northwind GmbH' });
+        const b = store.createSubject({ kind: 'organization', name: 'Northwind' });
+        const c = store.createSubject({ kind: 'organization', name: 'Northwind Holding' });
+        expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
+        expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
+        const runs = listMergeRuns(store, join(dir, 'sweeps'));
+        const older = runs.find((m) => m.dupName === 'Northwind GmbH')!;
+        const newer = runs.find((m) => m.dupName === 'Northwind')!;
+        expect(older.inEffect, 'the fixture is not a chain').toBe(false);
+        expect(newer.inEffect, 'the newer merge should still be in effect').toBe(true);
+
+        const refused = await jsonFetch(`/api/merges/${older.id}/rollback`, { method: 'POST', body: '{}' });
+        expect(refused.status).toBe(409);
+        const body = (await refused.json()) as { error: string; code?: string };
+
+        // Each thing the owner needs, asserted on its own so a failure says
+        // WHICH one went missing.
+        expect(body.error, 'the blocking merge id is not in the sentence').toContain(newer.id);
+        expect(body.error, 'the next step is not stated').toMatch(/take merge .* back first/i);
+        // ⚠ This test used to require the entry name here, and this is a
+        // TWO-link chain, where naming it was true. It is gone because the same
+        // clause was false from three links on — the blocking merge is the last
+        // link, so its canonical is where the chain ends, not what the entry
+        // this merge led to was merged into. Pinning it at length 2 is what let
+        // the clause look defended while being wrong everywhere else.
+        expect(body.error, 'an entry name is back in the sentence').not.toContain('Northwind');
+        // …and it must NOT still claim the merge was taken back already, which is
+        // the half of the old wording that was false in a chain.
+        expect(body.error, 'still says it was taken back already').not.toMatch(/taken back already/i);
+        // A view cannot read a sentence — the category rides as a code.
+        expect(body.code).toBe('merge_chained');
+
+        // The refusal really refused: the chain stands, read from the store
+        // rather than spending another request on it.
+        expect(store.getSubject(a)!.merged_into).toBe(b);
+        expect(store.getSubject(b)!.merged_into).toBe(c);
+      });
+    });
+
+    it('⭐ names the blocking merge and NO entry, however long the entry names are', async () => {
+      // ⚠ WHAT THIS PINS IS AN ABSENCE, and the absence is the correction. The
+      // sentence used to end «…has since been merged onward to <name>», capped
+      // at 120 code points because subject names are bounded nowhere — not in
+      // the DDL, not in `createSubject`, not on the paths that write them
+      // (entity extraction, CRM import, `set_thread_context`). The name taken
+      // was the blocking merge's canonical, i.e. where the chain ENDS — which is
+      // not what «the entry this merge led to» was merged into. True at two
+      // links, false from three on, so false exactly in the state the chain walk
+      // exists for. With the clause gone, the cap, the `trim()`, the code-point
+      // slicing and the arithmetic against `capForClient` went with it: they
+      // existed only to carry a name safely.
+      //
+      // The fixture therefore keeps an enormous name and asserts the sentence
+      // does not carry it, so a mutation reinstating the clause fails here
+      // whether or not it caps — pinning the absence rather than a length.
+      // ⚠ A negative assertion is worth nothing without an «it does too» on the
+      // same machinery: the id assertion is that, on the same string from the
+      // same request. The length bound is the second half — nothing unbounded
+      // can reach the sentence any more, and that is checkable rather than
+      // argued.
+      await withMergeRoute(async ({ store, dir }) => {
+        const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
+        const a = store.createSubject({ kind: 'organization', name: 'Adventure GmbH' });
+        const b = store.createSubject({ kind: 'organization', name: 'Adventure' });
+        const c = store.createSubject({ kind: 'organization', name: `Adventure ${'x'.repeat(900)}` });
+        expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
+        expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
+        const runs = listMergeRuns(store, join(dir, 'sweeps'));
+        const older = runs.find((m) => m.dupName === 'Adventure GmbH')!;
+        const newer = runs.find((m) => m.dupName === 'Adventure')!;
+
+        const refused = await jsonFetch(`/api/merges/${older.id}/rollback`, { method: 'POST', body: '{}' });
+        expect(refused.status).toBe(409);
+        const body = (await refused.json()) as { error: string; code?: string };
+        expect(body.error, 'the blocking id is not in the sentence').toContain(newer.id);
+        expect(body.error, 'the next step is not stated').toMatch(/take merge .* back first/i);
+        expect(body.error, 'an entry name is back in the sentence').not.toContain('Adventure');
+        expect(body.error, 'part of a long entry name reached the sentence').not.toContain('x'.repeat(10));
+        // One id (≤47) plus fixed text. 200 leaves room for wording changes and
+        // still fails on anything that reads a name in.
+        expect(body.error.length, 'the sentence grew something unbounded').toBeLessThan(200);
+        expect(body.code).toBe('merge_chained');
+      });
+    });
+
+    it('⭐ says the dead end without claiming the blocking merge is gone', async () => {
+      // ⚠ THE CORRECTION THIS PINS, and it is the SECOND correction to the same
+      // sentence. Version one promised a step that does not exist when nothing
+      // can be named («Take that newer merge back first; then this one can be
+      // taken back»). Version two stated the dead end but gave a false reason —
+      // «that newer merge is no longer on record» — which the `applied:false`
+      // test below refutes: that ledger is on disk and listed. The sentence may
+      // say the blocking merge cannot be taken back; it may not say it is absent,
+      // so this asserts both the claim and the absence of the false reason.
+      await withMergeRoute(async ({ store, dir }) => {
+        const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
+        const a = store.createSubject({ kind: 'organization', name: 'Fabrikam GmbH' });
+        const b = store.createSubject({ kind: 'organization', name: 'Fabrikam' });
+        const c = store.createSubject({ kind: 'organization', name: 'Fabrikam Holding' });
+        expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
+        expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
+        const runs = listMergeRuns(store, join(dir, 'sweeps'));
+        const older = runs.find((m) => m.dupName === 'Fabrikam GmbH')!;
+        const newer = runs.find((m) => m.dupName === 'Fabrikam')!;
+        rmSync(join(dir, 'sweeps', `${newer.id}.json`));
+
+        const refused = await jsonFetch(`/api/merges/${older.id}/rollback`, { method: 'POST', body: '{}' });
+        expect(refused.status).toBe(409);
+        const body = (await refused.json()) as { error: string; code?: string };
+        expect(body.error, 'it still promises a step that cannot be taken').not.toMatch(/take .*back first/i);
+        expect(body.error, 'the dead end is not stated').toMatch(/cannot be taken back/i);
+        expect(body.error, 'it claims the blocking merge is absent from the record').not.toMatch(/on record/i);
+        expect(body.error, 'an id was invented for a ledger that is gone').not.toContain(newer.id);
+        expect(body.error, 'fell back to the bare refusal').not.toBe('Refused.');
+        expect(body.code, 'the category no longer rides as a code').toBe('merge_chained');
+      });
+    });
+
+    it('⭐ names the LAST link of a three-link chain, which is the one that can be taken back', async () => {
+      // ⚠ THE DEFECT THIS PINS, and it is the third appearance of one class:
+      // a refusal naming a step the owner cannot take. The filter looked ONE step
+      // ahead and required that step to be in effect. In `A→B, B→C, C→D` the next
+      // link `B→C` is NOT in effect — its own canonical moved on — so nothing
+      // matched and the owner got the no-id dead-end sentence, while `C→D` sat on
+      // record and was perfectly reversible. Measured on this tree.
+      //
+      // The walk names the last link instead. Both halves are asserted: the tip
+      // is named, and the two merges that are NOT takeable right now are not.
+      await withMergeRoute(async ({ store, dir }) => {
+        const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
+        const a = store.createSubject({ kind: 'organization', name: 'Contoso GmbH' });
+        const b = store.createSubject({ kind: 'organization', name: 'Contoso' });
+        const c = store.createSubject({ kind: 'organization', name: 'Contoso Group' });
+        const d = store.createSubject({ kind: 'organization', name: 'Contoso Holding' });
+        expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
+        expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
+        expect(runMerge(store, null, null, dir, c, d).ok).toBe(true);
+        const sweeps = join(dir, 'sweeps');
+        const runs = listMergeRuns(store, sweeps);
+        const first = runs.find((m) => m.dupName === 'Contoso GmbH')!;
+        const middle = runs.find((m) => m.dupName === 'Contoso')!;
+        const tip = runs.find((m) => m.dupName === 'Contoso Group')!;
+
+        const refused = await jsonFetch(`/api/merges/${first.id}/rollback`, { method: 'POST', body: '{}' });
+        expect(refused.status).toBe(409);
+        const body = (await refused.json()) as { error: string; code?: string };
+        expect(body.error, 'the last link is not named').toContain(tip.id);
+        expect(body.error, 'it names the middle merge, which refuses `chained` itself').not.toContain(middle.id);
+        expect(body.error, 'it fell through to the no-id dead end').toMatch(/take merge .* back first/i);
+        // ⚠ «Then try this one again», NOT «then this merge can be taken back».
+        // In a three-link chain the named tip is not the only obstacle, so the
+        // stronger promise would be false here. That the weaker one holds — the
+        // named step works, and this merge then names the new last link — is
+        // proved where the walk lives: `subject-merge-runner.test.ts`, «unwinds a
+        // three-link chain one takeable step at a time».
+        expect(body.error, 'it promises this merge becomes takeable, which is false at three links')
+          .not.toMatch(/then this merge can be taken back/i);
+        expect(body.error, 'the retry step is not stated').toMatch(/try this one again/i);
+        expect(body.code).toBe('merge_chained');
+      });
+    });
+
+    it('⭐ does not call an unfinished blocking merge absent — it is listed and answers `not_applied`', async () => {
+      // ⚠ This is the state that refutes «no longer on record». `runMerge` has a
+      // crash window that commits the graph change and leaves the ledger
+      // `applied:false`; the blocking merge is then on disk, returned by
+      // `GET /api/merges`, and answers `not_applied` — not `not_found`. It is
+      // deliberately NOT named: naming it sends the owner to a route that says
+      // «This merge did not complete, so there is nothing to take back», two
+      // answers pointing at each other. Unnamed and truthful is the cut.
+      await withMergeRoute(async ({ store, dir }) => {
+        const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
+        const a = store.createSubject({ kind: 'organization', name: 'Tailspin GmbH' });
+        const b = store.createSubject({ kind: 'organization', name: 'Tailspin' });
+        const c = store.createSubject({ kind: 'organization', name: 'Tailspin Air' });
+        expect(runMerge(store, null, null, dir, a, b).ok).toBe(true);
+        expect(runMerge(store, null, null, dir, b, c).ok).toBe(true);
+        const sweeps = join(dir, 'sweeps');
+        const older = listMergeRuns(store, sweeps).find((m) => m.dupName === 'Tailspin GmbH')!;
+        const newer = listMergeRuns(store, sweeps).find((m) => m.dupName === 'Tailspin')!;
+        // The crash window, reproduced on the artifact rather than described.
+        const path = join(sweeps, `${newer.id}.json`);
+        const ledger = JSON.parse(readFileSync(path, 'utf8')) as { applied?: boolean };
+        ledger.applied = false;
+        writeFileSync(path, JSON.stringify(ledger));
+        expect(listMergeRuns(store, sweeps).find((m) => m.id === newer.id)?.applied,
+          'the premise of this test is gone — the ledger no longer reads as unfinished').toBe(false);
+
+        const refused = await jsonFetch(`/api/merges/${older.id}/rollback`, { method: 'POST', body: '{}' });
+        expect(refused.status).toBe(409);
+        const body = (await refused.json()) as { error: string; code?: string };
+        expect(body.error, 'an unfinished merge was named as a step').not.toContain(newer.id);
+        expect(body.error, 'it claims a listed ledger is absent from the record').not.toMatch(/on record/i);
+        expect(body.error, 'the dead end is not stated').toMatch(/cannot be taken back/i);
+        expect(body.code).toBe('merge_chained');
+      });
+    });
+
+    it('⭐ gives LYNOX_DATA_DIR back exactly as it found it, unset included', async () => {
+      // ⚠ THE WITNESS FOR THE HELPER'S OWN RESTORE, and it exists because the
+      // first version of that restore had the defect it was written to fix. It
+      // substituted `''` for an absent value, and the file's `getLynoxDir` mock
+      // resolves with `??`, which does not fall through on an empty string: every
+      // test after these three would have read the data dir as `''` and the
+      // sweeps dir as the relative path `sweeps`. Latent, and the only thing
+      // tidying up afterwards was an unrelated `vi.unstubAllEnvs()`.
+      //
+      // ⚠ THE KNOWN STATE IS SET HERE, and that is the second correction to this
+      // test. Its first version read its reference out of `process.env` as it
+      // found it — but every test above it in this describe runs the same helper,
+      // so with the defect present that reference was ALREADY the damaged value
+      // and the test agreed with it: the mutation restoring the defect survived.
+      // A control taken from the subject's own aftermath cannot fail. Clearing
+      // the key first is what puts the `undefined` branch under test at all.
+      // (The first version of this very comment said «the three tests above» and
+      // was stale on arrival — the same commit added two more. A count of its
+      // own neighbours is a number that goes wrong whenever anyone writes a
+      // test, so it is gone rather than corrected.)
+      //
+      // It asserts PRESENCE, not value: `toBe(undefined)` alone passes for a key
+      // that is present and empty, which is exactly the broken state.
+      // No HTTP request — the shared rate-limit budget is thin and this needs none.
+      const outer = process.env['LYNOX_DATA_DIR'];
+      try {
+        vi.stubEnv('LYNOX_DATA_DIR', undefined);
+        expect('LYNOX_DATA_DIR' in process.env, 'the fixture could not clear the key').toBe(false);
+        await withMergeRoute(async () => { /* the helper's own teardown is the subject */ });
+        expect('LYNOX_DATA_DIR' in process.env, 'an absent value came back as an empty string').toBe(false);
+      } finally {
+        vi.stubEnv('LYNOX_DATA_DIR', outer);
+      }
+    });
+
+    // ⚠ A test «fills in for a blank entry name instead of printing nothing»
+    // stood here. It is gone with the name clause, not skipped: an empty or
+    // whitespace-only subject name (`TEXT NOT NULL` with no non-empty check,
+    // `createSubject` adds none — measured at the store) could reach the
+    // sentence only while the sentence read a name. It carries no entry name at
+    // all now, so there is nothing for a blank to show up in, and keeping a
+    // fixture for it would conserve the surface the fix removed.
+
     it('lists a merge without its detail rows, takes it back once, and answers in fixed words', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'lynox-merge-route-'));
       const { SubjectStore } = await import('../core/subject-store.js');
