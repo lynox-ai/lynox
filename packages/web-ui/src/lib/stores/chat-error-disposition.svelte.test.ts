@@ -30,7 +30,7 @@ let store: Store;
 let calls: string[];
 
 beforeEach(async () => {
-	// Node has no network state; the store reads `navigator.onLine` before sending.
+	// The store reads `navigator.onLine` before sending: pin it online, whatever the environment says.
 	vi.stubGlobal('navigator', { onLine: true });
 	vi.resetModules();
 	store = await import('./chat.svelte.js');
