@@ -7413,6 +7413,39 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
+      it('a library start carries the ORIGIN and the claim seam, not one or the other', async () => {
+        // ⚠ The rebase witness. Two tracks added fields to one options object at this exact
+        // call: `origin`, which decides whether the workflow's stored write grant applies,
+        // and the claim's pre-minted id plus its stamping hook. Keeping either side alone
+        // compiles and passes every test the other side wrote — the grant quietly falls back
+        // to "no contract", or the stamp never fires and a paid claim is released. Neither
+        // loss has a symptom, which is why the conjunction is the assertion.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          // `runSavedWorkflow`'s 5th argument is the runtime the wrapper built from both.
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string; hooks?: unknown; decideGrant?: unknown };
+          expect(runtime.runId, 'the claim seam').toEqual(expect.any(String));
+          expect(runtime.hooks, 'the stamping hook').toBeDefined();
+          expect(runtime.decideGrant, 'the grant decider, which only an origin produces').toBeDefined();
+        });
+      });
+
+      it('a KEYLESS library start still carries the origin', async () => {
+        // The half a conditional object can silently drop: an earlier shape passed
+        // `undefined` for the whole options object when no claim was held, which would have
+        // removed `origin` from every call without a key — i.e. from the cron-free default
+        // path. The grant decision must not be the sibling of an optional field.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string; hooks?: unknown; decideGrant?: unknown };
+          expect(runtime.decideGrant, 'the origin survives a request with no key').toBeDefined();
+          expect(runtime.runId, 'and no claim was taken').toBeUndefined();
+          expect(runtime.hooks).toBeUndefined();
+        });
+      });
+
       it('the run receives the PRE-MINTED id, and the claim row holds the SAME one', async () => {
         // The seam, read at the route: the id the claim was taken with is the id the run is
         // given. If the run minted its own, the stamp would land on no claim.
