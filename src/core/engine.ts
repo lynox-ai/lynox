@@ -1218,6 +1218,22 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] pipeline-run sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
+      // The run claims of `POST /api/workflows/:id/run` (PRD idempotency-bulk-first §3.1).
+      // A claim with no `started_at` was held by a request that died before its run began,
+      // and no such request can be alive at boot — without this sweep its key answers 409
+      // for good, and a client that persisted the key could never run that workflow again.
+      //
+      // A claim WITH `started_at` is left standing on purpose, and that asymmetry is the
+      // whole design: its run spent money, the route reads it and refuses, and sweeping it
+      // would hand the next caller a second paid run. Deliberately NOT ordered against the
+      // pipeline sweep above — this one reads only `started_at`, so no run status it
+      // rewrites can change the outcome. Separate try, like its siblings.
+      try {
+        const sweptClaims = this.runHistory.sweepUnstartedWorkflowRunClaims();
+        if (sweptClaims > 0) process.stderr.write(`[lynox] run-history: released ${sweptClaims} run claim(s) that had spent nothing\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] run-claim sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     // Initialize the resumable run-event buffer manager (pure in-memory, no DB).
