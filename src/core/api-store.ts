@@ -47,13 +47,21 @@ const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 
 /**
- * A stored value on one line: every line or paragraph separator and control character
- * becomes a space, so the value cannot begin a line of its own in the briefing. Not a
- * string (a profile from a file is not type-checked) prints as a marker.
+ * A stored value as one inert line of the briefing.
+ *  - Every line or paragraph separator and control character becomes a space, so the
+ *    value cannot begin a line of its own.
+ *  - Characters that render as nothing (zero-width, bidirectional controls, tag
+ *    characters) are removed, so the value carries no text a reader cannot see.
+ *  - `<` becomes `&lt;`, so the value cannot open or close any tag — not the fence it sits
+ *    in, and not the engine's `<api_profile_rules>` block, whose name is fixed and public.
+ * Not a string (a profile from a file is not type-checked) prints as a marker.
  */
 function oneLineInBriefing(value: unknown): string {
-  if (typeof value !== 'string') return `<non-string: ${typeof value}>`;
-  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ');
+  if (typeof value !== 'string') return `[non-string: ${typeof value}]`;
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]|[\u{e0000}-\u{e007f}]/gu, '')
+    .replace(/</g, '&lt;');
 }
 
 /**
@@ -1248,9 +1256,10 @@ export class ApiStore {
    *
    * Two blocks, split by who wrote the text. `<api_profiles>` holds what the profiles
    * STORE — name, description, address — and nothing else; a profile can come from a file
-   * or from an earlier agent, so its preamble says what the text is. Each value is flattened
-   * onto its own line, so a stored line break cannot start a line of its own, and a
-   * docs-page bootstrap keeps its description wrapped as untrusted data, as `view` does.
+   * or from an earlier agent, so its preamble says what the text is. Each value goes through
+   * `oneLineInBriefing`: it cannot start a line of its own, hide text, or open or close a
+   * tag. A docs-page bootstrap keeps its description wrapped as untrusted data, as `view`
+   * does; that wrap spans lines, which is why the preamble says "entry", not "line".
    * `<api_profile_rules>` holds the engine's own guidance about maintaining profiles, so a
    * stored value cannot append a sentence that reads as part of it. Only engine-derived
    * values sit outside the stored text: the admitted id, a known auth type, and counts.
@@ -1270,7 +1279,7 @@ export class ApiStore {
 
     return compose([
       renderFence('api_profiles', lines.join('\n'), {
-        preamble: `Registered APIs, one per line, each starting with its id. ${STORED_PROFILE_PREAMBLE}`,
+        preamble: `Registered APIs; each entry starts with its id. ${STORED_PROFILE_PREAMBLE}`,
       }),
       renderFence('api_profile_rules', `Use \`api_setup\` action=view with the id to get full details BEFORE calling an API above.
 Maintain these profiles as you learn. If an API call returns an unexpected schema, hits a rate limit,
