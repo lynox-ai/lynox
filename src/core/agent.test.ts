@@ -3043,8 +3043,7 @@ describe('Agent', () => {
       // `tool_calls.output_json`, the debug export and the `toolEnd`
       // breadcrumb — all read line by line. Asserted on the WRITER: it covers
       // every soft-failure tool that reaches the SESSION sink, including the
-      // ones not written yet. Pipeline steps write the same column through a
-      // different sink that never calls it — see `_ledgerReason`'s own note.
+      // ones not written yet.
       const { ToolSoftFailure } = await import('./tool-soft-failure.js');
       type RecordedCall = { toolName: string; outputJson: string };
       const recorded: RecordedCall[] = [];
