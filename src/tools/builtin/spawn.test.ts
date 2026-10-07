@@ -2244,6 +2244,34 @@ describe('spawn_agent tool', () => {
       expect(msg, 'its ask is NOT called the binding thing').not.toContain('what binds is its own budget');
     });
 
+    it('the exhaustion message prescribes a figure that is strictly larger and typeable', async () => {
+      // ⛔ THE ONE STANDING IMPERATIVE on this surface, and the only place a figure is still
+      // prescribed: when a child spends its ceiling, the message tells the parent to come
+      // back with "a higher max_budget_usd (at least X)". X is a doubling, so it is always
+      // larger — but when the child's budget is a SCALED SHARE it carries float noise, and
+      // the parent was told to type `0.4099999999999999`.
+      //
+      // Measured fixture: $0.41 left, two default children → each is scaled to
+      // $0.20499999999999996, whose double prints as `0.4099999999999999` raw. Ceiling it to
+      // its own display precision gives `0.41`, which is still strictly larger than the share
+      // the child had. The number stays a NUMBER, so a clean figure is unaffected — the two
+      // standing assertions on `(at least 1)` and `(at least 50)` are the control for that.
+      mockSend.mockResolvedValue('[Stopped: the cost budget was reached …]');
+      mockLastStop = { cause: 'budget_cap', pendingTools: ['web_research'], pendingToolCount: 1, text: '' };
+      const { agent } = parentWithCeiling(0.41);
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        agent,
+      );
+      expect(result, 'the figure is readable').toContain('higher max_budget_usd (at least 0.41)');
+      expect(result, 'and carries no float tail').not.toMatch(/at least 0\.40999/);
+      // ⛔ STRICTLY LARGER, which is the property that makes it worth typing: the child ran
+      // with a ceiling BELOW the figure it is now told to ask for.
+      const quoted = /at least ([0-9.]+)\)/.exec(result);
+      expect(quoted, 'the message must carry a figure').not.toBeNull();
+      expect(Number(quoted![1]), 'larger than the share the child actually had').toBeGreaterThan(0.20499999999999996);
+    });
+
     it('a short remainder beats a short ask: the (a)/(b) boundary is the remainder, not the scale factor', async () => {
       // ⛔ THE RECORDED TRAP. A first attempt split this message by `factor` alone and, at
       // $0.15 left with a $0.10 ask, told the model "the run's remainder is not the constraint
