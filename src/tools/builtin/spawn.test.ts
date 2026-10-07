@@ -2032,7 +2032,7 @@ describe('spawn_agent tool', () => {
       const agents = Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, task: 'A' }));
       await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/cost ceiling/);
       await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/\$0\.40 left/);
-      await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/under the \$0\.05/);
+      await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/one turn on its model costs/);
     });
 
     it('refuses a child whose caller asked for nothing', async () => {
@@ -2044,7 +2044,7 @@ describe('spawn_agent tool', () => {
       await expect(spawnAgentTool.handler(
         { agents: [{ name: 'free', task: 'A', max_budget_usd: 0 }] },
         agent,
-      )).rejects.toThrow(/under the \$0\.05/);
+      )).rejects.toThrow(/one turn on its model costs/);
     });
 
     it('refuses the second of two batches that would claim the same room', async () => {
@@ -2099,20 +2099,26 @@ describe('spawn_agent tool', () => {
       // blaming a concurrent batch that does not exist. Deterministic, so the retry that
       // message advises fails identically.
       //
-      // $0.103 against two default children is the minimal case: the shares are
-      // $0.051500000000000004 each and sum to $0.10300000000000001. The sibling scaling
-      // test could not see it because 6/15 and 5×0.4 are both exact in binary.
+      // $0.60 across three default children is the clearest case, and it survives the
+      // per-model floor: each share is a round $0.20 — above what one turn costs on the
+      // test's model — while THREE of them sum to $0.6000000000000001. The shares being
+      // exact and the sum not is the whole shape of the defect.
+      //
+      // ⚠ Re-measured when the floor became per-model: the first version of this case
+      // used $0.103 across two children, whose shares ($0.0515) now fall below the floor
+      // and are correctly refused. A fixture that stops exercising its own subject is
+      // worse than none, so the numbers were searched rather than adjusted by hand.
       const { Agent: MockAgent } = await import('../../core/agent.js');
-      const { agent } = parentWithCeiling(0.103);
+      const { agent } = parentWithCeiling(0.6);
       const result = await spawnAgentTool.handler(
-        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] },
         agent,
       );
       expect(result, 'admitted, not refused').toContain('Budget note');
       const caps = childCaps(MockAgent);
-      expect(caps).toHaveLength(2);
+      expect(caps).toHaveLength(3);
       expect(caps.reduce((sum, c) => sum + c, 0), 'and the sum still fits, as arithmetic')
-        .toBeLessThanOrEqual(0.103);
+        .toBeLessThanOrEqual(0.6);
     });
 
     it('names the share a trimmed child actually ran with, not what it asked for', async () => {
@@ -2191,6 +2197,241 @@ describe('spawn_agent tool', () => {
       // the mutant the batch releases its own $5 a second time, cutting the neighbour's
       // hold to $3, and this reads $16.99 — room that belongs to someone else.
       expect(guard.remainingBudgetUSD(), "the neighbour's hold survives").toBeCloseTo(11.99, 6);
+    });
+
+    it('prices the floor per model, so a cheap child passes where an expensive one fails', async () => {
+      // ⛔ THE POINT OF DERIVING IT. The floor was flat at $0.05, which measured against
+      // this repo's pricing is about right for the fast tier and seventeen times too low
+      // for the most expensive one — so on an expensive model a child was admitted with
+      // five cents and spent eighty-eight. Here the same remainder is enough for a
+      // child on the fast tier and not for one on the default tier.
+      const { agent } = parentWithCeiling(0.1);
+      // Fast tier: one turn is ~$0.05, so $0.10 clears it.
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'cheap', task: 'A', model: 'fast' }] },
+        agent,
+      )).resolves.toBeDefined();
+      // Default (balanced) tier: one turn is ~$0.19, so the same $0.10 does not.
+      const { agent: second } = parentWithCeiling(0.1);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'dear', task: 'A' }] },
+        second,
+      )).rejects.toThrow(/one turn on its model costs/);
+
+      // ⛔ AND THE MIXED BATCH, which is what makes "per child" distinguishable from
+      // "one floor for the whole batch". Found by a surviving mutant: checking the two
+      // tiers in SEPARATE calls could not tell the two implementations apart, because
+      // each call had only one model in it. Here the cheap child would clear a shared
+      // floor taken from its own model, and the expensive one must still be refused.
+      const { agent: third } = parentWithCeiling(0.3);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'cheap', task: 'A', model: 'fast' }, { name: 'dear', task: 'B' }] },
+        third,
+      )).rejects.toThrow(/"dear"/);
+
+      // ⛔ AND THE FIGURE IN THE MESSAGE, which had no witness at all: a mutant quoting
+      // `floors[0]` instead of `floors[tooSmall]` SURVIVED the whole suite, because both
+      // tests above assert only on which child is named and on the phrase. The surviving
+      // mutant told the model `"dear" would get $0.15, and one turn on its model costs
+      // about $0.05` — a $0.15 share below a $0.05 cost, i.e. arithmetic nonsense that
+      // points at "retry" instead of "cut the batch".
+      const { agent: fourth } = parentWithCeiling(0.3);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'cheap', task: 'A', model: 'fast' }, { name: 'dear', task: 'B' }] },
+        fourth,
+      )).rejects.toThrow(/"dear" would get \$0\.15, and one turn on its model costs about \$0\.19/);
+    });
+
+    it('names the CHEAP child when it is the one under its own floor', async () => {
+      // ⚠ The comment at the floor used to say a mixed batch is "refused on account of the
+      // expensive one alone". `findIndex` returns the FIRST child under ITS OWN floor: at a
+      // $0.03 remainder both children get $0.015, and the fast tier's own floor is
+      // $0.052288, so the cheap child is the one named. The expensive child is named only
+      // when the cheap one clears its floor — which is what the test above shows.
+      const { agent } = parentWithCeiling(0.03);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'cheap', task: 'A', model: 'fast' }, { name: 'dear', task: 'B' }] },
+        agent,
+      )).rejects.toThrow(/"cheap" would get/);
+    });
+
+    it('applies no floor to a model this instance has no price for', async () => {
+      // ⛔ MEASURED BY A REFUTER, and it is the self-host case. `estimateFirstTurnUSD`
+      // answers for an unknown id with the FALLBACK rate — $0.32, dearer than the balanced
+      // tier and 6.4x the flat $0.05 the floor used to be. A profile pinning a local model
+      // is unpriced AND free, so a fallback-derived floor refused a child handed the run's
+      // ENTIRE remainder, on a price nobody pays.
+      //
+      // ⚠ WHAT THIS WITNESS DOES NOT ESTABLISH, because an earlier version of this comment
+      // asserted it: that admitting "costs at most one small turn". Both words are wrong —
+      // the price is UNKNOWN, which is the premise of the carve-out, and the bound is per
+      // CHILD, so a ten-child batch is ten such turns. The doc comment at the floor
+      // retracted that sentence and THIS copy survived, because the sweep ran over the
+      // paragraph instead of over the STRING. What the test holds is narrow and true: a
+      // child on an unpriced model is not refused for a price nobody charges.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        local: { provider: 'openai', api_base_url: 'http://localhost:11434/v1', api_key: 'k', model_id: 'my-local-llama-70b' },
+      }));
+      reloadConfig();
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      try {
+        vi.mocked(MockAgent).mockClear();
+        const { agent } = parentWithCeiling(0.1);
+        const result = await spawnAgentTool.handler(
+          { agents: [{ name: 'local', task: 'A', profile: 'local' }] },
+          agent,
+        );
+        expect(result, 'admitted, where a fallback-priced floor refused').not.toContain('cannot share');
+        expect(childCaps(MockAgent)[0]).toBeCloseTo(0.1, 6);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('does not render a sub-cent BUDGET NOTE as all zeros either', async () => {
+      // ⛔ THE SAME DEFECT ON THE SECOND SURFACE, found by a delta round — and this change
+      // is what made it reachable: while the floor was a flat $0.05, no admitted share could
+      // be under five cents, so the note could never carry a sub-cent amount. Measured
+      // before the fix: a sub-cent remainder rendered as "got $0.00", and the remainder
+      // itself rounded UP.
+      //
+      // ⚠ TWICE RE-CUT, and both reasons are the same class. (1) Every budget-note fixture
+      // gave its children the $5 default ask, and `$5` renders identically through either
+      // formatter — so a mutant leaving `asked` on `toFixed(2)` SURVIVED the whole suite.
+      // The ask here is sub-cent, which is what makes the assertion able to see its subject.
+      // (2) The first version put its shares 0.19 % above the floor, so a routine price
+      // refresh of one registry entry would flip it from "admitted + note" to "refused" and
+      // the failure would read as a formatter bug. $0.0095 across two children asking
+      // $0.005 leaves 5.7 % of margin.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        tiny: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(0.0095);
+        const result = await spawnAgentTool.handler(
+          {
+            agents: [
+              { name: 'p1', task: 'A', profile: 'tiny', max_budget_usd: 0.005 },
+              { name: 'p2', task: 'B', profile: 'tiny', max_budget_usd: 0.005 },
+            ],
+          },
+          agent,
+        );
+        expect(result, 'admitted and scaled, so the note is there').toContain('Budget note');
+        expect(result, 'the ASK is legible — the half a mutant survived on').toMatch(/asked \$0\.0050/);
+        expect(result, 'and not rounded up to a cent').not.toMatch(/asked \$0\.01/);
+        expect(result, 'the share keeps four decimals').toMatch(/got \$0\.00\d\d/);
+        expect(result, 'and so does the remainder').toMatch(/had \$0\.0095 left/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('does not quote a $0 turn cost when it has no price for the model', async () => {
+      // ⛔ FOUND BY A DELTA ROUND, and the carve-out above is what makes it reachable: on an
+      // unpriced model the floor is 0, so the shared reason clause would have read "would
+      // get $0.0000, and one turn on its model costs about $0.0000" — a refusal whose own
+      // arithmetic cancels out, and an assertion that a turn on an unpriced model is free,
+      // which is precisely what is not known about it.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        local: { provider: 'openai', api_base_url: 'http://localhost:11434/v1', api_key: 'k', model_id: 'my-local-llama-70b' },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(5);
+        const err = await spawnAgentTool.handler(
+          { agents: [{ name: 'free', task: 'A', profile: 'local', max_budget_usd: 0 }] },
+          agent,
+        ).then(() => null, (e: unknown) => (e as Error).message);
+        expect(err, 'still refused').not.toBeNull();
+        expect(err, 'no self-cancelling cost claim').not.toMatch(/costs about \$0\.0000/);
+        expect(err, 'the reason is the budget, not a price it does not know')
+          .toMatch(/no budget runs a single turn/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('does not render a sub-cent refusal as all zeros', async () => {
+      // ⛔ `toFixed(2)` printed `"would get $0.00, and one turn on its model costs about
+      // $0.00"` for a ministral-class child — a refusal whose own reason rounds to nothing,
+      // in exactly the cheap-model regime the derived floor exists to serve.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        tiny: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(0.002);
+        const err = await spawnAgentTool.handler(
+          { agents: [{ name: 't1', task: 'A', profile: 'tiny' }, { name: 't2', task: 'B', profile: 'tiny' }] },
+          agent,
+        ).then(() => null, (e: unknown) => e as Error);
+        expect(err, 'refused: $0.001 each is under one $0.0045 turn').not.toBeNull();
+        expect(err!.message, 'the floor is readable').toMatch(/\$0\.0045/);
+        expect(err!.message, 'and so is the share').toMatch(/\$0\.0010/);
+        // ⚠ Scoped on purpose: this holds for THIS fixture, not for the function. Four
+        // decimals narrow the class, they do not close it — anything below $0.00005 still
+        // renders "$0.0000", which a delta round measured and which is filed rather than
+        // claimed away here.
+        expect(err!.message, 'no figure rounds away in this fixture').not.toMatch(/\$0\.00[^0-9]/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('quotes the share of the child it names, not the first one', async () => {
+      // ⛔ A SURVIVING MUTANT, found by a delta round: `shares[0]` in place of
+      // `shares[tooSmall]` passed the whole suite, because every fixture above gives both
+      // children the SAME $5 default and therefore the same share — an assertion that
+      // cannot tell its subject from its neighbour. Unequal asks separate them: `cheap`
+      // asks $10 and `dear` asks $1, so of a $0.30 remainder `dear` gets $0.03 while
+      // `shares[0]` is $0.27 — which would tell the model a share ABOVE the cost it is
+      // being refused for.
+      const { agent } = parentWithCeiling(0.3);
+      const err = await spawnAgentTool.handler(
+        {
+          agents: [
+            { name: 'cheap', task: 'A', model: 'fast', max_budget_usd: 10 },
+            { name: 'dear', task: 'B', max_budget_usd: 1 },
+          ],
+        },
+        agent,
+      ).then(() => null, (e: unknown) => (e as Error).message);
+      expect(err, 'the refused child, not its neighbour').toMatch(/"dear" would get \$0\.03,/);
+      expect(err, "and not the first child's share").not.toMatch(/\$0\.27/);
+    });
+
+    it('still refuses a zero budget on a model it has no price for', async () => {
+      // ⛔ THE HOLE THE CARVE-OUT WOULD HAVE OPENED, found by a delta round. An unpriced
+      // model gets no floor (0), and `share < 0` is false for a share of exactly 0 — so
+      // `max_budget_usd: 0` on a profiled local model would have been ADMITTED with a
+      // ceiling of zero, while the sibling test `refuses a child whose caller asked for
+      // nothing` forbids exactly that for every priced model. A zero share is now its own
+      // refusal rather than something a number happens to catch.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        local: { provider: 'openai', api_base_url: 'http://localhost:11434/v1', api_key: 'k', model_id: 'my-local-llama-70b' },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(5);
+        await expect(spawnAgentTool.handler(
+          { agents: [{ name: 'free', task: 'A', profile: 'local', max_budget_usd: 0 }] },
+          agent,
+        )).rejects.toThrow(/cannot share/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
     });
 
     it('refuses when the remainder cannot be known', async () => {
