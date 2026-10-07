@@ -142,6 +142,29 @@ function usdAtLeast(amount: number): string {
 }
 
 /**
+ * One precision for a whole sentence: four decimals as soon as two DISTINCT amounts in it
+ * would print identically at two.
+ *
+ * ⛔ MEASURED, and it is the original defect re-entering through the DESCRIPTION. `usdLabel`
+ * rounds to nearest, and 15 of the 39 priced ids round down — so a child asking $0.19 against
+ * a $0.192 floor read "it may spend $0.19 and one turn on its model costs about $0.19", two
+ * identical figures with one declared insufficient against the other, next to an instruction
+ * to raise it. A sweep found 73 of 2 717 refusals saying "X is below X". The figure is a
+ * description and needs no round-up; what it needs is to be DISTINGUISHABLE from the figure it
+ * is being compared with, and that is a property of the pair, not of either number.
+ *
+ * ⚠ When even four decimals collide the amounts differ by a rounding step, and the only branch
+ * that can reach it says so in words ("the two are too close to fund it"). Falling back to the
+ * coarse form there is deliberate: printing `$0.4400` twice would claim a difference that the
+ * sentence then has to explain away.
+ */
+function money(amounts: number[]): (v: number) => string {
+  const collides = amounts.some((a, i) => amounts.some((b, j) =>
+    i < j && a !== b && a.toFixed(2) === b.toFixed(2) && a.toFixed(4) !== b.toFixed(4)));
+  return (v) => (collides ? v.toFixed(4) : usdLabel(v));
+}
+
+/**
  * The floor refusal, named by what ACTUALLY binds — one sentence per cause.
  *
  * ⛔ THREE CAUSES, AND ONLY ONE OF THEM IS SCARCITY. One message served all three and was
@@ -219,9 +242,12 @@ function floorRefusal(opts: {
   factor: number;
   /** One turn for every child in the batch, added up. */
   sumFloors: number;
+  /** Whether any child in the batch runs a model with no known price, i.e. a floor of 0. */
+  anyFloorUnpriced: boolean;
 }): string {
-  const { name, got, need, askedFor, remainingRunUSD, batchSize, batchAsked, factor, sumFloors } = opts;
-  const left = usdLabel(remainingRunUSD);
+  const { name, got, need, askedFor, remainingRunUSD, batchSize, batchAsked, factor, sumFloors, anyFloorUnpriced } = opts;
+  const usd = money([remainingRunUSD, got, need, askedFor, batchAsked, sumFloors]);
+  const left = usd(remainingRunUSD);
   // ⚠ `name` IS NOT ESCAPED HERE, AND THAT IS A DECISION. A security round recommended
   // `escapeXml` because three other outbound paths in this file apply it. Those are composed
   // into an XML-ish envelope (`compose`/`renderFence`) and need it; this string is thrown, and
@@ -231,14 +257,26 @@ function floorRefusal(opts: {
   // touch control characters at all. And escaping would corrupt the identifier the model has
   // to name on its next call: a child called `a&b` would come back as `a&amp;b`. If this
   // string is ever composed into an envelope, the escaping belongs at that composition site.
-  const share = `"${name}" would get $${usdLabel(got)}`;
-  const turn = `one turn on its model costs about $${usdLabel(need)}`;
+  const share = `"${name}" would get $${usd(got)}`;
+  const turn = `one turn on its model costs about $${usd(need)}`;
   const abort = 'below its floor a sub-agent runs a single turn and then stops, so the money '
     + 'buys an abort instead of an answer';
   const nothing = ' No sub-agent was started and there are no results to report.';
   const ceiling = `$${left} left of its own cost ceiling`;
-  /** True when SOME split of the asks admits the whole batch; see the docblock. */
-  const batchCanFit = sumFloors <= remainingRunUSD;
+  /**
+   * True when SOME split of the asks admits the whole batch.
+   *
+   * ⛔ STRICT WHEN A FLOOR IS ZERO, and the proof is why. Sufficiency comes from asks
+   * proportional to the floors: every child then gets `floor_i · R / sumFloors >= floor_i`.
+   * That construction needs `floor_i > 0` for EVERY child — a child on an unpriced model has
+   * a floor of 0, so its proportional ask is 0, and a zero ask is refused by its own rule one
+   * level up. It therefore needs a positive slice that the sum does not account for. Measured:
+   * at a remainder exactly equal to the one priced floor, with an unpriced sibling, all 24
+   * combinations of the two asks were refused while this gate called the batch feasible.
+   */
+  const batchCanFit = anyFloorUnpriced
+    ? sumFloors < remainingRunUSD
+    : sumFloors <= remainingRunUSD;
 
   // ── (a0) THE RUN IS SPENT. Nothing about the batch changes it, and no model is cheap
   // enough — the cheapest priced floor in the registry is $0.000898, not $0.
@@ -272,17 +310,18 @@ function floorRefusal(opts: {
   // raising the ask is the only move that can work, because the share never exceeds the ask.
   if (askedFor < need) {
     const scaled = factor < 1
-      ? `, and the batch's $${usdLabel(batchAsked)} against that remainder scaled it to `
-        + `$${usdLabel(got)}`
+      ? `, and the batch's $${usd(batchAsked)} against that remainder scaled it to `
+        + `$${usd(got)}`
       : '';
     const also = batchCanFit
       ? ''
       : ` The batch cannot fit either, however the asks are split — one turn each costs `
-        + `$${usdLabel(sumFloors)} together, against $${left} — so delegate fewer at once as well.`;
+        + `$${usd(sumFloors)} together, against $${left} — so delegate fewer at once as well.`;
     return `This run has ${ceiling}, which covers one turn of "${name}" — what binds is its own `
-      + `budget: it may spend $${usdLabel(askedFor)} and ${turn}${scaled}. Raise its `
-      + `max_budget_usd; nothing smaller will do, and no change to the batch can substitute `
-      + `for it.${also}${nothing}`;
+      + `budget: it may spend $${usd(askedFor)} and ${turn}${scaled}. Raise its `
+      + `max_budget_usd — a bigger share cannot come out of the batch, because a share never `
+      + `exceeds the ask it was scaled from. A cheaper model or a narrower max_tokens would `
+      + `also clear it, by lowering what one turn costs.${also}${nothing}`;
   }
   // ⛔ A SINGLE CHILD HAS NO SIBLINGS TO BLAME, and this test belongs HERE — a first cut put
   // it in (a)'s condition, where it swallowed every single-child (b) case and answered "give
@@ -303,11 +342,11 @@ function floorRefusal(opts: {
   const remedy = batchCanFit
     ? 'Delegate fewer at once, run them one after another, or lower what the others ask for.'
     : `The whole batch cannot fit however the asks are split — one turn each costs `
-      + `$${usdLabel(sumFloors)} together, against $${left}. Delegate fewer at once, or run `
+      + `$${usd(sumFloors)} together, against $${left}. Delegate fewer at once, or run `
       + 'them one after another.';
-  return `${String(batchSize)} sub-agents asked for $${usdLabel(batchAsked)} against the `
+  return `${String(batchSize)} sub-agents asked for $${usd(batchAsked)} against the `
     + `$${left} left of this run's own cost ceiling, so every share was scaled down: `
-    + `${share}, below the $${usdLabel(need)} one turn on its model costs — ${abort}, and on `
+    + `${share}, below the $${usd(need)} one turn on its model costs — ${abort}, and on `
     + `its own it would fit. ${remedy}${nothing}`;
 }
 
@@ -1953,6 +1992,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           batchAsked: asked,
           factor,
           sumFloors: floors.reduce((sum, f) => sum + f, 0),
+          anyFloorUnpriced: floors.some((f) => !(f > 0)),
         }));
       }
 
@@ -2256,7 +2296,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           // than it, and placed after it. The announcement that scaling is visible is
           // worth nothing while this line contradicts it.
           const budget = shares?.[i] ?? spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
-          const knob = isBudget ? `max_budget_usd=${String(budget)}` : `max_turns=${String(turns)}`;
+          // ⚠ The SHARE, not the ask, so it carries float noise: a scaled $0.205 printed as
+          // `max_budget_usd=0.20499999999999996` — a description formatted as a parameter
+          // assignment, which reads as typeable. Rounded to display precision and kept a
+          // NUMBER, so `0.5` and `50` print unchanged (two standing assertions pin them).
+          const knob = isBudget
+            ? `max_budget_usd=${String(Number(usdLabel(budget)))}`
+            : `max_turns=${String(turns)}`;
           const tools = stop.pendingTools.map((t) => escapeXml(t)).join(', ');
           const whileDoing = ` and was still calling tools (${tools || 'unnamed'}) when it was stopped`;
           const raisedTurns = Math.min(turns * 2, MAX_SPAWN_TURNS);

@@ -1982,17 +1982,22 @@ describe('spawn_agent tool', () => {
     }
 
     it('no branch prescribes a figure to type', async () => {
-      // ⛔⛔ THE GATE FOR THIS CUT, and it is mechanical on purpose. A previous version of this
-      // message advised a number ("raise max_budget_usd to at least $X"). A review round swept
-      // 3 957 refusals through the real handler, fed each printed figure back, and found 599
-      // of 1 674 not followable: $Infinity at the exact tie, figures above the schema maximum,
-      // figures that refused the same child again, figures that refused a sibling. Every one
-      // of those lived in the prescription and none in the diagnosis.
+      // ⛔⛔ THE GATE FOR THIS CUT, and it is mechanical on purpose. A previous version advised a
+      // number ("raise max_budget_usd to at least $X"). A review round swept 3 957 refusals
+      // through the real handler, fed each printed figure back, and found 599 of 1 674 not
+      // followable: $Infinity at the exact tie, figures above the schema maximum, figures that
+      // refused the same child again, figures that refused a sibling. Every one of those lived
+      // in the prescription and none in the diagnosis.
       //
-      // So the invariant is not "the advised figure works" — it is that THERE IS NO ADVISED
-      // FIGURE. That is checkable over every branch at once, which an assertion per sentence
-      // is not, and it cannot rot into a weaker claim the way a per-figure witness did twice.
+      // ⚠ AND THE FIRST VERSION OF THIS GATE FORBADE A SPELLING, NOT A PRESCRIPTION. A delta
+      // round proved it: `to no less than $0.19` and `it needs 0.192 for one turn` both pass a
+      // ban on "at least" plus a well-formedness check on `$`-tokens, and both prescribe a
+      // figure that refuses the same child again. So the rule here is about the SENTENCE: a
+      // clause carrying an imperative verb may contain no digit at all. The figures this
+      // message does carry are descriptions, and they live in clauses without one.
       const { balanced, deep } = await floors();
+      /** Imperative heads this surface uses. A digit in the same clause is a prescription. */
+      const IMPERATIVE = /\b(Raise|raise|Give|give|Delegate|delegate|Lower|lower|Use|use|set|needs|come back with|re-run)\b/;
       const fixtures: Array<[string, number, unknown[]]> = [
         ['spent ceiling', 0, [{ name: 'one', task: 'A' }]],
         ['spent ceiling, zero ask', 0, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
@@ -2000,12 +2005,22 @@ describe('spawn_agent tool', () => {
         ['zero ask, short run', 0.15, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
         ['zero ask, scaled batch', 1.0, [{ name: 'free', task: 'A', max_budget_usd: 0 }, { name: 'dear', task: 'B', max_budget_usd: 10 }]],
         ['run cannot pay', 0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]],
-        ['run cannot pay, exact tie minus a step', balanced * 0.99, [{ name: 'one', task: 'A' }]],
+        ['run cannot pay, a rounding step under the floor', balanced * 0.99, [{ name: 'one', task: 'A' }]],
         ['own budget, unscaled', 10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]],
+        ['own budget, ask collides with the floor at display precision', 10, [{ name: 'one', task: 'A', max_budget_usd: 0.19 }]],
         ['own budget, unscaled, fat sibling', 1.0, [{ name: 'thin', task: 'A', max_budget_usd: 0.1 }, { name: 'fat', task: 'B', max_budget_usd: 0.9 }]],
+        // ⛔ A SHAPE NO FIXTURE REACHED, named by a delta round: nothing scaled (`factor === 1`)
+        // and yet the batch cannot fit, so the own-budget branch has to carry the batch clause
+        // without any scaling to report.
+        ['own budget, unscaled AND infeasible batch', 0.3, [{ name: 'a', task: 'A', max_budget_usd: 0.05 }, { name: 'b', task: 'B', max_budget_usd: 0.05 }]],
         ['own budget, scaled', 1.0, [{ name: 'cheap', task: 'A', max_budget_usd: 0.01 }, { name: 'dear', task: 'B', max_budget_usd: 10 }]],
         ['own budget, infeasible batch', 0.3, [{ name: 'thin', task: 'A', max_budget_usd: 0.01 }, { name: 'fat', task: 'B' }]],
-        ['own budget, ask over the maximum would be needed', 0.2, [{ name: 'cheap', task: 'A', max_budget_usd: 0.01 }, { name: 'dear', task: 'B', max_budget_usd: 50 }]],
+        ['own budget, a cap narrows the floor', 10, [{ name: 'one', task: 'A', max_budget_usd: 0.01, max_tokens: 500 }]],
+        // ⛔ The other unreached shape: a cap so large the floor goes exponential under
+        // `toFixed`. `max_tokens` is unbounded on the schema and unvalidated, and the floor is
+        // priced against it — so this is the one input that can put `4.5e+302` in front of a
+        // model. The per-figure assertion below is what refuses it.
+        ['own budget, an absurd cap', 0.25, [{ name: 'one', task: 'A', model: 'fast', max_budget_usd: 5, max_tokens: 1e12 }]],
         ['siblings, batch fits', 0.5, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
         ['siblings, batch cannot fit', 0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
         ['siblings at the gate boundary', balanced * 2, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
@@ -2015,15 +2030,59 @@ describe('spawn_agent tool', () => {
       ];
       for (const [label, remainder, agents] of fixtures) {
         const msg = await refusalFor(remainder, agents);
-        expect(msg, `${label}: no "at least" imperative`).not.toMatch(/at least/);
-        expect(msg, `${label}: no NaN or Infinity reaches the model`).not.toMatch(/Infinity|NaN/);
-        // Every figure it DOES carry is a description of what already happened, so each must
-        // be a real amount — a mutant that prints an unformatted float fails here.
+        expect(msg, `${label}: no NaN, Infinity or exponent reaches the model`).not.toMatch(/Infinity|NaN|e[+-][0-9]/);
         for (const figure of msg.match(/\$[0-9]+(?:\.[0-9]+)?/g) ?? []) {
           expect(figure, `${label}: ${figure} is printed at display precision`).toMatch(/^\$[0-9]+\.[0-9]{2}([0-9]{2})?$/);
         }
+        // ⛔ THE SENTENCE RULE. Split on clause boundaries and require that no clause carrying
+        // an imperative head also carries a digit. This is what the "at least" ban should have
+        // been: it catches a synonym, a naked float, and a figure smuggled into any wording.
+        for (const clause of msg.split(/[.;—]/)) {
+          if (!IMPERATIVE.test(clause)) continue;
+          expect(clause.trim(), `${label}: an imperative clause carries a figure`).not.toMatch(/[0-9]/);
+        }
         expect(msg, `${label}: says nothing was started`).toContain('No sub-agent was started');
         expect(msg, `${label}: and that there are no results`).toContain('there are no results');
+      }
+    });
+
+    it('two amounts compared in one sentence are never printed identically', async () => {
+      // ⛔ THE ORIGINAL DEFECT, RE-ENTERED THROUGH THE DESCRIPTION. `usdLabel` rounds to nearest
+      // and 15 of the 39 priced ids round down, so an ask of $0.19 against a $0.192 floor read
+      // "it may spend $0.19 and one turn on its model costs about $0.19" — with an instruction
+      // to raise it beside them. Measured over a sweep: 73 of 2 717 refusals said "X is below X".
+      const msg = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.19 }]);
+      expect(msg, 'the ask is separated from the floor').toContain('it may spend $0.1900');
+      expect(msg, 'and the floor from the ask').toContain('costs about $0.1920');
+      expect(msg, 'so the sentence no longer says X is below X').not.toMatch(/spend \$0\.19 and one turn[^$]*\$0\.19\b/);
+      // The control: where the two differ at display precision, nothing is widened.
+      const plain = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
+      expect(plain, 'an unambiguous pair stays at two decimals').toContain('it may spend $0.10');
+      expect(plain, 'and so does its floor').toContain('costs about $0.19');
+    });
+
+    it('a floor of zero in the batch makes the fits-gate strict', async () => {
+      // ⛔ The sufficiency proof behind "lower what the others ask for" is asks proportional to
+      // the floors — which needs every floor positive. An unpriced child has a floor of 0, so
+      // its proportional ask is 0, and a zero ask is refused by its own rule. Measured: at a
+      // remainder exactly equal to the one priced floor, all 24 combinations of the two asks
+      // were refused while the gate called the batch feasible and offered that remedy.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        local: { provider: 'openai', api_base_url: 'http://localhost:11434/v1', api_key: 'k', model_id: 'my-local-llama-70b' },
+      }));
+      reloadConfig();
+      try {
+        const { balanced } = await floors();
+        const msg = await refusalFor(balanced, [
+          { name: 'thin', task: 'A', max_budget_usd: 10 },
+          { name: 'local', task: 'B', profile: 'local', max_budget_usd: 5 },
+        ]);
+        expect(msg, 'the remedy that cannot work is withheld').not.toContain('lower what the others ask for');
+        expect(msg, 'and the batch is named as infeasible instead').toContain('cannot fit however the asks are split');
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
       }
     });
 
@@ -2092,8 +2151,13 @@ describe('spawn_agent tool', () => {
       const msg = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
       expect(msg, 'the run covers it').toContain('which covers one turn of "one"');
       expect(msg, 'the ask is named').toContain('it may spend $0.10');
-      expect(msg, 'and the only move that works').toContain('Raise its max_budget_usd');
-      expect(msg, 'said as an exclusion, not a suggestion').toContain('no change to the batch can substitute');
+      expect(msg, 'the ask is named as necessary').toContain('Raise its max_budget_usd');
+      expect(msg, 'with the reason the batch cannot substitute').toContain('a share never exceeds the ask it was scaled from');
+      // ⛔ AND THE TWO LEVERS THAT ALSO WORK, measured: at a $0.13 ask both `model: 'fast'` and
+      // `max_tokens: 500` are ADMITTED. A previous cut said "nothing smaller will do", which
+      // denied exactly those — and this is the one branch where a cheaper model demonstrably
+      // clears the refusal, so withholding it was the expensive direction.
+      expect(msg, 'a cheaper model is named').toContain('A cheaper model or a narrower max_tokens');
       expect(msg, 'so NOT the batch remedy that cannot work here').not.toContain('Delegate fewer at once');
       expect(msg, 'and nothing was scaled in this fixture').not.toContain('scaled it to');
     });
@@ -2265,6 +2329,12 @@ describe('spawn_agent tool', () => {
       );
       expect(result, 'the figure is readable').toContain('higher max_budget_usd (at least 0.41)');
       expect(result, 'and carries no float tail').not.toMatch(/at least 0\.40999/);
+      // ⛔ AND THE KNOB BESIDE IT, which a delta round found unguarded: the header reports the
+      // ceiling the child ran with, and that ceiling is the SCALED share — so it printed
+      // `max_budget_usd=0.20499999999999996`, a description formatted as a parameter
+      // assignment. Rounded to display precision, kept a number.
+      expect(result, 'the reported knob is readable too').toContain('COST BUDGET REACHED (max_budget_usd=0.2)');
+      expect(result, 'and carries no float tail either').not.toMatch(/max_budget_usd=0\.204/);
       // ⛔ STRICTLY LARGER, which is the property that makes it worth typing: the child ran
       // with a ceiling BELOW the figure it is now told to ask for.
       const quoted = /at least ([0-9.]+)\)/.exec(result);
