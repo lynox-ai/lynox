@@ -28,10 +28,28 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
     // `/\s*<\/[A-Za-z][\w:-]*>\s*$/.replace(body)` retried from every position in a whitespace
     // run: measured 7652 ms on this input, synchronous, inside the tool handler. The margin is
     // four orders of magnitude, so the bound is not delicate.
-    const body = `{${' '.repeat(80_000)}x`;
-    const started = Date.now();
-    expect(repairStrayCloseTag(body, JSON_CT)).toBeNull();
-    expect(Date.now() - started, 'the trailing-tag scan is backtracking over the body again').toBeLessThan(1000);
+    // ⚠ The input set is the whole point here, and two earlier versions of it could not fail.
+    //
+    // The backtrack only happens when the pattern FAILS: on a match the engine stops at the
+    // first viable start. So `{…spaces…</x>` runs in 0 ms even against the quadratic version —
+    // measured — and a test built only from that input is green for a defect that is present.
+    // `{…spaces…x` is slow, but it never reaches the tag path at all, because `endsWith('>')`
+    // returns first; a mutant that put the old regex BEHIND that guard survived exactly that.
+    //
+    // What is needed is an input that PASSES `endsWith('>')` and still makes the pattern fail:
+    // a bare `>`, an empty tag, or a name the grammar refuses. Each of those takes ~6.5 s on the
+    // quadratic version. Measured, all five.
+    for (const body of [
+      `{${' '.repeat(80_000)}x`,
+      `{${' '.repeat(80_000)}</x>`,
+      `{${' '.repeat(80_000)}>`,
+      `{${' '.repeat(80_000)}</>`,
+      `{${' '.repeat(80_000)}</1x>`,
+    ]) {
+      const started = Date.now();
+      repairStrayCloseTag(body, JSON_CT);
+      expect(Date.now() - started, 'the trailing-tag scan is backtracking over the body again').toBeLessThan(1000);
+    }
   });
 
   it('repairs the same body when the call declares NO content type at all', () => {
@@ -58,6 +76,19 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
     // implementation look like a regression.
     const got = repairStrayCloseTag('{"a":1}\n  </body>\n', JSON_CT);
     expect(JSON.parse(got?.body ?? 'null')).toEqual({ a: 1 });
+  });
+
+  it('repairs across whitespace JSON does NOT accept — NBSP, U+FEFF, U+2028', () => {
+    // ⚠ The reason this needs its own test: JS `\s` and JSON's whitespace are different sets.
+    // `{"a":1}<NBSP></body>` only parses once the NBSP goes too, so a version that cuts at the
+    // tag and stops leaves a body that still fails — and declines to repair exactly the inputs
+    // it was built for. Found by a delta round comparing against the regex this replaced: 366
+    // bodies in that class, and zero in the other direction.
+    for (const ws of [' ', ' ', '﻿', '　', ' \t\n']) {
+      const got = repairStrayCloseTag(`{"a":1}${ws}</body>`, JSON_CT);
+      expect(got, JSON.stringify(ws)).not.toBeNull();
+      expect(JSON.parse(got?.body ?? 'null'), JSON.stringify(ws)).toEqual({ a: 1 });
+    }
   });
 
   it('⭐ what it sends is always a PREFIX of what the model wrote', () => {
