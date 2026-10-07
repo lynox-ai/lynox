@@ -2348,6 +2348,15 @@ describe('isDangerous', () => {
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
       expect(performance.now() - started).toBeLessThan(10_000);
     });
+
+    it('stays fast when options and values alternate', () => {
+      // Only a word that is neither an option nor an option's value opens a run; if every
+      // option after a value opened one, this would cost the square of its length.
+      const cmd = `git ${'-a v -b '.repeat(125_000)}status`;
+      const started = performance.now();
+      expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
+      expect(performance.now() - started).toBeLessThan(10_000);
+    });
   });
 
   // Regression backstop: the destructive gate now reads from
