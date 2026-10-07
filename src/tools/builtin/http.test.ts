@@ -696,18 +696,24 @@ describe('httpRequestTool', () => {
       //      the needle absent: green, having swept nothing. A control token has to be ABSENT
       //      from every other surface, which is the property `tests/gate-record.test.ts` asserts
       //      for its own marker.
-      //   2. `export const httpRequestTool` — unique in the repo, but 280 lines from the claim.
-      //      Split this file and move the body-repair region, and the control stays green on a
-      //      file that no longer carries the comment.
+      //   2. `export const httpRequestTool` — one occurrence in the handler, but it sits with the
+      //      tool declaration near the top of the file, far from the claim. Split this file and
+      //      move the body-repair region, and the control stays green on a file that no longer
+      //      carries the comment.
       //   3. `The scan reads the ORIGINAL` — suggested, and rejected by MEASUREMENT: it does not
       //      occur in this file at all. The sentence reads "The scan reads `input.body` — the
       //      ORIGINAL —". The control caught that, which is the only reason to write one.
       //
       // The token below sits in the sentence that states the CORRECT direction, so it dies when
-      // that correction is deleted. ⚠ It does NOT die when the repair-ordering block moves: that
-      // block is ~42 lines from this one, so a split between them still leaves this green. 280
-      // lines became 42, not zero, and an earlier draft of this comment claimed the control
-      // "dies exactly when the correction does", which overstates it.
+      // that correction is deleted. ⚠ It does NOT die when the repair-ordering block moves — that
+      // is a different comment block, so a split between the two still leaves this green. The
+      // residual shrank; it is not zero, and an earlier draft claimed the control "dies exactly
+      // when the correction does", which overstates it.
+      //
+      // ⚠ The distances those two sentences used to quote are GONE on purpose. Both were exact
+      // when written and both went stale — one of them inside the same commit, because another
+      // hunk inserted six lines between the anchors. The comparison that matters is "same
+      // sentence" versus "different block", and that does not drift.
       //
       // A moved file, incidentally, is NOT the failure this guards: `readFileSync` throws ENOENT
       // and the test goes loudly red. The reachable failure was always the wrong TARGET.

@@ -83,11 +83,15 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
   });
 
   it('tolerates whitespace around the stray tag', () => {
-    // ⚠ Asserted as a PROPERTY, not as a string. An earlier version pinned `'{"a":1}'` exactly,
-    // which also pinned that the repair eats the whitespace BEFORE the tag — a formatting detail
-    // of the regex that then existed. The linear replacement leaves it, which parses identically
-    // and changes less of someone else's data. Pinning the literal made the stricter
-    // implementation look like a regression.
+    // ⚠ Asserted as a PROPERTY, not as a string, so that a change to how much whitespace the
+    // repair removes does not read as a regression here.
+    //
+    // ⚠ CORRECTED: this comment used to say "the linear replacement leaves it [the whitespace
+    // before the tag]". That was false when written and is false now — `withoutTrailingCloseTag`
+    // trims the prefix deliberately, which is what rescues a body ending in U+00A0 or U+FEFF, and
+    // `repairStrayCloseTag('{"a":1}\n  </body>\n')` returns `{"a":1}`. The engine note in
+    // `http.ts` now says the whitespace around the tag goes too, so the two would have
+    // contradicted each other in print.
     const got = repairStrayCloseTag('{"a":1}\n  </body>\n', JSON_CT);
     expect(JSON.parse(got?.body ?? 'null')).toEqual({ a: 1 });
   });

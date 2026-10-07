@@ -2206,9 +2206,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // enum both answers coincide, so this is the right set today, and they are still two
     // different questions.
     //
-    // They also differ on case: this predicate folds, and BOTH places that decide whether a body
-    // is sent — `opts.body` below and the `bodySent` term it does not read — compare the RAW
-    // method. So a lowercase
+    // They also differ on case: this predicate folds, and both spellings of "does a body leave"
+    // — the `opts.body` gate below, which is the one that decides, and the `bodySent` term that
+    // mirrors it for the repair — compare the RAW method. So a lowercase
     // read has its body sent and not scanned, and the GET-exfiltration check above is
     // skipped too — none of it reachable through the validated dispatch, which enforces
     // the enum case-sensitively.
@@ -2236,11 +2236,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // added as a plain `return`" and that "nothing cheap can". The cost is the fourteen names and
     // three sentences, and the risk is that they quietly stop being true, which is worse.
     //
-    // So the predicate stays written twice, and the duplication is NOT cheap: the two spellings
-    // sit 130 lines apart with the body-secret refusal and the whole write-consent gate between
-    // them. Nothing makes them agree. That is the known cost of not folding, stated rather than
-    // dressed up — an earlier draft of this sentence claimed eleven lines and adjacency as the
-    // justification, which was simply wrong.
+    // So the predicate stays written twice, and the duplication is NOT cheap: the second spelling
+    // is at `opts.body`, with the body-secret refusal and the whole write-consent gate between it
+    // and this one. Nothing makes them agree. That is the known cost of not folding, stated
+    // rather than dressed up.
+    //
+    // ⚠ NO LINE DISTANCE IS GIVEN, and that omission is deliberate. Two drafts of this sentence
+    // carried one — "eleven lines", then "130 lines" — and the first was simply wrong while the
+    // second was EXACT when written and went stale inside the very commit that wrote it, because
+    // another hunk inserted six lines between the anchors. A measured number in a comment is a
+    // claim with a maintenance cost that nothing pays. Name the anchor, not the distance.
     //
     // It holds the body rather than a boolean so the `typeof` narrowing survives to the call
     // below, which then needs no cast; a boolean would force one, because `input.body` is
@@ -2256,8 +2261,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // knowingly. Named here because the next edit to the method set has to find three places for
     // THIS question — and four more on the same GET/HEAD-versus-rest axis that an enum change
     // touches: `shouldRewriteToGet` and the GET-exfiltration gate compare raw, `httpTimeoutMessage`
-    // and `undoClassFor` fold. Only the last is pinned by a test. Leaving one of them out of a
-    // paragraph like this is how the compensation claim three paragraphs down went wrong.
+    // and `undoClassFor` fold. The two that FOLD are both pinned by tests; the two that compare
+    // RAW are pinned by nothing, which is the half worth knowing. (An earlier draft said only
+    // `undoClassFor` was pinned. False: `httpTimeoutMessage`'s fold is pinned by the
+    // timeout-message test, which asserts a lowercase `head` gets the bare line.) Leaving one of
+    // these out of a paragraph like this is how the compensation claim below went wrong.
     const bodySent: string | null =
       typeof input.body === 'string' && method !== 'GET' && method !== 'HEAD'
         ? input.body
