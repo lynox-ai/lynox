@@ -84,8 +84,7 @@
   conversation. A task created from a conversation that had taken in nothing
   runs as before. (#1528)
 - The record lives in the new `engine.db` column `triggers.created_untrusted`
-  (schema v19). A workflow task created before this release carries no record; to
-  give it one, create it again from its conversation. A task that is saved again never loses a recorded state, and a
+  (schema v19). A task that is saved again never loses a recorded state, and a
   stored value this version does not recognise is read as untrusted.
 
 ### Fixed: web UI errors that went unreported
@@ -102,8 +101,8 @@
 ### Internal
 
 - The Svelte components of the web UI are linted, the Markdown renderer
-  included, and floating promises in the web UI outside the chat view are handled or marked, and
-  the chat view's prompt-answer, stop, dismissal and copy calls are handled.
+  included, and floating promises in the web UI outside the chat view are handled or marked; in
+  the chat view, the prompt-answer, stop, dismissal and copy calls are handled.
   (#1527, #1536, #1539, #1543)
 - `tests/online/` calls real provider APIs and now runs only with
   `LYNOX_ONLINE=1`; an ordinary local run leaves it out and says so. The checks
