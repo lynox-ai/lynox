@@ -19,7 +19,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
-import { httpRequestTool, oauthRenewalBackoffSizeForTests, resetOAuthRenewalBackoffForTests, OAUTH_RENEWAL_BACKOFF_MS } from './http.js';
+import { httpRequestTool, oauthRenewalBackoffSizeForTests, resetOAuthRenewalBackoffForTests, OAUTH_RENEWAL_BACKOFF_MS, HTTP_HARD_CAP_MS, HTTP_WALL_GRACE_MS } from './http.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({
@@ -1798,6 +1798,108 @@ describe('a failed renewal holds the profile back', () => {
     await request(t.agent);
 
     expect(t.tokenPosts()).toBe(2);
+  });
+});
+
+describe('a renewal that succeeds but leaves the profile due is held too', () => {
+  const T0 = Date.parse('2026-10-07T12:00:00.000Z');
+  const SEED = {
+    CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec',
+    CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH',
+  };
+  let now = T0;
+  beforeEach(() => {
+    now = T0;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+  });
+
+  /**
+   * `refuseSave` makes every profile save come back refused, which is the state the
+   * hold has to cover: the exchange wrote a new token, but the profile still carries
+   * the old expiry, so every request would renew again.
+   */
+  function setup(tokenBody: () => Record<string, unknown>, refuseSave: boolean): { agent: never; vault: MockVault; tokenPosts: () => number; lastAuth: () => string | undefined } {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: T0 - 1000 } } }));
+    if (refuseSave) vi.spyOn(apiStore, 'save').mockReturnValue({ ok: false, reason: 'refused for the test' });
+    const vault = makeVault(SEED);
+    let posts = 0;
+    let auth: string | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/oauth/token')) {
+        posts++;
+        return new Response(JSON.stringify(tokenBody()), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      auth = new Headers(init?.headers).get('authorization') ?? undefined;
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { agent: makeAgent(apiStore, vault), vault, tokenPosts: () => posts, lastAuth: () => auth };
+  }
+
+  const request = (agent: never): Promise<unknown> =>
+    httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, agent);
+
+  it('holds a profile whose save was refused for the period, and attaches the new token meanwhile', async () => {
+    const t = setup(() => ({ access_token: 'MINTED', expires_in: 3600 }), true);
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(1);
+
+    now = T0 + OAUTH_RENEWAL_BACKOFF_MS - 1;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(1);
+    expect(t.lastAuth()).toBe('Bearer MINTED');
+
+    now = T0 + OAUTH_RENEWAL_BACKOFF_MS;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(2);
+  });
+
+  it('does not hold when the new token lives shorter than the hold plus a request', async () => {
+    // 30 seconds: a hold would leave requests on a dead token.
+    const t = setup(() => ({ access_token: 'MINTED', expires_in: 30 }), false);
+    await request(t.agent);
+    now = T0 + 1;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(2);
+  });
+
+  it('cuts the hold to the new token\'s lifetime less the longest fetch', async () => {
+    // 90 seconds of life, less the longest fetch (60-second ceiling plus the wall timer's grace).
+    const t = setup(() => ({ access_token: 'MINTED', expires_in: 90 }), false);
+    await request(t.agent);
+    const hold = 90_000 - HTTP_HARD_CAP_MS - HTTP_WALL_GRACE_MS;
+
+    now = T0 + hold - 1;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(1);
+    now = T0 + hold;
+    await request(t.agent);
+    expect(t.tokenPosts()).toBe(2);
+  });
+
+  it('does not hold when the exchange gave no lifetime, since nothing bounds the hold', async () => {
+    const t = setup(() => ({ access_token: 'MINTED' }), true);
+    await request(t.agent);
+    now = T0 + 1;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(2);
+  });
+
+  it('keeps holding after the exchange rotated the refresh token', async () => {
+    // The rotation changes the refresh slot; the hold is keyed on what is there after it.
+    let n = 0;
+    const t = setup(() => ({ access_token: 'MINTED', expires_in: 3600, refresh_token: `R${String(++n)}` }), true);
+    await request(t.agent);
+    expect(t.vault.peek('CRM_API_REFRESH_TOKEN')).toBe('R1');
+    now = T0 + 1;
+    await request(t.agent);
+
+    expect(t.tokenPosts()).toBe(1);
   });
 });
 

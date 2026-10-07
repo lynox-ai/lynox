@@ -1124,6 +1124,21 @@ function purgeMessage(purge: TokenPurge): string {
 }
 
 /**
+ * The expiry of the access token the last successful exchange for a profile wrote,
+ * as the exchange computed it: absolute milliseconds, or `'unknown'` when the
+ * answer carried no lifetime. Kept here because the profile is not a reliable
+ * copy of it: when the profile save is refused, `token_expires_at` on the profile
+ * still describes the token before. The unattended renewal in `http.ts` reads it
+ * to size its hold. One entry per profile id, overwritten by each exchange.
+ */
+const exchangedTokenExpiry = new Map<string, number | 'unknown'>();
+
+/** See {@link exchangedTokenExpiry}. `undefined` when no exchange for the profile has written a token in this process. */
+export function exchangedTokenExpiryFor(profileId: string): number | 'unknown' | undefined {
+  return exchangedTokenExpiry.get(profileId);
+}
+
+/**
  * Persist the engine-owned grant record — and, after a successful exchange, the
  * token expiry — onto the FRESHEST copy of the profile: an exchange takes
  * seconds, and saving the copy read before it would roll back a concurrent
@@ -2213,6 +2228,7 @@ Next steps before calling create:
         ? parsed.refresh_token
         : null;
       secretStore.set(outputName, accessToken);
+      exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
       if (rotated !== null) {
         // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
