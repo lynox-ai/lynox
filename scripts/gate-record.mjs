@@ -251,7 +251,7 @@ export function requiredGates(files) {
  *
  * WHY IT IS ITS OWN FUNCTION. `review:` was the first field to demand what a round FOUND, and
  * the `security` gate is getting the same demand. The two differ in their HEAD —
- * `<n> <model> round(s)` against an origin vocabulary — and agree completely on their TAIL:
+ * `<n> <model> <round|rounds>` against an origin vocabulary — and agree completely on their TAIL:
  * `no findings`, or `<N> findings` followed by `all fixed` or counts that sum to N. Copying
  * that tail would produce two grammars that drift, and the copy nobody tests is the one that
  * drifts first. Naming it once means the mutants that witness it keep witnessing it for every
@@ -265,6 +265,22 @@ export function requiredGates(files) {
  * it through `evaluate` witnesses one caller's WIRING, not the grammar. Both assertions are
  * worth having and they are not the same one, so the tests carry both.
  */
+/**
+ * The ONE place the `review:` format is written down for a human.
+ *
+ * ⚠ Both messages below used to carry it as their own literal, and the PR template carried
+ * it twice more. A measured defect: the template's skeleton read `<n> <model> round(s),
+ * <result>`, where `(s)` sits OUTSIDE the brackets, so an author who substituted the slots
+ * correctly still produced `round(s)` — which the grammar refuses. Four copies agreed with
+ * each other and three of them were wrong. The template's two are checked against the
+ * grammar by `tests/gate-record.test.ts`; these two now read one constant, so they cannot
+ * disagree at all.
+ *
+ * The plural lives INSIDE a slot on purpose: the skeleton has to stay refused while
+ * unsubstituted (an attestation must not be pre-answered) and be valid once filled.
+ */
+export const REVIEW_FORMAT = '<n> <model> <round|rounds>, <result>';
+
 export function roundResultErrors(result, quoted) {
   // ⛔ Loud about a missing `quoted`, and that is the point of the check rather than a formality:
   // without it the three interpolating messages read `\`undefined\` — the result must read …`,
@@ -686,7 +702,7 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
     if (!raw) {
       errors.push(
         'this diff owes the `code-review` gate, so the record needs a `review:` line saying what the round FOUND.',
-        'Format: `review: <n> <model> <round|rounds>, <result>` — e.g. `review: 1 opus round, no findings`,',
+        `Format: \`review: ${REVIEW_FORMAT}\` — e.g. \`review: 1 opus round, no findings\`,`,
         '`review: 1 opus round, 5 findings, all fixed`, or `review: 1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted`.',
         'The model is the one that RAN the round (your own, if you reviewed it yourself).',
       );
@@ -694,7 +710,7 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
       const m = /^(\d+)\s+([a-z][a-z0-9.+-]{1,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
       if (!m) {
         errors.push(
-          `\`review: ${raw}\` is not \`<n> <model> <round|rounds>, <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
+          `\`review: ${raw}\` is not \`${REVIEW_FORMAT}\` — e.g. \`review: 1 opus round, no findings\`.`,
           'The model slot takes a short HANDLE: a letter, then at least one more character from',
           '`[a-z0-9.+-]` — so neither `1 x round` nor `1 ... round` passes as evidence. Two characters,',
           'not three, because a floor of three refused `o3` and `r1`.',

@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -418,13 +418,48 @@ describe('gate-record — the shipped template does not answer its own questions
     expect(errors).toContain('unknown gate');
     expect(errors).toContain('`delta:`');
     expect(errors).toContain('`mutations:`');
-    // ⭐ This assertion is why the field is in the template at all. Without it, adding a mandatory
-    // field and forgetting the template leaves the perfectly-filled template REJECTED — measured:
-    // that is what happened on pro's first cut, and this test is the one that would have caught it.
-    // ⚠ It reaches that property through the MESSAGE TEXT, which is a correlate: the message
-    // quoting a format proves the field is read, not that the template's own line is fillable.
-    // The case below tests the property itself, by filling the skeleton and requiring a pass.
-    expect(errors).toContain('`review: <n> <model> <round|rounds>, <result>`');
+    // ⚠ A MIRROR of `.github/pull_request_template.md`'s review line, and kept deliberately
+    // after an attempt to replace it lost coverage. The property it binds is «no field
+    // pre-answers ANY PART of its question», and nothing cheaper reaches it: the per-field case
+    // below asserts each field is still REFUSED, which a half-filled line
+    // (`review: <n> opus round, no findings`) satisfies — it still holds a placeholder and is
+    // still refused, while the template has answered «which model» and «what did it find» for
+    // the author. Measured: with that mutation the per-field case stays green and only this
+    // assertion goes red. Counting placeholders per field was the alternative and trades this
+    // lockstep for a brittler one — it would red a legitimate reword of the skeleton.
+    // So: two copies to keep in step, with the reason written down rather than discovered again.
+    expect(errors).toContain(`\`review: ${REVIEW_FORMAT}\``);
+  });
+
+  /**
+   * ⭐ The per-FIELD half of "answers nothing in advance". The test above reads the aggregate
+   * message, which goes red as long as ANY field is still a placeholder — so a single field
+   * quietly pre-filled (`review: <n> opus round, no findings`) leaves it green.
+   *
+   * ⚠ An assertion pinning the message's echo of the template line used to stand in for this.
+   * It worked, by mirroring `.github/pull_request_template.md` into a string here — two copies
+   * to keep in lockstep, which is the shape this whole change exists to remove. And it covered
+   * one field where the property holds for all of them.
+   */
+  it('⭐ every field is still refused when it is the ONLY placeholder left', () => {
+    const shipped = (extractRecord(TEMPLATE) as { fields: Record<string, string> }).fields;
+    // A base that PASSES, so the only thing under test is the one substituted field. It owes the
+    // security gate, so `security:` is live here too — on a code diff that field is not read at
+    // all and this test would silently skip it.
+    const base = { gates: 'code-review, delta, security', security: 'own round, no findings' };
+    expect(evaluate({ body: record(base), head: HEAD, files: SEC }).ok, 'the base is not valid — every case below would pass for the wrong reason').toBe(true);
+    for (const [field, line] of Object.entries(shipped)) {
+      const v = evaluate({ body: record({ ...base, [field]: line }), head: HEAD, files: SEC });
+      expect(v.ok, `template field \`${field}:\` is ACCEPTED as shipped — it answers its own question`).toBe(false);
+    }
+  });
+
+  it('⭐ the format in the script and the one in the template are one string, not two', () => {
+    // Four copies of this format once agreed with each other and three were wrong. The script's
+    // two messages now interpolate `REVIEW_FORMAT`; this holds the template to the same value, so
+    // there is no pair left that can drift.
+    const shipped = (extractRecord(TEMPLATE) as { fields: Record<string, string> }).fields;
+    expect(shipped['review'], 'the template teaches a different format than the script prescribes').toBe(REVIEW_FORMAT);
   });
 
   it('is rejected on `security:` too, which needs a diff that OWES that gate', () => {
@@ -453,14 +488,23 @@ describe('gate-record — the shipped template does not answer its own questions
    * whole line would pass whatever the skeleton said — it would never read the literals. Freeing
    * only the bracketed parts makes the fill prove it kept every other character, so a skeleton
    * literal that is not valid input cannot satisfy both this and the grammar.
+   *
+   * ⚠ WHAT IT GIVES UP, since the fix moved the plural inside a slot: `review:` now has no word
+   * literal left, so its shape is pure structure (`^(.+?) (.+?) (.+?), (.+?)$`) and a future
+   * skeleton that DROPPED the comma would still match this fill while being unfillable. Measured.
+   * The alternative — a bare `round` literal — keeps that one anchor but makes the test's own
+   * doctrine false for a legitimate `3 opus rounds`, so the anchor is the cheaper thing to lose.
+   * For four of the seven fields the shape is `^(.+?)$` and checks nothing; it does real work on
+   * `review`, `security` and `mutations`. The loop stays uniform so a NEW field is covered
+   * without anyone remembering to add it.
    */
-  it('⭐ is ACCEPTED once its bracketed slots are filled, with every literal kept', () => {
+  it('⭐ is ACCEPTED once its bracketed slots are filled, keeping what sits outside them', () => {
     // One value per field, in the form an author would write. Keyed BY FIELD on purpose: a field
     // added to the template without a value here fails below by name, which is the drift this
     // exists to catch — in the direction the rejection tests structurally cannot see.
     const FILLED: Record<string, string> = {
       head: HEAD.slice(0, 8),
-      gates: 'code-review, delta',
+      gates: 'code-review, delta, security',
       review: '1 opus round, no findings',
       security: 'own round, no findings',
       delta: 'clean',
@@ -490,23 +534,20 @@ describe('gate-record — the shipped template does not answer its own questions
       ).toMatch(shape);
     }
 
-    const body = (gates: string) =>
-      `## Summary\n\nSomething.\n\n\`\`\`gate-record\n${fields
-        .map((f) => `${f}: ${f === 'gates' ? gates : FILLED[f]}`)
-        .join('\n')}\n\`\`\`\n`;
-    // ⚠ BOTH diffs. `security:` is only read when the diff owes that gate, so a code-only run
-    // would leave the template's security line unexercised — the same gap the rejection case
-    // above needed its own SEC run for.
+    // ⚠ ONE diff, and it is the one that owes `security` — because that field is only READ
+    // when the gate is due, so a code-only run leaves the template's security line unexercised.
+    // An earlier version evaluated both. The code leg was measured redundant: the gates a code
+    // diff owes are a subset of a security diff's, every ungated check runs identically, and
+    // listing a gate that is not owed is not an error — so its errors are always a subset.
+    // A case that cannot change the answer is one this file removes on sight.
     // ⚠ `evaluate` returns `{ok, notes}` on success and carries `errors` only on failure —
-    // measured, not assumed. So the assertion reads `ok`, and quotes the errors when it fails,
+    // measured, not assumed. So the assertion reads `ok` and quotes the errors when it fails,
     // because «expected false to be true» would not say WHICH field refused.
-    for (const [label, gates, files] of [
-      ['an ordinary code diff', 'code-review, delta', CODE],
-      ['a diff that owes the security gate', 'code-review, delta, security', SEC],
-    ] as Array<[string, string, string[]]>) {
-      const v = evaluate({ body: body(gates), head: HEAD, files });
-      expect(v.ok, `the filled template was refused on ${label}: ${(v.errors ?? []).join(' ')}`).toBe(true);
-    }
+    const body = `## Summary\n\nSomething.\n\n\`\`\`gate-record\n${fields
+      .map((f) => `${f}: ${FILLED[f]}`)
+      .join('\n')}\n\`\`\`\n`;
+    const v = evaluate({ body, head: HEAD, files: SEC });
+    expect(v.ok, `the filled template was refused: ${(v.errors ?? []).join(' ')}`).toBe(true);
   });
 });
 
