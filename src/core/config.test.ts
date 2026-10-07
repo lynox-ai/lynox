@@ -1521,6 +1521,28 @@ describe('Config', () => {
     expect(cfg.model_profiles).toBeUndefined();
   });
 
+  it('clears a worker_profile that names a prototype member, not a profile', async () => {
+    process.env['LYNOX_WORKER_PROFILE'] = 'toString';
+    process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+      fallback: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-x', model_id: 'mistral-large-2512' },
+    });
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().worker_profile).toBeUndefined();
+  });
+
+  it('a profile named "__proto__" stays a profile and does not replace the map\'s prototype', async () => {
+    // Raw text: JSON.stringify of an object literal would drop the key.
+    process.env['LYNOX_MODEL_PROFILES_JSON'] =
+      '{"__proto__": {"provider": "openai", "api_base_url": "https://api.mistral.ai/v1", "api_key": "sk-p", "model_id": "ministral-14b-2512"},'
+      + ' "fallback": {"provider": "openai", "api_base_url": "https://api.mistral.ai/v1", "api_key": "sk-x", "model_id": "mistral-large-2512"}}';
+    process.env['LYNOX_WORKER_PROFILE'] = '__proto__';
+    const { loadConfig } = await import('./config.js');
+    const cfg = loadConfig();
+    expect(Object.hasOwn(cfg.model_profiles ?? {}, '__proto__')).toBe(true);
+    expect(cfg.model_profiles?.['fallback']).toMatchObject({ model_id: 'mistral-large-2512' });
+    expect(cfg.worker_profile).toBe('__proto__');
+  });
+
   it('LYNOX_MODEL_PROFILES_JSON env deserializes into model_profiles', async () => {
     process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
       fallback: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'sk-x', model_id: 'mistral-large-2512' },

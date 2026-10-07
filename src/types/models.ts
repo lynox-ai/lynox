@@ -1323,6 +1323,17 @@ export function ownEntry<T>(map: Readonly<Record<string, T>>, key: string): T | 
   return Object.hasOwn(map, key) ? map[key] : undefined;
 }
 
+/** The named model profile, read as an OWN entry (see {@link ownEntry}). A profile
+ *  name reaches this from outside too — the model passes one to `spawn_agent` — and
+ *  `model_profiles['toString']` must be "no such profile", not a function that then
+ *  sails past the unknown-profile check with `model_id` undefined. */
+export function profileNamed(
+  profiles: Readonly<Record<string, ModelProfile>> | undefined,
+  name: string,
+): ModelProfile | undefined {
+  return profiles ? ownEntry(profiles, name) : undefined;
+}
+
 /** Resolve a model id (canonical or @-suffixed Vertex variant) to its
  *  capability entry. Returns `undefined` for unknown models — callers must
  *  decide whether that's a hard error or a soft fallback. */

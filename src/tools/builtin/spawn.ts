@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
-import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
+import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId, profileNamed } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
@@ -242,7 +242,7 @@ function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
  *     cost the run demonstrably does not incur), so it is deliberately NOT used.
  */
 function specResolvesDeep(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider): boolean {
-  const profile = spec.profile ? userConfig.model_profiles?.[spec.profile] : undefined;
+  const profile = spec.profile ? profileNamed(userConfig.model_profiles, spec.profile) : undefined;
   if (profile && profileBandIsDeepOrUnknown(profile)) return true;
   const role = spec.role ? getRole(spec.role) : undefined;
   const { tier } = resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider });
@@ -689,7 +689,7 @@ function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfi
   }
 
   const profile: ModelProfile | undefined = spec.profile
-    ? userConfig.model_profiles?.[spec.profile]
+    ? profileNamed(userConfig.model_profiles, spec.profile)
     : undefined;
   if (spec.profile && !profile) {
     throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
@@ -897,7 +897,7 @@ async function executeThinker(
 
   const resolved = spec.role ? getRole(spec.role) : undefined;
   const profile: ModelProfile | undefined = spec.profile
-    ? userConfig.model_profiles?.[spec.profile]
+    ? profileNamed(userConfig.model_profiles, spec.profile)
     : undefined;
 
   const baseProvider = getActiveProvider();
@@ -1453,7 +1453,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const specs: SpawnSpec[] = input.agents.map((spec, i) => {
       assertSpawnRoutingPermitted(spec, cfg);
       if (isHeadless && specResolvesDeep(spec, cfg, provider)) {
-        const deepProfile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
+        const deepProfile = spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined;
         // A deep-band OR unknown-band profile pins a specific endpoint and cannot be
         // substituted down to balanced, so it is REFUSED headless (not clamped). This
         // is the security control for the unknown-band case: without it, a profile
@@ -1488,7 +1488,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       const { model, tier } = resolveSpawnChildRouting({
         spec,
         role: spec.role ? getRole(spec.role) : undefined,
-        profile: spec.profile ? cfg.model_profiles?.[spec.profile] : undefined,
+        profile: spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined,
         userConfig: cfg,
         baseProvider: provider,
         parent: readParentProviderConfig(agent),
@@ -2020,7 +2020,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       let canDowngrade = true;
       for (const spec of deepSpecs) {
         const role = spec.role ? getRole(spec.role) : undefined;
-        const profile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
+        const profile = spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined;
         const r = resolveSpawnChildRouting({ spec, role, profile, userConfig: cfg, baseProvider });
         // A profile's band hides behind the clamp-resolved tier. The payload names
         // the ACTUAL classification — deep for a known-deep profile, deep

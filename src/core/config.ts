@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, TierSet } from '../types/index.js';
-import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId } from '../types/index.js';
+import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, profileNamed } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
@@ -525,7 +525,9 @@ export function loadConfig(): LynoxUserConfig {
         // Validate each entry against the engine ModelProfile shape instead of a
         // blind cast: a malformed profile (e.g. missing api_key) must be dropped
         // here, not passed on to spawn/openai-adapter as `Bearer undefined`.
-        const valid: Record<string, ModelProfile> = {};
+        // No prototype: a `"__proto__"` name would otherwise replace this object's
+        // prototype on assignment instead of becoming an entry.
+        const valid: Record<string, ModelProfile> = Object.create(null) as Record<string, ModelProfile>;
         for (const [name, profile] of Object.entries(parsed as Record<string, unknown>)) {
           if (isModelProfile(profile)) valid[name] = profile;
         }
@@ -543,7 +545,7 @@ export function loadConfig(): LynoxUserConfig {
   // malformed and dropped above, or the two env vars drifted), clear it instead
   // of letting EVERY background task throw "Unknown model profile". Running the
   // worker on the main provider is a graceful degrade; failing every task is not.
-  if (merged.worker_profile && !merged.model_profiles?.[merged.worker_profile]) {
+  if (merged.worker_profile && !profileNamed(merged.model_profiles, merged.worker_profile)) {
     merged.worker_profile = undefined;
   }
   // Model blocklist × worker profile: background tasks run on the profile's raw
@@ -552,7 +554,7 @@ export function loadConfig(): LynoxUserConfig {
   // where the resolver enforces the same blocklist) — same shape as the
   // dangling-profile guard above.
   if (merged.worker_profile) {
-    const workerProfile = merged.model_profiles?.[merged.worker_profile];
+    const workerProfile = profileNamed(merged.model_profiles, merged.worker_profile);
     if (workerProfile && isBlockedModelId(workerProfile.model_id, merged.blocked_model_ids)) {
       merged.worker_profile = undefined;
     }

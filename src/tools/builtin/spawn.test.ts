@@ -783,6 +783,26 @@ describe('spawn_agent tool', () => {
     }
   });
 
+  it.each(['toString', 'constructor', '__proto__', 'hasOwnProperty'])('REFUSES a spawn profile named %s as unknown — a prototype member is not a profile', async (name) => {
+    // `profile` is a plain string the model chooses. On the config's profile object
+    // `model_profiles['toString']` is a function: truthy, so it used to pass the
+    // unknown-profile check with `model_id` undefined, and the ceiling and blocklist
+    // checks then ran on undefined.
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+    }));
+    reloadConfig();
+    try {
+      await expect(
+        spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Analyze', profile: name }] }, makeAgent()),
+      ).rejects.toThrow(/Unknown model profile/);
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig();
+    }
+  });
+
   it('announces NOTHING when the profile is refused — no model id reaches the UI', async () => {
     // The refusal above proves the child does not run. It does NOT prove the UI
     // was never told it would: the `spawn` event used to be streamed BEFORE the
@@ -4197,6 +4217,27 @@ describe('spawn_agent tool', () => {
       // returns a payload, which would make the permission guard refuse the
       // spawn headlessly (denying the balanced fallback) — the exact regression.
       expect(consent({ agents: [{ name: 'r', task: 'deep work', model: 'deep' }] }, 'autonomous')).toBeNull();
+    });
+
+    it.each(['toString', 'constructor'])('a profile named %s is no profile to the consent check either — it runs before the handler refuses it', async (name) => {
+      // The guard's check runs BEFORE the handler, whose unknown-profile refusal is
+      // therefore not there yet. A prototype member read as a profile here made a
+      // balanced spawn look like an unknown-band deep one, and took the "run on
+      // balanced" option away from a deep one.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-14b-2512' },
+      }));
+      reloadConfig();
+      try {
+        expect(consent({ agents: [{ name: 'r', task: 'x', model: 'balanced', profile: name }] }, 'guided')).toBeNull();
+        const withName = consent({ agents: [{ name: 'r', task: 'x', model: 'deep', profile: name }] }, 'guided') as WarningPayload;
+        const without = consent({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided') as WarningPayload;
+        expect(withName).toEqual(without);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
     });
 
     it('consent is deep-only: a balanced spawn returns null', () => {

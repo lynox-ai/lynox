@@ -1967,6 +1967,17 @@ describe('Engine + Session (Orchestrator)', () => {
         }
       });
 
+      it.each(['toString', 'constructor', '__proto__'])('a profile named %s is unknown, not a prototype member', async (name) => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        try {
+          expect(() => engine.createSession({})._recreateAgent({ profile: name })).toThrow(/Unknown model profile/);
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
       it('an unknown worker profile fails the admission the way it fails the run', async () => {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await engine.init();
