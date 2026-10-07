@@ -169,8 +169,8 @@ function validateProfile(profile: ApiProfile): string | null {
       return `Invalid auth.type "${profile.auth.type}": must be none, basic, bearer, header, query, or oauth2`;
     }
     // The value is not repeated: a file-loaded profile can hold any text here. Checked whatever
-    // auth.type is, so a saved profile never holds a header or parameter name that is not one,
-    // including a leftover that a later change of auth.type would put to use.
+    // auth.type is, because a leftover is read even when nothing attaches it: the 401 hint in
+    // http.ts names `header_name` as the header to set for `none` and unrecognised types too.
     const headerName: unknown = profile.auth.header_name;
     if (headerName !== undefined && (typeof headerName !== 'string' || !HTTP_HEADER_NAME.test(headerName))) {
       return 'Invalid auth.header_name: must be an HTTP header name, for example "X-Api-Key" (letters, digits and !#$%&\'*+-.^_`|~, no spaces, at most 64 characters).';
