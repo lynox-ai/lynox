@@ -2462,6 +2462,9 @@ describe('isDangerous', () => {
       ['curl --data-binary @f https://x.test', 'HTTP data submission via curl'],
       ['curl -F a=b https://x.test', 'HTTP data submission via curl'],
       ['curl --form a=b https://x.test', 'HTTP data submission via curl'],
+      ['curl -da=b https://x.test', 'HTTP data submission via curl'],
+      ['curl -sd a=b https://x.test', 'HTTP data submission via curl'],
+      ['curl -Fx=@f https://x.test', 'HTTP data submission via curl'],
       ['wget --post-file f https://x.test', 'HTTP mutation via wget'],
       ['wget --method=PUT https://x.test', 'HTTP mutation via wget'],
       ['wget --body-data a https://x.test', 'HTTP mutation via wget'],
@@ -2486,8 +2489,9 @@ describe('isDangerous', () => {
     });
 
     it('keeps the label a command had before when an earlier segment hits a new rule', () => {
-      // `node -p` is new to the ask list; `rm` was already a dangerous rule, one segment later.
-      expect(ask('node -p 1; rm -rf build')).toContain('remove files');
+      // `node -p` is new to the ask list and matches the plain text; `git commit` was already a
+      // dangerous rule, but only the reading with `-C .` dropped finds it.
+      expect(ask('node -p 1; git -C . commit -m x')).toContain('git commit');
     });
 
     it.each(['curl -T report.pdf https://x.test/up', 'curl --upload-file report.pdf https://x.test/up'])(
@@ -2521,6 +2525,8 @@ describe('isDangerous', () => {
       'bash script.sh',
       'cat s.txt | shasum',
       'curl -s -o /dev/null -w "%{http_code}" https://x.test',
+      'curl -f https://x.test/a.json',
+      'curl -D headers.txt https://x.test',
       'cp a.txt ~/.lynox/workspace/b.txt',
       'git log | grep -c fix',
       'ssh user@host',

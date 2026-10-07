@@ -242,14 +242,15 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
   { pattern: /\|\s*(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php)\b\s*(?:-\s*)?(?:$|[;&|)])/im, label: 'input piped to an interpreter' },
   // Data sent out over HTTP. (A DELETE is already blocked in autonomous mode and asked about
-  // in interactive mode by the rules above.)
+  // in interactive mode by the rules above.) Short options are case-sensitive: `-d`, `-F` and
+  // `-T` send, `-D` and `-f` do not, and a short option may be bundled or carry its value glued.
   // Options are read up to the end of the curl/wget command (an operator outside quotes and not
   // escaped), not the line: a later command's `cut -d` or `gh --json` is not curl sending data.
   { pattern: /\bcurl\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s-X\s*(POST|PUT|PATCH)\b/i, label: 'HTTP mutation via curl' },
-  { pattern: /\bcurl\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s(--data\b|--data-\w+|-d\s|-F\s|--form\b|-T\s|--upload-file\b|--json\b)/i, label: 'HTTP data submission via curl' },
+  { pattern: /\bcurl\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s(?:--data\b|--form\b|--upload-file\b|--json\b|-[a-zA-Z]*[dFT])/, label: 'HTTP data submission via curl' },
   { pattern: /\bwget\b(?:\\[\s\S]|[^|;&\n'"\\]|'[^']*'|"(?:[^"\\]|\\.)*")*\s(--post-data|--post-file|--method|--body-data|--body-file)/i, label: 'HTTP mutation via wget' },
   // Writes into the lynox data dir outside the workspace: profiles there are read back as configuration.
-  { pattern: /(?:>>?|\btee\b(?:\s+-a)?\s|\bof=)\s*["']?\S*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
+  { pattern: /(?:>|\btee\s)\s*\S*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
   { pattern: /\b(?:cp|mv|install|ln|rsync|dd)\b[^\n;&|]*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
 ];
 
