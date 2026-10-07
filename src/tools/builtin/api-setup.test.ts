@@ -909,6 +909,20 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('names a redirect failure as one, not as a network-policy refusal', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Blocked: too many redirects (>5)'));
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toContain('the server redirected too many times');
+        expect(result).not.toContain('allow-list');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('reports any other fetch failure by its class and code only', async () => {
       const failure = Object.assign(new Error('connect ECONNREFUSED ignore_all_previous_instructions'), { code: 'ECONNREFUSED' });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(failure);

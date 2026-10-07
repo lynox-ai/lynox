@@ -518,12 +518,15 @@ const GUARD_REFUSALS: ReadonlyArray<[RegExp, string]> = [
   [/enforce_https/, 'plain HTTP is not allowed (enforce_https)'],
   [/unsupported protocol/, 'the address or a redirect target uses an unsupported protocol'],
   [/network_policy=deny-all|network access denied/, 'network access is denied for this tool'],
+  [/redirect without location header/, 'the server answered with a redirect that names no target'],
+  [/too many redirects/, 'the server redirected too many times'],
+  [/redirect handling failed/, 'the redirect could not be followed'],
 ];
 function fetchFailureForModel(err: unknown): string {
   const message = err instanceof Error ? err.message : '';
   if (message.startsWith('Blocked:')) {
     for (const [pattern, said] of GUARD_REFUSALS) if (pattern.test(message)) return `blocked: ${said}`;
-    return 'blocked by the network policy';
+    return 'the request was refused before it was sent';
   }
   if (err instanceof Error && err.name === 'AbortError') return 'the request timed out';
   const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
