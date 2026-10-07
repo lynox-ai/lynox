@@ -567,30 +567,24 @@ describe('httpRequestTool', () => {
         body: '{"a":1}</body>',
       }, agentWithPromptFn());
 
-      // ⚠ The call has to have HAPPENED, asserted before anything else, or the rest is vacuous.
-      // `calls[0]?.[1]` is `undefined` when fetch was never invoked, and
-      // `expect(undefined).not.toHaveProperty('body')` PASSES — so any future gate that refuses
-      // this shape would leave both assertions green with nothing witnessed. The optional chain
-      // is precisely what converts a loud failure into a silent pass.
+      // The call count is asserted for LEGIBILITY, not because the witness below needs rescuing.
+      // ⚠ A review round claimed the witness was vacuous on zero requests — that
+      // `expect(undefined).not.toHaveProperty('body')` passes — and that claim is FALSE in this
+      // project: measured against this repo's own matcher chain, it THROWS
+      // `TypeError: Cannot convert undefined or null to object`, while `expect({})` passes and
+      // `expect({body:''})` fails. So a zero-request run was always loud; it was merely
+      // illegible, which is what this line fixes. The wrong diagnosis is recorded because it was
+      // believed and acted on for one commit.
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(result)).not.toContain('repaired');
-      // …and the body really was dropped rather than repaired-and-sent. `lastPinnedInputs` is the
-      // DIRECT witness — what the pinned transport actually received — rather than the init this
-      // harness reconstructs one layer above it.
+      // ⚠ ONE witness, deliberately. The init this harness hands the stub is RECONSTRUCTED from
+      // the pinned input, so `calls[0][1]` has a `body` key exactly when `lastPinnedInputs[0]`
+      // does: asserting both is one fact stated twice, and a redundant pair is what makes a later
+      // removal of the real witness look survivable. This is the direct one — what the transport
+      // actually received. A zero-length body would be a `Buffer`, not `undefined`, so an
+      // attached empty body fails here too.
       expect(lastPinnedInputs).toHaveLength(1);
       expect(lastPinnedInputs[0]!.body).toBeUndefined();
-      // ⚠ BOTH witnesses, because the review that asked for the direct one did not ask for the
-      // other to go, and replacing rather than adding is its own mistake. This second one reads
-      // the init the harness reconstructs, one layer above the wire.
-      //
-      // ⚠ What NEITHER of them sees, stated so the pair is not mistaken for more than it is:
-      // setting `opts.body = outboundBody` unconditionally — i.e. attaching `null` instead of
-      // omitting the key — is invisible here. The redirect wrapper re-attaches a non-`undefined`
-      // body (`http.ts:231`) and `materialiseBody` maps `null` to `undefined`
-      // (`network-guard.ts:560`), so that transformation changes nothing at the wire or here. A
-      // mutation round confirmed it survives both assertions; it is behaviour-equivalent, not a
-      // hole, and no test is owed for it.
-      expect(fetchMock.mock.calls[0]![1]).not.toHaveProperty('body');
     });
 
     it('⭐ the note survives a timeout — the silent path is the one that mattered', async () => {
@@ -609,16 +603,24 @@ describe('httpRequestTool', () => {
         headers: { 'Content-Type': 'application/json' },
         body: '{"a":1}</body>',
         timeout_ms: 50,
-      }, agentWithPromptFn())).rejects.toThrow(/the engine repaired your request body/);
+      }, agentWithPromptFn())).rejects.toThrow(/your request body was repaired/);
     });
 
-    it('⭐ the note claims nothing about the request having been sent', async () => {
-      // ⚠ The regression this pins is MINE, one commit old. The note used to read "your request
-      // body was repaired before it was sent" and rode the success path only, where a response
-      // proves the send. Putting it on the timeout path made that clause unprovable: `timeout_ms`
-      // has no schema minimum, the clamp floor is 1ms, the abort timer is armed before the `try`,
-      // and `fetchPinned` resolves DNS before a byte leaves — so an early abort reaches this
-      // message with nothing on the wire. The clause was removed rather than gated.
+    it('⭐ the note text is pinned EXACTLY — every claim in it is one the engine can support', async () => {
+      // ⚠ Pinned as a whole string rather than swept for forbidden phrases, and that choice is
+      // the finding of a delta round. The first version of this test forbade two spellings
+      // ("before it was sent", "and sent the rest") under a name that claimed the PROPERTY. A
+      // re-wording puts the claim straight back — "transmitted the rest unchanged" passes both
+      // needles — and the house style two hundred lines down ("the request goes out with only
+      // the headers you set yourself") makes that the natural next phrasing. One spelling is not
+      // a property, and the same commit had just renamed another test for exactly that.
+      //
+      // An exact match has no such gap: any edit to a model-visible string fails here and has to
+      // be deliberate. Three claims were removed from this sentence — that the body reached the
+      // network (unprovable from inside the handler: a 1 ms abort lands with nothing on the wire),
+      // that the API would have rejected the call (measured false: HTTP 200 with an
+      // application-level error), and that the rest was left unchanged (the repair also trims
+      // trailing whitespace). `http.ts` carries the reasoning per claim.
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise(() => { /* never settles */ })));
 
@@ -631,19 +633,19 @@ describe('httpRequestTool', () => {
       }, agentWithPromptFn()).then(() => null, (e: unknown) => e);
       const msg = String(err instanceof Error ? err.message : err);
 
-      // Positive control: the note is THERE. Without this the absence below is satisfied by a
-      // message that carries no note at all.
-      expect(msg).toContain('**[Engine note — the engine repaired your request body]**');
+      // ⚠ Transcribed here independently of the source, which is the point: a control built by
+      // importing the constant it checks cannot see a wording change at all. The cost is that a
+      // deliberate edit has to be made twice, and that cost IS the gate.
+      const EXPECTED =
+        '\n\n**[Engine note \u2014 your request body was repaired]**\n'
+        + 'It ended in a closing tag, which is not valid JSON. '
+        + 'The engine removed that tag before using the body. '
+        + 'Do not append a closing tag to a JSON body.';
 
-      // ⚠ And the needles are proven to be real substrings of the wording they came from, in
-      // the same run. A `not.toContain(X)` where X occurs nowhere is not a weak control, it is
-      // NO control — indistinguishable from a passing one.
-      const RETIRED = 'your request body was repaired before it was sent';
-      for (const needle of ['before it was sent', 'and sent the rest']) {
-        expect(`${RETIRED}. The engine removed that tag and sent the rest unchanged.`,
-          'the needle is not a substring of the wording it is meant to forbid').toContain(needle);
-        expect(msg, 'the note asserts a send this handler cannot establish').not.toContain(needle);
-      }
+      expect(msg).toContain(EXPECTED);
+      // …and the note is the TAIL of the message, so the engine's own sentence cannot be read as
+      // part of the timeout text it follows.
+      expect(msg.endsWith(EXPECTED), 'the note is not the last thing the model reads').toBe(true);
     });
 
     it('⭐ the handler carries no copy of one retired sentence about which body is scanned', async () => {
@@ -667,16 +669,30 @@ describe('httpRequestTool', () => {
       //
       // A moved file, incidentally, is NOT the failure this guards: `readFileSync` throws ENOENT
       // and the test goes loudly red. The reachable failure was always the wrong TARGET.
-      expect(src, 'the sweep is not reading http.ts').toContain('export const httpRequestTool');
+      // ⚠ The token names the PARAGRAPH, not the file, and that distinction is the whole repair.
+      // The first control was `repairStrayCloseTag`, which `model-json-body.ts` also declares, so
+      // aiming the read one file sideways left it satisfied with the needle absent — green,
+      // sweeping nothing. The second was `export const httpRequestTool`: unique, but 280 lines
+      // away, so splitting this file and moving the body-repair region would leave the control
+      // green on a file that no longer carries the comment. This phrase sits in the sentence that
+      // states the CORRECT direction, so the control dies exactly when the correction does.
+      //
+      // A third candidate was suggested and rejected by measurement: `The scan reads the ORIGINAL`
+      // does not occur in this file at all — the sentence reads "The scan reads `input.body` — the
+      // ORIGINAL —". The control caught it, which is the only reason to write one.
+      expect(src, 'the sweep is not reading the paragraph whose claim this is about')
+        .toContain('and not the repaired one');
       expect(src, 'a comment claims the scan reads the repaired body; it reads the original')
         .not.toContain(WRONG);
     });
 
     it('⭐ an EMPTY body attaches nothing — the term must not widen what goes out', async () => {
-      // ⚠ Written because a mutation that deleted the `length > 0` test from `bodySent` SURVIVED.
-      // Without it an empty body becomes an attached zero-length body: the shape this replaced
-      // read `outboundBody && …`, where `''` is falsy and nothing was attached. The whole claim
-      // of that term is that it preserves the old set exactly, and no test held it to that.
+      // ⚠ This witnesses the TRUTHINESS test at `opts.body`, which is the one thing about the
+      // outbound body this change deliberately did not touch. `''` is falsy, so nothing is
+      // attached; replace that condition with an `!== undefined` and an empty body becomes an
+      // attached zero-length `Buffer`, which is a different request on the wire. The test exists
+      // because a mutation round found the condition unwitnessed — first in an earlier form of
+      // this branch, where the term had its own length test and deleting it SURVIVED.
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
       vi.stubGlobal('fetch', fetchMock);
@@ -694,28 +710,29 @@ describe('httpRequestTool', () => {
       expect(fetchMock.mock.calls[0]![1]).not.toHaveProperty('body');
     });
 
-    it('⭐ a non-string body is refused LOUDLY, not silently dropped', async () => {
-      // ⚠ Also a regression of my own, and in the direction that costs something. Folding the
-      // `typeof` test into the term that decides whether a body leaves made a non-string body
-      // yield `null` — no `body` key on `opts`, so a BODYLESS POST went out and returned 200,
-      // creating an empty record on the remote with no error anywhere. The shape this replaced
-      // forwarded the value and the transport threw, which was loud. Unreachable from a model
-      // (the validated dispatch rejects it against `body: {type:'string'}`), so this test is the
-      // only thing that can see it — and the narrowing now DEPENDS on that other file's
-      // guarantee, which is why the guard is asserted rather than assumed.
+    it('⭐ a non-string body is FORWARDED to the transport, not quietly dropped', async () => {
+      // ⚠ This pins the regression a fix round nearly shipped, which is why it asserts a
+      // behaviour nobody designed: the transport's own refusal. Folding the body-leaves predicate
+      // into the term that the repair reads made a non-string body yield `null` — no `body` key
+      // on `opts`, so a BODYLESS POST went out and returned 200, creating an empty record on the
+      // remote with nothing reporting it. Guarding that with a new refusal site was the second
+      // attempt and cost more than it bought (three comments and fourteen test names in this
+      // repo state the refusal count). So the condition at `opts.body` stays as it was, the value
+      // is handed on, and `materialiseBody` rejects it.
+      //
+      // Unreachable from a model — the validated dispatch checks `body: {type:'string'}` — so
+      // this test is the only thing that can see it, and it is owed precisely because the
+      // duplication above is now deliberate.
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
       vi.stubGlobal('fetch', fetchMock);
 
-      const result = await visible({
+      await expect(handler({
         url: 'http://example.com/api',
         method: 'POST',
         body: 5,
-      } as unknown as Parameters<typeof handler>[0], agentWithPromptFn());
-
-      expect(String(result)).toContain('Blocked: request body must be a string.');
-      // The refusal has to come BEFORE the wire, or it is a report rather than a guard.
-      expect(fetchMock).not.toHaveBeenCalled();
+      } as unknown as Parameters<typeof handler>[0], agentWithPromptFn()))
+        .rejects.toThrow(/unsupported body type/);
     });
 
     it('a legitimate HTML POST reaches fetch UNCHANGED, tag and all', async () => {

@@ -2219,40 +2219,36 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // classified `none` and scanned. Folding stays because the declaration needs it — a
     // lowercase write must classify, and `undo-declaration.test.ts` pins that — so the cost
     // lands on one unreachable spelling and is paid knowingly.
-    // ⚠ Does a body actually leave? ONE term, because three decisions below hang on the answer
-    // — whether to repair, what `opts.body` gets, and whether the note is produced — and written
-    // out separately they disagreed: the repair ran on an uppercase `GET`'s body, which `opts`
-    // drops, and the note then reported a repair to a body that was discarded. (Read the chain,
-    // not a count: `opts.body` and the note read `outboundBody` and `repairedBody`, both derived
-    // from this one term.)
+    // ⚠ Does a body actually leave? The repair below reads THIS and not `input.body`, and that is
+    // the entire behavioural content of this change: `opts.body` drops a body on GET/HEAD, so
+    // repairing one there corrected a value that is then thrown away — and the note reported the
+    // repair to the model anyway.
+    //
+    // ⛔ `opts.body` DELIBERATELY DOES NOT READ IT, and the reason is a measurement, not taste.
+    // Folding the two was the obvious next step and it changed behaviour: this term narrows on
+    // `typeof`, so a body that is present but not a string became `null`, no `body` key reached
+    // `opts`, and a BODYLESS POST went out and returned 200 — an empty record on the remote with
+    // nothing reporting it, where the condition below forwards the value and lets the transport
+    // refuse it. Guarding that with a fifteenth refusal site was the next attempt and cost more
+    // than it bought: three comments and fourteen test names in this repo state the refusal
+    // count, and the by-member list in the test file exists precisely so a new site cannot be
+    // added without its own row. So the predicate stays written twice. Both spellings are here,
+    // eleven lines apart, which is the cheapest form of a duplication that has to agree.
     //
     // It holds the body rather than a boolean so the `typeof` narrowing survives to the call
     // below, which then needs no cast; a boolean would force one, because `input.body` is
     // `string | undefined`. That is `strictNullChecks`, not anything `strictest` adds, and a
     // non-null assertion would also work — this shape is preferred, not forced.
     //
-    // ⚠ A FOURTH reader asks the same question in its own words and is deliberately NOT folded
-    // in: the egress scan below spells it `input.body && isWriteMethod(method)`, and
-    // `isWriteMethod` folds case where this term compares raw. Over the schema enum the two
-    // agree, so folding them would be a refactor with no behavioural content — and the case
-    // difference is load-bearing for the declaration, as the paragraph above says. Named here
-    // because the next edit to the method set has to find both places, not one.
-    // ⚠ A body that is PRESENT but not a string is refused loudly rather than dropped, and this
-    // guard exists because the term below made that case silent. `bodySent` narrows on `typeof`,
-    // so without it a non-string body yields `null`, no `body` key reaches `opts`, and a
-    // BODYLESS POST goes out and returns 200 — an empty record created on the remote, with no
-    // error anywhere. The shape this replaced forwarded the value and the transport threw
-    // (`fetchPinned: unsupported body type`), which was loud; this keeps that direction.
-    // Unreachable from a model — the validated dispatch rejects it against `body:
-    // {type:'string'}` first — and here anyway, because the narrowing below now DEPENDS on a
-    // guarantee enforced in a different file.
-    if (input.body !== undefined && typeof input.body !== 'string') {
-      blockedVerbatim('Blocked: request body must be a string.');
-    }
-
+    // ⚠ A THIRD spelling of the same question lives in the egress scan below —
+    // `input.body && isWriteMethod(method)` — and `isWriteMethod` folds case where these two
+    // compare raw. Over the schema enum all three agree on every member. Folding them is NOT
+    // free, though, and an earlier draft of this paragraph said it was: the fold is what creates
+    // the unscanned body for a lowercase `'get'`, so unifying them would stop sending it. That
+    // is a real behaviour change on the one spelling the paragraph above calls out and pays for
+    // knowingly. Named here because the next edit to the method set has to find three places.
     const bodySent: string | null =
-      typeof input.body === 'string' && input.body.length > 0
-        && method !== 'GET' && method !== 'HEAD'
+      typeof input.body === 'string' && method !== 'GET' && method !== 'HEAD'
         ? input.body
         : null;
 
@@ -2262,11 +2258,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // POST through the API store fail at the far end with a misleading error, and the model then
     // repeats the identical call.
     //
-    // ⚠ An earlier version of this comment justified the ordering by claiming the scan reads
-    // the REPAIRED body. It was TRUE when written and went false two commits later, when the
-    // direction was reversed,
-    // and it was a claim about security behaviour in a public repo. The scan reads the ORIGINAL
-    // on purpose; the paragraph below says why.
+    // ⚠ An earlier version of this comment justified the ordering by claiming the scan reads the
+    // REPAIRED body. It was TRUE when written and went false two commits later, when the
+    // direction was reversed, and it was a claim about security behaviour in a public repo. The
+    // scan reads the ORIGINAL on purpose; the paragraph below says why.
     //
     // ⚠ The wrong sentence is deliberately NOT quoted here, not even as history — a test sweeps
     // this file for that exact sentence, and a sweep with an exception is a sweep somebody will
@@ -2274,7 +2269,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // sweep CANNOT do is recognise the same claim in different words; it pins one spelling, and
     // its name says so.
     const repairedBody = bodySent === null ? null : repairStrayCloseTag(bodySent, headers);
-    const outboundBody = repairedBody?.body ?? bodySent;
 
     // ⚠ ONE string for the note, appended on the success path and on the timeout path. The
     // timeout half is the one that mattered: a timed-out call used to throw with the repair
@@ -2282,28 +2276,38 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // repair exists to end, one layer further out. Written twice the two would drift, and the
     // empty string when nothing was repaired keeps both call sites unconditional.
     //
-    // ⛔ IT MAKES NO CLAIM ABOUT REACHING THE NETWORK, and that is the whole reason this
-    // paragraph is here. The first wording was "your request body was repaired before it was
-    // sent", which the success path can support — a response proves the send — and the timeout
-    // path cannot: `timeout_ms` carries no schema minimum, the clamp floor is 1 ms, the abort
-    // timer is armed before the `try`, and `fetchPinned` resolves DNS before a byte leaves. A
-    // 1 ms abort therefore lands with nothing on the wire while the sentence asserts the
-    // opposite. From in here the only observable fact is that `fetch` was CALLED, which is
-    // strictly weaker than "the body was sent".
+    // ⛔ THREE CLAIMS WERE TAKEN OUT OF THIS SENTENCE, each because the code cannot support it.
+    // The note is a privileged channel into the model's context, so a sentence in it is a claim
+    // the engine makes, not decoration:
     //
-    // The clause is REMOVED rather than gated. Gating it means classifying every exit of this
-    // handler as sent or not-sent — a check per instance, which is the signature of a cut in the
-    // wrong place — and the note never needed it: what stops the retry loop is knowing what the
-    // engine DID to the body, not how far the request travelled. Same subtraction as the removed
-    // tag echo in `model-json-body.ts`: the first answer bounded a symptom, the right one deleted
-    // the claim.
+    //   1. that the body REACHED THE NETWORK. Supportable on the success path, where a response
+    //      proves it, and not on the timeout path this change adds: `timeout_ms` carries no
+    //      schema minimum, the clamp floor is 1 ms, the abort timer is armed before the `try`,
+    //      and `fetchPinned` resolves DNS before a byte leaves — so a 1 ms abort lands here with
+    //      nothing on the wire. From in here the only observable fact is that `fetch` was CALLED,
+    //      which is strictly weaker. (The message it rides already says the request may have
+    //      taken effect, so nothing was lost by dropping it.)
+    //   2. that the API WOULD HAVE REJECTED the call. `model-json-body.ts` measured the opposite
+    //      on the API that produced this defect: HTTP 200 with an application-level
+    //      "POST Data Is Empty". Accepted and misread is not rejected.
+    //   3. that the rest was LEFT UNCHANGED. `withoutTrailingCloseTag` trims before and after
+    //      cutting, deliberately — that second trim is what rescues a body ending in U+00A0 or
+    //      U+FEFF — so trailing whitespace goes too. The sentence now says the tag was removed
+    //      and claims nothing about the remainder.
     //
-    // Scope, stated so it is not mistaken for coverage: the `Blocked:` translation and the raw
-    // re-throw in the catch below build their own messages and get no note. Folding all three
-    // onto one append point is a change to the catch's shape, not to this constant.
+    // All three are REMOVED rather than gated. Gating (1) would mean classifying every exit as
+    // sent or not-sent, a check per instance, which is the signature of a cut in the wrong place.
+    // Same subtraction as the removed tag echo in `model-json-body.ts`: the first answer bounded
+    // a symptom, the right one deleted the claim.
+    //
+    // Scope, and it is FIVE exits rather than the two an earlier draft of this paragraph named:
+    // downstream of the repair, the body-secret refusal, both write-consent refusals, the
+    // `Blocked:` translation and the raw re-throw all build their own messages and carry no note.
+    // Folding them onto one append point is a change to the catch's shape and to the refusal
+    // helpers, not to this constant.
     const repairNote = repairedBody === null
       ? ''
-      : `\n\n**[Engine note — the engine repaired your request body]**\nIt ended in a closing tag, which is not valid JSON, so the API would have rejected the call. The engine removed that tag and left the rest unchanged. Do not append a closing tag to a JSON body.`;
+      : `\n\n**[Engine note \u2014 your request body was repaired]**\nIt ended in a closing tag, which is not valid JSON. The engine removed that tag before using the body. Do not append a closing tag to a JSON body.`;
 
     // ⚠ The scan reads `input.body` — the ORIGINAL — and not the repaired one, which is the
     // opposite of what the first draft did under "scan what goes out". The repaired body is a
@@ -2371,7 +2375,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     const opts: RequestInit = { method, headers };
-    if (outboundBody !== null) {
+    // ⚠ UNCHANGED from before the repair landed, on purpose — see `bodySent` above for the
+    // measured reason the two predicates are not folded into one.
+    const outboundBody = repairedBody?.body ?? input.body;
+    if (outboundBody && method !== 'GET' && method !== 'HEAD') {
       opts.body = outboundBody;
     }
     // Hard cap. The original 30s default + agent-overridable timeout meant a
