@@ -686,7 +686,7 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
     if (!raw) {
       errors.push(
         'this diff owes the `code-review` gate, so the record needs a `review:` line saying what the round FOUND.',
-        'Format: `review: <n> <model> round(s), <result>` — e.g. `review: 1 opus round, no findings`,',
+        'Format: `review: <n> <model> <round|rounds>, <result>` — e.g. `review: 1 opus round, no findings`,',
         '`review: 1 opus round, 5 findings, all fixed`, or `review: 1 opus round, 5 findings, 3 fixed, 1 filed, 1 refuted`.',
         'The model is the one that RAN the round (your own, if you reviewed it yourself).',
       );
@@ -694,7 +694,7 @@ export function evaluate({ body, head, files, author, visibility = 'unknown' }) 
       const m = /^(\d+)\s+([a-z][a-z0-9.+-]{1,})\s+rounds?\s*,\s*(.+)$/i.exec(raw);
       if (!m) {
         errors.push(
-          `\`review: ${raw}\` is not \`<n> <model> round(s), <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
+          `\`review: ${raw}\` is not \`<n> <model> <round|rounds>, <result>\` — e.g. \`review: 1 opus round, no findings\`.`,
           'The model slot takes a short HANDLE: a letter, then at least one more character from',
           '`[a-z0-9.+-]` — so neither `1 x round` nor `1 ... round` passes as evidence. Two characters,',
           'not three, because a floor of three refused `o3` and `r1`.',

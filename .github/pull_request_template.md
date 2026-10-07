@@ -80,7 +80,7 @@ fabricated line is worse than none.)
 ```gate-record
 head: <short SHA>
 gates: <which gates ran>
-review: <n> <model> round(s), <result>
+review: <n> <model> <round|rounds>, <result>
 security: <origin>, <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived

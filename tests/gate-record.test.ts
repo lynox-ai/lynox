@@ -421,7 +421,10 @@ describe('gate-record — the shipped template does not answer its own questions
     // ⭐ This assertion is why the field is in the template at all. Without it, adding a mandatory
     // field and forgetting the template leaves the perfectly-filled template REJECTED — measured:
     // that is what happened on pro's first cut, and this test is the one that would have caught it.
-    expect(errors).toContain('`review: <n> <model> round(s), <result>`');
+    // ⚠ It reaches that property through the MESSAGE TEXT, which is a correlate: the message
+    // quoting a format proves the field is read, not that the template's own line is fillable.
+    // The case below tests the property itself, by filling the skeleton and requiring a pass.
+    expect(errors).toContain('`review: <n> <model> <round|rounds>, <result>`');
   });
 
   it('is rejected on `security:` too, which needs a diff that OWES that gate', () => {
@@ -431,6 +434,79 @@ describe('gate-record — the shipped template does not answer its own questions
     // reasoning as the assertion above, one gate further.
     const errors = evaluate({ body: TEMPLATE, head: HEAD, files: SEC }).errors.join(' ');
     expect(errors).toContain('`security: <origin>, <result>`');
+  });
+
+  /**
+   * ⭐ THE OTHER HALF OF THE SAME PROPERTY, and its absence cost a real PR a red check on a
+   * record whose author had filled the template in correctly.
+   *
+   * Everything above pins that the skeleton is REJECTED as shipped — deliberately, so that no
+   * attestation is answered in advance by the file asking the question. That says nothing about
+   * what happens when an author DOES fill it in, and the two can disagree: `review:` shipped as
+   * `<n> <model> round(s), <result>`, where `(s)` is notation sitting OUTSIDE the angle brackets.
+   * Replace every bracketed slot correctly and the literal `round(s)` stays, which the grammar
+   * refuses (`rounds?` — `round` or `rounds`). Three places carried that string: the skeleton, the
+   * message prescribing the format, and the assertion above pinning the message. Agreeing with each
+   * other is not the same as being right.
+   *
+   * ⚠ The regex built FROM the skeleton is what makes this test mean something. Substituting a
+   * whole line would pass whatever the skeleton said — it would never read the literals. Freeing
+   * only the bracketed parts makes the fill prove it kept every other character, so a skeleton
+   * literal that is not valid input cannot satisfy both this and the grammar.
+   */
+  it('⭐ is ACCEPTED once its bracketed slots are filled, with every literal kept', () => {
+    // One value per field, in the form an author would write. Keyed BY FIELD on purpose: a field
+    // added to the template without a value here fails below by name, which is the drift this
+    // exists to catch — in the direction the rejection tests structurally cannot see.
+    const FILLED: Record<string, string> = {
+      head: HEAD.slice(0, 8),
+      gates: 'code-review, delta',
+      review: '1 opus round, no findings',
+      security: 'own round, no findings',
+      delta: 'clean',
+      mutations: '12 killed, 0 survived',
+      closes: 'none',
+    };
+    const parsed = extractRecord(TEMPLATE) as { fields: Record<string, string> } | null;
+    expect(parsed, 'the template no longer carries a gate-record block at all').not.toBeNull();
+    const shipped = parsed!.fields;
+    const fields = Object.keys(shipped);
+    expect(fields.length, 'an empty block would make every assertion below vacuous').toBeGreaterThan(3);
+
+    for (const f of fields) {
+      const line = shipped[f]!;
+      // Still a question rather than an answer — checked here for EVERY field, where the
+      // rejection test above names four.
+      expect(line, `template field \`${f}:\` ships an answer, not a placeholder`).toContain('<');
+      expect(FILLED[f], `no fill value for template field \`${f}:\` — add one to FILLED`).toBeDefined();
+      // Escape first, THEN free the slots: `round(s)` becomes `round\(s\)` and stays literal,
+      // while `<n>` becomes a group. Reversing the order would free nothing.
+      const shape = new RegExp(
+        `^${line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/<[^>]*>/g, '(.+?)')}$`,
+      );
+      expect(
+        FILLED[f]!,
+        `the fill for \`${f}:\` does not keep the skeleton's literal text — skeleton says \`${line}\``,
+      ).toMatch(shape);
+    }
+
+    const body = (gates: string) =>
+      `## Summary\n\nSomething.\n\n\`\`\`gate-record\n${fields
+        .map((f) => `${f}: ${f === 'gates' ? gates : FILLED[f]}`)
+        .join('\n')}\n\`\`\`\n`;
+    // ⚠ BOTH diffs. `security:` is only read when the diff owes that gate, so a code-only run
+    // would leave the template's security line unexercised — the same gap the rejection case
+    // above needed its own SEC run for.
+    // ⚠ `evaluate` returns `{ok, notes}` on success and carries `errors` only on failure —
+    // measured, not assumed. So the assertion reads `ok`, and quotes the errors when it fails,
+    // because «expected false to be true» would not say WHICH field refused.
+    for (const [label, gates, files] of [
+      ['an ordinary code diff', 'code-review, delta', CODE],
+      ['a diff that owes the security gate', 'code-review, delta, security', SEC],
+    ] as Array<[string, string, string[]]>) {
+      const v = evaluate({ body: body(gates), head: HEAD, files });
+      expect(v.ok, `the filled template was refused on ${label}: ${(v.errors ?? []).join(' ')}`).toBe(true);
+    }
   });
 });
 
@@ -846,7 +922,7 @@ describe('gate-record — the `review:` evidence line', () => {
     // the third against my own PR body. If a pattern cannot find it, a gate cannot demand it.
     const v = evaluate({ body: record({ review: 'a reviewer looked at it and was happy' }), head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
-    expect(v.errors.join(' ')).toMatch(/is not `<n> <model> round\(s\), <result>`/);
+    expect(v.errors.join(' ')).toMatch(/is not `<n> <model> <round\|rounds>, <result>`/);
   });
 
   it('rejects a model slot that does not START with a letter', () => {
