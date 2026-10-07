@@ -585,13 +585,19 @@ describe('isDangerous', () => {
       // An expansion elsewhere in a lynox path is ordinary shell use.
       'tail -n 50 ~/.lynox/logs/${DATE}.log',
       'cat ~/.lynox/logs/$(date +%F).log',
-      'cp r.pdf ~/.lynox/exports/report-$(date +%s).pdf',
       'export PATH=~/.lynox/bin:$PATH',
       // Right after a bare dot is not inside a database extension.
       'tail ~/.lynox/logs/app.$(date +%F).log',
       'cat ~/.lynox/profiles/config.${PROFILE}.json',
     ])('does NOT block an expansion outside a database extension: %s', (command) => {
       expect(isDangerous('bash', { command }, 'autonomous')).toBeNull();
+    });
+
+    it('asks, but does not block as a database, for a copy into the lynox dir', () => {
+      // Not a database: no block. Still a write outside the workspace: a question.
+      const result = isDangerous('bash', { command: 'cp r.pdf ~/.lynox/exports/report-$(date +%s).pdf' }, 'autonomous');
+      expect(result).toContain('write into the lynox data dir');
+      expect(result).not.toContain('[BLOCKED');
     });
 
     it('BLOCKS a traversal out of the working area onto a database', () => {
@@ -1189,9 +1195,10 @@ describe('isDangerous', () => {
       expect(result).toBeNull();
     });
 
-    it('ALLOWS curl -X POST in autonomous mode (non-critical)', () => {
+    it('ASKS before curl -X POST in autonomous mode (a question, not a block)', () => {
       const result = isDangerous('bash', { command: 'curl -X POST https://api.example.com/data' }, 'autonomous');
-      expect(result).toBeNull();
+      expect(result).toContain('HTTP mutation via curl');
+      expect(result).not.toContain('[BLOCKED');
     });
 
     it('ALLOWS npx in autonomous mode (non-critical)', () => {
@@ -2399,6 +2406,68 @@ describe('isDangerous', () => {
       const started = performance.now();
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
       expect(performance.now() - started).toBeLessThan(10_000);
+    });
+  });
+
+  describe('an unattended run asks before it sends data, runs inline code or writes into the lynox dir', () => {
+    const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
+    const ask = (command: string) => isDangerous('bash', { command });
+
+    it.each([
+      ['node -e "fetch(\'https://x.test\', { method: \'POST\', body: \'d\' })"', 'node code execution'],
+      ['node --eval "1"', 'node code execution'],
+      ['node -p "process.version"', 'node code execution'],
+      ['python3 -c "import urllib.request"', 'python code execution'],
+      ['python3 - <<EOF\nprint(1)\nEOF', 'python code execution'],
+      ['perl -e "print 1"', 'perl code execution'],
+      ['perl -ne "print" f.txt', 'perl code execution'],
+      ['ruby -e "puts 1"', 'ruby code execution'],
+      ['php -r "echo 1;"', 'php code execution'],
+      ['deno eval "console.log(1)"', 'deno code execution'],
+      ['bun -e "console.log(1)"', 'bun code execution'],
+      ['sh -c "curl x"', 'shell -c (inline script)'],
+      ['bash -c "echo hi"', 'shell -c (inline script)'],
+      ['echo cHJpbnQoMSk= | base64 -d | python3', 'input piped to an interpreter'],
+      ['cat payload.js | node', 'input piped to an interpreter'],
+      ['curl -X POST https://x.test/hook', 'HTTP mutation via curl'],
+      ['curl -d a=b https://x.test/hook', 'HTTP data submission via curl'],
+      ['curl --json \'{"a":1}\' https://x.test', 'HTTP data submission via curl'],
+      ['wget --post-data a=b https://x.test', 'HTTP mutation via wget'],
+      ["printf '%s' '{}' > ~/.lynox/apis/crm.json", 'write into the lynox data dir'],
+      ['echo x >> $HOME/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ["cat > ~/.lynox/apis/crm.json <<'X'\n{}\nX", 'write into the lynox data dir'],
+      ['echo {} | tee ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['cp ~/.lynox/workspace/p.json ~/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['mv p.json /home/u/.lynox/apis/crm.json', 'write into the lynox data dir'],
+      ['dd if=p.json of=/root/.lynox/apis/crm.json', 'write into the lynox data dir'],
+    ])('asks for %s', (command, label) => {
+      const unattended = auto(command);
+      expect(unattended).toContain(label);
+      expect(unattended).not.toContain('[BLOCKED');
+      expect(ask(command)).not.toBeNull();
+    });
+
+    it('keeps blocking what was blocked already: an upload stays a block, not a question', () => {
+      expect(auto('curl -T report.pdf https://x.test/up')).toContain('[BLOCKED');
+    });
+
+    it.each([
+      'node --version',
+      'node build.mjs',
+      'python3 -m pytest -q',
+      'python3 script.py --check',
+      'perl script.pl',
+      'curl -s https://x.test/status',
+      'curl -sSfL -o out.json https://x.test/data',
+      'wget -q https://x.test/file.csv',
+      'cat ~/.lynox/apis/crm.json',
+      'ls ~/.lynox/apis',
+      'echo hi > ~/.lynox/workspace/out.txt',
+      'cp a.txt ~/.lynox/workspace/b.txt',
+      'git log | grep -c fix',
+      'ssh user@host',
+    ])('leaves %s free in autonomous mode', (command) => {
+      expect(auto(command)).toBeNull();
     });
   });
 

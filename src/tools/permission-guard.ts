@@ -220,6 +220,36 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)' },
 ];
 
+/**
+ * What a bash call may not do without being asked, in EVERY mode: send data out, run code it
+ * carries inline, or write into the lynox data dir. In autonomous mode these are the only rules
+ * besides CRITICAL_BASH, and a hit there is a question (the warning carries no BLOCKED marker),
+ * the same consent `http_request` asks for a write. Without this, an unattended run could send
+ * with a one-line interpreter what `http_request` would have asked about.
+ *
+ * A list of commands, so it is never complete: a script written first and run afterwards, or a
+ * binary with its own network access, reads as harmless text.
+ */
+const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
+  // Code passed inline to an interpreter, or fed to one on stdin.
+  { pattern: /\bnode\s+(?:-e|-p|--eval|--print)\b/i, label: 'node code execution' },
+  { pattern: /\bpython(?:[23](?:\.\d+)?)?\s+(?:-[a-zA-Z]*c\b|-(?=\s|$))/i, label: 'python code execution' },
+  { pattern: /\bperl\s+-[a-zA-Z]*e\b/i, label: 'perl code execution' },
+  { pattern: /\bruby\s+-[a-zA-Z]*e\b/i, label: 'ruby code execution' },
+  { pattern: /\bphp\s+-r\b/i, label: 'php code execution' },
+  { pattern: /\bdeno\s+eval\b/i, label: 'deno code execution' },
+  { pattern: /\bbun\s+(?:-e|--eval)\b/i, label: 'bun code execution' },
+  { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
+  { pattern: /\|\s*(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php)\b\s*(?:-\s*)?(?:$|[;&|)])/im, label: 'input piped to an interpreter' },
+  // Data sent out over HTTP.
+  { pattern: /\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/i, label: 'HTTP mutation via curl' },
+  { pattern: /\bcurl\b.*(--data\b|--data-\w+|-d\s|-F\s|--form\b|-T\s|--upload-file\b|--json\b)/i, label: 'HTTP data submission via curl' },
+  { pattern: /\bwget\b.*(--post-data|--post-file|--method|--body-data|--body-file)/i, label: 'HTTP mutation via wget' },
+  // Writes into the lynox data dir outside the workspace: profiles there are read back as configuration.
+  { pattern: /(?:>>?|\btee\b(?:\s+-a)?\s|\bof=)\s*["']?\S*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
+  { pattern: /\b(?:cp|mv|install|ln|rsync|dd)\b[^\n;&|]*\.lynox\/+(?!workspace(?:\/|$|\s))/i, label: 'write into the lynox data dir' },
+];
+
 const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\brm\s/i,                     label: 'remove files' },
   { pattern: /\bsudo\b/i,                   label: 'elevated privileges' },
@@ -330,6 +360,7 @@ const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\/dev\/(tcp|udp)\//i,                label: 'bash built-in networking (/dev/tcp)' },
   // Local HTTP server
   { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)' },
+  ...SENDS_OR_KEEPS_BASH,
 ];
 
 const SENSITIVE_PATHS: RegExp[] = [
@@ -794,6 +825,10 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       const hit = _scanBashDanger(rawCmd, CRITICAL_BASH);
       if (hit) {
         return `⚠ ${toolName}: ${hit.label} — "${preview}" [BLOCKED — this action needs to be run manually for safety]`;
+      }
+      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
+      if (ask) {
+        return `⚠ ${toolName}: ${ask.label} — "${preview}"`;
       }
       return null;
     }
