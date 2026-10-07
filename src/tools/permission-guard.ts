@@ -683,13 +683,17 @@ const carriesOperator = (token: string): boolean =>
   /[|;&<>()]/.test(token.replace(/\\[\s\S]|"(?:[^"\\]|\\[\s\S])*"|'[^']*'/g, ''));
 const isOptionToken = (token: string): boolean =>
   token.length > 1 && token.startsWith('-') && !carriesOperator(token);
-/** Tokens of the remainder kept per variant — enough for any rule's subcommand and arguments. */
-const OPTION_VARIANT_TAIL = 64;
-/** Characters of the remainder kept per variant: one oversized word must not make every variant long. */
-const OPTION_VARIANT_CHARS = 512;
-/** An escaped line break continues the command; `\\` before it is a literal backslash and does not. */
-const joinContinuations = (text: string): string =>
-  text.replace(/(\\*)\\\n/g, (match, before: string) => (before.length % 2 === 0 ? `${before} ` : match));
+/**
+ * Characters of the remainder kept per variant — enough for any rule's subcommand and
+ * arguments, and bounded in characters rather than words so that one oversized word cannot
+ * make every variant long.
+ */
+const OPTION_VARIANT_CHARS = 192;
+/**
+ * An escaped line break continues the command. After `\\` (a literal backslash) the join leaves
+ * an escaped space, which keeps the two words one word, so no reading crosses that break either.
+ */
+const joinContinuations = (text: string): string => text.replace(/\\\n/g, ' ');
 /**
  * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
  * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
@@ -732,8 +736,7 @@ export function withoutLeadingOptions(segment: string): string[] {
         // Nothing would stand in the subcommand's place: `set -e x | head` is not `set | head`.
         if (/^[|;&<>)]/.test(tokens[k + 1]!.text)) continue;
         const from = tokens[k + 1]!.start;
-        const last = tokens[Math.min(k + OPTION_VARIANT_TAIL, tokens.length - 1)]!;
-        variants.push(`${word} ${line.slice(from, Math.min(last.end, from + OPTION_VARIANT_CHARS))}`);
+        variants.push(`${word} ${line.slice(from, from + OPTION_VARIANT_CHARS)}`);
       }
     }
   }
@@ -760,7 +763,6 @@ function _bashScanSegments(chunk: string, withVariants: boolean): string[] {
   // then read once more as the shell executes it (`p''ush` → `push`).
   const readings = [joinContinuations(normalized), ...segments].flatMap(withoutLeadingOptions);
   return readings.flatMap((reading) => {
-    if (!/["'\\]/.test(reading)) return [reading];
     const executed = stripShellQuotes(reading);
     return executed === reading ? [reading] : [reading, executed];
   });

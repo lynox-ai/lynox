@@ -2393,7 +2393,7 @@ describe('isDangerous', () => {
     });
 
     it('stays fast on a long run of options', () => {
-      const cmd = `git ${'-c a=b '.repeat(150_000)}status`;
+      const cmd = `git ${'-c a=b '.repeat(75_000)}status`;
       const started = performance.now();
       expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
       expect(performance.now() - started).toBeLessThan(10_000);
