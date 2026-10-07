@@ -329,8 +329,10 @@
 			const encoded = mermaidSaveBtn.dataset['content'] ?? '';
 			const mermaidCode = decodeURIComponent(escape(atob(encoded)));
 			const title = prompt('Titel für dieses Diagramm:', 'Diagramm') ?? 'Diagramm';
-			saveArtifact({ title, content: mermaidCode, type: 'mermaid' }).then(result => {
+			// saveArtifact resolves null on failure and never rejects; both outcomes are said.
+			void saveArtifact({ title, content: mermaidCode, type: 'mermaid' }).then(result => {
 				if (result) addToast(t('artifacts.saved'), 'success');
+				else addToast(t('common.save_failed'), 'error');
 			});
 			return;
 		}
@@ -663,6 +665,7 @@
 	prose-headings:text-text prose-headings:font-medium prose-headings:tracking-tight
 	prose-p:leading-relaxed prose-li:leading-relaxed
 	prose-strong:text-text prose-strong:font-semibold">
+	<!-- eslint-disable-next-line svelte/no-at-html-tags -- baseHtml: renderSanitizedMarkdown (marked, DOMPurify, then link and table wrapping on the sanitized DOM). highlightedHtml: baseHtml re-parsed into an inert template, each whole fence element replaced by markup this file builds (Shiki output, escaped code, mermaid SVG at mermaid's default strict level with its action buttons (static icons, base64 source), mermaid error and reloading cards (escaped message and source), artifact cards with escaped values, sanitized markdown or a sandboxed iframe, static i18n strings), then serialized once (utils/code-fences.ts) -->
 	{@html highlightedHtml || baseHtml}
 </div>
 
