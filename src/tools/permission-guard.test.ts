@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments } from './permission-guard.js';
+import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments, withoutLeadingOptions } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2278,6 +2278,127 @@ describe('isDangerous', () => {
       }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('XML system tag injection');
+    });
+  });
+
+  describe('a subcommand behind global options is still the subcommand', () => {
+    // The rules name a command and its subcommand side by side; global options in between
+    // (`git -C dir push`, `kubectl -n ns delete`) must not hide the pair from them.
+    const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
+    const ask = (command: string) => isDangerous('bash', { command });
+
+    it.each([
+      ['git -C . push origin main', 'git push'],
+      ['git -c user.name=x commit -m msg', 'git commit'],
+      ['git --no-pager -C /repo -c core.editor=true push', 'git push'],
+      ['git --git-dir=/r/.git --work-tree=/r commit -m msg', 'git commit'],
+      ['env GIT_DIR=/r git -C /r push', 'git push'],
+      ['kubectl -n prod --context live delete pod web-1', 'kubectl mutation'],
+      ['helm --namespace prod --kube-context live uninstall web', 'helm mutation'],
+      ['terraform -chdir=infra apply -auto-approve', 'infrastructure change'],
+      ['docker -H tcp://build:2375 push registry/app:1', 'docker push'],
+      ['python3 -u -m http.server 8000', 'local HTTP server'],
+      ['git -C "/srv/my repo" push', 'git push'],
+      ["git -C '/srv/my repo' -c a=b commit -m msg", 'git commit'],
+      ['git -C /repo \\\n  push origin main', 'git push'],
+      ['git -C /srv/a\\"b push', 'git push'],
+      ['git -C . "push"', 'git push'],
+      ["git -C . p''ush", 'git push'],
+      // Each surface carries its own share: the segments split at `;`; quote removal turns
+      // `p''ush`, a quoted option and a command inside quotes into what the shell runs; and the
+      // unsplit chunk keeps a quoted `;` (`'a;b'`) from splitting the command in two.
+      ['echo -n hi;git -C . push', 'git push'],
+      ["git -C 'a;b' p''ush", 'git push'],
+      ["echo -n hi;git -C . p''ush", 'git push'],
+      ["git '-C' x push", 'git push'],
+      ['echo "$(git -C . push)"', 'git push'],
+      ["sh -c 'cd x; git -C . push'", 'git push'],
+    ])('blocks %s in autonomous mode', (command, label) => {
+      const result = auto(command);
+      expect(result).toContain(label);
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('names the plain hit, not a reading with options dropped, when both are in the command', () => {
+      // The plain `rm -rf /` sits in a later scan window than the optioned `git -C x push`.
+      const cmd = `git -C x push\n${'echo hi\n'.repeat(1500)}rm -rf /`;
+      expect(cmd.length).toBeGreaterThan(10_000);
+      expect(auto(cmd)).toContain('rm -rf /');
+    });
+
+    it.each([
+      ['git -C . push', 'git push'],
+      ['git --no-pager -c a=b commit -m msg', 'git commit'],
+      ['node --input-type=module -e "console.log(1)"', 'node code execution'],
+    ])('still asks for %s in interactive mode', (command, label) => {
+      expect(ask(command)).toContain(label);
+    });
+
+    it.each([
+      'git -C . status',
+      'git -C /repo log --oneline --grep push',
+      'git log --grep push',
+      'git -c core.pager=cat diff --stat',
+      'kubectl -n prod get pods',
+      'helm --namespace prod list',
+      'terraform -chdir=infra plan',
+      'docker -H tcp://build:2375 ps',
+      'python3 -u -m pytest -q',
+      'set -e',
+      'set -euo pipefail',
+      'set -e x | head -3',
+      'git -P|grep -c commit',
+      'echo -n "first\nsecond > out"',
+      'grep -e git -c commit notes.txt',
+      'echo git - commit',
+    ])('leaves %s free in autonomous mode', (command) => {
+      expect(auto(command)).toBeNull();
+    });
+
+    // Reaching `git <subcommand>` behind `-C` must not drag in the read-only plumbing whose name
+    // merely starts with a ruled one. `commit-tree` and `merge-file` write, so they stay ruled.
+    // `merge-tree` writes objects, but it moves no ref and changes no file.
+    describe.each(['', '-C /repo '])('git %s<subcommand>', (opts) => {
+      it.each(['merge-base HEAD origin/main', 'merge-tree --write-tree a b', 'commit-graph verify'])(
+        'leaves %s free', (sub) => {
+          expect(auto(`git ${opts}${sub}`)).toBeNull();
+          expect(ask(`git ${opts}${sub}`)).toBeNull();
+        },
+      );
+      it.each([
+        ['merge origin/main', 'git merge'],
+        ['commit -m msg', 'git commit'],
+        ['commit-tree -p HEAD t', 'git commit'],
+        ['merge-file ours base theirs', 'git merge'],
+      ])('still stops %s', (sub, label) => {
+        expect(auto(`git ${opts}${sub}`)).toContain(label);
+        expect(ask(`git ${opts}${sub}`)).toContain(label);
+      });
+    });
+
+    it('drops the options for a CLI the rules have never heard of', () => {
+      // No tool is listed in the mechanism, so an unknown CLI's subcommand surfaces the same way.
+      expect(withoutLeadingOptions('frobctl --region eu-1 -v --dry-run=false deploy now')).toContain('frobctl deploy now');
+    });
+
+    it('keeps every variant on its own line', () => {
+      expect(withoutLeadingOptions('echo -n first\nsecond > out')).toEqual(['echo first']);
+    });
+
+    it('stays fast on a long run of options', () => {
+      const cmd = `git ${'-c a=b '.repeat(150_000)}status`;
+      const started = performance.now();
+      expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
+      expect(performance.now() - started).toBeLessThan(10_000);
+    });
+
+    it('stays fast when options and values alternate', () => {
+      // Only a word that is neither an option nor an option's value opens a run; if every
+      // option after a value opened one, this would cost the square of its length.
+      const cmd = `git ${'-a v -b '.repeat(125_000)}status`;
+      const started = performance.now();
+      expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
+      expect(performance.now() - started).toBeLessThan(10_000);
     });
   });
 

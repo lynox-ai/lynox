@@ -166,9 +166,9 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\brm\s+-rf\s+\//i,                label: 'rm -rf /' },
   { pattern: /\bsudo\b/i,                       label: 'elevated privileges' },
   { pattern: /\bgit\s+push\s+(?=.*--force)(?=.*main)/i, label: 'force push main' },
-  { pattern: /\bgit\s+commit\b/i,                     label: 'git commit (requires explicit user request)' },
+  { pattern: /\bgit\s+commit\b(?!-graph)/i,           label: 'git commit (requires explicit user request)' },
   { pattern: /\bgit\s+push\b/i,                       label: 'git push (requires explicit user request)' },
-  { pattern: /\bgit\s+merge\b/i,                      label: 'git merge (modifies branch history)' },
+  { pattern: /\bgit\s+merge\b(?!-(?:base|tree)\b)/i,  label: 'git merge (modifies branch history)' },
   { pattern: /\bgit\s+rebase\b/i,                     label: 'git rebase (rewrites history)' },
   { pattern: /\bgit\s+cherry-pick\b/i,                label: 'git cherry-pick (modifies branch history)' },
   { pattern: /\bgit\s+revert\b/i,                     label: 'git revert (creates revert commit)' },
@@ -230,8 +230,8 @@ const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bgit\s+push\b/i,             label: 'git push (requires explicit user request)' },
   { pattern: /\bgit\s+reset\s+--hard/i,     label: 'hard reset' },
   { pattern: /\bgit\s+add\s+(-A|--all|\.)\s*(?:$|[|;&])/im, label: 'stage all files (review before committing)' },
-  { pattern: /\bgit\s+commit\b/i,           label: 'git commit (requires explicit user request)' },
-  { pattern: /\bgit\s+merge\b/i,            label: 'git merge' },
+  { pattern: /\bgit\s+commit\b(?!-graph)/i, label: 'git commit (requires explicit user request)' },
+  { pattern: /\bgit\s+merge\b(?!-(?:base|tree)\b)/i, label: 'git merge' },
   { pattern: /\bgit\s+rebase\b/i,           label: 'git rebase' },
   { pattern: /\bgit\s+cherry-pick\b/i,      label: 'git cherry-pick' },
   { pattern: /\bgit\s+revert\b/i,           label: 'git revert' },
@@ -678,17 +678,76 @@ function _checkPatterns(segments: string[], patterns: Array<{ pattern: RegExp; l
   return null;
 }
 
+// A token carrying a shell operator is not a plain option: `-euo|tail` ends the command at the pipe.
+const isOptionToken = (token: string): boolean =>
+  token.length > 1 && token.startsWith('-') && !/[|;&<>()]/.test(token);
+/** Tokens of the remainder kept per variant — enough for any rule's subcommand and arguments. */
+const OPTION_VARIANT_TAIL = 64;
+/**
+ * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
+ * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
+ * the line: it belongs to no word, and the words after it stay words.
+ */
+const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+/g;
+
+/**
+ * The same segment with the options between a command and its subcommand dropped.
+ *
+ * The rules name a command and its subcommand side by side (`git push`, `kubectl delete`,
+ * `python -m http.server`), but most CLIs take global options in between — `git -C dir push`,
+ * `kubectl -n ns delete`. Which options take a value differs per tool, so this does not try
+ * to know: for every command word followed by options, it yields the segment with each
+ * prefix of that option run removed, a word directly after an option counting as a possible
+ * value. One of those variants puts the real subcommand next to its command; the rules then
+ * match it as they match the plain form. No tool is listed here, so a new CLI with global
+ * options is covered without a change.
+ *
+ * Only ever ADDS scan surface: the original segment is still scanned, so nothing that was
+ * caught before can stop being caught. A variant never leaves the command without a word after
+ * it (`set -e` does not become `set`, `set -e x | head` not `set | head`), and each keeps a
+ * bounded tail, so the work stays linear in the command's length. A variant stays on its line
+ * and keeps the line's own text: options never continue a command across a line break (only
+ * across an escaped one), and joining lines would let a rule read a `>` or a `|` from the next
+ * line as part of this command.
+ */
+export function withoutLeadingOptions(segment: string): string[] {
+  const variants: string[] = [];
+  for (const line of segment.replace(/\\\n/g, ' ').split('\n')) {
+    const tokens = [...line.matchAll(SHELL_WORD)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
+    for (let i = 0; i < tokens.length - 1; i++) {
+      const word = tokens[i]!.text;
+      // A command word: not an option itself, and not the value of the option before it.
+      if (isOptionToken(word) || (i > 0 && isOptionToken(tokens[i - 1]!.text))) continue;
+      for (let k = i + 1; k < tokens.length - 1; k++) {
+        const inRun = isOptionToken(tokens[k]!.text) || (k > i + 1 && isOptionToken(tokens[k - 1]!.text));
+        if (!inRun) break;
+        // Nothing would stand in the subcommand's place: `set -e x | head` is not `set | head`.
+        if (/^[|;&<>)]/.test(tokens[k + 1]!.text)) continue;
+        const last = tokens[Math.min(k + OPTION_VARIANT_TAIL, tokens.length - 1)]!;
+        variants.push(`${word} ${line.slice(tokens[k + 1]!.start, last.end)}`);
+      }
+    }
+  }
+  return variants;
+}
+
 // Build the per-chunk scan surface: the normalized form, the quote-removed
 // form the shell actually executes (`r''m -rf /` → `rm -rf /`), and both split
-// into segments so cross- and intra-segment patterns are all covered.
-function _bashScanSegments(chunk: string): string[] {
+// into segments so cross- and intra-segment patterns are all covered. With
+// `withVariants`, it is the same surface read with the options before each
+// subcommand dropped instead (see withoutLeadingOptions).
+function _bashScanSegments(chunk: string, withVariants: boolean): string[] {
   const normalized = normalizeCommand(chunk);
   const stripped = stripShellQuotes(normalized);
   const segments = splitCommandSegments(normalized);
   // Only re-split the stripped form when stripping changed something (no extra
   // work for the common unquoted command).
   const strippedSegments = stripped !== normalized ? splitCommandSegments(stripped) : [];
-  return [normalized, stripped, ...segments, ...strippedSegments];
+  const all = [...segments, ...strippedSegments];
+  if (!withVariants) return [normalized, stripped, ...all];
+  // The whole chunk too: a segment ends at every line break, an escaped one included.
+  const wholes = stripped !== normalized ? [normalized, stripped] : [normalized];
+  return [...wholes, ...all].flatMap(withoutLeadingOptions);
 }
 
 // Overlapping scan windows. Several danger patterns backtrack (multiple `.*`),
@@ -706,12 +765,18 @@ function _scanBashDanger(
   rawCmd: string,
   patterns: Array<{ pattern: RegExp; label: string }>,
 ): { label: string } | null {
-  if (rawCmd.length <= BASH_SCAN_WINDOW) {
-    return _checkPatterns(_bashScanSegments(rawCmd), patterns);
-  }
-  for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
-    const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW)), patterns);
-    if (hit) return hit;
+  // The command as written, in every window, before any reading with options dropped: a
+  // variant only adds surface, so it must not put its label in front of a plain hit.
+  for (const withVariants of [false, true]) {
+    if (rawCmd.length <= BASH_SCAN_WINDOW) {
+      const hit = _checkPatterns(_bashScanSegments(rawCmd, withVariants), patterns);
+      if (hit) return hit;
+      continue;
+    }
+    for (let start = 0; start < rawCmd.length; start += BASH_SCAN_WINDOW - BASH_SCAN_OVERLAP) {
+      const hit = _checkPatterns(_bashScanSegments(rawCmd.slice(start, start + BASH_SCAN_WINDOW), withVariants), patterns);
+      if (hit) return hit;
+    }
   }
   return null;
 }
