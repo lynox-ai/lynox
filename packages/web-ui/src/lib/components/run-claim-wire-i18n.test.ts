@@ -143,7 +143,7 @@ describe('the run claim reaches the view that holds its key', () => {
     // directions. The keys are split by where they belong, so neither file can satisfy the
     // other's.
     const inView = ['run_already_running', 'run_outcome_unknown', 'run_claim_held'];
-    const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_restarted_cost', 'run_restarted_free'];
+    const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_replayed_cost', 'run_restarted_cost', 'run_restarted_free'];
     for (const [key, source, where] of [
       ...inView.map(k => [k, VIEW, 'the view'] as const),
       ...inComposer.map(k => [k, NOTICE, 'the notice composer'] as const),
@@ -161,7 +161,7 @@ describe('the run claim reaches the view that holds its key', () => {
     // cost nothing: a sentence ending in a colon, with the NEXT value concatenated after
     // it. Checked on the strings themselves, in both languages, because the composition
     // cannot know what follows it.
-    for (const key of ['run_done', 'run_failed', 'run_replayed', 'run_restarted_cost', 'run_restarted_free', 'run_already_running']) {
+    for (const key of ['run_done', 'run_failed', 'run_replayed', 'run_replayed_cost', 'run_restarted_cost', 'run_restarted_free', 'run_already_running']) {
       const line = I18N.split('\n').find(l => l.includes(`'workflow_library.${key}'`))!;
       for (const lang of ['de', 'en']) {
         const m = new RegExp(`${lang}: '((?:[^'\\\\]|\\\\.)*)'`).exec(line);

@@ -120,12 +120,29 @@ describe('the run notice, rendered', () => {
     }
   });
 
-  it('a REPLAY says the run happened earlier and shows that run\'s cost', () => {
+  it('a REPLAY that SHOWS a cost says the cost is the earlier run\'s', () => {
+    // The caveat is what keeps a replayed amount from reading as a fresh charge, and it
+    // belongs only where an amount is printed. This file has seen both failures: the
+    // promise in a branch with no number, and the promise removed from the branch that
+    // has one.
     for (const lang of LANGS) {
       const { kind, text } = render({ status: 'completed', costUsd: 0.25, idempotent: true }, lang);
       expect(kind).toBe('notice');
       expect(text.toLowerCase()).toMatch(/früher|earlier/);
       expect(text).toContain('$0.2500');
+      expect(text.toLowerCase(), 'the amount has to be named as the earlier run\'s')
+        .toMatch(/kosten|cost/);
+    }
+  });
+
+  it('a REPLAY with NO cost to show promises nothing about one', () => {
+    // A completed replay whose run cost zero prints no amount, so it must use the plain
+    // wording — the conditional is the point, not the wording.
+    for (const lang of LANGS) {
+      const { text } = render({ status: 'completed', costUsd: 0, idempotent: true }, lang);
+      expect(text.toLowerCase()).toMatch(/früher|earlier/);
+      expect(text, 'nothing may be said about a cost that is not shown').not.toMatch(/\$\d/);
+      expect(text.toLowerCase()).not.toMatch(/kosten sind|cost is/);
     }
   });
 

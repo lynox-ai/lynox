@@ -1366,13 +1366,31 @@ const MIGRATIONS: string[] = [
   // migration is history; the change belongs in a new one.
   //
   // The DELETE repairs a database that reached the non-unique state: rows sharing a run id
-  // are a corruption (one stamp would mark them all), so keeping the earliest and dropping
-  // the rest is a repair, not a loss — and without it the index creation would fail and
-  // take the engine's boot with it. It is a no-op on every database that never had a
-  // duplicate, which is every database that only ever ran this code.
+  // are a corruption (one stamp would mark them all), and without the repair the index
+  // creation would fail and take the engine's boot with it. It is a no-op on every database
+  // that never had a duplicate, which is every database that only ever ran this code.
+  //
+  // ⚠ WHICH row survives is the whole question, and `MIN(rowid)` was the wrong answer. A
+  // duplicate can be asymmetric: the earlier row unstarted, the later one carrying
+  // `started_at`, i.e. the spend. Keeping the earliest would then destroy the only record
+  // that money was spent, and that key's owner pays again on the next click — the exact
+  // damage this delivery exists to prevent, caused by its own repair. So a STARTED row
+  // wins, and `rowid` only breaks a tie among equals.
+  //
+  // Written as two UNIONed selects rather than a window function because this runs in the
+  // engine's boot path on whatever SQLite the host shipped: the first keeps the earliest
+  // started row of every run id that has one, the second the earliest row of every run id
+  // that has none.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
    DELETE FROM workflow_run_claims
-     WHERE rowid NOT IN (SELECT MIN(rowid) FROM workflow_run_claims GROUP BY run_id);
+     WHERE rowid NOT IN (
+       SELECT MIN(rowid) FROM workflow_run_claims
+         WHERE started_at IS NOT NULL GROUP BY run_id
+       UNION
+       SELECT MIN(rowid) FROM workflow_run_claims
+         WHERE run_id NOT IN (SELECT run_id FROM workflow_run_claims WHERE started_at IS NOT NULL)
+         GROUP BY run_id
+     );
    DROP INDEX IF EXISTS idx_workflow_run_claims_run;
    CREATE UNIQUE INDEX idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
 ];

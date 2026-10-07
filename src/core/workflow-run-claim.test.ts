@@ -122,6 +122,32 @@ describe('workflow run claim — the state space on a real history.db', () => {
     expect(() => after.claimWorkflowRun('wf-3', 'k-3', 'run-shared')).toThrow(/UNIQUE|constraint/i);
   });
 
+  it('the upgrade keeps the row that holds the SPEND, not the earliest one', () => {
+    // ⚠ The repair's tie-break was `MIN(rowid)`, and a duplicate can be asymmetric: the
+    // earlier row unstarted, the LATER one carrying `started_at`. Keeping the earliest then
+    // destroys the only record that money was spent, and that key's owner pays again on the
+    // next click — this delivery's own damage, caused by its own repair.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-claim-tiebreak-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    const before = new RunHistory(path);
+    before.getDb().exec('DROP INDEX IF EXISTS idx_workflow_run_claims_run');
+    before.getDb().exec('CREATE INDEX idx_workflow_run_claims_run ON workflow_run_claims(run_id)');
+    const ins = before.getDb().prepare('INSERT INTO workflow_run_claims (workflow_id, key, run_id, started_at) VALUES (?, ?, ?, ?)');
+    ins.run('wf-early', 'k-early', 'run-shared', null);   // earlier rowid, nothing spent
+    ins.run('wf-late', 'k-late', 'run-shared', '2026-10-07T00:00:00.000Z'); // later rowid, PAID
+    before.getDb().exec('DELETE FROM schema_version WHERE version > 55');
+    before.close();
+
+    const after = new RunHistory(path);
+    histories.push(after);
+    expect(after.readWorkflowRunClaim('wf-late', 'k-late'),
+      'the paid claim is the one that must survive').not.toBeNull();
+    expect(after.readWorkflowRunClaim('wf-late', 'k-late')!.startedAt).not.toBeNull();
+    expect(after.readWorkflowRunClaim('wf-early', 'k-early'),
+      'and the unstarted one is the one that goes').toBeNull();
+  });
+
   it('a different key on the same workflow is a different claim', () => {
     const h = make();
     expect(h.claimWorkflowRun('wf-1', 'k-1', 'run-a')).toBe(true);

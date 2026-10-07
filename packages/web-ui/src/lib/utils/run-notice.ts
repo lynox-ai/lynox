@@ -49,8 +49,16 @@ const money = (n: number): string => `$${n.toFixed(4)}`;
  * Empty when there was none. Each form is a COMPLETE sentence fragment carrying its own
  * label, so nothing that follows it can be mistaken for part of it.
  */
-function earlierAttempt(data: RunNoticeInput, t: Translate): string {
-  if (data.idempotent === true) return ` ${t('workflow_library.run_replayed')}`;
+function earlierAttempt(data: RunNoticeInput, t: Translate, printsCost: boolean): string {
+  // ⚠ The replay has TWO wordings and the branch decides, which is the repair for a round
+  // trip this file already made: the first version promised "the cost below is that run's"
+  // everywhere, and the failed branch prints no cost, so the promise pointed at nothing.
+  // The second version dropped the promise everywhere — and in the completed branch it had
+  // been true and load-bearing: it is the sentence that keeps a replayed `($0.2500)` from
+  // reading as a fresh charge. So the caveat is made conditional instead of removed.
+  if (data.idempotent === true) {
+    return ` ${t(printsCost ? 'workflow_library.run_replayed_cost' : 'workflow_library.run_replayed')}`;
+  }
   if (data.restartedFrom === undefined) return '';
   return typeof data.previousCostUsd === 'number' && data.previousCostUsd > 0
     ? ` ${t('workflow_library.run_restarted_cost', { cost: money(data.previousCostUsd) })}`
@@ -66,12 +74,12 @@ export type RunNotice =
 export function composeRunNotice(data: RunNoticeInput, t: Translate): RunNotice {
   const failedSteps = (data.stepErrors ?? []).filter(s => s.error !== undefined && s.error !== '');
   const stepDetail = failedSteps.map(s => `${s.stepId}: ${s.error}`).join('; ');
-  const earlier = earlierAttempt(data, t);
 
   if (data.status === 'completed') {
     // Non-fatal step errors (on_failure 'continue'/'notify') are a caveat on a success,
     // not a failure — they belong in the green banner.
     const cost = typeof data.costUsd === 'number' && data.costUsd > 0 ? ` (${money(data.costUsd)})` : '';
+    const earlier = earlierAttempt(data, t, cost !== '');
     return {
       kind: 'notice',
       text: `${t('workflow_library.run_done')}${earlier}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`,
@@ -80,6 +88,6 @@ export function composeRunNotice(data: RunNoticeInput, t: Translate): RunNotice 
 
   // ⚠ The failed branch prints NO cost, which is why no marker here may promise a number.
   const detail = stepDetail || (data.error ?? '');
-  const head = `${t('workflow_library.run_failed')}${earlier}`;
+  const head = `${t('workflow_library.run_failed')}${earlierAttempt(data, t, false)}`;
   return { kind: 'error', text: detail ? `${head} — ${detail}` : head };
 }
