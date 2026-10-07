@@ -2170,6 +2170,40 @@ describe('spawn_agent tool', () => {
       }
     });
 
+    it('at the exact boundary the comparison is strict: a share EQUAL to the floor is admitted', async () => {
+      // ⛔ TWO SURVIVING MUTANTS, both found by a delta round and both at the same place:
+      // `remainingRunUSD < need` → `<=` and `askedFor < need` → `<=`. No fixture in this file
+      // had a remainder or an ask equal to a floor, so relaxing either comparison changed
+      // nothing that anything asserted. They are not cosmetic: the first refuses a run that
+      // can afford exactly one turn, the second tells a caller to raise an ask to a figure it
+      // already holds.
+      //
+      // ⚠ The floor is read from the real pricing function rather than typed as $0.192,
+      // because the witness needs EXACT equality and a typed literal would be a second home
+      // for the figure. What is under test here is the comparison, not the price.
+      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
+      const floor = estimateFirstTurnUSD('claude-sonnet-4-6');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(floor);
+      await spawnAgentTool.handler({ agents: [{ name: 'exact', task: 'A', max_budget_usd: floor }] }, agent);
+      expect(childCaps(MockAgent), 'a share exactly at the floor clears it').toEqual([floor]);
+    });
+
+    it('a child whose ask EQUALS its floor is blamed on the siblings, not on its ask', async () => {
+      // The other half of the boundary: here the refusal happens, and the question is which
+      // branch explains it. The ask was enough — exactly enough — so the cause is the split.
+      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
+      const floor = estimateFirstTurnUSD('claude-sonnet-4-6');
+      const msg = await refusalFor(0.5, [
+        { name: 'hog', task: 'A', max_budget_usd: 10 },
+        { name: 'exact', task: 'B', max_budget_usd: floor },
+      ]);
+      expect(msg, 'the siblings are named').toContain('2 sub-agents asked for');
+      expect(msg, 'and the named child is the one at its floor').toContain('"exact" would get');
+      expect(msg, 'its ask is NOT called the binding thing').not.toContain('what binds is its own budget');
+      expect(msg, 'nor is it told to raise an ask it already holds').not.toContain('Raise max_budget_usd');
+    });
+
     it('a short remainder beats a short ask: the (a)/(b) boundary is the remainder, not the scale factor', async () => {
       // ⛔ THE RECORDED TRAP. A first attempt split this message by `factor` alone and, at
       // $0.15 left with a $0.10 ask, told the model "the run's remainder is not the
