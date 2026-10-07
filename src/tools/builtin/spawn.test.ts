@@ -188,6 +188,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     getExcludedToolNames: () => [],
     getMaxContextWindowTokens: () => undefined,
     getNativeContextWindow: () => undefined,
+    chargeExternalCost: vi.fn(),
     // Every agent owns one: a child registers in its PARENT's scope, so a session's
     // abort reaches the whole chain and nothing outside it. REQUIRED on `IAgent` rather
     // than optional, which is why this stub had to gain it — a stub that could leave it
@@ -1528,6 +1529,60 @@ describe('spawn_agent tool', () => {
     expect(cg).toBeDefined();
     expect(cg.maxBudgetUSD).toBe(5);
     expect(cg.maxIterations).toBe(10);
+  });
+
+  describe("a child's cost reaches the delegating run's ceiling", () => {
+    it('books each child at its ACTUAL cost', async () => {
+      // The run's arithmetic after a fan-out. Without this the run keeps counting only
+      // its own turns while the tenant's daily total carries the children too — so its
+      // next turn believes it has more room than it has.
+      const charged: number[] = [];
+      mockCostSnapshotQueue = [0.07, 0.03].map((usd) => ({
+        inputTokens: 0, outputTokens: 0, estimatedCostUSD: usd, iterationsUsed: 1, budgetPercent: 0,
+      }));
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        makeAgent({ chargeExternalCost: (usd: number) => { charged.push(usd); } }),
+      );
+      // Sorted NUMERICALLY — the default comparator is lexicographic, and for these two
+      // decimal strings it happens to agree, which is luck rather than construction.
+      expect(charged.slice().sort((x, y) => x - y), 'both children, at their own cost')
+        .toEqual([0.03, 0.07]);
+    });
+
+    it('books even with no control plane to report to', async () => {
+      // ⚠ The managed-billing report sits inside an `if (meteredHost)`, and this booking
+      // must NOT: the run's own ceiling exists on self-host and BYOK too. `makeAgent`
+      // supplies no metered host, so this case is exactly that configuration — and a
+      // mutant moving the booking inside that branch dies here.
+      const charged: number[] = [];
+      mockCostSnapshot = {
+        inputTokens: 0, outputTokens: 0, estimatedCostUSD: 0.02, iterationsUsed: 1, budgetPercent: 0,
+      };
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'solo', task: 'A' }] },
+        makeAgent({ chargeExternalCost: (usd: number) => { charged.push(usd); } }),
+      );
+      expect(charged, 'booked without a metered host').toEqual([0.02]);
+    });
+
+    it('a throwing booking does not replace the child\'s own outcome', async () => {
+      // ⛔ The reason the call is fenced. This callback runs in a `finally`, where a
+      // throw REPLACES the error the catch is rethrowing — the child's real failure
+      // would be lost and the message would point at bookkeeping instead. The real
+      // `Agent` cannot throw here; an `IAgent` from outside this repo can, and
+      // `chargeExternalCost` is a required member of a published interface.
+      mockCostSnapshot = {
+        inputTokens: 0, outputTokens: 0, estimatedCostUSD: 0.02, iterationsUsed: 1, budgetPercent: 0,
+      };
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'solo', task: 'A' }] },
+        makeAgent({ chargeExternalCost: () => { throw new Error('a consumer agent exploded'); } }),
+      );
+      // The batch still returns its result, and the consumer's error is nowhere in it.
+      expect(result).not.toContain('exploded');
+      expect(result.length, 'the child\'s own output survived').toBeGreaterThan(0);
+    });
   });
 
   it('uses explicit max_budget_usd from spec', async () => {

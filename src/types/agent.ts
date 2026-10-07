@@ -287,6 +287,18 @@ export interface IAgent {
   /** Init-time warnings (e.g. thinking-flag dropped on Mistral). Engine surface for HTTP-API SSE toast events. Returns empty array when no warnings. */
   getWarnings(): readonly AgentWarning[];
   /**
+   * Book a dollar amount spent OUTSIDE this agent's own turns against its cost ceiling
+   * — a spawned child's actual cost.
+   *
+   * REQUIRED rather than optional, for the same reason as `abortScope` above: an
+   * implementation without it would let a delegating run keep counting only its own
+   * turns while the tenant's daily total carries the children too, and the omission
+   * would be silent. A TypeScript implementer gets a compile error and adds it; the
+   * call site still guards the METHOD, because a partial test double is not a type
+   * error — and because this one is called from a `finally`.
+   */
+  chargeExternalCost(usd: number): void;
+  /**
    * Provider config snapshot for sub-agent inheritance (spawn.ts). Closes the
    * gap where managed-tier UI provider-switch wasn't reflected in `loadConfig()`.
    *
