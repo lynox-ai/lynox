@@ -26,6 +26,11 @@ export { loadManifestFile, validateManifest } from './validate.js';
 
 export interface RunManifestOptions {
   agentsDir?: string | undefined;
+  /** The run's id, minted by the caller instead of here. A route that holds a claim on
+   *  this run has to know the id BEFORE the run starts — the claim is taken first, and a
+   *  run that throws before answering leaves nothing to look the id up by. Absent: minted
+   *  below, which is every other caller. */
+  runId?: string | undefined;
   gateAdapter?: GateAdapter | undefined;
   hooks?: RunHooks | undefined;
   mockResponses?: Map<string, string> | undefined;
@@ -177,6 +182,7 @@ export interface RunCtxInput {
   parentPrompt?: SubAgentPromptHandles | undefined;
   parentSessionCounters?: SessionCounters | undefined;
   runHistory?: RunHistory | undefined;
+  runId?: string | undefined;
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   observeToolCall?: StepToolRecorder | undefined;
@@ -226,6 +232,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     parentPrompt: input.parentPrompt,
     parentSessionCounters: input.parentSessionCounters,
     runHistory: input.runHistory,
+    runId: input.runId,
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     observeToolCall: input.observeToolCall,
@@ -437,7 +444,10 @@ export async function runManifest(
     pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
 
-  const runId = randomUUID();
+  // A caller that holds a claim on this run passes the id in; it cannot wait for one
+  // minted here, because the claim is taken before the run and a run that throws before
+  // answering returns no id at all.
+  const runId = options.runId ?? randomUUID();
 
   const state: RunState = {
     runId,

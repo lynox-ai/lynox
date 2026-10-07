@@ -23,7 +23,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
   };
 });
 
-import { runManifest, retryManifest, workflowBoundExceeded } from './runner.js';
+import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
@@ -1912,5 +1912,36 @@ describe('runManifest — DoS bound wiring', () => {
     expect(state.error).toContain('step limit');
     expect(state.outputs.has('p1')).toBe(true);
     expect(state.outputs.has('p2')).toBe(false);
+  });
+});
+
+describe('the claim seam: a caller may mint the run id and pass hooks through', () => {
+  // The route takes its claim BEFORE the run, so it cannot wait for an id minted inside
+  // runManifest — and a run that throws before answering returns no id to link up later.
+  // These two witnesses are diagnostic: without them a missing seam shows up only as the
+  // route test failing, with no hint of WHICH of the four seams dropped the value.
+
+  it('uses a run id handed in by the caller instead of minting one', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runId: 'run-from-caller' });
+    expect(state.runId).toBe('run-from-caller');
+  });
+
+  it('still mints one when the caller passes none', async () => {
+    // The negative half: every caller that holds no claim must keep working, and an
+    // accidental `runId: undefined` must not produce an empty id.
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses });
+    expect(state.runId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('buildRunCtx carries runId and hooks to the options it builds', () => {
+    // The seam that had no parameter at all before: nothing on the saved-workflow path
+    // passed hooks, so a stamping `onRunStart` would have been dropped silently.
+    const onRunStart = vi.fn();
+    const opts = buildRunCtx({ autonomy: 'autonomous', runId: 'run-x', hooks: { onRunStart } });
+    expect(opts.runId).toBe('run-x');
+    opts.hooks?.onRunStart?.();
+    expect(onRunStart).toHaveBeenCalledTimes(1);
   });
 });
