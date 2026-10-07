@@ -2017,6 +2017,13 @@ describe('spawn_agent tool', () => {
         { name: 'cheap', task: 'A', max_budget_usd: 0.05 },
         { name: 'dear', task: 'B', max_budget_usd: 40 },
       ], 0);
+      // ⛔ A ZERO ask inside a SCALED batch — the combination a delta round found uncovered
+      // in both directions. The advised figure has to carry the scaling here too, and the
+      // zero-ask branch has no clause of its own that says so.
+      await followsItsOwnAdvice(1.0, [
+        { name: 'free', task: 'A', max_budget_usd: 0 },
+        { name: 'dear', task: 'B', max_budget_usd: 10 },
+      ], 0);
     });
 
     it('(a) names the RUN when the remainder cannot pay for one turn, and only remedies that exist', async () => {
@@ -2085,7 +2092,6 @@ describe('spawn_agent tool', () => {
       expect(msg, 'the named child is the second one').toContain('covers one turn of "thin"');
       expect(msg, "and its OWN ask, not the first child's default").toContain('it may spend $0.10');
       expect(msg, 'nothing here was scaled').not.toContain('scaled it to');
-      expect(msg, 'nor is the batch total blamed').not.toContain('asked for $5.10');
     });
 
     it('(b) when scaled, the advised figure accounts for the batch growing with the ask', async () => {

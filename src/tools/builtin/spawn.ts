@@ -205,14 +205,29 @@ function floorRefusal(opts: {
 }): string {
   const { name, got, need, askedFor, remainingRunUSD, batchSize, batchAsked, factor, sumFloors, maxAsk } = opts;
   const left = usdLabel(remainingRunUSD);
+  // ⚠ `name` IS NOT ESCAPED HERE, AND THAT IS A DECISION, not an oversight — a security
+  // round recommended `escapeXml` because three other outbound paths in this file apply it.
+  // They are composed into an XML-ish envelope (`compose`/`renderFence`) and need it; this
+  // string is thrown, and a thrown tool error reaches the model as the `content` of a
+  // `tool_result`, with no envelope and so no delimiter to break. What keeps a line break
+  // out is the input gate (`CONTROL_CHARS`, rejected in `validateSpawnInput`), NOT escaping
+  // — `escapeXml` does not touch control characters at all. And escaping here would corrupt
+  // the one identifier the remedy tells the model to type back: a child named `a&b` would be
+  // quoted as `a&amp;b`. If this string is ever composed into an envelope, the escaping
+  // belongs at that composition site, where the delimiter exists.
   const share = `"${name}" would get $${usdLabel(got)}`;
   const turn = `one turn on its model costs about $${usdLabel(need)}`;
   // ⛔ The floor's TRUE meaning, from {@link minChildBudgetUSD}: not "it cannot finish a
   // turn" (false — the cost guard books before it compares) but what follows the turn.
   const abort = 'below its floor a sub-agent runs a single turn and then stops, so the money '
     + 'buys an abort instead of an answer';
-  const nothing = ' No sub-agent was started, so there are no results: nothing ran, and there is '
-    + 'nothing to report from this call.';
+  // ⚠ SHORT ON PURPOSE. `RepeatCallGuard` quotes a refused result back at the model with a
+  // 300-character excerpt, and three of these branches now overrun it — what falls off the
+  // end is the remedy. The full text still reaches the model three times before any
+  // escalation (`REPEAT_LIMIT`), so nothing is withheld; the excerpt is a reminder of a
+  // result already read in full. Saying this in sixty characters instead of a hundred and
+  // ten costs nothing and leaves more of the remedy inside the window.
+  const nothing = ' No sub-agent was started and there are no results to report.';
   /**
    * What the ask would have to be for THIS child's share to clear its floor.
    *
