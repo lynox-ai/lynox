@@ -51,8 +51,19 @@ export function attemptIsOver(answer: { httpStatus: number; code?: string | unde
   // paid start keeps the key, and the next click gets the disclosed restart instead of a
   // silent second charge. Keep is right for both, which is why the unknown case keeps too.
   //
-  // 403 (the consent gate) and 404 (no such workflow) both answer before any claim exists.
-  return answer.httpStatus === 200 || answer.httpStatus === 403 || answer.httpStatus === 404;
+  // 403 is the consent gate, which answers before any claim exists.
+  //
+  // ⚠ 404 is NOT terminal either, for the same reason as 400 and one the route makes
+  // unavoidable: it maps a RUN failure to 404 by looking for the substring "not found" in
+  // the error. So a run that started, spent, and failed with a message containing those
+  // words arrives here as a 404 — indistinguishable, from the client, from "there is no
+  // such workflow". The client cannot tell them apart, so it must not treat the answer as
+  // proof that nothing was spent.
+  //
+  // What that costs: a workflow that is genuinely gone leaves one bounded storage entry
+  // behind, because no later answer can ever be terminal for it. That is the same trade as
+  // for 400, and it is the cheap side of the two.
+  return answer.httpStatus === 200 || answer.httpStatus === 403;
 }
 
 function mint(): string {

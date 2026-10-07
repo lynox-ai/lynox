@@ -189,19 +189,25 @@ describe('the workflow run attempt key', () => {
     });
 
     it('ends the attempt on the answers that cannot hide a paid run', () => {
-      // 200: the run happened and its outcome is known. 403: the consent gate, before any
-      // claim. 404: no such workflow, likewise.
-      for (const httpStatus of [200, 403, 404]) {
+      // 200: the run happened and its outcome is known. 403: the consent gate, which
+      // answers before any claim exists. Those are the only two.
+      for (const httpStatus of [200, 403]) {
         expect(attemptIsOver({ httpStatus }), `${httpStatus} cannot carry a paid run`).toBe(true);
       }
     });
 
-    it('KEEPS the key on a 400, because a 400 CAN carry a paid run', () => {
-      // ⚠ This asserted the opposite one revision ago, with the reason "refused before any
-      // claim could be taken" — and the route's own test suite refutes it: a run that threw
-      // AFTER it started answers 400 with its claim stamped as having spent. Discarding the
-      // key there is what lets the next click pay for the whole workflow again.
+    it('KEEPS the key on a 400 and a 404, because both CAN carry a paid run', () => {
+      // ⚠ 400 asserted the opposite one revision ago, with the reason "refused before any
+      // claim could be taken" — and the route's own suite refutes it: a run that threw
+      // AFTER it started answers 400 with its claim stamped as having spent.
+      //
+      // 404 is the same shape through a different door: the route chooses between 404 and
+      // 400 by looking for the substring "not found" in the run's error, so a run that
+      // started, spent, and failed with those words in its message arrives as a 404. From
+      // the client that is indistinguishable from "no such workflow", and discarding the
+      // key on either reading is what lets the next click pay for the whole workflow again.
       expect(attemptIsOver({ httpStatus: 400 })).toBe(false);
+      expect(attemptIsOver({ httpStatus: 404 })).toBe(false);
     });
 
     it('KEEPS the key on an answer the route did not produce', () => {
