@@ -2189,6 +2189,28 @@ describe('spawn_agent tool', () => {
       expect(childCaps(MockAgent), 'a share exactly at the floor clears it').toEqual([floor]);
     });
 
+    it('a remainder EQUAL to one turn is not called unaffordable', async () => {
+      // ⛔ THE MUTANT MY FIRST BOUNDARY WITNESS COULD NOT SEE, and the reason is worth
+      // keeping: it relaxes `remainingRunUSD < need` to `<=`, which only changes WHICH
+      // SENTENCE a refusal gets. My first attempt put a single child at the tie and asserted
+      // it was ADMITTED — so `floorRefusal` was never entered and the mutated line never ran.
+      // A branch-selection mutant needs a fixture that is REFUSED.
+      //
+      // Two children against a remainder of exactly one turn: the split is what refuses them,
+      // and "delegate fewer" is the remedy that works — one of them alone is admitted. The
+      // mutant answers "delegating fewer cannot change that", which is false here.
+      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
+      const floor = estimateFirstTurnUSD('claude-sonnet-4-6');
+      const msg = await refusalFor(floor, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]);
+      expect(msg, 'the split is named as the cause').toContain('2 sub-agents asked for');
+      expect(msg, 'and the remedy that works is offered').toContain('Delegate fewer at once');
+      expect(msg, 'the run is NOT called unable to pay for a turn').not.toContain('Delegating fewer at once cannot change that');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(floor);
+      await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A' }] }, agent);
+      expect(childCaps(MockAgent), 'one of them alone is admitted, which is why that remedy is true').toEqual([floor]);
+    });
+
     it('a child whose ask EQUALS its floor is blamed on the siblings, not on its ask', async () => {
       // The other half of the boundary: here the refusal happens, and the question is which
       // branch explains it. The ask was enough — exactly enough — so the cause is the split.
