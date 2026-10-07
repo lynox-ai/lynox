@@ -1742,7 +1742,7 @@ async function attachEngineManagedAuth(
  *     digit-leading id, `ISO_TIMESTAMP_SHAPE` for `revoked_at`.
  * Neither is applied by default. Any NEW interpolation of a profile value into a
  * model-facing string needs one of them chosen deliberately: `validateProfile` checks
- * the names at create and update, but a profile loaded from a file never passes it.
+ * the names on create, update and refine, but a profile loaded from a file never passes it.
  */
 const SAFE_PROFILE_TOKEN = /^[A-Za-z0-9._-]{1,64}$/;
 function safeToken(value: string | undefined): string | undefined {
