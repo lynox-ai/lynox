@@ -1975,87 +1975,99 @@ describe('spawn_agent tool', () => {
       return err!;
     }
 
-    /**
-     * Refuse, read the advised `max_budget_usd` OUT OF THE MESSAGE, and retry with exactly
-     * that figure.
-     *
-     * ⛔ THE POINT, and the lesson from the round that found this: a first version of these
-     * witnesses hand-picked the retry ($0.20 against an advised $0.19) and so proved only
-     * that SOME fix works. The advised figure printed `toFixed(2)` of a $0.192 floor, so
-     * following it literally reproduced the identical refusal — a non-terminating loop on
-     * the default tier, inside the change whose whole purpose is that the advice works.
-     * Feeding the printed string back is the only shape that can see it.
-     */
-    async function followsItsOwnAdvice(remainder: number, agents: Array<Record<string, unknown>>, idx: number): Promise<string> {
-      const msg = await refusalFor(remainder, agents);
-      const quoted = /max_budget_usd[^$]*\$([0-9]+(?:\.[0-9]+)?)/.exec(msg);
-      expect(quoted, 'this branch must advise a figure, or it is the wrong fixture').not.toBeNull();
-      const retry = agents.map((sp, i) => (i === idx ? { ...sp, max_budget_usd: Number(quoted![1]) } : sp));
-      const { agent: second } = parentWithCeiling(remainder);
-      await expect(
-        spawnAgentTool.handler({ agents: retry } as never, second),
-        `the figure the message printed ($${String(quoted![1])}) must be admitted`,
-      ).resolves.toBeTruthy();
-      return msg;
+    /** The floors this suite's branch fixtures are cut against, read from the real pricer. */
+    async function floors(): Promise<{ balanced: number; deep: number }> {
+      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
+      return { balanced: estimateFirstTurnUSD('claude-sonnet-4-6'), deep: estimateFirstTurnUSD('claude-opus-4-6') };
     }
 
-    it('the figure the refusal advises is admitted when it is fed straight back', async () => {
-      // ⛔ FIVE REGIMES, and three of them LOOPED before the advice figure was rounded UP:
-      // $0.192 printed "$0.19" (default tier), $0.052288 printed "$0.05", $0.12225 printed
-      // "$0.12" — each refused again, identically, forever. The two scaled rows are the
-      // second half: there the figure must also account for the batch total growing with
-      // the ask, which `need / factor` does not (it quoted $1.93; $1.93 is refused).
-      await followsItsOwnAdvice(10, [{ name: 'one', task: 'A', max_budget_usd: 0 }], 0);
-      await followsItsOwnAdvice(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }], 0);
-      await followsItsOwnAdvice(10, [{ name: 'one', task: 'A', model: 'fast', max_budget_usd: 0.01 }], 0);
-      await followsItsOwnAdvice(10, [{ name: 'one', task: 'A', max_budget_usd: 0.01, max_tokens: 500 }], 0);
-      await followsItsOwnAdvice(1.0, [
-        { name: 'cheap', task: 'A', max_budget_usd: 0.01 },
-        { name: 'dear', task: 'B', max_budget_usd: 10 },
-      ], 0);
-      await followsItsOwnAdvice(2.0, [
-        { name: 'cheap', task: 'A', max_budget_usd: 0.05 },
-        { name: 'dear', task: 'B', max_budget_usd: 40 },
-      ], 0);
-      // ⛔ A ZERO ask inside a SCALED batch — the combination a delta round found uncovered
-      // in both directions. The advised figure has to carry the scaling here too, and the
-      // zero-ask branch has no clause of its own that says so.
-      await followsItsOwnAdvice(1.0, [
-        { name: 'free', task: 'A', max_budget_usd: 0 },
-        { name: 'dear', task: 'B', max_budget_usd: 10 },
-      ], 0);
+    it('no branch prescribes a figure to type', async () => {
+      // ⛔⛔ THE GATE FOR THIS CUT, and it is mechanical on purpose. A previous version of this
+      // message advised a number ("raise max_budget_usd to at least $X"). A review round swept
+      // 3 957 refusals through the real handler, fed each printed figure back, and found 599
+      // of 1 674 not followable: $Infinity at the exact tie, figures above the schema maximum,
+      // figures that refused the same child again, figures that refused a sibling. Every one
+      // of those lived in the prescription and none in the diagnosis.
+      //
+      // So the invariant is not "the advised figure works" — it is that THERE IS NO ADVISED
+      // FIGURE. That is checkable over every branch at once, which an assertion per sentence
+      // is not, and it cannot rot into a weaker claim the way a per-figure witness did twice.
+      const { balanced, deep } = await floors();
+      const fixtures: Array<[string, number, unknown[]]> = [
+        ['spent ceiling', 0, [{ name: 'one', task: 'A' }]],
+        ['spent ceiling, zero ask', 0, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
+        ['zero ask, ample run', 10, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
+        ['zero ask, short run', 0.15, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
+        ['zero ask, scaled batch', 1.0, [{ name: 'free', task: 'A', max_budget_usd: 0 }, { name: 'dear', task: 'B', max_budget_usd: 10 }]],
+        ['run cannot pay', 0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]],
+        ['run cannot pay, exact tie minus a step', balanced * 0.99, [{ name: 'one', task: 'A' }]],
+        ['own budget, unscaled', 10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]],
+        ['own budget, unscaled, fat sibling', 1.0, [{ name: 'thin', task: 'A', max_budget_usd: 0.1 }, { name: 'fat', task: 'B', max_budget_usd: 0.9 }]],
+        ['own budget, scaled', 1.0, [{ name: 'cheap', task: 'A', max_budget_usd: 0.01 }, { name: 'dear', task: 'B', max_budget_usd: 10 }]],
+        ['own budget, infeasible batch', 0.3, [{ name: 'thin', task: 'A', max_budget_usd: 0.01 }, { name: 'fat', task: 'B' }]],
+        ['own budget, ask over the maximum would be needed', 0.2, [{ name: 'cheap', task: 'A', max_budget_usd: 0.01 }, { name: 'dear', task: 'B', max_budget_usd: 50 }]],
+        ['siblings, batch fits', 0.5, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
+        ['siblings, batch cannot fit', 0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
+        ['siblings at the gate boundary', balanced * 2, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
+        ['solo at the rounding tie', deep, [{ name: 'solo', task: 'A', model: 'deep' }]],
+        ['the exact-tie remainder', balanced, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
+        ['ten children', 0.4, Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, task: 'A' }))],
+      ];
+      for (const [label, remainder, agents] of fixtures) {
+        const msg = await refusalFor(remainder, agents);
+        expect(msg, `${label}: no "at least" imperative`).not.toMatch(/at least/);
+        expect(msg, `${label}: no NaN or Infinity reaches the model`).not.toMatch(/Infinity|NaN/);
+        // Every figure it DOES carry is a description of what already happened, so each must
+        // be a real amount — a mutant that prints an unformatted float fails here.
+        for (const figure of msg.match(/\$[0-9]+(?:\.[0-9]+)?/g) ?? []) {
+          expect(figure, `${label}: ${figure} is printed at display precision`).toMatch(/^\$[0-9]+\.[0-9]{2}([0-9]{2})?$/);
+        }
+        expect(msg, `${label}: says nothing was started`).toContain('No sub-agent was started');
+        expect(msg, `${label}: and that there are no results`).toContain('there are no results');
+      }
     });
 
-    it('(a) names the RUN when the remainder cannot pay for one turn, and only remedies that exist', async () => {
+    it('(a) names the RUN when the remainder cannot pay for one turn', async () => {
       const msg = await refusalFor(0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
       expect(msg, 'the run is named as the binding thing').toContain('$0.15 left of its own cost ceiling');
       expect(msg, 'with the turn it cannot pay for').toContain('one turn on its model costs about $0.19');
-      expect(msg, 'and the remedy is conditioned on the remainder').toContain('first turn costs under $0.15');
-      expect(msg, 'NOT the remedy that is impossible here').not.toContain('Delegating fewer at once can change');
+      expect(msg, 'and that the batch is not the lever').toContain('Delegating fewer at once cannot change that');
+      expect(msg, 'with the reason, which is what makes it followable').toContain('even on its own this child cannot be granted one turn');
+      expect(msg, 'a cheaper model is offered as a MAY, not a promise').toContain('A cheaper model may clear it');
       expect(msg, "and NOT the child's own budget, which is not what binds").not.toContain('what binds is its own budget');
       // ⛔ THE SENTENCE THIS FILE ALREADY CORRECTED ONCE. `minChildBudgetUSD`'s docblock
-      // records that "a child this small cannot finish a turn" is FALSE — the cost guard
-      // books a turn before it compares, so an admitted child always completes its first
-      // one. A first cut of this message wrote that false sentence into a new home and
-      // pinned it with two witnesses; this is the assertion that keeps it out.
+      // records that "a child this small cannot finish a turn" is FALSE — the cost guard books
+      // a turn before it compares, so an admitted child always completes its first one. A
+      // first cut wrote that false sentence into a new home and pinned it with two witnesses.
+      //
+      // ⚠ The needle is `cannot finish`, which is the wording the docblock uses. A delta round
+      // proved the earlier needle (`could not finish`) was a dead guard: appending "(it cannot
+      // finish a turn)" to the floor explanation survived the whole suite, because that phrase
+      // had been deleted from the source and only the deleted spelling was forbidden.
       expect(msg, 'the true statement about the floor').toContain('runs a single turn and then stops');
-      expect(msg, 'and not the one the file documents as false').not.toContain('could not finish');
-      const { agent } = parentWithCeiling(0.15);
-      await expect(spawnAgentTool.handler(
-        { agents: [{ name: 'one', task: 'A', model: 'fast', max_budget_usd: 0.1 }] },
-        agent,
-      ), 'a model under the named figure is admitted').resolves.toBeTruthy();
+      expect(msg, 'and not the one the file documents as false').not.toContain('cannot finish');
     });
 
     it('(a) at a spent ceiling quotes no price and promises no cheaper model', async () => {
       // ⛔ At $0 left NO model is cheap enough — the cheapest priced floor in the registry is
-      // $0.000898, not $0 — so a cheaper-model remedy would be false. The branch says so.
+      // $0.000898, not $0 — so a cheaper-model remedy would be false. This branch says so.
       const msg = await refusalFor(0, [{ name: 'one', task: 'A' }]);
       expect(msg, 'nothing to divide').toContain('there is nothing to divide');
       expect(msg, 'and it says why no model helps').toContain('no model is cheap enough');
-      expect(msg, 'so no cheaper-model instruction').not.toContain('first turn costs under');
+      expect(msg, 'so no cheaper-model MAY here').not.toContain('may clear it');
       expect(msg, 'and no price quoted against a zero remainder').not.toContain('costs about');
       expect(msg, 'the share is still named').toContain('"one" would get $0.0000');
+    });
+
+    it('a spent ceiling beats a zero ask: the run is named first when nothing is left', async () => {
+      // ⛔ A SURVIVING MUTANT the delta round found: swapping the (a0) and (z) blocks changed
+      // nothing any fixture asserted, because none had BOTH a zero remainder and a zero ask.
+      // Under the swap that case gets the zero-ask text and offers a cheaper model against a
+      // $0 remainder — the falsehood (a0) exists to avoid.
+      const msg = await refusalFor(0, [{ name: 'one', task: 'A', max_budget_usd: 0 }]);
+      expect(msg, 'the spent ceiling is named').toContain('there is nothing to divide');
+      expect(msg, 'and no model is offered').toContain('no model is cheap enough');
+      expect(msg, 'not the zero-ask remedy, which cannot help at $0 left').not.toContain('positive max_budget_usd');
     });
 
     it('(z) names a zero ask as the cause, before the remainder', async () => {
@@ -2064,27 +2076,32 @@ describe('spawn_agent tool', () => {
       // leave it at $0. The ask is the cause the caller controls.
       const ample = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0 }]);
       expect(ample, 'the zero ask is named').toContain('was given no budget at all');
-      expect(ample, 'with the remedy that reaches it').toContain('a positive max_budget_usd of at least $0.20');
+      expect(ample, 'with the move that reaches it').toContain('Give "one" a positive max_budget_usd');
+      expect(ample, 'and no second cause invented').not.toContain('Both bind');
       const short = await refusalFor(0.15, [{ name: 'one', task: 'A', max_budget_usd: 0 }]);
       expect(short, 'both causes are named when both bind').toContain('was given no budget at all');
-      expect(short, 'the remainder half too').toContain('first turn costs under $0.15');
+      expect(short, 'the remainder half too').toContain('a cheaper model may be needed');
       expect(short, 'and it says so in so many words').toContain('Both bind');
     });
 
-    it("(b) names the CHILD'S OWN budget and says the run covers the turn", async () => {
+    it("(b) names the CHILD'S OWN budget, and the only move that can work", async () => {
+      // ⛔ "Delegate fewer at once" was offered here by a second cut and is FALSE in every
+      // case: (b) is entered only when `askedFor < need`, and `share = askedFor · factor <=
+      // askedFor`, so no reduction of the batch lifts this child over its floor. Measured
+      // 131 of 131. Raising the ask is the only lever, and this branch says that.
       const msg = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
       expect(msg, 'the run covers it').toContain('which covers one turn of "one"');
       expect(msg, 'the ask is named').toContain('it may spend $0.10');
-      expect(msg, 'and the remedy is the ask, rounded UP past the floor').toContain('to at least $0.20');
-      expect(msg, 'not the rounded-down floor, which loops').not.toContain('to at least $0.19');
-      expect(msg, 'and no batch remedy, because nothing is being scaled').not.toContain('delegate fewer at once');
+      expect(msg, 'and the only move that works').toContain('Raise its max_budget_usd');
+      expect(msg, 'said as an exclusion, not a suggestion').toContain('no change to the batch can substitute');
+      expect(msg, 'so NOT the batch remedy that cannot work here').not.toContain('Delegate fewer at once');
+      expect(msg, 'and nothing was scaled in this fixture').not.toContain('scaled it to');
     });
 
     it("(b) reads the ask of the child it NAMES, not the first child's", async () => {
       // ⛔ THE INDEX MUTANT, the class that survived this suite twice before (`floors[0]`,
       // `shares[0]`). `requested[0]` here would read the healthy child's default $5, decide
-      // the ask was ample, and fall through to the siblings branch — announcing that every
-      // share "was scaled down" in a batch where nothing was scaled.
+      // the ask was ample, and fall through to the siblings branch.
       const msg = await refusalFor(10, [
         { name: 'ok', task: 'A' },
         { name: 'thin', task: 'B', max_budget_usd: 0.1 },
@@ -2094,41 +2111,43 @@ describe('spawn_agent tool', () => {
       expect(msg, 'nothing here was scaled').not.toContain('scaled it to');
     });
 
-    it('(b) when scaled, the advised figure accounts for the batch growing with the ask', async () => {
-      // ⛔ `need / factor` is WRONG here and a first cut used it: raising this child's ask
-      // raises the batch total, so the factor drops with it. Measured — it quoted $1.93 and
-      // $1.93 is refused. The figure has to solve `x·R/(x+S) >= need`, i.e. $2.38.
-      const msg = await followsItsOwnAdvice(1.0, [
+    it('(b) says the batch is infeasible too, when it is', async () => {
+      // Raising the ask is still the only lever for THIS child, but when the floors together
+      // do not fit the remainder, no split admits the batch either — so the caller needs both
+      // moves. A second cut offered the batch move alone here, which cannot work.
+      const msg = await refusalFor(0.3, [
+        { name: 'thin', task: 'A', max_budget_usd: 0.01 },
+        { name: 'fat', task: 'B' },
+      ]);
+      expect(msg, 'the ask is still the lever').toContain('Raise its max_budget_usd');
+      expect(msg, 'and the batch is named as infeasible').toContain('The batch cannot fit either');
+      expect(msg, 'with the figure that shows why').toContain('one turn each costs $0.38 together, against $0.30');
+      expect(msg, 'so the batch move is named as an ADDITION').toContain('delegate fewer at once as well');
+      const fits = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
+      expect(fits, 'and withheld where the batch is not the problem').not.toContain('cannot fit either');
+    });
+
+    it('(b) names the scaling as a fact when the shares were scaled', async () => {
+      const msg = await refusalFor(1.0, [
         { name: 'cheap', task: 'A', max_budget_usd: 0.01 },
         { name: 'dear', task: 'B', max_budget_usd: 10 },
-      ], 0);
-      expect(msg, 'the ask is what binds first').toContain('it asked for $0.01');
-      expect(msg, 'the scaling is named as a fact, not as a cause of the ask').toContain('scaled it to $0.0010');
-      expect(msg, 'with the batch total that caused it').toContain("the batch's $10.01");
-      expect(msg, 'the figure solves the scaling, it is not need/factor').toContain('to at least $2.38');
-      expect(msg, 'and NOT the naive figure, which is refused again').not.toContain('to at least $1.93');
-      // ⛔ AND NOT THE CLAIM THAT A LARGER ASK ALONE CANNOT WORK. Measured: raising only
-      // this child's ask to $2.50 with the sibling untouched IS admitted, so the sentence a
-      // first cut carried — "a larger ask alone would be scaled too" — was false.
-      expect(msg, 'no false claim about the ask alone').not.toContain('alone would be scaled');
-      const { agent } = parentWithCeiling(1.0);
-      await expect(spawnAgentTool.handler({ agents: [
-        { name: 'cheap', task: 'A', max_budget_usd: 2.5 },
-        { name: 'dear', task: 'B', max_budget_usd: 10 },
-      ] }, agent), 'the ask alone, raised far enough, is admitted').resolves.toBeTruthy();
+      ]);
+      expect(msg, 'the ask is what binds').toContain('it may spend $0.01');
+      expect(msg, 'and the scaling is reported, not blamed').toContain("the batch's $10.01 against that remainder scaled it to $0.0010");
+      expect(msg, 'the lever is still the ask').toContain('Raise its max_budget_usd');
     });
 
     it('(c) names the siblings, and offers "lower what the others ask for" only when the batch CAN fit', async () => {
-      // ⛔ MEASURED BOTH WAYS. The batch is admissible iff the floors together fit the
-      // remainder — necessary, and sufficient: asks proportional to the floors give every
-      // child `floor_i · R / sumFloors >= floor_i`. Below that no split admits it, and a
-      // first cut offered the remedy anyway: at $0.30 with two default children every value
-      // of the sibling's ask was refused.
+      // ⛔ MEASURED BOTH WAYS, and the gate was PROVED by a round: the batch is admissible iff
+      // the floors together fit the remainder — necessary (`sum(shares) <= R`) and sufficient
+      // (asks proportional to the floors give every child `floor_i · R / sumFloors >= floor_i`).
+      // Below that no split admits it, and a first cut offered the remedy anyway.
       const fits = await refusalFor(0.5, [
         { name: 'a', task: 'A', max_budget_usd: 10 },
         { name: 'b', task: 'B', max_budget_usd: 0.3 },
       ]);
       expect(fits, 'the batch and its total').toContain('2 sub-agents asked for $10.30 against the $0.50 left');
+      expect(fits, 'the share and the floor, coupled').toContain('"b" would get $0.01, below the $0.19 one turn');
       expect(fits, 'the fact that makes the remedy work').toContain('on its own it would fit');
       expect(fits, 'and the remedy is offered').toContain('lower what the others ask for');
       const cannot = await refusalFor(0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]);
@@ -2136,113 +2155,106 @@ describe('spawn_agent tool', () => {
       expect(cannot, 'and the reason is given as a figure').toContain('one turn each costs $0.38 together, against $0.30');
       // ⛔ "run them one after another" HOLDS, against a review finding that it does not: the
       // hold is released and the child's real spend charged when it settles, so the next call
-      // reads a remainder reduced by what was SPENT, not by what was asked. The finding
-      // measured the reservation while held — the concurrent case, not the sequential one.
+      // reads a remainder reduced by what was SPENT. The finding measured the reservation
+      // while held — the concurrent case, not the sequential one.
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const { agent } = parentWithCeiling(0.3);
       await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A' }] }, agent);
       expect(childCaps(MockAgent), 'one at a time is admitted with the whole remainder').toEqual([0.3]);
     });
 
+    it('the batch-fits gate is inclusive at its own boundary', async () => {
+      // ⛔ A SURVIVING MUTANT: `sumFloors <= remainingRunUSD` → `<` changed nothing, because no
+      // fixture had the floors summing to EXACTLY the remainder. At that point a split does
+      // admit the batch (asks proportional to the floors give each child exactly its floor),
+      // so the remedy must still be offered.
+      // ⚠ The asks must be UNEQUAL. With two identical children at the boundary every share
+      // comes out exactly at its own floor, so nothing is refused and the fixture witnesses
+      // nothing — measured: my first version of this test was admitted, not refused.
+      const { balanced } = await floors();
+      const msg = await refusalFor(balanced * 2, [
+        { name: 'a', task: 'A', max_budget_usd: 10 },
+        { name: 'b', task: 'B', max_budget_usd: 0.3 },
+      ]);
+      expect(msg, 'at sumFloors === remainder the batch still fits').toContain('lower what the others ask for');
+      expect(msg, 'so the infeasible wording is withheld').not.toContain('cannot fit however the asks are split');
+    });
+
+    it('the batch total counts every floor, not the named one times the batch size', async () => {
+      // ⛔ A SURVIVING MUTANT: `floors[tooSmall] * specs.length` is indistinguishable whenever
+      // every child runs the same model. A mixed-model batch separates them — and no fixture
+      // asserted a REMEDY on one, so the mutant flipped the remedy and nothing looked.
+      // $0.052288 (fast) + $0.192 (balanced) = $0.2443; against $0.21 the batch cannot fit,
+      // while 2 × $0.192 = $0.384 and 2 × $0.052288 = $0.1046 both decide it differently.
+      const msg = await refusalFor(0.21, [
+        { name: 'cheap', task: 'A', model: 'fast', max_budget_usd: 10 },
+        { name: 'dear', task: 'B', max_budget_usd: 0.3 },
+      ]);
+      expect(msg, 'the two floors are added, not multiplied').toContain('one turn each costs $0.24 together');
+    });
+
     it('a single child is never told that its siblings took its share', async () => {
-      // ⛔ The one way a lone child lands under its floor is the rounding give-back at an
-      // exact tie ($0.44 left, a $0.44 turn). A first cut let that reach the siblings branch,
-      // which printed "1 sub-agent(s) … on its own it would fit" about a child that was on
-      // its own and did not fit — bullet one of this change's own indictment, reproduced.
-      const msg = await refusalFor(0.44, [{ name: 'solo', task: 'A', model: 'deep' }]);
-      expect(msg, 'it is the run that cannot pay').toContain('and one turn on its model costs about $0.44');
+      // ⛔ The one way a lone child lands under its floor is the rounding give-back at an exact
+      // tie. A first cut let that reach the siblings branch, which printed "1 sub-agent(s) … on
+      // its own it would fit" about a child that was on its own and did not fit.
+      //
+      // ⚠ The remainder is DERIVED from the pricer, not typed. A delta round proved the typed
+      // version green-but-blind: a 0.01 % rise in the deep tier's price moves the fixture onto
+      // the `remainingRunUSD < need` path, which returns a byte-identical string — so every
+      // assertion still passed while the line they exist for stopped being executed. The
+      // admission at `floor + ε` below is what pins the fixture to THIS branch.
+      const { deep } = await floors();
+      const msg = await refusalFor(deep, [{ name: 'solo', task: 'A', model: 'deep' }]);
+      expect(msg, 'the two figures are named as too close').toContain('the two are too close to fund it');
+      expect(msg, 'and the absence of siblings is said outright').toContain('There are no siblings to delegate away');
       expect(msg, 'no sibling story').not.toContain('sub-agents asked for');
       expect(msg, 'and no claim that it would fit alone').not.toContain('on its own it would fit');
       expect(msg, 'nor the plural-of-one grammar').not.toContain('1 sub-agent');
-    });
-
-    it('every branch says that nothing was started', async () => {
-      // ⛔ MEASURED IN A RELEASE WALK: after a floor refusal one model invented the children's
-      // results while the ledger showed zero children started. The throw happens before any
-      // child is dispatched, so this is true in every branch — and it is the one fact the
-      // model demonstrably gets wrong, which makes it worth saying rather than implying.
-      const fixtures: Array<[number, unknown[]]> = [
-        [0, [{ name: 'one', task: 'A' }]],
-        [10, [{ name: 'one', task: 'A', max_budget_usd: 0 }]],
-        [0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]],
-        [10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]],
-        [1.0, [{ name: 'cheap', task: 'A', max_budget_usd: 0.01 }, { name: 'dear', task: 'B', max_budget_usd: 10 }]],
-        [0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
-      ];
-      for (const [remainder, agents] of fixtures) {
-        const msg = await refusalFor(remainder, agents);
-        expect(msg, `nothing-started, at $${String(remainder)}`).toContain('No sub-agent was started');
-        expect(msg, `no-results, at $${String(remainder)}`).toContain('there are no results');
-      }
-    });
-
-    it('at the exact boundary the comparison is strict: a share EQUAL to the floor is admitted', async () => {
-      // ⛔ TWO SURVIVING MUTANTS, both found by a delta round and both at the same place:
-      // `remainingRunUSD < need` → `<=` and `askedFor < need` → `<=`. No fixture in this file
-      // had a remainder or an ask equal to a floor, so relaxing either comparison changed
-      // nothing that anything asserted. They are not cosmetic: the first refuses a run that
-      // can afford exactly one turn, the second tells a caller to raise an ask to a figure it
-      // already holds.
-      //
-      // ⚠ The floor is read from the real pricing function rather than typed as $0.192,
-      // because the witness needs EXACT equality and a typed literal would be a second home
-      // for the figure. What is under test here is the comparison, not the price.
-      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
-      const floor = estimateFirstTurnUSD('claude-sonnet-4-6');
-      const { Agent: MockAgent } = await import('../../core/agent.js');
-      const { agent } = parentWithCeiling(floor);
-      await spawnAgentTool.handler({ agents: [{ name: 'exact', task: 'A', max_budget_usd: floor }] }, agent);
-      expect(childCaps(MockAgent), 'a share exactly at the floor clears it').toEqual([floor]);
+      const { agent } = parentWithCeiling(deep * 1.001);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'solo', task: 'A', model: 'deep' }] },
+        agent,
+      ), 'a hair above the floor is admitted, which is what puts the fixture at the tie').resolves.toBeTruthy();
     });
 
     it('a remainder EQUAL to one turn is not called unaffordable', async () => {
-      // ⛔ THE MUTANT MY FIRST BOUNDARY WITNESS COULD NOT SEE, and the reason is worth
-      // keeping: it relaxes `remainingRunUSD < need` to `<=`, which only changes WHICH
-      // SENTENCE a refusal gets. My first attempt put a single child at the tie and asserted
-      // it was ADMITTED — so `floorRefusal` was never entered and the mutated line never ran.
-      // A branch-selection mutant needs a fixture that is REFUSED.
-      //
-      // Two children against a remainder of exactly one turn: the split is what refuses them,
-      // and "delegate fewer" is the remedy that works — one of them alone is admitted. The
-      // mutant answers "delegating fewer cannot change that", which is false here.
-      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
-      const floor = estimateFirstTurnUSD('claude-sonnet-4-6');
-      const msg = await refusalFor(floor, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]);
+      // ⛔ A branch-selection mutant (`remainingRunUSD < need` → `<=`) needs a fixture that is
+      // REFUSED: an earlier attempt asserted an ADMISSION at the tie, so `floorRefusal` was
+      // never entered and the mutated line never ran. Two children against exactly one turn's
+      // worth: the split refuses them, and delegating fewer is the remedy that works.
+      const { balanced } = await floors();
+      const msg = await refusalFor(balanced, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]);
       expect(msg, 'the split is named as the cause').toContain('2 sub-agents asked for');
       expect(msg, 'and the remedy that works is offered').toContain('Delegate fewer at once');
       expect(msg, 'the run is NOT called unable to pay for a turn').not.toContain('Delegating fewer at once cannot change that');
       const { Agent: MockAgent } = await import('../../core/agent.js');
-      const { agent } = parentWithCeiling(floor);
+      const { agent } = parentWithCeiling(balanced);
       await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A' }] }, agent);
-      expect(childCaps(MockAgent), 'one of them alone is admitted, which is why that remedy is true').toEqual([floor]);
+      expect(childCaps(MockAgent), 'one of them alone is admitted, which is why that remedy is true').toEqual([balanced]);
     });
 
     it('a child whose ask EQUALS its floor is blamed on the siblings, not on its ask', async () => {
-      // The other half of the boundary: here the refusal happens, and the question is which
-      // branch explains it. The ask was enough — exactly enough — so the cause is the split.
-      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
-      const floor = estimateFirstTurnUSD('claude-sonnet-4-6');
+      const { balanced } = await floors();
       const msg = await refusalFor(0.5, [
         { name: 'hog', task: 'A', max_budget_usd: 10 },
-        { name: 'exact', task: 'B', max_budget_usd: floor },
+        { name: 'exact', task: 'B', max_budget_usd: balanced },
       ]);
       expect(msg, 'the siblings are named').toContain('2 sub-agents asked for');
       expect(msg, 'and the named child is the one at its floor').toContain('"exact" would get');
       expect(msg, 'its ask is NOT called the binding thing').not.toContain('what binds is its own budget');
-      expect(msg, 'nor is it told to raise an ask it already holds').not.toContain('Raise max_budget_usd');
     });
 
     it('a short remainder beats a short ask: the (a)/(b) boundary is the remainder, not the scale factor', async () => {
       // ⛔ THE RECORDED TRAP. A first attempt split this message by `factor` alone and, at
-      // $0.15 left with a $0.10 ask, told the model "the run's remainder is not the
-      // constraint here: $0.15 of it is still free" while a turn cost $0.192. `factor === 1`
-      // only says the sum of the asks fits. These two fixtures differ ONLY in the remainder.
+      // $0.15 left with a $0.10 ask, told the model "the run's remainder is not the constraint
+      // here: $0.15 of it is still free" while a turn cost $0.192. `factor === 1` only says the
+      // sum of the asks fits. These two fixtures differ ONLY in the remainder.
       const short = await refusalFor(0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
       const ample = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
       expect(short, 'the remainder binds, so the run is named').toContain('Delegating fewer at once cannot change that');
-      expect(short, 'and the ask is NOT offered as the fix').not.toContain('Raise max_budget_usd');
-      expect(short, 'nor is the remainder called free').not.toContain('covers one turn');
-      expect(ample, 'the same ask with room to spare blames the ask').toContain('Raise max_budget_usd');
+      expect(short, 'and the ask is NOT offered as the fix').not.toContain('Raise its max_budget_usd');
+      expect(short, 'nor is the remainder called sufficient').not.toContain('covers one turn');
+      expect(ample, 'the same ask with room to spare blames the ask').toContain('Raise its max_budget_usd');
       expect(ample, 'and never says the batch is the problem').not.toContain('cannot change that');
     });
 
