@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { calculateCost } from './pricing.js';
+import { getModelId } from '../types/index.js';
 import {
   captureProcess,
   collapseConsecutiveDuplicates,
@@ -91,6 +93,23 @@ describe('captureProcess', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreate.mockResolvedValue(makeMockResponse());
+  });
+
+  it('sends a pinned model instead of the fast tier, and prices it', async () => {
+    mockCreate.mockClear();
+    mockCreate.mockResolvedValueOnce({ ...makeMockResponse(), usage: { input_tokens: 5_000, output_tokens: 1_000 } });
+    const counters: import('../types/index.js').SessionCounters = {
+      httpRequests: 0, writeBytes: 0, costUSD: 0,
+      approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
+    };
+    await captureProcess('run1', 'Ad Report', makeToolCalls(), { apiKey: 'test-key', modelId: 'ministral-14b-2512', sessionCounters: counters });
+    expect((mockCreate.mock.calls[0]![0] as { model: string }).model).toBe('ministral-14b-2512');
+    // Booked at the pinned model's price, not the fast tier's.
+    expect(counters.costUSD).toBeCloseTo(calculateCost('ministral-14b-2512', { input_tokens: 5_000, output_tokens: 1_000 }), 10);
+    expect(counters.costUSD).not.toBeCloseTo(calculateCost(getModelId('fast', 'anthropic'), { input_tokens: 5_000, output_tokens: 1_000 }), 10);
+    mockCreate.mockClear();
+    await captureProcess('run1', 'Ad Report', makeToolCalls(), { apiKey: 'test-key' });
+    expect((mockCreate.mock.calls[0]![0] as { model: string }).model).toContain('haiku');
   });
 
   it('should filter out internal tools', async () => {

@@ -262,6 +262,8 @@ export interface ProviderConfigSnapshot {
   readonly apiBaseURL: string | undefined;
   readonly openaiModelId: string | undefined;
   readonly openaiAuth: 'static' | 'google-vertex' | undefined;
+  /** The client came from a model profile, so `openaiModelId` is the model it serves (`AgentConfig.modelPinnedByProfile`). */
+  readonly modelPinnedByProfile?: boolean | undefined;
 }
 
 export interface IAgent {

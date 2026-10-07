@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -11,7 +12,7 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, resolveStepSlotCreds, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
@@ -1104,6 +1105,12 @@ export function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, 
   // the right thing to charge. Only a tier has to be mapped through the active
   // routing — hence the `pinned` flag rather than re-deriving the branch here.
   const resolved = resolveStepRunModel(step, defaultTier, config, autonomy);
+  // A config overlay from a profiled caller pins the step to the profile's model,
+  // exactly where the runtime-adapter does: whenever the tier has no cross-provider
+  // slot of its own (core/profile-pair.ts). Then that model is what runs and what
+  // the ledger must name.
+  const profilePinned = pinnedModelOfConfig(config);
+  if (profilePinned && !resolveStepSlotCreds(config, resolved.tier).crossProviderSlot) return profilePinned;
   return resolved.pinned ? resolved.modelId : effectiveTierModelId(resolved.tier, getActiveProvider());
 }
 

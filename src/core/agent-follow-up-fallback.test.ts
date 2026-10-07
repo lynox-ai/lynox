@@ -80,12 +80,12 @@ const ANSWER = 'Es gibt 3 überfällige Aufgaben. Soll ich die Budget-E-Mail vor
  * Fireworks, i.e. precisely the providers this exists for, while a fake with
  * both methods stayed green.
  */
-function makeAgent(opts: { reply?: ReturnType<typeof vi.fn> } = {}) {
+function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; modelPinnedByProfile?: boolean } = {}) {
   const reply = opts.reply ?? vi.fn().mockResolvedValue({
     content: [{ type: 'tool_use', id: 'call_1', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
     usage: USAGE,
   });
-  const agent = new Agent({ name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS' });
+  const agent = new Agent({ name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS', modelPinnedByProfile: opts.modelPinnedByProfile });
   const inner = agent as unknown as Agent & Internals;
   inner.client = {
     beta: { messages: { stream: (params: unknown, opt: unknown) => ({ finalMessage: () => reply(params, opt) }) } },
@@ -148,6 +148,22 @@ describe('follow-up recovery — the call it makes', () => {
     const body = reply.mock.calls[0]![0] as Record<string, unknown>;
     expect(body['model']).toBe('claude-haiku-4-5-20251001');
     expect(body['model']).not.toBe('mistral-medium-2604');
+  });
+
+  it('a profiled agent reports the pin to the children it spawns', () => {
+    expect(makeAgent({ modelPinnedByProfile: true }).agent.getProviderConfig().modelPinnedByProfile).toBe(true);
+    expect(makeAgent().agent.getProviderConfig().modelPinnedByProfile).toBe(false);
+  });
+
+  it('on an agent built from a model profile, runs on the profile\'s pair — its client AND its model', async () => {
+    // The profile's endpoint serves the profile's model. The fast-tier id sent there
+    // is a request for a model that host does not serve (a 400 this path swallows).
+    const { inner, reply } = makeAgent({ modelPinnedByProfile: true });
+    await inner._recoverFollowUps(ANSWER);
+    expect(reply).toHaveBeenCalledTimes(1);
+    const body = reply.mock.calls[0]![0] as Record<string, unknown>;
+    expect(body['model']).toBe('mistral-medium-2604');
+    expect(body['betas']).toBeUndefined();
   });
 
   it('forces the tool so a non-compliant model cannot decline again', async () => {

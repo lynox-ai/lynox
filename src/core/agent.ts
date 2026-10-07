@@ -332,6 +332,8 @@ export class Agent implements IAgent {
   /** True only for custom (non-Claude) — additionally strips betas, block-level cache_control, thinking, effort */
   private readonly isCustomProxy: boolean;
   private readonly provider: LLMProvider;
+  /** See `AgentConfig.modelPinnedByProfile`. */
+  private readonly modelPinnedByProfile: boolean;
   private readonly systemPrompt: string | undefined;
   private thinking: ThinkingMode;
   /** Model-aware chars-per-token for context estimation (Sonnet 5's tokenizer
@@ -854,6 +856,7 @@ export class Agent implements IAgent {
       apiBaseURL: this.inheritedApiBaseURL,
       openaiModelId: this.inheritedOpenaiModelId,
       openaiAuth: this.inheritedOpenaiAuth,
+      modelPinnedByProfile: this.modelPinnedByProfile,
     };
   }
 
@@ -1088,6 +1091,7 @@ export class Agent implements IAgent {
     this.inheritedApiKey = config.apiKey;
     this.inheritedApiBaseURL = config.apiBaseURL;
     this.inheritedOpenaiModelId = config.openaiModelId;
+    this.modelPinnedByProfile = config.modelPinnedByProfile === true;
     this.inheritedOpenaiAuth = config.openaiAuth;
     this.toolContext = config.toolContext ?? createToolContext({});
     this.sessionCounters = config.sessionCounters ?? {
@@ -1249,12 +1253,37 @@ export class Agent implements IAgent {
    * exact prior gate: legacy extraction fires only when NOT untrusted AND DK OFF.
    */
   /**
+   * The client and model an in-run helper call (follow-up chips, the capture
+   * fallback) runs on.
+   *
+   * A model profile pins endpoint AND model as one pair. On an agent built from a
+   * profile, `this.client` points at the profile's endpoint, which serves the
+   * profile's model — sending it the tier's `fast` id mixes the pair (a Fireworks
+   * id at a Mistral endpoint is a 400, which these best-effort paths only log
+   * and then drop). So a profiled agent's helper runs on the profile's own pair, and it
+   * stays on the provider the profile chose (for a worker profile: the cheaper,
+   * EU one) rather than moving to the tier's. Unprofiled: the fast-tier snapshot,
+   * exactly as before.
+   */
+  private _helperModel(): { client: Anthropic; modelId: string; betas: string[] | undefined } {
+    if (this.modelPinnedByProfile) {
+      return { client: this.client, modelId: this.model, betas: undefined };
+    }
+    const provider = getActiveProvider();
+    const fastSnap = resolveTierModel('fast', provider);
+    return { client: clientForTierSnapshot(fastSnap, this.client, provider), modelId: fastSnap.modelId, betas: fastSnap.betas };
+  }
+
+  /**
    * Recover the end-of-turn follow-up chips for a turn that did not call
    * `suggest_follow_ups` itself. See `follow-up-fallback.ts` for the measurement
    * that makes this necessary; {@link followUpFallback} for when it is enabled.
    *
    * Shape of the call, and why each part is the way it is:
-   *  - **fast tier, not the turn's model.** This is an ancillary call, and on a
+   *  - **fast tier, not the turn's model** — unless the agent was built from a
+   *    model profile, where it runs on the profile's own model (`_helperModel`):
+   *    a profile's endpoint serves only that model, so the cost saving below
+   *    does not apply there. This is an ancillary call, and on a
    *    non-compliant model it runs on essentially every turn — 14× cheaper on
    *    Mistral, 5× on Opus. `clientForTierSnapshot` so a hybrid `fast→Mistral`
    *    slot reaches Mistral instead of sending a Mistral id to the ambient
@@ -1295,8 +1324,7 @@ export class Agent implements IAgent {
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), FOLLOW_UP_TIMEOUT_MS);
     try {
-      const provider = getActiveProvider();
-      const fastSnap = resolveTierModel('fast', provider);
+      const helper = this._helperModel();
       // `getActiveProvider()` and NOT `this.provider`, deliberately — the obvious-looking fix
       // here costs money.
       //
@@ -1315,15 +1343,14 @@ export class Agent implements IAgent {
       // So the wrong client stays until the right one can be chosen WITH its credentials, and
       // the catch below now says when this path fails — which is what was missing to measure
       // how often it actually fires.
-      const client = clientForTierSnapshot(fastSnap, this.client, provider);
-      const stream = client.beta.messages.stream({
-        model: fastSnap.modelId,
+      const stream = helper.client.beta.messages.stream({
+        model: helper.modelId,
         max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
         system: FOLLOW_UP_FALLBACK_SYSTEM,
         messages: [{ role: 'user', content: buildFollowUpExcerpt(question, text) }],
         tools: [entry.definition],
         tool_choice: { type: 'tool', name: FOLLOW_UP_TOOL_NAME },
-        ...(fastSnap.betas ? { betas: fastSnap.betas } : {}),
+        ...(helper.betas ? { betas: helper.betas } : {}),
       }, {
         // A user stop cancels it; the timeout bounds a hanging provider.
         signal: AbortSignal.any(
@@ -1336,13 +1363,14 @@ export class Agent implements IAgent {
       // whether or not the suggestions turn out usable.
       const u = response.usage;
       if (u) {
-        const usd = calculateCost(fastSnap.modelId, {
+        const usd = calculateCost(helper.modelId, {
           input_tokens: u.input_tokens,
           output_tokens: u.output_tokens,
           cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
           cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
         });
-        // Priced on the FAST model, then charged as a dollar amount.
+        // Priced on the model the helper ran on (the fast tier, or a profile's own
+        // model — `_helperModel`), then charged as a dollar amount.
         // `recordTurn` would book these tokens at the run's own `pricePerM` — on
         // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
         this.costGuard?.recordExternalCost(usd);
@@ -1423,7 +1451,9 @@ export class Agent implements IAgent {
    * forced call does.
    *
    * Three deliberate bounds, each protecting something measured:
-   *  - **fast tier**, so the recovered facts never cost more than the turn.
+   *  - **fast tier**, so the recovered facts never cost more than the turn — on an
+   *    agent built from a model profile it is the turn's own model instead
+   *    (`_helperModel`), so there it costs what a turn costs.
    *  - **capped excerpt**, so a long research turn cannot turn this into a large call.
    *  - **at most four facts**, because the precision worth keeping is 7 of 10
    *    proposals confirmed by the user, and a pass that returns fifteen turns an
@@ -1503,17 +1533,15 @@ export class Agent implements IAgent {
     // the over-count landing precisely on failing runs.
     let announced = false;
     try {
-      const provider = getActiveProvider();
-      const fastSnap = resolveTierModel('fast', provider);
-      const client = clientForTierSnapshot(fastSnap, this.client, provider);
-      const stream = client.beta.messages.stream({
-        model: fastSnap.modelId,
+      const helper = this._helperModel();
+      const stream = helper.client.beta.messages.stream({
+        model: helper.modelId,
         max_tokens: CAPTURE_FALLBACK_MAX_TOKENS,
         system: CAPTURE_SYSTEM,
         messages: [{ role: 'user', content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
         tools: [CAPTURE_TOOL],
         tool_choice: { type: 'tool', name: CAPTURE_TOOL_NAME },
-        ...(fastSnap.betas ? { betas: fastSnap.betas } : {}),
+        ...(helper.betas ? { betas: helper.betas } : {}),
       }, {
         signal: AbortSignal.any(
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
@@ -1526,7 +1554,7 @@ export class Agent implements IAgent {
       // dollar amount, so an expensive run does not book helper tokens at its own rate.
       const u = response.usage;
       if (u) {
-        const usd = calculateCost(fastSnap.modelId, {
+        const usd = calculateCost(helper.modelId, {
           input_tokens: u.input_tokens,
           output_tokens: u.output_tokens,
           cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,

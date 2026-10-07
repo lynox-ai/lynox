@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
@@ -504,8 +505,10 @@ export function resolveSpawnChildRouting(input: {
   profile: ModelProfile | undefined;
   userConfig: LynoxUserConfig;
   baseProvider: LLMProvider;
-}): { tier: ModelTier; model: string; hybridSlot: ReturnType<typeof hybridSlotClientConfig> } {
-  const { spec, role, profile, userConfig, baseProvider } = input;
+  /** The spawning agent's provider config — a child without its own profile inherits it (`resolveSpawnChildProviderConfig`). */
+  parent?: ProviderConfigSnapshot | null | undefined;
+}): { tier: ModelTier; model: string; hybridSlot: ReturnType<typeof hybridSlotClientConfig>; pinnedByProfile: boolean } {
+  const { spec, role, profile, userConfig, baseProvider, parent } = input;
   // Single chokepoint: the override gate (now a pass-through, D8) THEN CLAMP to
   // the cost ceiling THEN map to the provider's model id. Routing through
   // resolveRunModel adds the max_tier clamp this path previously skipped — a run
@@ -535,10 +538,21 @@ export function resolveSpawnChildRouting(input: {
     : hybridSlotClientConfig(resolveTierModel(resolvedRun.tier, baseProvider), baseProvider);
   // Profile overrides model ID + provider; a cross-provider hybrid slot supplies
   // its own model; otherwise use the resolved tier id for the base provider.
+  // A profile pins endpoint AND model as one pair — also when the child has no
+  // profile of its own but inherits a profiled parent's client. That inheritance
+  // happens exactly when `resolveSpawnChildProviderConfig` falls through to the
+  // parent (no cross-provider slot, not hybrid-without-profile); the child then
+  // talks to the profile's endpoint and must send the profile's model, not the
+  // tier's.
+  const inheritedPin = !profile
+    && !hybridSlot.crossProviderSlot
+    && getActiveRoutingMode() !== 'hybrid'
+    ? pinnedModelOf(parent)
+    : undefined;
   const model = profile
     ? profile.model_id
-    : (hybridSlot.crossProviderSlot ? hybridSlot.openaiModelId : resolvedRun.modelId);
-  return { tier: resolvedRun.tier, model, hybridSlot };
+    : (inheritedPin ?? (hybridSlot.crossProviderSlot ? hybridSlot.openaiModelId : resolvedRun.modelId));
+  return { tier: resolvedRun.tier, model, hybridSlot, pinnedByProfile: profile !== undefined || inheritedPin !== undefined };
 }
 
 /**
@@ -733,8 +747,9 @@ async function executeThinker(
     : undefined;
 
   const baseProvider = getActiveProvider();
-  const { tier: modelTier, model, hybridSlot } = resolveSpawnChildRouting({
-    spec, role: resolved, profile, userConfig, baseProvider,
+  const parentProviderCfg = readParentProviderConfig(parentAgent);
+  const { tier: modelTier, model, hybridSlot, pinnedByProfile } = resolveSpawnChildRouting({
+    spec, role: resolved, profile, userConfig, baseProvider, parent: parentProviderCfg,
   });
   // Resolve the child's wire + creds ONCE, up front, so (a) the runs row records
   // the ACTUAL provider instead of '' — the recording gap that made the hybrid
@@ -744,7 +759,7 @@ async function executeThinker(
     hybridSlot,
     routingMode: getActiveRoutingMode(),
     profile,
-    parent: readParentProviderConfig(parentAgent),
+    parent: parentProviderCfg,
     baseProvider,
     userConfig,
     resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: wireKeyReader, userConfig }),
@@ -847,6 +862,9 @@ async function executeThinker(
   const agentConfig: AgentConfig = {
     name: spec.name,
     model,
+    // A profile pins endpoint and model as one pair (`AgentConfig.modelPinnedByProfile`),
+    // its own or one inherited from a profiled parent (`resolveSpawnChildRouting`).
+    modelPinnedByProfile: pinnedByProfile,
     systemPrompt,
     // ⛔ INHERITED, and this line is the transitive half of the scoping: the child
     // registers in the PARENT's scope below, and by carrying that same scope it makes
@@ -1301,6 +1319,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         profile: spec.profile ? cfg.model_profiles?.[spec.profile] : undefined,
         userConfig: cfg,
         baseProvider: provider,
+        parent: readParentProviderConfig(agent),
       });
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
       totalEstimate += estimateSpawnCost(model, iters);

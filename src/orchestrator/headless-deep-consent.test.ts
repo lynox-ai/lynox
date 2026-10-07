@@ -254,6 +254,34 @@ describe('resolveModelForCost wiring (budget precheck + step-row stamp)', () => 
     expect(resolveModelForCost(step, 'fast', mockConfig, undefined)).toBe(getModelId('deep', PROVIDER));
   });
 
+  it('prices the profile model a profiled caller pinned the step to, where the step runs on it', async () => {
+    // pipeline.ts marks the overlay built from a profiled caller; the runtime-adapter
+    // then runs the step on the profile's model, so the ledger must name that model.
+    const { pinConfigModel } = await import('../core/profile-pair.js');
+    const { resolveModelForCost } = await import('./runner.js');
+    const step = { id: 's1', task: 'do', model: 'balanced' } as unknown as ManifestStep;
+    const pinned = pinConfigModel({ ...mockConfig }, 'ministral-14b-2512');
+    expect(resolveModelForCost(step, 'fast', pinned, undefined)).toBe('ministral-14b-2512');
+    // CONTROL: the same config unpinned prices the tier.
+    expect(resolveModelForCost(step, 'fast', { ...mockConfig }, undefined)).toBe(getModelId('balanced', PROVIDER));
+  });
+
+  it('a cross-provider slot still wins over a profile pin, as it does where the step runs', async () => {
+    const { pinConfigModel } = await import('../core/profile-pair.js');
+    const { setTierSetResolver } = await import('../core/tier-resolver.js');
+    const { resolveModelForCost } = await import('./runner.js');
+    try {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/minimax-m3', api_key: 'test-slot-key', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+      });
+      const step = { id: 's1', task: 'do', model: 'balanced' } as unknown as ManifestStep;
+      expect(resolveModelForCost(step, 'fast', pinConfigModel({ ...mockConfig }, 'ministral-14b-2512'), undefined)).toBe('accounts/fireworks/models/minimax-m3');
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
+  });
+
   it('prices the HYBRID SLOT that runs, not the base provider model for the tier', async () => {
     // The over-debit this fixes. `resolveRunModel`'s tier branch answers with the
     // BASE provider's model, but under hybrid routing the tier's SLOT executes —

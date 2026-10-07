@@ -434,6 +434,7 @@ import { Memory } from './memory.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 import { initLLMProvider } from './llm-client.js';
+import { setTierSetResolver, resolveTierModel } from './tier-resolver.js';
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/index.js';
 // === Helper ===
 
@@ -1739,6 +1740,123 @@ describe('Engine + Session (Orchestrator)', () => {
       } finally {
         delete engine.getUserConfig().model_profiles;
       }
+    });
+
+    describe('a profile pins endpoint AND model as one pair', () => {
+      // A managed tenant's tier set can point a tier at a provider (here Fireworks)
+      // while the worker profile points at another (Mistral). Before, the agent got
+      // the profile's endpoint but the TIER's model id, and the openai wire sends a
+      // non-`claude-` id as is: a Fireworks model at api.mistral.ai, a 400.
+      const MISTRAL_PROFILE = {
+        provider: 'openai' as const,
+        api_base_url: 'https://api.mistral.ai/v1',
+        api_key: 'test-profile-key',
+        model_id: 'ministral-14b-2512',
+      };
+      const FIREWORKS_BALANCED = 'accounts/fireworks/models/minimax-m3';
+
+      afterEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
+
+      it('takes model and endpoint from the profile, not the model from a Fireworks tier slot', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: FIREWORKS_BALANCED } } });
+        try {
+          const session = engine.createSession({});
+          vi.mocked(Agent).mockClear();
+          session._recreateAgent({ profile: 'worker' });
+          const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+          expect(cfg.apiBaseURL).toBe('https://api.mistral.ai/v1');
+          expect(cfg.model, 'the per-request model must be the profile\'s, not the tier slot\'s').toBe('ministral-14b-2512');
+          expect(cfg.openaiModelId).toBe('ministral-14b-2512');
+          expect(cfg.modelPinnedByProfile).toBe(true);
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
+      it('records the run under the profile\'s model and the provider its agent is wired to', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: FIREWORKS_BALANCED } } });
+        try {
+          const session = engine.createSession({});
+          session._recreateAgent({ profile: 'worker' });
+          mockSend.mockResolvedValueOnce('done');
+          await session.run('go');
+          const rh = engine.getRunHistory()!;
+          const row = vi.mocked(rh.insertRun).mock.calls.at(-1)![0];
+          expect(row.modelId).toBe('ministral-14b-2512');
+          expect(row.provider).toBe('openai');
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
+      it('a tier change on a profiled session reports the model that will actually run', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: FIREWORKS_BALANCED } } });
+        try {
+          const session = engine.createSession({});
+          session._recreateAgent({ profile: 'worker' });
+          expect(session.setModel('balanced')).toBe('ministral-14b-2512');
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
+      it('keeps the profile\'s model across a bare rebuild (compaction tier override, registry bump)', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'fireworks', model_id: FIREWORKS_BALANCED } } });
+        try {
+          const session = engine.createSession({});
+          session._recreateAgent({ profile: 'worker' });
+          vi.mocked(Agent).mockClear();
+          session._recreateAgent();
+          const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+          expect(cfg.model).toBe('ministral-14b-2512');
+          expect(cfg.modelPinnedByProfile).toBe(true);
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
+      it('the watch-analysis shape (a fast-tier session, then the worker profile) runs the profile\'s model', async () => {
+        // worker-loop's watch analysis creates the session with `model: 'fast'` and then
+        // applies the worker profile. On the `efficient` preset fast is a Fireworks id.
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: { fast: { provider: 'fireworks', model_id: 'accounts/fireworks/models/deepseek-v4p1-flash' } } });
+        try {
+          const session = engine.createSession({ model: 'fast' });
+          vi.mocked(Agent).mockClear();
+          session._recreateAgent({ profile: 'worker' });
+          const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+          expect(cfg.apiBaseURL).toBe('https://api.mistral.ai/v1');
+          expect(cfg.model).toBe('ministral-14b-2512');
+        } finally {
+          delete engine.getUserConfig().model_profiles;
+        }
+      });
+
+      it('CONTROL: without a profile the tier decides, exactly as before', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        const session = engine.createSession({});
+        vi.mocked(Agent).mockClear();
+        session._recreateAgent({});
+        const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+        expect(cfg.model).toBe(resolveTierModel('balanced', 'anthropic').modelId);
+        expect(cfg.model.startsWith('claude-')).toBe(true);
+        expect(cfg.modelPinnedByProfile).toBe(false);
+      });
     });
 
     it('a partial override changes only what it supplies (worker-loop.ts:752 shape)', async () => {

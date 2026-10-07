@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, ProcessRecord, InlinePipelineStep, PlannedPipeline, ProviderConfigSnapshot } from '../../types/index.js';
+import { pinnedModelOf } from '../../core/profile-pair.js';
 import { captureProcess } from '../../core/process-capture.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
@@ -258,6 +259,8 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       provider,
       openaiModelId,
       openaiAuth,
+      // A profiled caller's endpoint serves only its profile model (core/profile-pair.ts).
+      modelId: pinnedModelOf(parentProv),
       description: input.description,
       // Account the annotation's pool-key spend to the local session cap +
       // the tenant balance (no-op on self-host / BYOK).

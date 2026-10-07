@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { pinConfigModel } from '../core/profile-pair.js';
 import type { ToolEntry, LynoxUserConfig } from '../types/index.js';
 import { getModelId } from '../types/index.js';
 import { setTierSetResolver } from '../core/tier-resolver.js';
@@ -95,6 +96,28 @@ describe('spawnInline with role', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('a config overlay pinned by a profiled caller gives the step its profile model, both runtimes', async () => {
+    // The overlay carries the profile's endpoint (`api_base_url`); without the pin the
+    // step sent the tier's model there.
+    const pinnedConfig = pinConfigModel({ api_key: 'test-profile-key', api_base_url: 'https://api.mistral.ai/v1', provider: 'openai', openai_model_id: 'ministral-14b-2512' } as LynoxUserConfig, 'ministral-14b-2512');
+    await spawnInline({ id: 'p', agent: 'p', runtime: 'inline', task: 't' }, { task: 't' }, pinnedConfig, mockParentTools);
+    const inline = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(inline['apiBaseURL']).toBe('https://api.mistral.ai/v1');
+    expect(inline['model']).toBe('ministral-14b-2512');
+    expect(inline['modelPinnedByProfile']).toBe(true);
+
+    await spawnViaAgent({ id: 'a', agent: 'a', runtime: 'agent' }, { name: 'a', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] }, {}, pinnedConfig, undefined, 'run-1');
+    const viaAgent = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(viaAgent['model']).toBe('ministral-14b-2512');
+    expect(viaAgent['modelPinnedByProfile']).toBe(true);
+
+    // CONTROL: the same overlay without the pin keeps the tier model.
+    await spawnInline({ id: 'q', agent: 'q', runtime: 'inline', task: 't' }, { task: 't' }, { ...mockConfig }, mockParentTools);
+    const plain = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    expect(String(plain['model']).startsWith('claude-')).toBe(true);
+    expect(plain['modelPinnedByProfile']).toBe(false);
   });
 
   it('uses default settings when no role specified', async () => {

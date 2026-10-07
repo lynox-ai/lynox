@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier, ThinkingHint, EffortLevel } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
@@ -342,6 +343,8 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     const planApiKey = planProv?.apiKey ?? planConfig.api_key;
     if (!hasPhases && !hasSteps && planApiKey) {
       const plan = await planDAG(input.summary, {
+        // A profiled caller's endpoint serves only its profile model (core/profile-pair.ts).
+        model: pinnedModelOf(planProv),
         apiKey: planApiKey,
         apiBaseURL: planProv?.apiBaseURL ?? planConfig.api_base_url,
         provider: planProv?.provider ?? planConfig.provider,

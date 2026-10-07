@@ -629,6 +629,27 @@ describe('phasesToPipelineSteps', () => {
 });
 
 describe('plan_task auto-planning fallback', () => {
+  it('a profiled caller plans on its profile model, not the fast-tier id at its endpoint', async () => {
+    const plan = { steps: [{ id: 'a', task: 'do it' }], reasoning: 'r', estimatedCost: 0 };
+    const snapshot = {
+      provider: 'openai' as const, apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'ministral-14b-2512', openaiAuth: undefined, modelPinnedByProfile: true,
+    };
+    mockPlanDAG.mockClear();
+    mockPlanDAG.mockResolvedValueOnce(plan);
+    const pinnedAgent = { ...makeAgent({ promptUser: undefined }, mockConfig), getProviderConfig: () => snapshot } as unknown as IAgent;
+    await planTaskTool.handler({ summary: 'Create a report' }, pinnedAgent);
+    const opts = mockPlanDAG.mock.calls[0]![1] as { model?: string; apiBaseURL?: string };
+    expect(opts.apiBaseURL).toBe('https://api.mistral.ai/v1');
+    expect(opts.model).toBe('ministral-14b-2512');
+
+    // CONTROL: unpinned → planDAG picks its own (fast) model, as before.
+    mockPlanDAG.mockResolvedValueOnce(plan);
+    const plainAgent = { ...makeAgent({ promptUser: undefined }, mockConfig), getProviderConfig: () => ({ ...snapshot, modelPinnedByProfile: undefined }) } as unknown as IAgent;
+    await planTaskTool.handler({ summary: 'Create a report' }, plainAgent);
+    expect((mockPlanDAG.mock.calls[1]![1] as { model?: string }).model).toBeUndefined();
+  });
+
   it('should auto-generate phases when no phases/steps provided', async () => {
     mockPlanDAG.mockResolvedValueOnce({
       steps: [

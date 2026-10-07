@@ -46,6 +46,9 @@ interface CaptureOptions {
   provider?: LLMProvider | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'ministral-8b-2512'). */
   openaiModelId?: string | undefined;
+  /** The model to send instead of the fast tier — set when the client comes from a
+   *  profiled agent, whose endpoint serves only its profile model (core/profile-pair.ts). */
+  modelId?: string | undefined;
   /** Auth mode for 'openai' provider. Default 'static'. */
   openaiAuth?: 'static' | 'google-vertex' | undefined;
   /**
@@ -404,8 +407,9 @@ export async function captureProcess(
     openaiModelId: options.openaiModelId,
     openaiAuth: options.openaiAuth,
   });
+  const modelId = options.modelId ?? getModelId('fast', provider);
   const response = await client.beta.messages.create({
-    model: getModelId('fast', provider),
+    model: modelId,
     max_tokens: 4096,
     ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
     system: EXTRACTION_SYSTEM,
@@ -424,7 +428,7 @@ export async function captureProcess(
   // session cap + the tenant balance so it isn't invisible to billing. No-op
   // on self-host / BYOK, or when the caller didn't wire the metered context.
   if (options.sessionCounters) {
-    const cost = calculateCost(getModelId('fast', provider), {
+    const cost = calculateCost(modelId, {
       input_tokens: response.usage?.input_tokens ?? 0,
       output_tokens: response.usage?.output_tokens ?? 0,
       cache_creation_input_tokens: response.usage?.cache_creation_input_tokens ?? undefined,

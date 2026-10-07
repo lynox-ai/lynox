@@ -139,6 +139,13 @@ export interface AgentConfig {
   toolContext?:        import('../core/tool-context.js').ToolContext | undefined;
   /** Model ID for OpenAI-compatible providers (e.g. 'mistral-large-2512'). Used with provider: 'openai'. */
   openaiModelId?:      string | undefined;
+  /**
+   * The client was built from a model PROFILE, which pins endpoint and model as one
+   * pair. The agent's own helper calls (follow-up chips, the capture fallback) then
+   * run on that pair (`client` + `model`) instead of sending the tier's `fast` id to
+   * the profile's endpoint, which serves only the profile's model.
+   */
+  modelPinnedByProfile?: boolean | undefined;
   /** Auth mode for OpenAI provider. 'google-vertex' uses GOOGLE_APPLICATION_CREDENTIALS to generate OAuth tokens. */
   openaiAuth?:         'static' | 'google-vertex' | undefined;
   /** IANA timezone (e.g. 'Europe/Zurich') for the human user. Threaded through the per-turn `[Now: …]` marker so the model presents scheduled times in the user's wallclock, not UTC. */

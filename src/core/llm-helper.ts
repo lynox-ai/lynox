@@ -14,6 +14,7 @@
  * required constraints, so this helper post-validates structurally.
  */
 
+import { pinnedModelOf } from './profile-pair.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
@@ -181,6 +182,10 @@ const DEFAULT_ANTHROPIC_MODEL = process.env['LYNOX_LLM_HELPER_MODEL'] ?? MODEL_M
  */
 function resolveModel(provider: ProviderConfigSnapshot | undefined, blockedModelIds?: readonly string[]): string {
   const resolved = ((): string => {
+    // A profiled agent's client serves only its profile model (core/profile-pair.ts);
+    // the env override below would put another model on that endpoint.
+    const pinned = pinnedModelOf(provider);
+    if (pinned) return pinned;
     if (provider?.provider === 'openai') {
       const envOverride = process.env['LYNOX_LLM_HELPER_MODEL'];
       // Only honour the env override if it's NOT a claude-* id — otherwise the

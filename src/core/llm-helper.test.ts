@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   callForStructuredJson,
@@ -362,6 +362,21 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
     expect(lastCall.model).toBe('mistral-large-2512');
     expect(lastCall.model).not.toBe('claude-sonnet-4-6');
     expect(lastCall.model?.startsWith('claude-')).toBe(false);
+  });
+
+  it('a profiled agent\'s helper call sends its profile model even with the helper-model env override set', async () => {
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+    const agent = stubAgent({
+      provider: 'openai', apiKey: 'test-profile-key', apiBaseURL: 'https://api.mistral.ai/v1',
+      openaiModelId: 'ministral-14b-2512', openaiAuth: 'static', modelPinnedByProfile: true,
+    });
+    vi.stubEnv('LYNOX_LLM_HELPER_MODEL', 'accounts/fireworks/models/gpt-oss-120b');
+    try {
+      await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, agent, client });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(lastCall.model).toBe('ministral-14b-2512');
   });
 
   it('Anthropic user keeps the Sonnet default', async () => {

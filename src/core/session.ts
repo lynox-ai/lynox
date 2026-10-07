@@ -842,7 +842,7 @@ export class Session {
     // hybrid `balanced→Mistral` slot → provider 'mistral'), not the base.
     const runBaseProvider = getActiveProvider();
     const runSnap = resolveTierModel(this._model, runBaseProvider);
-    const model = runSnap.modelId;
+    const model = this._pairedModelId(runSnap);
     const startTime = Date.now();
     this.runToolCallSeq = 0;
     this._foreignRunSeq.clear();
@@ -886,7 +886,10 @@ export class Session {
           taskText,
           modelTier: this._model,
           modelId: model,
-          provider: runSnap.provider,
+          // Same pair as `model`: a profiled run names the provider its agent is wired
+          // to, not the tier slot's — otherwise the record pairs the profile's model
+          // with a provider that never served it.
+          provider: this._profileOverride ? (this._identityProvider(runSnap, runBaseProvider) ?? runSnap.provider) : runSnap.provider,
           promptHash,
           contextId: context?.id ?? '',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
@@ -1945,7 +1948,22 @@ export class Session {
   setModel(tier: ModelTier): string {
     this._model = tier;
     this._rebuildAgentKeepingConversation();
-    return resolveTierModel(tier, getActiveProvider()).modelId;
+    return this._pairedModelId(resolveTierModel(tier, getActiveProvider()));
+  }
+
+  /**
+   * The model id this session's agent sends — the one source for it.
+   *
+   * A model profile pins endpoint AND model as one pair. With a `_profileOverride`
+   * the agent's client points at the profile's endpoint (`api_base_url`, `provider`,
+   * `api_key` in `_createAgent`), so the model must be the profile's `model_id`, not
+   * the tier's: a tier id at a profile's endpoint is a request for a model that host
+   * does not serve (a Fireworks id sent to Mistral, a 400). Without a profile, the
+   * tier's model, exactly as before. The run record and its cost read the same value,
+   * so they name the model that actually ran.
+   */
+  private _pairedModelId(tierSnap: ReturnType<typeof resolveTierModel>): string {
+    return this._profileOverride?.model_id ?? tierSnap.modelId;
   }
 
   /**
@@ -2307,7 +2325,7 @@ export class Session {
     // byte-identical to the previous single-provider behavior.
     const baseProvider = getActiveProvider();
     const tierSnap = resolveTierModel(this._model, baseProvider);
-    const model = tierSnap.modelId;
+    const model = this._pairedModelId(tierSnap);
     const slotCfg = this._profileOverride
       ? { crossProviderSlot: false as const }
       : hybridSlotClientConfig(tierSnap, baseProvider);
@@ -2448,6 +2466,7 @@ export class Session {
       abortScope: this.agent?.abortScope,
       name: 'lynox',
       model,
+      modelPinnedByProfile: this._profileOverride !== null,
       systemPrompt,
       tools: effectiveTools,
       thinking: this._thinking,
