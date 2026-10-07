@@ -885,6 +885,39 @@ export class Agent implements IAgent {
     this.costGuard?.recordExternalCost(usd);
   }
 
+  /**
+   * Dollars left under THIS run's cost ceiling, or `null` when it has none.
+   *
+   * ⚠ `null` means NO CEILING — self-host or BYOK with no configured budget. It does
+   * NOT mean "interactive": `Engine.createSession` gives every managed session without
+   * a caller-supplied guard a per-run ceiling, so on that tier this is never `null`.
+   * An earlier attempt at the fan-out bound equated the two in six places, which made
+   * its control case describe a configuration the product rarely runs in.
+   *
+   * Holds taken by {@link reserveExternalCost} are already subtracted.
+   */
+  getRemainingRunBudgetUSD(): number | null {
+    return this.costGuard?.remainingBudgetUSD() ?? null;
+  }
+
+  /**
+   * Hold `usd` against this run's ceiling for work about to start; `false` means it did
+   * not fit and NOTHING was held.
+   *
+   * Reserving rather than reading is the point: several tool calls run in parallel, so
+   * two fan-outs can be admitted in the same instant, and a caller that only read the
+   * remainder would grant the same room twice. `true` without a ceiling — there is
+   * nothing to hold against.
+   */
+  reserveExternalCost(usd: number): boolean {
+    return this.costGuard?.reserveExternalCost(usd) ?? true;
+  }
+
+  /** Give back a hold taken by {@link reserveExternalCost}. */
+  releaseExternalCost(usd: number): void {
+    this.costGuard?.releaseExternalCost(usd);
+  }
+
   /** A provider billing/quota stop from the last send's LLM call, or `null`. */
   getLastProviderFailure(): RunFailure | null {
     return this._lastProviderFailure;

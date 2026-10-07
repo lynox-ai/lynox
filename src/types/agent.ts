@@ -301,6 +301,21 @@ export interface IAgent {
    */
   chargeExternalCost(usd: number): void;
   /**
+   * Dollars left under this run's cost ceiling, or `null` when it has none.
+   *
+   * ⚠ `null` is NO CEILING — self-host or BYOK without a configured budget — and not
+   * "interactive": a managed session gets a per-run ceiling from the engine unless its
+   * caller supplied one, so there this is never `null`.
+   */
+  getRemainingRunBudgetUSD(): number | null;
+  /**
+   * Hold `usd` against this run's ceiling for work about to start. `false` means it did
+   * not fit and nothing was held, so a refused caller has nothing to give back.
+   */
+  reserveExternalCost(usd: number): boolean;
+  /** Give back a hold taken by {@link IAgent.reserveExternalCost}. */
+  releaseExternalCost(usd: number): void;
+  /**
    * Provider config snapshot for sub-agent inheritance (spawn.ts). Closes the
    * gap where managed-tier UI provider-switch wasn't reflected in `loadConfig()`.
    *
