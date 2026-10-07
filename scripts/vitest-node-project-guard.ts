@@ -12,8 +12,9 @@ export function isSvelteModuleId(id: string): boolean {
 /**
  * Imports that ask for a file's text or URL, not its module: nothing of the file runs for them.
  * Only a bare `raw` or `url` parameter counts — vite runs the module for `?raw=1` or `?raw?x` —
- * and a `worker` parameter turns either into a worker wrapper, so that is refused too. Anything
- * this does not recognise is treated as a module import and refused.
+ * and a `worker` parameter hands the id to vite's worker handling, which for `?raw` returns a
+ * wrapper rather than text; it is refused with either, for simplicity. Anything this does not
+ * recognise is treated as a module import and refused.
  */
 export function asksForSourceOrUrl(id: string): boolean {
   const [, query, ...more] = id.split('?');
