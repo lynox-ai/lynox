@@ -475,17 +475,51 @@ describe('gate-record — the shipped template does not answer its own questions
       fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url)),
       'utf-8',
     );
-    // The literal the grammar refuses, built rather than typed, so this cannot drift either:
-    // `rounds?` accepts `round` and `rounds`, so a parenthesised plural is what it rejects.
-    const refused = REVIEW_FORMAT.replace('<round|rounds>', 'round(s)');
-    expect(evaluate({ body: record({ review: '1 opus round(s), no findings' }), head: HEAD, files: CODE }).ok,
-      'the premise is gone — the grammar now accepts the parenthesised plural, so this sweep guards nothing').toBe(false);
+    // ⚠ ONE value feeds both the sweep and its control. A previous version built `refused` from
+    // the constant, asserted THAT, and then grepped a separately typed `'round(s)'` — so the
+    // literal actually swept was covered by nothing, and weakening it to `'ROUND(S)'` passed
+    // silently. Measured. The sweep greps the bare marker rather than the whole format on
+    // purpose: the script's docblock carried only the format's HEAD, so a whole-format
+    // `not.toContain` would have missed it.
+    const PLURAL = 'round(s)';
+    const refused = REVIEW_FORMAT.replace('<round|rounds>', PLURAL);
+
+    // ⚠ THE PREMISE, and it needs the pair. Asserting only that the record is refused is two
+    // causes for one observation — a stale `head:` refuses it too. So: refused WITH the
+    // parenthesised plural, accepted with the form the skeleton teaches, same base record.
+    expect(evaluate({ body: record({ review: `1 opus ${PLURAL}, no findings` }), head: HEAD, files: CODE }).ok,
+      'the grammar now ACCEPTS the parenthesised plural — this sweep guards nothing').toBe(false);
+    expect(evaluate({ body: record({ review: '1 opus round, no findings' }), head: HEAD, files: CODE }).ok,
+      'the base record is broken for some other reason, so the refusal above proves nothing').toBe(true);
+
     for (const [label, text] of [['the PR template', TEMPLATE], ['scripts/gate-record.mjs', SCRIPT]] as Array<[string, string]>) {
+      // ⚠ An identity guard, because a sweep cannot tell «clean» from «not reading the file».
+      // Measured: pointing the read at `package.json` left this test green.
+      expect(text, `the sweep is not reading ${label}`).toContain('gate-record');
       expect(text, `${label} contains an example of the form the grammar refuses — an author who reads it writes a record that fails`)
-        .not.toContain('round(s)');
+        .not.toContain(PLURAL);
     }
-    // A control on the sweep itself: the string it looks for must be the one the grammar refuses.
+    // The marker the loop greps is the one the grammar refuses — now the same value.
     expect(refused).toBe('<n> <model> round(s), <result>');
+  });
+
+  /**
+   * ⭐ THE ONE TYPED COPY in this file, deliberately, and it is here rather than buried in an
+   * assertion about something else.
+   *
+   * Detecting «the source moved» needs a reference outside the source, and any such reference is
+   * either typed or another copy — one typed copy is the floor, not a smell. Wiring every reader
+   * to `REVIEW_FORMAT` was tried and measured VACUOUS for exactly this: a reader that reads the
+   * constant cannot notice the constant changing.
+   *
+   * ⚠ It lives in a test NAMED for it because of a diagnosis problem. A drifted constant used to
+   * red four tests — about field placeholders, about the sweep, about one-string, about free
+   * text — none of them named for a format change, so the cause had to be inferred from four
+   * unrelated-sounding failures. Now the alarm announces itself and the others may read the
+   * constant.
+   */
+  it('⭐ REVIEW_FORMAT is this exact string — changing it is a deliberate act', () => {
+    expect(REVIEW_FORMAT).toBe('<n> <model> <round|rounds>, <result>');
   });
 
   it('⭐ the format in the script and the one in the template are one string, not two', () => {
@@ -1005,14 +1039,10 @@ describe('gate-record — the `review:` evidence line', () => {
     // the third against my own PR body. If a pattern cannot find it, a gate cannot demand it.
     const v = evaluate({ body: record({ review: 'a reviewer looked at it and was happy' }), head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
-    // ⚠ TYPED OUT, deliberately, and this is the one place in this file that should be.
-    // Wiring it to `REVIEW_FORMAT` was tried and MEASURED VACUOUS: the message interpolates the
-    // same constant, so an assertion reading it cannot disagree with it — changing the constant
-    // left this green where the typed form goes red. One source of truth makes every reader that
-    // reads the source unable to notice the source moving; a single typed copy is what keeps a
-    // deliberate format change loud instead of silent. It fails CLOSED, which is the direction
-    // worth paying one lockstep for.
-    expect(v.errors.join(' ')).toMatch(/is not `<n> <model> <round\|rounds>, <result>`/);
+    // Reads the constant: the tripwire for a changed format now lives in its own named test, so
+    // this one is free to assert what it is actually about — that the message prescribes the
+    // format at all. (It was typed out for one commit, when the tripwire had no other home.)
+    expect(v.errors.join(' ')).toContain(`is not \`${REVIEW_FORMAT}\``);
   });
 
   it('rejects a model slot that does not START with a letter', () => {
