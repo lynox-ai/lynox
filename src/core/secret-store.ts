@@ -1,3 +1,4 @@
+import { LinearJwtRegExp, JWT_SHAPE, JWT_EGRESS_WIDE, withFlags } from './jwt-scan.js';
 import type { SecretScope, SecretStoreLike, LynoxUserConfig } from '../types/index.js';
 import { channels } from './observability.js';
 import type { SecretVault } from './secret-vault.js';
@@ -216,8 +217,9 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   // Shopify (admin / app-secret / partner / custom — added 2026-05-18 after
   // a Shopify integration flow leaked the prefix into the agent transcript)
   { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca)_`, String.raw`[A-Fa-f0-9]{20,}`) },
-  // JWT (three base64-url segments) — catches OAuth ID tokens etc.
-  { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
+  // JWT (three base64-url segments) — catches OAuth ID tokens etc. Matched in linear time,
+  // see `jwt-scan.ts`; the regex it equals is `JWT_SHAPE.regex`.
+  { label: 'JWT token', kind: 'jwt', pattern: new LinearJwtRegExp(JWT_SHAPE) },
   // Google OAuth access token
   { label: 'Google OAuth token', kind: 'vendor', pattern: credentialShape(String.raw`ya29\.`, String.raw`[A-Za-z0-9_-]{20,}`) },
   // Private key blocks (PEM / OpenSSH) — any key type, not only RSA.
@@ -227,7 +229,7 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   { label: 'Anthropic API key', kind: 'egress-wide', pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/ },
   { label: 'OpenAI-style API key', kind: 'egress-wide', pattern: /sk-[a-zA-Z0-9]{20,}/ },
   { label: 'GitHub token', kind: 'egress-wide', pattern: /gh[po]_[a-zA-Z0-9]{36,}/ },
-  { label: 'JWT token', kind: 'egress-wide', pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./ },
+  { label: 'JWT token', kind: 'egress-wide', pattern: new LinearJwtRegExp(JWT_EGRESS_WIDE) },
   // Generic Bearer tokens (long base64-ish)
   { label: 'bearer token', kind: 'contextual', pattern: /\bBearer\s+[A-Za-z0-9_\-.]{20,}\b/ },
   // Generic long hex/base64 secrets (40+ chars, likely tokens)
@@ -286,7 +288,7 @@ export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boole
   // credential.
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
-    const globalPattern = new RegExp(pattern.source, 'g');
+    const globalPattern = withFlags(pattern, 'g');
     result = result.replace(globalPattern, (match) => {
       if (match.length <= 4) return '***';
       return `***${match.slice(-4)}`;
@@ -323,7 +325,7 @@ export function maskSecretsAndPatterns(
 
   const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
   for (const pattern of patterns) {
-    const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    const global = withFlags(pattern, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
     for (const m of text.matchAll(global)) {
       if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length });
     }

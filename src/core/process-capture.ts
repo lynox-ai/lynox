@@ -1,3 +1,4 @@
+import { LinearJwtRegExp, JWT_PROCESS_CAPTURE } from './jwt-scan.js';
 import { credentialShape } from './secret-store.js';
 import { randomUUID } from 'node:crypto';
 import { getBetasForProvider, getModelId } from '../types/index.js';
@@ -69,13 +70,14 @@ interface CaptureOptions {
  * bare values inside tool inputs/outputs. These regexes redact the secret
  * value wherever it appears.
  */
-const VALUE_SECRET_PATTERNS: RegExp[] = [
+/** Exported so a test can check the JWT rule is the linear-time one (the scan cap hides its cost from the sweep). */
+export const VALUE_SECRET_PATTERNS: RegExp[] = [
   // Bearer / token auth headers — `Bearer <token>`, `token <token>`.
   /\b(Bearer|token)\s+[A-Za-z0-9\-._~+/]{12,}=*/gi,
   // Slack-style tokens — xoxb-, xoxp-, xapp-, xoxa-, xoxr- …
   credentialShape(String.raw`xox[abprs]-`, String.raw`[A-Za-z0-9-]{8,}`, 'gi', ''),
   // JWT shape — three base64url segments separated by dots.
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  new LinearJwtRegExp(JWT_PROCESS_CAPTURE, 'g'), // linear time — see `jwt-scan.ts`
   // Common provider key prefixes (Anthropic, OpenAI, GitHub, Stripe, Google).
   // The longer `sk-` prefixes first, so a glued key's digit check reads its body, not `ant`/`proj`.
   credentialShape(String.raw`(sk-ant-|sk-(?:proj|svcacct|admin)-|sk-|ghp_|gho_|ghs_|github_pat_|rk_live_|sk_live_|sk_test_|AIza)`, String.raw`[A-Za-z0-9\-_]{12,}`, 'g', ''),
@@ -117,9 +119,9 @@ function looksHighEntropy(token: string): boolean {
  * Redact secrets from a serialized tool-call field. Runs key-name redaction,
  * value-pattern scanning, and high-entropy detection. Must run BEFORE any
  * length truncation so a secret split across the truncation boundary cannot
- * evade detection (redact-then-truncate, see PRD §6.2).
+ * evade detection (redact-then-truncate, see PRD §6.2). Exported for the linear-time sweep test.
  */
-function redactSecrets(text: string): string {
+export function redactSecrets(text: string): string {
   // Safety pre-cap so the scan stays bounded on huge tool outputs. Far larger
   // than the final truncation cap, so redact-then-truncate still holds.
   const scoped = text.length > MAX_REDACTION_SCAN_CHARS

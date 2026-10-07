@@ -78,7 +78,8 @@
 	const threadPending = $derived(getThreadPendingCount());
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
-	import { SECRET_SHAPES, looksLikeSecret } from '../utils/secret-shapes.js';
+	import { looksLikeSecret } from '../utils/secret-shapes.js';
+	import { maskText } from '../utils/mask-text.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
@@ -476,20 +477,6 @@
 
 	// Mask any secret-like patterns (API keys, tokens) that might leak into display:
 	// the display's own forms plus every shared credential shape.
-	const SECRET_PATTERNS = [
-		/sk-ant-[a-zA-Z0-9_-]{20,}/g,
-		/sk-[a-zA-Z0-9_-]{20,}/g,
-		/tvly-[a-zA-Z0-9_-]{10,}/g,
-		/\d{5,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot token
-		...SECRET_SHAPES.map((s) => new RegExp(s.pattern.source, 'g')),
-	];
-	function maskText(text: string): string {
-		let result = text;
-		for (const pattern of SECRET_PATTERNS) {
-			result = result.replace(pattern, (match) => `***${match.slice(-4)}`);
-		}
-		return result;
-	}
 
 	/** Artifact types that carry a `<!-- type: X -->` marker so MarkdownRenderer
 	 *  renders + labels them correctly. markdown/csv/tsv/json/text route to a

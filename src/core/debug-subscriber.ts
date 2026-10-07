@@ -1,3 +1,4 @@
+import { LinearJwtRegExp, JWT_DEBUG_VALUE } from './jwt-scan.js';
 import { createWriteStream, chmodSync, type WriteStream } from 'node:fs';
 import { channels } from './observability.js';
 
@@ -39,7 +40,7 @@ function redactValue(key: string, value: unknown): unknown {
 /** Token patterns that must be masked in any debug output value. */
 const TOKEN_VALUE_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
   { pattern: /ya29\.[A-Za-z0-9_-]{10,}/g, replacement: 'ya29.***' },
-  { pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*/g, replacement: 'eyJ***' },
+  { pattern: new LinearJwtRegExp(JWT_DEBUG_VALUE, 'g'), replacement: 'eyJ***' },
 ];
 
 /** Mask known token patterns within a string value. */
