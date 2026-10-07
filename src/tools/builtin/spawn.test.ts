@@ -1946,6 +1946,25 @@ describe('spawn_agent tool', () => {
       return calls.map((c) => (c[0]['costGuard'] as { maxBudgetUSD: number }).maxBudgetUSD);
     }
 
+    it('a child that hangs gives its share back once the spawn time limit ends it', async () => {
+      // The hold is released when a child settles, so a hung child would hold its share
+      // for as long as it hangs. The time limit is what makes it settle.
+      const { agent, guard } = parentWithCeiling(20);
+      mockSend.mockImplementationOnce((_task: unknown, opts?: { disposableDeadline?: AbortSignal }) => new Promise((_resolve, reject) => {
+        opts?.disposableDeadline?.addEventListener('abort', () => reject(new MockRunAbortedError()), { once: true });
+      }));
+      setSpawnTimeoutMsForTests(30);
+      try {
+        const run = spawnAgentTool.handler({ agents: [{ name: 'stuck', task: 'Analyze' }] }, agent);
+        await vi.waitFor(() => { expect(guard.remainingBudgetUSD()).toBe(15); });
+        await expect(run).rejects.toThrow(/spawn time limit/);
+        // The $5 share is back; the child spent nothing (no cost snapshot).
+        expect(guard.remainingBudgetUSD()).toBe(20);
+      } finally {
+        setSpawnTimeoutMsForTests(null);
+      }
+    }, 3000);
+
     it('leaves the children alone when the whole batch fits', async () => {
       // Three children at the $5 default need $15; a run with $20 left can pay for them,
       // so nothing is scaled and nothing is announced.
