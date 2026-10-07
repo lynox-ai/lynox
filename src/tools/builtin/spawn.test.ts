@@ -1966,6 +1966,136 @@ describe('spawn_agent tool', () => {
       return calls.map((c) => (c[0]['costGuard'] as { maxBudgetUSD: number }).maxBudgetUSD);
     }
 
+    /**
+     * The refusal text for one fixture, and the ceilings a follow-the-advice retry got.
+     *
+     * ⛔ Each of these cases is TWO calls, and the second is the point. A witness that only
+     * asserts the wording cannot tell a true sentence from a plausible one — the measured
+     * failure was a message whose advice, followed literally, produced the same refusal.
+     * So every branch below says what binds AND proves the remedy it names admits.
+     */
+    async function refusalFor(remainder: number, agents: unknown[]): Promise<string> {
+      const { agent } = parentWithCeiling(remainder);
+      const err = await spawnAgentTool.handler({ agents } as never, agent)
+        .then(() => null, (e: unknown) => (e as Error).message);
+      expect(err, 'this fixture must be refused, or it witnesses nothing').not.toBeNull();
+      return err!;
+    }
+
+    it('(a) names the RUN when the remainder cannot pay for one turn, and offers only remedies that exist', async () => {
+      // $0.15 left, one child asking $0.10, a $0.192 turn. The old message said "which 1
+      // sub-agent(s) cannot share … Delegate fewer at once, or run them one after another":
+      // with one child those are the same remedy and both are impossible.
+      const msg = await refusalFor(0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
+      expect(msg, 'the run is named as the binding thing').toContain('$0.15 left of its own cost ceiling');
+      expect(msg, 'with the turn it cannot pay for').toContain('one turn on its model costs about $0.19');
+      expect(msg, 'and the fact that the batch is not the problem').toContain('even delegated on its own');
+      expect(msg, 'so NOT the remedy that is impossible here').not.toContain('Delegate fewer');
+      expect(msg, 'and NOT the claim that the remainder is free').not.toContain('not what binds');
+      // ⛔ THE ADVICE, FOLLOWED LITERALLY: a cheaper model lowers the floor ($0.052288 on
+      // `fast`), and $0.15 covers that.
+      const { agent } = parentWithCeiling(0.15);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'one', task: 'A', model: 'fast', max_budget_usd: 0.1 }] },
+        agent,
+      ), 'the cheaper model it was told to use is admitted').resolves.toBeTruthy();
+    });
+
+    it('(a) at a spent ceiling quotes no price and promises no cheaper model', async () => {
+      // ⛔ The degenerate half of (a), and it needs its own sentence: at $0 left NO model
+      // has a floor below the remainder, so "give it a cheaper model" would be false — the
+      // one branch whose advice cannot be followed inside this run at all.
+      const msg = await refusalFor(0, [{ name: 'one', task: 'A' }]);
+      expect(msg, 'nothing to divide').toContain('there is nothing to divide');
+      expect(msg, 'and the batch cannot fix it').toContain('cannot change that');
+      expect(msg, 'no cheaper-model advice here').not.toContain('cheaper model');
+      expect(msg, 'and no price quoted against a zero remainder').not.toContain('costs about');
+    });
+
+    it("(b) names the CHILD'S OWN budget, and says in so many words that the run is not what binds", async () => {
+      // $10.00 left, one child asking $0.10. The old message claimed one child could not
+      // share $10 — twenty turns' worth. What binds is the ask.
+      const msg = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
+      expect(msg, 'the run covers it').toContain('which covers one turn of "one"');
+      expect(msg, 'the ask is named').toContain('"one" has $0.10 to spend');
+      expect(msg, 'and the remedy is the ask').toContain('Raise max_budget_usd for "one" to at least $0.19');
+      expect(msg, 'not the scarcity story').not.toContain('cannot share');
+      expect(msg, 'and not a batch remedy, because nothing is being scaled').not.toContain('delegate fewer at once');
+      // ⛔ THE ADVICE, FOLLOWED LITERALLY: $0.20 clears the $0.192 floor.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(10);
+      await spawnAgentTool.handler({ agents: [{ name: 'one', task: 'A', max_budget_usd: 0.2 }] }, agent);
+      expect(childCaps(MockAgent), 'admitted with the budget it was told to ask for').toEqual([0.2]);
+    });
+
+    it("(b) reads the ask of the child it NAMES, not the first child's", async () => {
+      // ⛔ THE INDEX MUTANT, the same class that survived the whole suite once before
+      // (`floors[0]` for `floors[tooSmall]`). Here `requested[0]` in place of
+      // `requested[tooSmall]` would read the default $5 of the HEALTHY child, decide the
+      // ask was ample, and fall through to the siblings branch — announcing that every
+      // share "was scaled down" in a batch where nothing was scaled at all. Every fixture
+      // whose named child is the first one is blind to it.
+      const msg = await refusalFor(10, [
+        { name: 'ok', task: 'A' },
+        { name: 'thin', task: 'B', max_budget_usd: 0.1 },
+      ]);
+      expect(msg, 'the named child is the second one').toContain('"thin" has $0.10 to spend');
+      expect(msg, 'and nothing here was scaled').not.toContain('scaled down');
+      expect(msg, 'nor is the batch total blamed').not.toContain('ask for $5.10');
+    });
+
+    it('(b) adds the batch clause when the shares are ALSO being scaled, and not otherwise', async () => {
+      // ⛔ THE CASE THAT MAKES THIS A CLAUSE AND NOT A FOURTH BRANCH, measured: $1.00 left,
+      // children asking $0.01 and $10.00. The named child's own ask is under its floor AND
+      // every share is scaled to a tenth, so raising the ask alone would be scaled too —
+      // advice that would send the caller back into the same refusal.
+      const msg = await refusalFor(1.0, [
+        { name: 'cheap', task: 'A', max_budget_usd: 0.01 },
+        { name: 'dear', task: 'B', max_budget_usd: 10 },
+      ]);
+      expect(msg, 'the ask is still what binds first').toContain('"cheap" has $0.01 to spend');
+      expect(msg, 'and the batch clause is there').toContain('delegate fewer at once');
+      expect(msg, 'with the total that causes the scaling').toContain('the batch asks for $10.01 against that $1.00');
+      expect(msg, 'and it says a bigger ask alone is not enough').toContain('a larger ask alone would be scaled too');
+      // ⛔ BOTH REMEDIES, FOLLOWED LITERALLY: raise the ask AND delegate fewer.
+      const { agent } = parentWithCeiling(1.0);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'cheap', task: 'A', max_budget_usd: 0.2 }] },
+        agent,
+      ), 'both remedies together are admitted').resolves.toBeTruthy();
+    });
+
+    it('(c) names the SIBLINGS and the total they asked for, and says the child would fit alone', async () => {
+      // $0.30 left, two children at the $5 default: the only one of the three forms where
+      // the old sentence was nearly right — $0.384 of floors against $0.30 genuinely does
+      // not fit twice. It is still missing WHY, and the why is what makes the remedy true.
+      const msg = await refusalFor(0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]);
+      expect(msg, 'the batch and its total').toContain('2 sub-agent(s) ask for $10.00 against the $0.30 left');
+      expect(msg, 'the share and the floor').toContain('"a" would get $0.15, below the $0.19 one turn on its model costs');
+      expect(msg, 'and the fact that makes the remedy work').toContain('on its own it would fit');
+      expect(msg, 'the ask is not blamed here, because it was enough').not.toContain('to spend');
+      // ⛔ THE ADVICE, FOLLOWED LITERALLY: one at a time.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { agent } = parentWithCeiling(0.3);
+      await spawnAgentTool.handler({ agents: [{ name: 'a', task: 'A' }] }, agent);
+      expect(childCaps(MockAgent), 'one after another is admitted, with the whole remainder').toEqual([0.3]);
+    });
+
+    it('a short remainder beats a short ask: the (a)/(b) boundary is the remainder, not the scale factor', async () => {
+      // ⛔ THE RECORDED TRAP. A first attempt split this message by `factor` alone and, at
+      // $0.15 left with a $0.10 ask, told the model "the run's remainder is not the
+      // constraint here: $0.15 of it is still free" — while a turn costs $0.192. `factor
+      // === 1` only says the sum of the asks fits; it does not say the remainder can pay
+      // for a turn. The two fixtures below differ ONLY in the remainder, and they must get
+      // different branches.
+      const short = await refusalFor(0.15, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
+      const ample = await refusalFor(10, [{ name: 'one', task: 'A', max_budget_usd: 0.1 }]);
+      expect(short, 'the remainder binds, so the run is named').toContain('could not finish one turn');
+      expect(short, 'and the ask is NOT offered as the fix').not.toContain('Raise max_budget_usd');
+      expect(ample, 'the same ask with room to spare blames the ask').toContain('Raise max_budget_usd');
+      expect(ample, 'and never says the turn is unaffordable').not.toContain('could not finish one turn');
+    });
+
     it('a child that hangs gives its share back once the spawn time limit ends it', async () => {
       // The hold is released when a child settles, so a hung child would hold its share
       // for as long as it hangs. The time limit is what makes it settle.
@@ -2239,7 +2369,10 @@ describe('spawn_agent tool', () => {
       await expect(spawnAgentTool.handler(
         { agents: [{ name: 'cheap', task: 'A', model: 'fast' }, { name: 'dear', task: 'B' }] },
         fourth,
-      )).rejects.toThrow(/"dear" would get \$0\.15, and one turn on its model costs about \$0\.19/);
+      // ⚠ The phrase moved when the message was branched (this fixture is the
+      // siblings-scaled form); the COUPLING is what kills the mutant, so share and floor
+      // stay in one regex.
+      )).rejects.toThrow(/"dear" would get \$0\.15, below the \$0\.19 one turn/);
     });
 
     it('names the CHEAP child when it is the one under its own floor', async () => {
@@ -2433,7 +2566,11 @@ describe('spawn_agent tool', () => {
         await expect(spawnAgentTool.handler(
           { agents: [{ name: 'free', task: 'A', profile: 'local', max_budget_usd: 0 }] },
           agent,
-        )).rejects.toThrow(/cannot share/);
+        // ⚠ The assertion moved from `/cannot share/` to the reason clause when the message
+        // was branched: with $5 left and ONE child there is nothing to share, so the old
+        // lead-in was false here while the refusal itself was right. This pins the reason,
+        // which is the stronger claim — a refusal for the wrong reason now fails.
+        )).rejects.toThrow(/would buy an abort rather than an answer/);
       } finally {
         vi.unstubAllEnvs();
         reloadConfig();
@@ -2478,7 +2615,8 @@ describe('spawn_agent tool', () => {
           ],
         },
         agent,
-      )).rejects.toThrow(/"wide" would get \$0\.25, and one turn on its model costs about \$0\.41/);
+      // ⚠ Same move, same reason: one regex, both figures.
+      )).rejects.toThrow(/"wide" would get \$0\.25, below the \$0\.41 one turn/);
     });
 
     it('admits a child whose narrower cap lowers its own floor', async () => {

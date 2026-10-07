@@ -120,6 +120,95 @@ function usdLabel(amount: number): string {
   return amount < 0.01 ? amount.toFixed(4) : amount.toFixed(2);
 }
 
+/**
+ * The floor refusal, named by what ACTUALLY binds — one sentence per cause.
+ *
+ * ⛔ THREE CAUSES, AND ONLY ONE OF THEM IS SCARCITY. One message served all three and was
+ * false in two of them. Measured at the real handler, 2026-10-07, every figure below from
+ * a probe that printed what the model would have read:
+ *   · $0.15 left, one child asking $0.10, floor $0.19 → "which 1 sub-agent(s) cannot
+ *     share … Delegate fewer at once, or run them one after another". With ONE child the
+ *     two remedies are the same remedy and both are impossible.
+ *   · $10.00 left, one child asking $0.10 → the same sentence, claiming $10 cannot be
+ *     shared by one child. The run's remainder is twenty turns' worth; the child's own
+ *     `max_budget_usd` is what binds.
+ *   · $1.00 left, children asking $0.01 and $10.00 → "which 2 sub-agent(s) cannot share".
+ *     Two floors are $0.38 together: they fit twice over. The refusal is an artefact of
+ *     proportional scaling, not of scarcity.
+ *
+ * ⚠ `factor` DOES NOT ANSWER "DID THE REMAINDER BIND", and an earlier attempt split the
+ * message by it and produced a second sentence false in its own case: at $0.15 left it
+ * said "the run's remainder is not the constraint here: $0.15 of it is still free" while a
+ * turn costs $0.192. `factor === 1` only says the sum of the asks fits. The dominant test
+ * is `remainingRunUSD < need`, and it has to come FIRST — a child whose own ask is also
+ * short is still refused by the remainder, and telling its caller to raise the ask would
+ * send it back into the same refusal.
+ *
+ * ⚠ And the remedy is branched too, not only the reason. "Give it a cheaper model" lowers
+ * the floor, so it works while the run has something left and is false at $0.00 — where no
+ * priced model has a floor below the remainder. "Delegate fewer" raises this child's share
+ * and is false when the child's own ask is the binding thing, unless the batch is also
+ * being scaled, which is a case that occurs (the $0.01-and-$10.00 probe above). Each
+ * branch's advice is witnessed by a second probe that follows it literally and is ADMITTED.
+ */
+function floorRefusal(opts: {
+  name: string;
+  /** The share this child was granted. */
+  got: number;
+  /** One cold turn on this child's model and cap; `0` when the model has no known price. */
+  need: number;
+  /** What the caller asked for this child (`max_budget_usd`, or the default). */
+  askedFor: number;
+  remainingRunUSD: number;
+  batchSize: number;
+  /** What the whole batch asked for. */
+  batchAsked: number;
+  /** Whether the shares were scaled down to fit the remainder (`factor < 1`). */
+  scaled: boolean;
+}): string {
+  const { name, got, need, askedFor, remainingRunUSD, batchSize, batchAsked, scaled } = opts;
+  const left = usdLabel(remainingRunUSD);
+  const share = `"${name}" would get $${usdLabel(got)}`;
+  const turn = `one turn on its model costs about $${usdLabel(need)}`;
+  // ── (a) the RUN cannot pay for one turn of this child — the only branch where scarcity
+  // is the true reason, and the only one where no change to the batch helps.
+  if (!(remainingRunUSD > 0)) {
+    return `This run has $${left} left of its own cost ceiling, so there is nothing to divide: `
+      + `${share}. Delegating fewer at once or one after another cannot change that — `
+      + 'a later run gets its own ceiling.';
+  }
+  if (remainingRunUSD < need) {
+    return `This run has $${left} left of its own cost ceiling and ${turn}, so ${share} `
+      + 'and could not finish one turn even delegated on its own. Give it a cheaper model, '
+      + 'or delegate it in a later run.';
+  }
+  // ── (b) the CHILD'S OWN budget cannot pay for one turn. The run's remainder covers it,
+  // which is why naming scarcity here sends the caller down a road that does not exist.
+  if (!(askedFor > 0) || askedFor < need) {
+    const scaledClause = scaled
+      ? `, and delegate fewer at once: the batch asks for $${usdLabel(batchAsked)} against that `
+        + `$${left}, so every share is scaled down and a larger ask alone would be scaled too.`
+      : '.';
+    if (need > 0) {
+      return `This run has $${left} left of its own cost ceiling, which covers one turn of "${name}" — `
+        + `what binds is its own budget: "${name}" has $${usdLabel(askedFor)} to spend `
+        + `and ${turn}, so ${share}. Raise max_budget_usd for "${name}" to at least `
+        + `$${usdLabel(need)}${scaledClause}`;
+    }
+    return `This run has $${left} left of its own cost ceiling, so the remainder is not what binds: `
+      + `${share}, because it was given no budget at all, and a sub-agent with no budget runs `
+      + 'a single turn and then stops, so it would buy an abort rather than an answer. '
+      + `Give "${name}" a positive max_budget_usd${scaledClause}`;
+  }
+  // ── (c) the SIBLINGS scaled it under its floor. Its own ask was enough and the run's
+  // remainder is enough; what is not enough is the remainder divided this many ways.
+  return `${String(batchSize)} sub-agent(s) ask for $${usdLabel(batchAsked)} against the $${left} left `
+    + `of this run's own cost ceiling, so every share was scaled down: ${share}, below the `
+    + `$${usdLabel(need)} one turn on its model costs — on its own it would fit. `
+    + `Delegate fewer at once, run them one after another, or lower `
+    + 'what the others ask for.';
+}
+
 /** The live limit; only tests shorten it (`setSpawnTimeoutMsForTests`). */
 let spawnTimeoutMs = SPAWN_TIMEOUT;
 
@@ -1737,31 +1826,29 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // and removed again, because the child this message names is often the CHEAPEST in
         // the batch, and a remedy it cannot follow is worse than none.
         //
-        // ⛔ The reason clause branches, and only the reason. On a model this instance has
-        // no price for the floor is 0, so quoting it would read "would get $0.0000, and one
-        // turn on its model costs about $0.0000" — a refusal whose own arithmetic cancels
-        // out, and an assertion that a turn is free, which is exactly what an unpriced model
-        // is not known to be. That case is reachable only because of the carve-out above, so
-        // it is this change's to get right.
+        // ⛔ The unpriced shape is why a price is never quoted unconditionally. On a model
+        // this instance has no price for the floor is 0, so quoting it would read "would get
+        // $0.0000, and one turn on its model costs about $0.0000" — a refusal whose own
+        // arithmetic cancels out, and an assertion that a turn is free, which is exactly what
+        // an unpriced model is not known to be. That case is reachable only because of the
+        // carve-out above. (An earlier revision branched the REASON alone and said so here;
+        // the remedy needed branching too, which is what `floorRefusal` now does.)
         //
-        // ⚠ This message is not the subject of this change and is unchanged by it. Its
-        // wording is a question of its own: a case distinction here needs a true sentence
-        // per branch and a witness per branch, and an attempt to split it by `factor` alone
-        // produced a second text that was false in its own case. Whoever takes it on starts
-        // from that.
-        const name = specs[tooSmall]!.name;
-        const got = shares[tooSmall]!;
-        const need = floors[tooSmall]!;
-        throw new Error(
-          `This run has $${usdLabel(remainingRunUSD)} left of its own cost ceiling, which `
-          + `${String(specs.length)} sub-agent(s) cannot share: "${name}" would get `
-          + `$${usdLabel(got)}, `
-          + (need > 0
-            ? `and one turn on its model costs about $${usdLabel(need)}. `
-            : 'and a sub-agent with no budget runs a single turn and then stops, so it '
-              + 'would buy an abort rather than an answer. ')
-          + 'Delegate fewer at once, or run them one after another.',
-        );
+        // ⚠ THE WORDING IS NOW BRANCHED, and the branches live in `floorRefusal` with the
+        // measurement that forced each one. What belongs here is only the handler's half:
+        // every input that branch selection needs is passed EXPLICITLY, including `asked`
+        // and `factor`, so the message cannot be derived from a subset and quietly answer
+        // the wrong question — which is how the first attempt went wrong.
+        throw new Error(floorRefusal({
+          name: specs[tooSmall]!.name,
+          got: shares[tooSmall]!,
+          need: floors[tooSmall]!,
+          askedFor: requested[tooSmall]!,
+          remainingRunUSD,
+          batchSize: specs.length,
+          batchAsked: asked,
+          scaled: factor < 1,
+        }));
       }
 
       // ⛔ RESERVE, do not merely read — and this is the half an earlier attempt left
