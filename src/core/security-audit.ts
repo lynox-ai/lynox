@@ -1,3 +1,4 @@
+import { LinearJwtRegExp, JWT_AUDIT_PREVIEW } from './jwt-scan.js';
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { channels } from './observability.js';
@@ -18,8 +19,11 @@ export interface SecurityEvent {
   contract_version?: string | undefined;
 }
 
-/** Mask common secret patterns in preview strings. */
-function maskSecrets(text: string): string {
+/** Linear-time JWT match (see `jwt-scan.ts`). */
+const AUDIT_PREVIEW_JWT = new LinearJwtRegExp(JWT_AUDIT_PREVIEW, 'g');
+
+/** Mask common secret patterns in preview strings. Exported for the linear-time sweep test. */
+export function maskSecrets(text: string): string {
   return text
     .replace(/sk-ant-[a-zA-Z0-9_-]{6,}/g, 'sk-ant-***')
     .replace(/sk-[a-zA-Z0-9]{6,}/g, 'sk-***')
@@ -27,7 +31,7 @@ function maskSecrets(text: string): string {
     .replace(/gho_[a-zA-Z0-9]{6,}/g, 'gho_***')
     .replace(/AKIA[A-Z0-9]{6,}/g, 'AKIA***')
     .replace(/AIza[a-zA-Z0-9_-]{6,}/g, 'AIza***')
-    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, 'eyJ***');
+    .replace(AUDIT_PREVIEW_JWT, 'eyJ***');
 }
 
 export class SecurityAudit {

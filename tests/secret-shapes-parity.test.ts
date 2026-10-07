@@ -7,6 +7,10 @@
 import { describe, it, expect } from 'vitest';
 import { SECRET_SHAPES as ENGINE_SHAPES } from '../src/core/secret-store.js';
 import { SECRET_SHAPES as WEB_UI_SHAPES } from '../packages/web-ui/src/lib/utils/secret-shapes.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { LinearJwtRegExp as EngineLinear } from '../src/core/jwt-scan.js';
+import { LinearJwtRegExp as WebUiLinear } from '../packages/web-ui/src/lib/utils/jwt-scan.js';
 
 const WEB_UI_KINDS = new Set(['vendor', 'jwt', 'key-block']);
 // Kinds the web UI deliberately does not take: recognisable only by context,
@@ -32,5 +36,29 @@ describe('secret shapes: web UI copy equals the engine list', () => {
     for (const kind of WEB_UI_KINDS) {
       expect(WEB_UI_SHAPES.some((s) => s.kind === kind)).toBe(true);
     }
+  });
+});
+
+// The source alone cannot tell a linear-time JWT matcher from the plain regex it equals: a
+// copy that went back to the plain regex would pass the set check above and be slow again.
+describe('linear JWT matching: web UI copy equals the engine', () => {
+  it('a shape the engine matches in linear time is matched in linear time in the web UI too, with the same spec', () => {
+    for (const engine of ENGINE_SHAPES.filter((s) => WEB_UI_KINDS.has(s.kind))) {
+      const web = WEB_UI_SHAPES.find((w) => w.label === engine.label && w.kind === engine.kind)!;
+      expect(web.pattern instanceof WebUiLinear, engine.label).toBe(engine.pattern instanceof EngineLinear);
+      if (engine.pattern instanceof EngineLinear && web.pattern instanceof WebUiLinear) {
+        const { regex: er, ...ep } = engine.pattern.spec;
+        const { regex: wr, ...wp } = web.pattern.spec;
+        expect(wr.source, engine.label).toBe(er.source);
+        expect(wp, engine.label).toEqual(ep);
+      }
+    }
+  });
+
+  it('jwt-scan.ts is the same file on both sides, apart from the note that names the other copy', () => {
+    const root = join(__dirname, '..');
+    const body = (path: string): string =>
+      readFileSync(join(root, path), 'utf8').replace(/ \* NOTE:[\s\S]*?\n \*\/\n/, ' */\n');
+    expect(body('packages/web-ui/src/lib/utils/jwt-scan.ts')).toBe(body('src/core/jwt-scan.ts'));
   });
 });

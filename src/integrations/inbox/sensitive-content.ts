@@ -17,6 +17,7 @@
 // OTP that doesn't match the patterns slips through. The audit log
 // records what was matched + which mode applied so the user can verify.
 
+import { LinearJwtRegExp, JWT_INBOX, withFlags } from '../../core/jwt-scan.js';
 import { credentialShape } from '../../core/secret-store.js';
 
 export type SensitiveCategory =
@@ -84,7 +85,7 @@ export const SECRET_PREFIX_RES: ReadonlyArray<RegExp> = [
   credentialShape(String.raw`AKIA`, String.raw`[0-9A-Z]{16}`),                       // AWS access key
   credentialShape(String.raw`ya29\.`, String.raw`[A-Za-z0-9_-]{20,}`),               // Google OAuth refresh token
   /\bBearer\s+\S{8,}\b/,                        // Generic bearer tokens (8+ chars — catches short opaque tokens too)
-  /\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\b/, // JWT (3 segments)
+  new LinearJwtRegExp(JWT_INBOX), // JWT (3 segments), matched in linear time — see `jwt-scan.ts`
 ];
 
 /**
@@ -93,7 +94,7 @@ export const SECRET_PREFIX_RES: ReadonlyArray<RegExp> = [
  * RegExp per inbound mail.
  */
 const SECRET_PREFIX_RES_G: ReadonlyArray<RegExp> = SECRET_PREFIX_RES.map(
-  (re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`),
+  (re) => withFlags(re, re.flags.includes('g') ? re.flags : `${re.flags}g`),
 );
 
 /**

@@ -8,6 +8,17 @@
  * equal to the engine's list for those kinds, in both directions. Edit the
  * engine list first, then mirror the change here.
  */
+import { LinearJwtRegExp, JWT_SHAPE, type JwtShapeSpec } from './jwt-scan.js';
+
+/** The same JWT shape without its trailing `\\b`, as the input guard wants it. */
+function openEnded(spec: JwtShapeSpec): JwtShapeSpec {
+  return {
+    ...spec,
+    regex: new RegExp(spec.regex.source.replace(/\\b$/, ''), spec.regex.flags),
+    s3: spec.s3 === null ? null : { ...spec.s3, wordEnd: false },
+  };
+}
+
 export type SecretShapeKind = 'vendor' | 'jwt' | 'key-block';
 export interface SecretShape {
   readonly label: string;
@@ -46,7 +57,7 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
   { label: 'Google API key', kind: 'vendor', pattern: credentialShape(String.raw`AIza`, String.raw`[A-Za-z0-9_-]{35}`) },
   { label: 'Slack token', kind: 'vendor', pattern: credentialShape(String.raw`xox[bpoasr]-`, String.raw`[A-Za-z0-9-]{10,}`) },
   { label: 'Shopify token', kind: 'vendor', pattern: credentialShape(String.raw`shp(at|ss|pa|ca)_`, String.raw`[A-Fa-f0-9]{20,}`) },
-  { label: 'JWT token', kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/ },
+  { label: 'JWT token', kind: 'jwt', pattern: new LinearJwtRegExp(JWT_SHAPE) },
   { label: 'Google OAuth token', kind: 'vendor', pattern: credentialShape(String.raw`ya29\.`, String.raw`[A-Za-z0-9_-]{20,}`) },
   { label: 'private key', kind: 'key-block', pattern: /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----/ },
 ];
@@ -56,8 +67,10 @@ export const SECRET_SHAPES: ReadonlyArray<SecretShape> = [
  * is rejected with `chat.secret_warning`. The trailing word boundary is dropped
  * so a key followed directly by a word character is still caught.
  */
-const SECRET_INPUT_PATTERNS: ReadonlyArray<RegExp> = SECRET_SHAPES.map(
-  (s) => new RegExp(s.pattern.source.replace(/\\b$/, ''), s.pattern.flags),
+const SECRET_INPUT_PATTERNS: ReadonlyArray<RegExp> = SECRET_SHAPES.map((s) =>
+  s.pattern instanceof LinearJwtRegExp
+    ? new LinearJwtRegExp(openEnded(s.pattern.spec), s.pattern.flags)
+    : new RegExp(s.pattern.source.replace(/\\b$/, ''), s.pattern.flags),
 );
 
 export function looksLikeSecret(text: string): boolean {
