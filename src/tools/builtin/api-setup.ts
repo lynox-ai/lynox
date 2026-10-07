@@ -20,7 +20,7 @@ import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { slotNameForModel } from '../../core/profile-value-shape.js';
+import { authTypeForModel, slotNameForModel } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -1750,7 +1750,7 @@ Next steps before calling create:
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
       if (profile.auth?.type !== 'oauth2') {
-        return `Error: profile "${id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
+        return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
       // The link is built from the server's own origin, never assembled by the
       // model: a link the model writes is a link the model chooses. Without an
@@ -1912,7 +1912,7 @@ Next steps before calling create:
       const profile = apiStore?.get(input.id);
       if (!profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
       if (profile.auth?.type !== 'oauth2') {
-        return `Error: profile "${input.id}" has auth.type="${profile.auth?.type ?? 'none'}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
+        return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
       const oauth = profile.auth.oauth;
       // A profile that names a preset this engine knows exchanges tokens at the preset's own

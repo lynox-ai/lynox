@@ -10,19 +10,18 @@
  * `migrateV1Profile` says why in `api-store.ts`: a profile can arrive from a
  * hand-edited or imported JSON, which no validator re-reads, so a field of it
  * reaching stderr raw can forge `[lynox:…]` lines or carry terminal escapes.
- * `writeRenewalFailure` there strips the same class. This is that rule, named
+ * `writeRenewalFailure` in `http.ts` strips the same class. This is that rule, named
  * once, because it was applied in one of the two places that needed it.
  */
 export function oneLineForLog(value: unknown, max: number): string {
-  // `unknown`, not `string`, and that is the point. The two profile fields this
+  // `unknown`, not `string`, and that is the point. The profile fields this
   // formats are typed `string | undefined` and arrive from `JSON.parse(raw) as
   // ApiProfile` with no schema check — `_admit` validates the id, the derived
-  // vault slot and the host, and nothing else. `(5).replace` is a TypeError, the
-  // attach is not inside a try/catch, and the result is every request to that
-  // profile failing: the identical defect, on the identical path, as the
-  // `oauth_grant.written` read two functions up. That one was fixed by reaching
-  // for the tolerant reader; this one has no tolerant reader to reach for, so
-  // the tolerance is here.
+  // vault slot and the host, and nothing else. `(5).replace` is a TypeError, and
+  // the credential attach in `http.ts` is not inside a try/catch, so the result
+  // would be every request to that profile failing: the same defect as the
+  // `oauth_grant.written` read there, which was fixed by reaching for a tolerant
+  // reader. This one has no tolerant reader to reach for, so the tolerance is here.
   if (typeof value !== 'string') return `<non-string: ${typeof value}>`;
   return value.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ').slice(0, max);
 }
@@ -84,3 +83,11 @@ export function slotNameForModel(name: unknown, derived: string): string {
   return shapedForLog(name, name === derived ? DERIVED_NAME_SHAPE : VAULT_NAME_SHAPE, 80);
 }
 
+/**
+ * A profile's `auth.type`, as it may appear in a sentence. A profile loaded from a file
+ * can carry any text there, and a refusal names the type it found; a lowercase word
+ * prints (an unknown one is a fact worth stating), anything else does not.
+ */
+export function authTypeForModel(type: unknown): string {
+  return type === undefined ? 'none' : shapedForLog(type, /^[a-z0-9_]{1,20}$/, 20);
+}
