@@ -40,10 +40,19 @@ export function attemptIsOver(answer: { httpStatus: number; code?: string | unde
     // this key: no further click on it could change the answer.
     return answer.code !== 'run_claim_in_flight' && answer.code !== 'run_in_progress';
   }
-  // The answers the route itself produces: the run happened (200), or it was refused
-  // before any claim could be taken (400 bad body/params/key, 403 unconfirmed, 404 gone).
-  return answer.httpStatus === 200 || answer.httpStatus === 400
-    || answer.httpStatus === 403 || answer.httpStatus === 404;
+  // ⚠ 400 is NOT terminal, and the first version of this function said it was, with the
+  // reason "refused before any claim could be taken". That reason is refuted by a test in
+  // this same repo: the route answers 400 for a run that threw AFTER it started, whose
+  // claim is stamped as having spent. Discarding the key there is what lets the next click
+  // pay for the whole workflow again — which is what this function exists to prevent.
+  //
+  // Keeping it costs nothing in the other reading: a 400 that really was a pre-run refusal
+  // released the claim, so the next click re-claims the same key and runs. A 400 after a
+  // paid start keeps the key, and the next click gets the disclosed restart instead of a
+  // silent second charge. Keep is right for both, which is why the unknown case keeps too.
+  //
+  // 403 (the consent gate) and 404 (no such workflow) both answer before any claim exists.
+  return answer.httpStatus === 200 || answer.httpStatus === 403 || answer.httpStatus === 404;
 }
 
 function mint(): string {
@@ -65,13 +74,35 @@ function mint(): string {
  * run, and the person's new values would be silently ignored while the notice read
  * "completed". A changed input is a different operation and deserves a different key.
  *
- * Not a hash — the values are the user's own and never leave the browser. Sorted by name
- * so key order cannot make one attempt look like two.
+ * ⚠ Three things the first version got wrong, all found by refutation:
+ *  · it joined `name=value` pairs with a separator and did not escape them, so
+ *    `{a: 'x\0b=y'}` and `{a: 'x', b: 'y'}` produced ONE key — a collision that replays
+ *    the wrong run, i.e. the very defect the fingerprint was added to prevent. `JSON`
+ *    does the escaping, so no value can forge a boundary.
+ *  · it compared unnormalised strings, so the same umlaut typed on two keyboards (NFC vs
+ *    NFD) split one attempt into two and paid twice. Normalised to NFC.
+ *  · it put the values VERBATIM into the storage key's name, which is where a reader of
+ *    `localStorage` would then find a client name or an IBAN, unbounded in length and
+ *    removed only when the workflow is deleted. Before the fingerprint existed, storage
+ *    held one UUID per workflow. A digest keeps the discrimination without the content.
+ *
+ * The digest is a 64-bit FNV-1a over the canonical JSON, not a cryptographic hash: it has
+ * to separate one person's handful of parameter sets, not resist an adversary. A collision
+ * would replay a wrong run, so the width is deliberate rather than minimal.
  */
 function inputFingerprint(params: Record<string, string> | undefined): string {
   if (params === undefined) return '';
-  const entries = Object.keys(params).sort().map(k => `${k}=${params[k] ?? ''}`);
-  return entries.length === 0 ? '' : `:${entries.join('\u0000')}`;
+  const names = Object.keys(params).sort();
+  if (names.length === 0) return '';
+  const canonical = JSON.stringify(names.map(k => [k.normalize('NFC'), (params[k] ?? '').normalize('NFC')]));
+  // FNV-1a, two independent 32-bit lanes with different offset bases → 64 bits of output.
+  let a = 0x811c9dc5, b = 0x01000193;
+  for (let i = 0; i < canonical.length; i++) {
+    const c = canonical.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x85ebca6b) >>> 0;
+  }
+  return `:${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}`;
 }
 
 /** The current attempt's key, minting and storing one if there is none. */

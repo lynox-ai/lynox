@@ -836,11 +836,11 @@ function errorResponse(
    *  here rather than in a hand-written `jsonResponse` for the reason below: the one
    *  place that masks and caps the message stays the one place that builds the body.
    *
-   *  ⚠ `error` and `code` are typed OUT of it, so a caller cannot pass either. The spread
-   *  order below already protects them, but an order is a thing the next edit can move and
-   *  no test can see — nothing passes an `extra.error`, so nothing would fail. The type
-   *  refuses it at compile time instead, which is where a bypass of the one masking site
-   *  belongs. */
+   *  `error` and `code` are typed out AND stripped at runtime — see
+   *  {@link buildClientErrorBody}. The type alone was not a guard: TypeScript checks excess
+   *  properties on an inline literal only, so `errorResponse(…, rec)` and `errorResponse(…,
+   *  { ...rec })` for a `Record<string, unknown>` both compiled, which is the most natural
+   *  way such a bag gets built. */
   extra?: Record<string, unknown> & { error?: never; code?: never },
 ): void {
   // ⭐ `code` is for the refusals a CLIENT has to tell apart. Two 409s on the same route
@@ -850,14 +850,35 @@ function errorResponse(
   // hand skipped both, and left a template the next author copies with an interpolated
   // string in it. Omitted by default, so the 264 existing callers are unchanged and a
   // client's default branch keeps its meaning.
-  jsonResponse(res, status, {
-    // ⚠ `extra` is spread FIRST on purpose. Spread last — as the first version of this
-    // was — an `extra.error` would silently replace the masked, capped message, i.e. the
-    // parameter would create the bypass its own docblock gives as the reason for existing.
-    ...(extra ?? {}),
+  jsonResponse(res, status, buildClientErrorBody(message, code, extra));
+}
+
+/**
+ * The body of a client-bound refusal: the masked, capped message, an optional machine
+ * code, and whatever data the caller needs to ride along.
+ *
+ * Exported and pure so the one property that matters can be driven directly: **nothing in
+ * `extra` can replace `error` or `code`.** That property had three defences in two
+ * revisions and only this one holds. Spreading `extra` first protects them, but a spread
+ * ORDER is something the next edit moves and no test observes, because no caller passes an
+ * `extra.error`. Typing `error?: never` protects them too — but only against an inline
+ * object literal: TypeScript's excess-property check does not apply to a variable, so
+ * passing a `Record<string, unknown>` that happens to hold `error`, or a spread of one,
+ * compiled cleanly. Measured across twelve call shapes. So the keys are REMOVED here, and
+ * the order is kept as a second line of defence rather than as the guarantee.
+ */
+export function buildClientErrorBody(
+  message: string,
+  code?: string,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  // Destructuring is the strip: whatever those two held does not reach `safe`.
+  const { error: _droppedError, code: _droppedCode, ...safe } = extra ?? {};
+  return {
+    ...safe,
     error: capForClient(maskForClient(message)),
     ...(code !== undefined ? { code } : {}),
-  });
+  };
 }
 
 /**

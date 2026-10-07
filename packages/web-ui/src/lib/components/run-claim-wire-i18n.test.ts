@@ -33,6 +33,8 @@ const VIEW = readFileSync(`${HERE}WorkflowLibraryView.svelte`, 'utf8');
  * A mutant that renamed the wire field and planted a decoy `idempotencyKey:` in the
  * unrelated `/tasks` body survived it.
  */
+/** The notice composer, which now owns every sentence the outcome branches show. */
+const NOTICE = readFileSync(`${HERE}../utils/run-notice.ts`, 'utf8');
 const RUN_FN = ((): string => {
   const from = VIEW.indexOf('async function runWorkflow(');
   const to = VIEW.indexOf('\n\tfunction startRename(', from);
@@ -102,7 +104,17 @@ describe('the run claim reaches the view that holds its key', () => {
     // component asks that function rather than deciding for itself.
     expect(RUN_FN, 'the 409 branch has to ask attemptIsOver')
       .toMatch(/keepKey = !attemptIsOver\(\{ httpStatus: 409, code: msg\?\.code \}\)/);
-    expect(RUN_FN, 'and so does every other non-ok status — res.ok is NOT the discriminator')
+    // ⚠ TWICE, and counted. The `!res.ok` branch and the SUCCESS path each need their own,
+    // and a single regex over the function was satisfied by either — so deleting the one on
+    // the paying path survived, which is the mutant with the money in it: the key is then
+    // never cleared after a successful run, the next click replays for ever, and the
+    // workflow can never be run a second time.
+    const narrowings = RUN_FN.match(/keepKey = !attemptIsOver\(\{ httpStatus: res\.status \}\)/g) ?? [];
+    expect(narrowings.length, 'the !res.ok branch and the success path each need one').toBe(2);
+    // And the success one sits AFTER the body is parsed: before it, a 200 whose body never
+    // arrives would discard the key of a run that had already succeeded.
+    const afterParse = RUN_FN.slice(RUN_FN.indexOf('await res.json()) as {'));
+    expect(afterParse, 'the success path narrows only once the outcome is in hand')
       .toMatch(/keepKey = !attemptIsOver\(\{ httpStatus: res\.status \}\)/);
     expect(RUN_FN, 'the key is cleared only when the attempt is over')
       .toMatch(/if \(!keepKey\) clearAttemptKey\(id, params\)/);
@@ -125,36 +137,78 @@ describe('the run claim reaches the view that holds its key', () => {
   });
 
   it('both languages carry every sentence the new branches show', () => {
-    for (const key of ['run_already_running', 'run_outcome_unknown', 'run_claim_held', 'run_replayed', 'run_restarted']) {
+    // Reachability is checked across the VIEW and the NOTICE COMPOSER, because the outcome
+    // sentences moved into the composer — a check against the view alone would have gone
+    // red for a refactor and green for a genuinely orphaned key, i.e. wrong in both
+    // directions. The keys are split by where they belong, so neither file can satisfy the
+    // other's.
+    const inView = ['run_already_running', 'run_outcome_unknown', 'run_claim_held'];
+    const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_restarted_cost', 'run_restarted_free'];
+    for (const [key, source, where] of [
+      ...inView.map(k => [k, VIEW, 'the view'] as const),
+      ...inComposer.map(k => [k, NOTICE, 'the notice composer'] as const),
+    ]) {
       const line = I18N.split('\n').find(l => l.includes(`'workflow_library.${key}'`));
       expect(line, `workflow_library.${key} has to exist`).toBeDefined();
       expect(line!, `${key} needs German`).toMatch(/de: '[^']+'/);
       expect(line!, `${key} needs English`).toMatch(/en: '[^']+'/);
-      expect(VIEW, `${key} has to be reachable from the view`).toContain(`workflow_library.${key}`);
+      expect(source, `${key} has to be reachable from ${where}`).toContain(`workflow_library.${key}`);
     }
   });
 
-  it('a restart is DISCLOSED in both outcome branches, with the earlier cost', () => {
-    // The field the route sends only on a restart, and the sentence that makes a second
-    // paid run visible as one. Appended in the completed AND the failed branch — a restart
-    // whose new run also fails still spent the earlier money.
+  it('no sentence shown next to a cost may end in a dangling label', () => {
+    // The defect that produced "the earlier run already cost: ($0.1200)" about a run that
+    // cost nothing: a sentence ending in a colon, with the NEXT value concatenated after
+    // it. Checked on the strings themselves, in both languages, because the composition
+    // cannot know what follows it.
+    for (const key of ['run_done', 'run_failed', 'run_replayed', 'run_restarted_cost', 'run_restarted_free', 'run_already_running']) {
+      const line = I18N.split('\n').find(l => l.includes(`'workflow_library.${key}'`))!;
+      for (const lang of ['de', 'en']) {
+        const m = new RegExp(`${lang}: '((?:[^'\\\\]|\\\\.)*)'`).exec(line);
+        expect(m, `${key} needs a ${lang} string`).not.toBeNull();
+        expect(m![1]!, `${key} (${lang}) ends in a label pointing at whatever follows`)
+          .not.toMatch(/[:：]\s*$/);
+      }
+    }
+  });
+
+  it('the route sends the restart disclosure, and the composer owns the sentence', () => {
+    // The two halves that cannot be seen from one file. The BEHAVIOUR of the sentence —
+    // which form appears when, and that none of them promises a number it does not print —
+    // is driven in `run-notice.test.ts`, with the real strings.
     expect(ROUTE, 'the route has to send it').toMatch(/restartedFrom: restartedFrom\.runId/);
     expect(ROUTE).toMatch(/previousCostUsd: restartedFrom\.costUsd/);
-    expect(RUN_FN, 'the view branches on its PRESENCE, not on a zero')
-      .toMatch(/data\.restartedFrom !== undefined/);
-    expect(RUN_FN).toContain('workflow_library.run_restarted');
-    const done = RUN_FN.slice(RUN_FN.indexOf("data.status === 'completed'"));
-    expect(done.slice(0, 600), 'the completed branch shows it').toMatch(/\$\{restarted\}/);
-    expect(done, 'and so does the failed branch').toMatch(/run_failed'\)\}\$\{replayed\}\$\{restarted\}/);
+    expect(NOTICE, 'the composer branches on PRESENCE, not on a zero')
+      .toMatch(/data\.restartedFrom === undefined/);
+    expect(RUN_FN, 'and the view delegates the composition')
+      .toMatch(/composeRunNotice\(data,/);
   });
 
   it('the local sentence WINS over the server message for the codes it knows', () => {
     // The route always sends an `error`, so a `msg?.error ?? t(…)` fallback never fires and
     // a German reader got the English sentence. The translation has to be chosen by code,
     // with the server's text kept only for a code this build does not know.
-    expect(RUN_FN).toMatch(/run_outcome_unknown'\s*\n?\s*\?\s*t\('workflow_library\.run_outcome_unknown'\)/);
     expect(RUN_FN).toMatch(/run_claim_held'\s*\n?\s*\?\s*t\('workflow_library\.run_claim_held'\)/);
-    expect(RUN_FN, 'the server text stays as the fallback for an unknown code')
-      .toMatch(/msg\?\.error \?\? t\('workflow_library\.run_failed'\)/);
+    expect(RUN_FN).toContain("t('workflow_library.run_outcome_unknown')");
+    // ⚠ And the FALLBACK for an unknown 409 code is the cautious sentence, not "the run
+    // failed": a 409 means the route refused, and a mangled or newer 409 must not be
+    // reported as a failed run. One revision replaced that true sentence with a false one.
+    //
+    // Scoped to the 409 BRANCH, because `msg?.error ?? t('…run_failed')` is correct in the
+    // `!res.ok` branch below it — a first version of this line forbade the pattern anywhere
+    // in the function and so condemned the one place it belongs.
+    const branch409 = RUN_FN.slice(
+      RUN_FN.indexOf('if (res.status === 409)'),
+      RUN_FN.indexOf('if (!res.ok)'),
+    );
+    expect(branch409.length, 'the 409 branch has to be found at all').toBeGreaterThan(100);
+    // The CALL form, not the bare key: the branch's own comment explains why `run_failed`
+    // is not used there, and a substring check counted that prose as a use. A text
+    // instrument has to be told the difference between a call and a sentence about one.
+    expect(branch409, 'an unknown 409 must not be reported as a failure')
+      .not.toContain("t('workflow_library.run_failed')");
+    // Positive control on the slice: it really is the branch, so the absence above means
+    // something. (An empty or mis-sliced string would satisfy the negative assertion.)
+    expect(branch409).toContain("t('workflow_library.run_outcome_unknown')");
   });
 });

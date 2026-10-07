@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
+	import { composeRunNotice } from '../utils/run-notice.js';
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
@@ -311,11 +312,13 @@
 					// never fired and a German user read the English message. The server's text
 					// is kept for a code this build does not know.
 					notice = '';
-					error = msg?.code === 'run_outcome_unknown'
-						? t('workflow_library.run_outcome_unknown')
-						: msg?.code === 'run_claim_held'
-							? t('workflow_library.run_claim_held')
-							: (msg?.error ?? t('workflow_library.run_failed'));
+					// The fallback stays `run_outcome_unknown`, not `run_failed`: a 409 means the
+					// route REFUSED, and telling the owner their run failed would be false for
+					// every unknown code — including a 409 a proxy mangled. The previous
+					// version replaced a cautious true sentence with a confident wrong one.
+					error = msg?.code === 'run_claim_held'
+						? t('workflow_library.run_claim_held')
+						: t('workflow_library.run_outcome_unknown');
 				}
 				return;
 			}
@@ -330,7 +333,6 @@
 				notice = '';
 				return;
 			}
-			keepKey = false;
 			// A2: the run endpoint now returns cost + per-step failures, so the
 			// library shows WHICH step failed and the spend right where the run was
 			// triggered — not just a terminal status.
@@ -343,38 +345,23 @@
 				previousCostUsd?: number;
 				stepErrors?: Array<{ stepId: string; error?: string; costUsd: number }>;
 			};
-			const failedSteps = (data.stepErrors ?? []).filter((s) => s.error);
-			const cost =
-				typeof data.costUsd === 'number' && data.costUsd > 0
-					? ` ($${data.costUsd.toFixed(4)})`
-					: '';
-			const stepDetail = failedSteps.map((s) => `${s.stepId}: ${s.error}`).join('; ');
-			// The marker goes BEFORE the cost and carries the "earlier" sense, because the
-			// cost shown on a replay is the EARLIER run's and would otherwise read as a fresh
-			// charge. Appended in both outcome branches — a replayed FAILED run had no marker
-			// at all in the first version.
-			const replayed = data.idempotent === true ? ` ${t('workflow_library.run_replayed')}` : '';
-			// A RESTART is the opposite case: this run really ran, and an earlier attempt
-			// under the same key already cost something. Saying so is the whole point — a
-			// second paid run otherwise reads exactly like a first one.
-			const restarted =
-				data.restartedFrom !== undefined
-					? ` ${t('workflow_library.run_restarted')}${
-							typeof data.previousCostUsd === 'number' && data.previousCostUsd > 0
-								? ` ($${data.previousCostUsd.toFixed(4)})`
-								: ''
-						}`
-					: '';
-			if (data.status === 'completed') {
-				// The run finished successfully. Non-fatal step errors (on_failure:
-				// 'continue'/'notify') are appended as a caveat — they did NOT fail
-				// the run, so they belong in the success notice, not a red error box.
-				notice = `${t('workflow_library.run_done')}${replayed}${restarted}${cost}${stepDetail ? ` — ${stepDetail}` : ''}`;
+			// ⚠ HERE, and not before the parse. The attempt is over once its outcome is in
+			// hand; a 200 whose body never arrives is an answer the client did not receive,
+			// and clearing the key there would make the next click pay for a run that had
+			// already succeeded. Deleting this line reintroduces "never clear" — after which
+			// a successful run replays for ever and the workflow can never be run again, so
+			// it is witnessed in both directions.
+			keepKey = !attemptIsOver({ httpStatus: res.status });
+			// Composed in `run-notice.ts`, where every shape it can take is drivable. It went
+			// wrong twice as template literals here, both times in a sentence about money.
+			// `tf` where a string has a slot, `t` otherwise — one closure, so the module needs
+			// no knowledge of which keys carry placeholders.
+			const composed = composeRunNotice(data, (key, vars) => (vars === undefined ? t(key) : tf(key, vars)));
+			if (composed.kind === 'notice') {
+				notice = composed.text;
 				error = '';
 			} else {
-				const detail = stepDetail || (data.error ?? '');
-				const failed = `${t('workflow_library.run_failed')}${replayed}${restarted}`;
-				error = detail ? `${failed} — ${detail}` : failed;
+				error = composed.text;
 				notice = '';
 			}
 		} catch {

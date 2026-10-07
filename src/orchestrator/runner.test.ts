@@ -1947,6 +1947,18 @@ describe('the claim seam: a caller may mint the run id and pass hooks through', 
         .rejects.toThrow(/must be a UUID/);
     });
 
+    it('refuses BEFORE the stamp fires, so a rejected run never marks a claim', async () => {
+      // The ordering the comment at the check claims, and nothing drove it: moving the whole
+      // validation below `options.hooks?.onRunStart?.()` left every test green. Moved, a
+      // rejected run stamps its claim as having spent — after which the request's cleanup
+      // can no longer release it and the key is stuck reading "outcome unknown" for ever.
+      let stamped = 0;
+      const hooks: RunHooks = { onRunStart: () => { stamped += 1; } };
+      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: 'not-a-uuid', hooks }))
+        .rejects.toThrow(/must be a UUID/);
+      expect(stamped, 'the stamp must not have fired for a refused run').toBe(0);
+    });
+
     it('refuses an id that already names a run, and leaves that run untouched', async () => {
       // The damage this prevents: the start-INSERT hits `pipeline_runs`' primary key, is
       // swallowed as fire-and-forget, and the finalize UPDATE then rewrites the OTHER

@@ -75,12 +75,51 @@ describe('workflow run claim — the state space on a real history.db', () => {
     // stamped by one call). Every producer mints a fresh UUID, so this cannot happen today
     // — which is exactly why it needs to be the table's property rather than the single
     // writer's habit, and why a violation has to be a loud error.
+    //
+    // ⚠ This passes on a FRESH database either way, so it does not by itself prove the
+    // index is unique on a database that ran v55 before v56 existed — the migration's own
+    // comment carries that reasoning, and the next test is the one that drives the upgrade.
     const h = make();
     expect(h.claimWorkflowRun('wf-1', 'k-1', 'run-shared')).toBe(true);
     expect(() => h.claimWorkflowRun('wf-2', 'k-2', 'run-shared')).toThrow(/UNIQUE|constraint/i);
     // and the first claim is untouched by the refused insert
     expect(h.readWorkflowRunClaim('wf-1', 'k-1')).toEqual({ runId: 'run-shared', startedAt: null });
     expect(h.readWorkflowRunClaim('wf-2', 'k-2')).toBeNull();
+  });
+
+  it('an UPGRADED database gets the unique index too, and its duplicates are repaired', () => {
+    // The hole the first attempt left: it edited v55 in place, so a database that had
+    // already run v55 kept a non-unique index — `schema_version` reads 55, the migration
+    // never re-runs, and `CREATE UNIQUE INDEX IF NOT EXISTS` sees the existing name and
+    // does nothing. A fresh-database test cannot see that, so this one builds the old
+    // state by hand and reopens it with the current code.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-claim-upgrade-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    const before = new RunHistory(path);
+    // Put the database back into the shape v55 alone left: a non-unique index, two claims
+    // sharing a run id, and the version pinned so v56 is the only thing that can run.
+    before.getDb().exec('DROP INDEX IF EXISTS idx_workflow_run_claims_run');
+    before.getDb().exec('CREATE INDEX idx_workflow_run_claims_run ON workflow_run_claims(run_id)');
+    before.getDb().prepare('INSERT INTO workflow_run_claims (workflow_id, key, run_id) VALUES (?, ?, ?)').run('wf-1', 'k-1', 'run-shared');
+    before.getDb().prepare('INSERT INTO workflow_run_claims (workflow_id, key, run_id) VALUES (?, ?, ?)').run('wf-2', 'k-2', 'run-shared');
+    before.getDb().exec('DELETE FROM schema_version WHERE version > 55');
+    // Fixture guard: the damage really is present before the upgrade.
+    before.markWorkflowRunStarted('run-shared');
+    expect(before.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt, 'fixture guard').not.toBeNull();
+    expect(before.readWorkflowRunClaim('wf-2', 'k-2')?.startedAt, 'ONE stamp hit TWO claims').not.toBeNull();
+    before.close();
+
+    const after = new RunHistory(path);
+    histories.push(after);
+    const idx = (after.getDb().prepare('PRAGMA index_list(workflow_run_claims)').all() as Array<{ name: string; unique: number }>)
+      .find(i => i.name === 'idx_workflow_run_claims_run');
+    expect(idx?.unique, 'the upgrade has to make it unique').toBe(1);
+    // The duplicate is repaired, the earlier row kept.
+    expect(after.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
+    expect(after.readWorkflowRunClaim('wf-2', 'k-2')).toBeNull();
+    // And a new duplicate is now refused outright.
+    expect(() => after.claimWorkflowRun('wf-3', 'k-3', 'run-shared')).toThrow(/UNIQUE|constraint/i);
   });
 
   it('a different key on the same workflow is a different claim', () => {
@@ -299,19 +338,12 @@ describe('workflow run claim — the state space on a real history.db', () => {
     // `pipeline_runs` has `started_at` set and no run row, which the route reads as "it may
     // still be running": a sentence that is false about a run the reset destroyed.
     // No production caller today, so this is the witness that keeps it true anyway.
+    // ⚠ This test needed a stub table for one revision: `resetDatabase`'s list named
+    // `memory_embeddings`, dropped by v19, and `DELETE FROM` a missing table throws — so
+    // the method never reached any later entry and adding one was a line that could not
+    // run. The dead name is gone from the list, so the method works and the stub is not
+    // needed. Kept as a note because the next person to add a table will be reading this.
     const h = make();
-    // ⚠ FIXTURE COMPENSATING FOR A PRE-EXISTING DEFECT, and asserting it so it stays
-    // visible. `resetDatabase`'s list names `memory_embeddings`, which a fresh `history.db`
-    // does NOT have — measured: 14 of its 15 tables exist, and the method throws on that
-    // one before reaching any later entry. It has no production caller, which is why that
-    // went unnoticed. The assertion is what makes this stub removable: the day the list is
-    // corrected, this line fails and the stub goes with it.
-    expect(
-      h.getDb().prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").get(),
-      'if this table now exists, resetDatabase was fixed — drop the stub below',
-    ).toBeUndefined();
-    h.getDb().exec('CREATE TABLE memory_embeddings (id INTEGER PRIMARY KEY)');
-
     h.claimWorkflowRun('wf-1', 'spent', 'run-a');
     h.markWorkflowRunStarted('run-a');
     h.claimWorkflowRun('wf-1', 'unspent', 'run-b');

@@ -15,7 +15,7 @@ import type { LynoxHooks } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
-import { readDurableKnowledgeForDebug, decideHeldRunClaim } from './http-api.js';
+import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
@@ -7470,14 +7470,20 @@ describe('LynoxHTTPApi', () => {
           expect(res.status).toBe(200);
           expect(reads, 'the branch has to have been taken').toBeGreaterThan(0);
           expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
+          // ⚠ And the request RE-CLAIMED: asserting only "did not 409" let a mutant that
+          // ran while holding NO claim row survive — after which `markWorkflowRunStarted`
+          // updates nothing and two concurrent requests both run, which is the double paid
+          // run the whole feature exists to prevent. The row and its stamp are the property.
+          const row = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
+          expect(row, 'the retry has to have taken the claim').not.toBeNull();
+          expect(row!.startedAt, 'and the stamp has to have reached it').not.toBeNull();
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string };
+          expect(runtime.runId).toBe(row!.runId);
         });
       });
 
-      it('an `extra` field cannot overwrite the masked message on a refusal', async () => {
-        // `errorResponse`'s new 5th parameter is spread FIRST so that `error` and `code`
-        // win. Spread last it would be a bypass of the one place that masks and caps — in
-        // the function whose docblock gives that as its reason for existing. Read off a real
-        // 409: the body has to carry both the run id AND the route's own sentence.
+      it('a 409 carries the run id ALONGSIDE the route\'s own sentence', async () => {
+        // The shape, read off a real refusal rather than off the helper.
         seedClaim('k-1', 'run-a', { started: true, status: 'running' });
         await withClaimDb(async () => {
           const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
@@ -7558,6 +7564,92 @@ describe('LynoxHTTPApi', () => {
           expect(taken).toEqual([]);
           expect(claimHistory.getDb().prepare('SELECT COUNT(*) AS n FROM workflow_run_claims').get()).toEqual({ n: 0 });
         });
+      });
+    });
+
+    describe('the run route\'s statement ORDER, where a move is the whole defect', () => {
+      // Two orderings in this handler are load-bearing and neither is observable from a
+      // request, because the thing that would go wrong needs a failure that does not happen
+      // in a test: a rejected dynamic import. Both moved cleanly in a mutation round with
+      // 600 tests green, so they are pinned here on the source. Named as what it is: a
+      // check on the TEXT, which cannot see behaviour — but the alternative was nothing.
+      const ROUTE_SRC = readFileSync(
+        resolvePath(dirname(fileURLToPath(import.meta.url)), 'http-api.ts'), 'utf8',
+      );
+      const handler = ROUTE_SRC.slice(ROUTE_SRC.indexOf("'POST', '/api/workflows/:id/run'"));
+      const body = handler.slice(0, handler.indexOf("parseDynamicRoute('user', 'PATCH'"));
+
+      it('loads the runner module BEFORE taking the claim', () => {
+        // A rejected import between the claim and the `try` leaves an unstarted claim
+        // standing until the next boot sweep — and the view KEEPS its key on the 409 that
+        // state produces, so the owner clicks for ever on a run that never started.
+        const imp = body.indexOf("await import('../core/saved-workflow-runner.js')");
+        const claim = body.indexOf('history.claimWorkflowRun(');
+        expect(imp, 'the import has to be in this handler').toBeGreaterThan(-1);
+        expect(claim, 'and so does the claim').toBeGreaterThan(-1);
+        expect(imp, 'the import must come first').toBeLessThan(claim);
+      });
+
+      it('releases inside a `finally`, not after the call', () => {
+        // The release has to run on a throw out of the wrapper too. There is a behavioural
+        // witness for that above; this one says the construct is still the one that makes
+        // it reachable, since a plain sequence passes that witness for the resolved path.
+        //
+        // ⚠ By INDEX, not by a character distance. The first version allowed 900 characters
+        // between the two and failed the moment the comment between them grew — the same
+        // brittleness a sibling test in the web-ui package already paid for. A count is not
+        // a structure, and prose moves it.
+        const fin = body.indexOf('} finally {');
+        const rel = body.indexOf('releaseUnstartedWorkflowRunClaim');
+        expect(fin, 'the handler has to have a finally').toBeGreaterThan(-1);
+        expect(rel, 'and a release').toBeGreaterThan(-1);
+        expect(fin, 'the release has to come after the finally opens').toBeLessThan(rel);
+      });
+    });
+
+    describe('buildClientErrorBody — nothing in `extra` may replace the message', () => {
+      // ⚠ THREE defences in two revisions, and only the third holds. Spreading `extra`
+      // first protects `error`/`code`, but a spread order is something the next edit moves
+      // and no test observes — no caller passes an `extra.error`, so nothing fails. Typing
+      // `error?: never` protects them against an inline literal ONLY: TypeScript's
+      // excess-property check does not reach a variable, so a `Record<string, unknown>`
+      // holding `error`, or a spread of one, compiled cleanly. Measured across twelve call
+      // shapes. The keys are now REMOVED, which is the version a test can drive.
+      const KEY = `sk-ant-${'f'.repeat(60)}`;
+
+      it('drops an `error` arriving through a variable, not just an inline literal', () => {
+        const bag: Record<string, unknown> = { error: 'unmasked bypass', runId: 'run-a' };
+        const body = buildClientErrorBody('the real refusal', 'some_code', bag);
+        expect(body['error']).toBe('the real refusal');
+        expect(body['runId']).toBe('run-a');
+      });
+
+      it('drops it through a SPREAD of that variable too', () => {
+        const bag: Record<string, unknown> = { error: 'unmasked bypass' };
+        expect(buildClientErrorBody('the real refusal', undefined, { ...bag })['error'])
+          .toBe('the real refusal');
+      });
+
+      it('drops a `code` the caller tried to smuggle, keeping the real one', () => {
+        const bag: Record<string, unknown> = { code: 'not_the_real_code' };
+        expect(buildClientErrorBody('m', 'run_in_progress', bag)['code']).toBe('run_in_progress');
+      });
+
+      it('omits `code` entirely when there is none, rather than echoing extra\'s', () => {
+        const bag: Record<string, unknown> = { code: 'smuggled' };
+        expect('code' in buildClientErrorBody('m', undefined, bag)).toBe(false);
+      });
+
+      it('masks and caps the message, which is the reason this is one function', () => {
+        const body = buildClientErrorBody(`refused: ${KEY}`, 'c');
+        expect(JSON.stringify(body)).not.toContain(KEY);
+        expect(body['error']).toContain('refused');
+      });
+
+      it('passes every other extra field through untouched', () => {
+        const body = buildClientErrorBody('m', 'c', { runId: 'run-a', retryAfter: 5 });
+        expect(body['runId']).toBe('run-a');
+        expect(body['retryAfter']).toBe(5);
       });
     });
 

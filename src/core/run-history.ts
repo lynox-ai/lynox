@@ -1313,12 +1313,8 @@ const MIGRATIONS: string[] = [
   // (This said "the index" until a refuter read it against the line four below, which
   // creates an index ON `run_id`. Two different things; only the KEY is the refusal.)
   //
-  // That secondary index is UNIQUE, and not merely for lookup speed: `markWorkflowRunStarted`
-  // is keyed on `run_id` alone, so with a non-unique index one stamp could set `started_at`
-  // on two claims at once — measured on a probe, two rows stamped by one call. Every
-  // producer mints a fresh UUID, so a collision cannot happen today; UNIQUE turns "one
-  // claim per run id" from a convention of the single writer into a property of the table,
-  // and a violation becomes a loud INSERT error instead of a silent double stamp.
+  // The secondary index on `run_id` is created here non-unique and made UNIQUE by v56 —
+  // see there for why, and for why it is not simply edited into this statement.
   //
   // `started_at` is the DISCRIMINATOR, and it is a column rather than a return value
   // because a process that dies between the run's start and its answer leaves no return
@@ -1329,13 +1325,17 @@ const MIGRATIONS: string[] = [
   //              run's own insert was swallowed) the claim is NEVER silently released.
   //              A restart needs a row naming a definitive end; a missing row does not.
   //
-  // ⚠ A claim with `started_at` set is PERMANENT: nothing deletes it. Both deletes are
-  // gated on `started_at IS NULL`, and there is no other writer. That is one row per keyed
-  // run, forever, holding the client's key and a run id — and it is what makes the replay
-  // of a completed run possible at all. Whether it should instead expire is an open
-  // decision in the PRD (§3.2, point 6), not an oversight. `created_at` exists so that a
-  // bounded sweep can be written without a migration; until that decision is taken,
-  // nothing reads it, and that is deliberate rather than forgotten.
+  // ⚠ A claim with `started_at` set is not removed by any path that READS it: both of the
+  // targeted deletes are gated on `started_at IS NULL`. So a completed run's claim stays
+  // and its replay keeps working. Whether it should instead expire is an open decision in
+  // the PRD (§3.2, point 6), not an oversight; `created_at` exists so a bounded sweep can
+  // be written without a migration, and until that decision is taken nothing reads it.
+  //
+  // ⚠ "PERMANENT: nothing deletes it" is what this said, and it was wrong twice over, both
+  // times by this same change: `resetDatabase` deletes the whole table ungated, and
+  // `restartWorkflowRunClaim` sets `started_at` back to NULL — after which the gated
+  // deletes DO apply, so a restarted claim whose new run never starts is released
+  // normally. Permanence is a property of a claim that stays started, not of the row.
   //
   // No FK to `pipeline_runs`: the claim is written BEFORE that row exists, and it has to
   // outlive a row whose insert was lost. The soft reference is the point.
@@ -1348,7 +1348,33 @@ const MIGRATIONS: string[] = [
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      PRIMARY KEY (workflow_id, key)
    );
-   CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
+   CREATE INDEX IF NOT EXISTS idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
+
+  // v56: make that index UNIQUE, so "one claim per run id" is a property of the table.
+  //
+  // `markWorkflowRunStarted` is keyed on `run_id` ALONE, so with a non-unique index one
+  // stamp sets `started_at` on every claim carrying that id — measured on a probe, two rows
+  // stamped by one call. Every producer mints a fresh UUID, so a collision cannot arise
+  // today; UNIQUE turns a convention of the single writer into something the database
+  // enforces, and a violation becomes a loud INSERT error instead of a silent double stamp.
+  //
+  // ⚠ WHY A NEW MIGRATION AND NOT AN EDIT TO v55. The first attempt changed v55's statement
+  // in place. On a database that had already run v55 that is a no-op in both directions:
+  // `schema_version` still reads 55 so the migration never re-runs, and
+  // `CREATE UNIQUE INDEX IF NOT EXISTS` sees the existing NAME and does nothing — leaving
+  // the index non-unique while the comment claimed uniqueness was established. An applied
+  // migration is history; the change belongs in a new one.
+  //
+  // The DELETE repairs a database that reached the non-unique state: rows sharing a run id
+  // are a corruption (one stamp would mark them all), so keeping the earliest and dropping
+  // the rest is a repair, not a loss — and without it the index creation would fail and
+  // take the engine's boot with it. It is a no-op on every database that never had a
+  // duplicate, which is every database that only ever ran this code.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   DELETE FROM workflow_run_claims
+     WHERE rowid NOT IN (SELECT MIN(rowid) FROM workflow_run_claims GROUP BY run_id);
+   DROP INDEX IF EXISTS idx_workflow_run_claims_run;
+   CREATE UNIQUE INDEX idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
 ];
 
 export class RunHistory {
@@ -3286,7 +3312,7 @@ export class RunHistory {
    */
   resetDatabase(): void {
     const tables = [
-      'run_tool_calls', 'run_spawns', 'prompt_snapshots', 'memory_embeddings',
+      'run_tool_calls', 'run_spawns', 'prompt_snapshots',
       'pre_approval_sets', 'pre_approval_events', 'pipeline_runs', 'pipeline_step_results',
       'advisor_suggestions', 'tasks', 'security_events', 'processes', 'wire_snapshots', 'runs',
       // A claim left behind by a wipe that took `pipeline_runs` with it has `started_at`
@@ -3295,6 +3321,14 @@ export class RunHistory {
       // hand-maintained kind every new table has to remember to join, and v55 did not.
       'workflow_run_claims',
     ];
+    // ⚠ `memory_embeddings` is NOT in that list, and removing it is a pre-existing repair
+    // this change had to make to mean anything: v19 drops that table ("replaced by
+    // Knowledge Graph"), so it has not existed on any database since. It stood at position
+    // four, and `DELETE FROM` a missing table throws — so this method threw before reaching
+    // anything after it, on every real `history.db` (measured: 14 of the 15 names existed).
+    // Adding a 15th entry to a list that never gets that far would have been a line that
+    // cannot run, so the dead entry goes. No production caller invokes this, which is why
+    // the method could stay broken unnoticed since v19.
     this.db.pragma('foreign_keys = OFF');
     for (const table of tables) {
       this.db.prepare(`DELETE FROM "${table}"`).run();

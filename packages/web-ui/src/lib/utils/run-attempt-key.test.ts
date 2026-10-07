@@ -107,9 +107,50 @@ describe('the workflow run attempt key', () => {
       attemptKey('wf-1', { client: 'Acme' });
       attemptKey('wf-1', { client: 'Globex' });
       const other = attemptKey('wf-2', { client: 'Acme' });
+      expect(m.size, 'four distinct attempts').toBe(4);
       clearAllAttemptKeys('wf-1');
-      expect([...m.keys()]).toEqual(['lynox:workflow-run-key:wf-2:client=Acme']);
+      // One entry left, and it belongs to the other workflow. Asserted on the PREFIX
+      // rather than on the whole name: the suffix is a digest, and pinning its value here
+      // would make every change to the fingerprint look like a behaviour change.
+      expect([...m.keys()].length).toBe(1);
+      expect([...m.keys()][0]!.startsWith('lynox:workflow-run-key:wf-2')).toBe(true);
       expect(attemptKey('wf-2', { client: 'Acme' })).toBe(other);
+    });
+
+    it('keeps the user\'s typed VALUES out of the storage key', () => {
+      // A regression the fingerprint introduced and this closes: the first version put
+      // `client=Acme AG\0iban=CH93 …` verbatim into the key's NAME, where a reader of
+      // localStorage finds it and where nothing bounds its length. Before the fingerprint
+      // existed, storage held one UUID per workflow.
+      const m = store();
+      attemptKey('wf-1', { client: 'Nordberg AG', iban: 'CH93 0076 2011 6238 5295 7' });
+      const name = [...m.keys()][0]!;
+      expect(name).not.toContain('Nordberg');
+      expect(name).not.toContain('CH93');
+      expect(name).not.toContain('iban');
+      // and it is bounded, whatever the values were
+      expect(name.length).toBeLessThan(64);
+    });
+
+    it('a value cannot forge a parameter boundary', () => {
+      // The collision the first version had: `{a: 'x\0b=y'}` and `{a: 'x', b: 'y'}` joined
+      // to the same string, so one replayed the other's run — the defect the fingerprint
+      // was added to prevent, reintroduced by the fingerprint itself.
+      store();
+      const forged = attemptKey('wf-1', { a: 'x\u0000b=y' });
+      const honest = attemptKey('wf-1', { a: 'x', b: 'y' });
+      expect(forged).not.toBe(honest);
+      // and the `name=value` form is forgeable the same way
+      expect(attemptKey('wf-1', { 'a=b': 'c' })).not.toBe(attemptKey('wf-1', { a: 'b=c' }));
+    });
+
+    it('the same text typed on two keyboards is ONE attempt', () => {
+      // NFC vs NFD: `Behörde` composed and decomposed are different strings and were two
+      // keys, so retyping an umlaut on another OS paid for a second run.
+      store();
+      const composed = attemptKey('wf-1', { client: 'Beh\u00f6rde' });
+      const decomposed = attemptKey('wf-1', { client: 'Beho\u0308rde' });
+      expect(decomposed).toBe(composed);
     });
 
     it('does NOT take the keys of a workflow whose id merely starts the same', () => {
@@ -147,16 +188,25 @@ describe('the workflow run attempt key', () => {
       expect(attemptIsOver({ httpStatus: 409 })).toBe(true);
     });
 
-    it('ends the attempt on every answer the ROUTE produces itself', () => {
-      for (const httpStatus of [200, 400, 403, 404]) {
-        expect(attemptIsOver({ httpStatus }), `${httpStatus} is the route's own answer`).toBe(true);
+    it('ends the attempt on the answers that cannot hide a paid run', () => {
+      // 200: the run happened and its outcome is known. 403: the consent gate, before any
+      // claim. 404: no such workflow, likewise.
+      for (const httpStatus of [200, 403, 404]) {
+        expect(attemptIsOver({ httpStatus }), `${httpStatus} cannot carry a paid run`).toBe(true);
       }
     });
 
+    it('KEEPS the key on a 400, because a 400 CAN carry a paid run', () => {
+      // ⚠ This asserted the opposite one revision ago, with the reason "refused before any
+      // claim could be taken" — and the route's own test suite refutes it: a run that threw
+      // AFTER it started answers 400 with its claim stamped as having spent. Discarding the
+      // key there is what lets the next click pay for the whole workflow again.
+      expect(attemptIsOver({ httpStatus: 400 })).toBe(false);
+    });
+
     it('KEEPS the key on an answer the route did not produce', () => {
-      // The finding this closes: a 502/503/504 from a proxy, or a 429, returns `!res.ok`
-      // while the engine may still be spending. Discarding the key there lets the next
-      // click pay for the whole workflow a second time.
+      // A 502/503/504 from a proxy, or a 429, returns `!res.ok` while the engine may still
+      // be spending. Discarding the key there lets the next click pay a second time.
       for (const httpStatus of [429, 500, 502, 503, 504, 0, 418]) {
         expect(attemptIsOver({ httpStatus }), `${httpStatus} is not the route's decision`).toBe(false);
       }

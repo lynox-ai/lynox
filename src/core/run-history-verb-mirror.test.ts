@@ -803,7 +803,8 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // v50 wire_snapshots extended-debug-capture, v51 prompt frame/value segments,
     // v52 prompt origin, v53 pending_prompts.trigger_id — durable wait state,
     // v54 run_tool_calls connection stamp — source connection,
-    // v55 workflow_run_claims — the run claim for POST /api/workflows/:id/run):
+    // v55 workflow_run_claims — the run claim for POST /api/workflows/:id/run,
+    // v56 that claim's run_id index made UNIQUE):
     //
     // ⚠ This assertion is the one thing in the repo that makes a new migration announce
     // itself, and it does so by failing in a file whose NAME is about the verb mirror —
@@ -811,7 +812,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // ran six other test files and found this only through a review. The roster above is
     // the reason to keep it that way: it is a list of what the schema IS, maintained
     // because the number beside it refuses to be wrong.
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(55);
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(56);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });
