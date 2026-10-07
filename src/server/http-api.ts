@@ -125,6 +125,35 @@ interface ProviderStatus {
 const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
 
 /** Reject out-of-range port numbers before they reach the socket layer. */
+/**
+ * Withdraw a pending prompt when the run that asked it is aborted (`PromptMeta.signal`:
+ * a Stop, or a sub-agent past its spawn time limit). Expiring the row settles the
+ * prompt's wait and frees the session's single pending slot; it also makes an
+ * abandoned confirmation unanswerable, so an "Allow" clicked after the stop cannot run
+ * the action. `expirePrompt` and the answer are each one `UPDATE … WHERE status =
+ * 'pending'`, so exactly one of them wins: withdrawn means never executed, answered
+ * means the tool goes on (and the run said "may still complete").
+ *
+ * Fenced: this runs in an abort listener, where a throw (SQLITE_BUSY, a closed db)
+ * would be an uncaught exception.
+ */
+export function withdrawPromptOnAbort(
+  store: { expirePrompt(id: string): boolean },
+  promptId: string,
+  signal: AbortSignal | undefined,
+): () => void {
+  if (!signal) return () => undefined;
+  const withdraw = (): void => {
+    try { store.expirePrompt(promptId); } catch { /* the row stays pending until its TTL — no worse than before */ }
+  };
+  if (signal.aborted) { withdraw(); return () => undefined; }
+  signal.addEventListener('abort', withdraw, { once: true });
+  // Called once the wait settles, so a run that asks many questions does not pile up
+  // listeners on one signal. A late abort would be a no-op anyway (the row is no
+  // longer pending).
+  return () => { signal.removeEventListener('abort', withdraw); };
+}
+
 function isValidMailPort(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= 65535;
 }
@@ -3166,8 +3195,10 @@ export class LynoxHTTPApi {
         const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments, origin);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
-        // Best-effort SSE notification (client may not be connected).
-        if (!aborted && !res.writableEnded) {
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
+        // Best-effort SSE notification (client may not be connected). A question
+        // withdrawn at birth (its run already stopped) is never announced.
+        if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
           const data = JSON.stringify({
             promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS,
             // Omitted when there is nothing to distinguish (an all-frame
@@ -3183,6 +3214,7 @@ export class LynoxHTTPApi {
           res.write(`event: prompt\ndata: ${data}\n\n`);
         }
         const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+        releaseWithdraw();
         hasActivePendingPrompt = false;
         resumeWallClock(); // human answered/dismissed — resume the compute budget
         if (outcome.status === 'answered') return outcome.row.answer ?? '__dismissed__';
@@ -3201,9 +3233,10 @@ export class LynoxHTTPApi {
         session.promptTabs = async (questions, meta?: PromptMeta): Promise<string[]> => {
           if (!promptStore) return [];
           const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta));
+          const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
           hasActivePendingPrompt = true;
           pauseWallClock(); // parked on a human — don't spend the compute budget
-          if (!aborted && !res.writableEnded) {
+          if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
             const data = JSON.stringify({
               promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
               ...originWireFields(meta),
@@ -3211,6 +3244,7 @@ export class LynoxHTTPApi {
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
           const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
+          releaseWithdraw();
           hasActivePendingPrompt = false;
           resumeWallClock(); // human answered/dismissed — resume the compute budget
           if (outcome.status === 'answered' && outcome.row.answer) {
@@ -3269,9 +3303,10 @@ export class LynoxHTTPApi {
         }
 
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta));
+        const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
-        if (!aborted && !res.writableEnded) {
+        if (!aborted && !res.writableEnded && meta?.signal?.aborted !== true) {
           const data = JSON.stringify({
             promptId, name, prompt, key_type: keyType,
             ...originWireFields(meta),
@@ -3279,6 +3314,7 @@ export class LynoxHTTPApi {
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
+        releaseWithdraw();
         hasActivePendingPrompt = false;
         resumeWallClock(); // human answered/dismissed — resume the compute budget
         // answer_error wins over answer_saved when set — see SecretOutcome contract

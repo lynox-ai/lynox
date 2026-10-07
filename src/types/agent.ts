@@ -76,6 +76,13 @@ export interface PromptMeta extends PromptOrigin {
    *  Send) instead of single-select auto-send. The answer comes back as a
    *  JSON-encoded string[] of the chosen labels. Default false. */
   multiSelect?: boolean | undefined;
+  /**
+   * The asking run's abort signal. When it fires (the run was aborted — e.g. a sub-agent
+   * hit the spawn time limit), the prompt implementation withdraws the question
+   * (`PromptStore.expirePrompt`) so the row frees the session's slot instead of staying
+   * pending for its TTL. Runtime only: no origin/wire field is read from it.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -330,6 +337,8 @@ export interface IAgent {
   // assignable here.
   onStream:        EmittingStreamHandler | null;
   promptUser?: PromptUserFn | undefined;
+  /** The current run's abort signal, `undefined` between runs (`Agent.runSignal`). */
+  readonly runSignal?: AbortSignal | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
   /** Raise an in-chat `connect_mail` consent prompt so the user enters the
