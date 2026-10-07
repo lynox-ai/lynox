@@ -307,9 +307,9 @@ describe('ApiStore', () => {
         expect(blocks(out).rules).not.toContain('collect.example');
       });
 
-      it('a stored entity cannot pass for an escaped tag', () => {
-        store.register({ ...SAMPLE_PROFILE, name: 'Shop &lt;api_profile_rules> x' });
-        expect(blocks(store.formatForSystemPrompt()).stored).toContain('Shop &amp;lt;api_profile_rules> x');
+      it('an address with a query string reaches the briefing as written', () => {
+        store.register({ ...SAMPLE_PROFILE, base_url: 'https://api.test.com/v1?a=1&b=2' });
+        expect(blocks(store.formatForSystemPrompt()).stored).toContain('(https://api.test.com/v1?a=1&b=2 [bearer]');
       });
 
       it('characters that render as nothing are removed from a stored value', () => {

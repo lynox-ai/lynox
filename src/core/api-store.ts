@@ -50,14 +50,18 @@ const BRIEFING_AUTH_TYPES: ReadonlySet<string> = new Set(['none', 'basic', 'bear
  * A stored value as one inert line of the briefing.
  *  - Every line or paragraph separator and control character becomes a space, so the
  *    value cannot begin a line of its own.
- *  - Characters that render as nothing are removed: Unicode format characters (`Cf`) and
- *    default-ignorable code points, by PROPERTY rather than by list, for the reason
- *    `data-boundary.ts` gives at `FORMAT_CHAR` (each list missed the next character). That
- *    takes the zero-width joiner too, so a joined emoji in a name prints as its parts — a
- *    cosmetic loss in briefing text, accepted.
- *  - `&` then `<` are escaped, so the value cannot open or close any tag — not the fence it
- *    sits in, and not the engine's `<api_profile_rules>` block, whose name is fixed and
- *    public — and a stored `&lt;` cannot pass for an escaped `<`.
+ *  - Format characters (`Cf`) and default-ignorable code points are removed, by PROPERTY
+ *    rather than by list, for the reason `data-boundary.ts` gives at `FORMAT_CHAR` (each
+ *    list missed the next character). Most of them render as nothing; the price is that a
+ *    few that matter in real text go too: the zero-width joiner and non-joiner (a joined
+ *    emoji prints as its parts, Persian spelling loses its joins), variation selectors
+ *    (an ideographic variant falls back to the default glyph), Hangul fillers, and some
+ *    visible Arabic and Syriac number marks. This is briefing text, not the stored value,
+ *    so the loss is accepted.
+ *  - `<` is escaped, so the value cannot open or close any tag — not the fence it sits in,
+ *    and not the engine's `<api_profile_rules>` block, whose name is fixed and public.
+ *    `&` is left alone on purpose: an address with a query string (`?a=1&b=2`) must reach
+ *    the model as written, and an `&` cannot start a tag.
  * Not a string (a profile from a file is not type-checked) prints as a marker.
  */
 function oneLineInBriefing(value: unknown): string {
@@ -65,7 +69,6 @@ function oneLineInBriefing(value: unknown): string {
   return value
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
     .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '')
-    .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;');
 }
 
@@ -1262,9 +1265,10 @@ export class ApiStore {
    * Two blocks, split by who wrote the text. `<api_profiles>` holds what the profiles
    * STORE — name, description, address — and nothing else; a profile can come from a file
    * or from an earlier agent, so its preamble says what the text is. Each value goes through
-   * `oneLineInBriefing`: it cannot start a line of its own, carry characters that render
-   * as nothing, or open or close a tag. A docs-page bootstrap keeps its description wrapped as untrusted data, as `view`
-   * does; that wrap spans lines, which is why the preamble says "entry", not "line".
+   * `oneLineInBriefing`: it cannot start a line of its own, carry format characters, or
+   * open or close a tag. A docs-page bootstrap keeps its description wrapped as untrusted
+   * data, as `view` does; that wrap spans lines, which is why the preamble says "entry",
+   * not "line".
    * `<api_profile_rules>` holds the engine's own guidance about maintaining profiles, so a
    * stored value cannot append a sentence that reads as part of it. Only engine-derived
    * values sit outside the stored text: the admitted id, a known auth type, and counts.
