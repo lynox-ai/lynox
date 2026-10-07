@@ -60,15 +60,16 @@ export const PUTS_WORK_OFF = [
   /\bout of scope (here|for this (change|PR|pull request))\b/i,
   /\bdeferred (until|to (a|the) (later|next|follow)|for (a )?later)/i,
   /\btracked separately\b/i,
-  // A follow-up as WORK put off: what something IS (`is a follow-up`, `as a follow-up`),
-  // or the name of a later piece of work. A bare `a follow-up` is the product's own noun
+  // A follow-up as WORK put off: what something IS or is left for (`is a follow-up`,
+  // `in a follow-up`, `needs a follow-up`), the name of a later piece of work, or one
+  // called deferred. A bare `a follow-up` is the product's own noun
   // (a follow-up pill, reminder, question) far more often than a deferral, so it is not.
-  /\b(is|are|was|be|as|remains?)\s+a\s+follow-?up\b|\ba\s+follow-?up\s+(change|PR|pull request|piece|fix|hardening|commit)\b/i,
+  /\b(is|are|was|be|as|remains?|in|for|needs)\s+a\s+follow-?up\b|\ba\s+follow-?up\s+(change|PR|pull request|piece|fix|hardening|commit)\b|\bdeferred\s+follow-?up\b|\bfollow-?up\s+is\s+deferred\b/i,
   /\b(its|their) own (PR|pull request|change|commit|piece)\b/i,
   /\b(change|PR|pull request|piece) of (its|their) own\b/i,
   /\bknown (gap|hole)s?\b/i,
   // The marker, not the product's own TODO tasks (`a TODO (TaskRecord)`, `USER-TODO`).
-  /\bTODO:/,
+  /\bTODO(\([^)]*\))?:/,
   /\b(findings?|gaps?|holes?|defects?)\b[^.]{0,30}\b(remains?|stays?|is|are|left|still) open\b/i,
   /\b((for|in|until) a later (change|PR|pull request|piece|release)|left for (a )?later)\b/i,
   /\bnot (addressed|handled|fixed|covered|touched|built|solved) here\b/i,

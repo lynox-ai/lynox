@@ -66,6 +66,13 @@ describe('what it warns about', () => {
       '// provenance is a follow-up (it needs a mapping)',
       '*     it is caught by the generic path and measured as a follow-up.',
       '// a follow-up hardening — not in this scope.',
+      '// will be done in a follow-up',
+      '// leaving it for a follow-up',
+      '// this needs a follow-up',
+      "en: 'UI toggle in a follow-up release.'",
+      '* The residual gap is a deferred follow-up.',
+      '// that follow-up is deferred.',
+      '// TODO(owner): wire this later',
     ]) {
       expect(kindOf(line), line).toBe('marks work as put off');
     }
