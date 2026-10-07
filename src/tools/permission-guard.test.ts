@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments } from './permission-guard.js';
+import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments, withoutLeadingOptions } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2278,6 +2278,75 @@ describe('isDangerous', () => {
       }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('XML system tag injection');
+    });
+  });
+
+  describe('a subcommand behind global options is still the subcommand', () => {
+    // The rules name a command and its subcommand side by side; global options in between
+    // (`git -C dir push`, `kubectl -n ns delete`) must not hide the pair from them.
+    const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
+    const ask = (command: string) => isDangerous('bash', { command });
+
+    it.each([
+      ['git -C . push origin main', 'git push'],
+      ['git -c user.name=x commit -m msg', 'git commit'],
+      ['git --no-pager -C /repo -c core.editor=true push', 'git push'],
+      ['git --git-dir=/r/.git --work-tree=/r commit -m msg', 'git commit'],
+      ['env GIT_DIR=/r git -C /r push', 'git push'],
+      ['kubectl -n prod --context live delete pod web-1', 'kubectl mutation'],
+      ['helm --namespace prod --kube-context live uninstall web', 'helm mutation'],
+      ['terraform -chdir=infra apply -auto-approve', 'infrastructure change'],
+      ['docker -H tcp://build:2375 push registry/app:1', 'docker push'],
+      ['python3 -u -m http.server 8000', 'local HTTP server'],
+    ])('blocks %s in autonomous mode', (command, label) => {
+      const result = auto(command);
+      expect(result).toContain(label);
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it.each([
+      ['git -C . push', 'git push'],
+      ['git --no-pager -c a=b commit -m msg', 'git commit'],
+      ['node --input-type=module -e "console.log(1)"', 'node code execution'],
+    ])('still asks for %s in interactive mode', (command, label) => {
+      expect(ask(command)).toContain(label);
+    });
+
+    it.each([
+      'git -C . status',
+      'git -C /repo log --oneline --grep push',
+      'git log --grep push',
+      'git -c core.pager=cat diff --stat',
+      'kubectl -n prod get pods',
+      'helm --namespace prod list',
+      'terraform -chdir=infra plan',
+      'docker -H tcp://build:2375 ps',
+      'python3 -u -m pytest -q',
+      'set -e',
+      'set -euo pipefail',
+      'set -e x | head -3',
+      'git -P|grep -c commit',
+      'echo -n "first\nsecond > out"',
+      'grep -e git -c commit notes.txt',
+      'echo git - commit',
+    ])('leaves %s free in autonomous mode', (command) => {
+      expect(auto(command)).toBeNull();
+    });
+
+    it('drops the options for a CLI the rules have never heard of', () => {
+      // No tool is listed in the mechanism, so an unknown CLI's subcommand surfaces the same way.
+      expect(withoutLeadingOptions('frobctl --region eu-1 -v --dry-run=false deploy now')).toContain('frobctl deploy now');
+    });
+
+    it('keeps every variant on its own line', () => {
+      expect(withoutLeadingOptions('echo -n first\nsecond > out')).toEqual(['echo first']);
+    });
+
+    it('stays fast on a long run of options', () => {
+      const cmd = `git ${'-c a=b '.repeat(150_000)}status`;
+      const started = performance.now();
+      expect(isDangerous('bash', { command: cmd }, 'autonomous')).toBeNull();
+      expect(performance.now() - started).toBeLessThan(10_000);
     });
   });
 
