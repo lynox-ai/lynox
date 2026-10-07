@@ -1,7 +1,7 @@
 import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { t } from '../i18n.svelte.js';
-import { dropPersistedThread } from './chat.svelte.js';
+import { dropPersistedThread, forgetDroppedThread } from './chat.svelte.js';
 import { parseActiveRuns, type ActiveRunStatus } from '../utils/active-runs.js';
 
 export interface Thread {
@@ -116,6 +116,7 @@ export async function unarchiveThread(id: string): Promise<void> {
 		addToast(t('threads.error_unarchive'), 'error');
 		return;
 	}
+	forgetDroppedThread(id);
 	await loadThreads();
 }
 
