@@ -495,10 +495,24 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // leaves the instance only once it is confirmed in the chat.
   if (isMailProviderTarget(obj.url)) return false;
   if (contract.origin === 'reviewed' && !isReviewableUrl(parsed, obj.url)) return false;
+  if (contract.origin === 'reviewed' && carriesTargetOverride((input as { headers?: unknown }).headers)) return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!_matchesAnyGlob(host, contract.hostPatterns)) return false;
   if (!_matchesAnyGlob(parsed.pathname, contract.pathPatterns)) return false;
   return true;
+}
+
+/**
+ * Request headers that re-target a call past the tuple a person was shown: a caller-set
+ * `Host` routes the request to another virtual host on the same address (TLS and the pin
+ * still follow the URL), and the method-override headers make a server that honours them
+ * run another verb — DELETE included — under a granted POST.
+ */
+const TARGET_OVERRIDE_HEADERS = new Set(['host', 'x-http-method-override', 'x-http-method', 'x-method-override']);
+
+function carriesTargetOverride(headers: unknown): boolean {
+  if (headers === null || typeof headers !== 'object') return false;
+  return Object.keys(headers).some((name) => TARGET_OVERRIDE_HEADERS.has(name.trim().toLowerCase()));
 }
 
 /**

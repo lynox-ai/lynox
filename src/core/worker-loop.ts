@@ -1682,7 +1682,9 @@ export class WorkerLoop {
     const grantReport = grantLines.length > 0 ? `\n${grantLines.map((l) => `• ${l}`).join('\n')}` : '';
     const success = result.status === 'completed';
     if (success) {
-      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})${grantReport}`, (result.writeNotes ?? []).length === 0);
+      // Still a success: the run completed. Marking it failed would retry the whole run
+      // (repeating its other effects) and flip the trigger's status, on every instance.
+      this.recordAndNotify(task, `Pipeline completed (run ${result.runId ?? 'unknown'})${grantReport}`, true);
       return;
     }
 

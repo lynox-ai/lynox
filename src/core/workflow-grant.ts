@@ -10,8 +10,10 @@ import { buildReviewedContract, validateContractAgainstSteps } from '../orchestr
  * The feature that lets a person grant a saved workflow a `reviewed` contract. Off by
  * default: until the remaining mail-API question is decided, no product path issues such
  * a grant. It closes BOTH requests of the dialog — the preview and the acceptance in the
- * scheduling route — because the acceptance is where the contract is written, and without
- * a vault key its checksum is a plain SHA-256 any signed-in caller could compute.
+ * scheduling route — because the acceptance is where the contract is written, and anyone
+ * who can call the preview gets the checksum back from it: closing only the preview would
+ * leave the acceptance open to the same caller. The checksum binds what was shown; it
+ * says nothing about WHO accepted, and no hash key changes that.
  */
 export function workflowGrantEnabled(): boolean {
   // The literal, not a constant: the env-ABI drift test reads this call site.
@@ -36,20 +38,30 @@ export interface GrantChecksumInput {
 }
 
 /**
+ * A value as the database holds it, in canonical JSON. The acceptance may hash an
+ * in-memory workflow (the pipeline cache) whose steps carry keys set to `undefined`; the
+ * run hashes the blob read back, where `JSON.stringify` dropped them. Hashing the stored
+ * form on both sides keeps the two computations over the same bytes.
+ */
+function storedForm(value: unknown): string {
+  return canonicalJson(JSON.parse(JSON.stringify(value ?? null)) as unknown);
+}
+
+/**
  * The digest a grant's stamp carries, over contract, steps, mode, parameter list, bound
  * values, cron and the after-untrusted permission. Any path that changes one of them
  * without a new acceptance — known or not, a tool, a migration, a raw write — makes the
  * stamp stop matching, which is what lets the run check stop depending on a list of
- * writers. Canonical JSON, so key order in the stored blob does not matter.
+ * writers. Over the stored form, so key order and keys holding `undefined` do not matter.
  */
 export function grantChecksum(hasher: GrantHasher, input: GrantChecksumInput): { checksum: string; binding: 'keyed' | 'unkeyed' } {
   function* parts(): Generator<string> {
     yield 'workflow-grant-v1';
-    yield canonicalJson(input.contract);
-    yield canonicalJson(input.steps);
+    yield storedForm(input.contract);
+    yield storedForm(input.steps);
     yield input.mode;
-    yield canonicalJson(input.parameters);
-    yield canonicalJson(input.boundParams);
+    yield storedForm(input.parameters);
+    yield storedForm(input.boundParams);
     yield input.cron;
     yield input.afterUntrusted ? 'after-untrusted' : 'clean-only';
   }
@@ -69,10 +81,18 @@ export type GrantRunOrigin =
   /** A person pressed Run in the library, over the authenticated route. */
   | { kind: 'library' };
 
-/** The contract a run gets, or why it gets none (`null`: there was nothing to withhold). */
+/**
+ * The contract a run gets, with the values it must run with — the schedule's, as the
+ * person accepted them — or why it gets none (`null`: there was nothing to withhold).
+ */
 export type GrantDecision =
-  | { contract: CapabilityContract; note: null }
+  | { contract: CapabilityContract; note: null; boundParams: Record<string, unknown> }
   | { contract: undefined; note: string | null };
+
+/** Whether a run's bound values are exactly the ones a grant was accepted with. */
+export function sameBoundValues(a: Readonly<Record<string, unknown>>, b: Readonly<Record<string, unknown>>): boolean {
+  return storedForm(a) === storedForm(b);
+}
 
 function parseParams(json: string | null): Record<string, unknown> | null {
   if (json === null || json === '') return {};
@@ -130,7 +150,7 @@ export function decideRunGrant(
   if (checksum !== stamp.checksum) {
     return withheld('the workflow, its values or its schedule changed after the grant was accepted. Schedule it again from the library to grant it.');
   }
-  return { contract: withAfterUntrusted(contract, stamp.afterUntrusted), note: null };
+  return { contract: withAfterUntrusted(contract, stamp.afterUntrusted), note: null, boundParams };
 }
 
 /** The grant dialog's request, as it arrives — both at the preview and at the acceptance. */
@@ -198,10 +218,14 @@ export function prepareWorkflowGrant(planned: PlannedPipeline, req: WorkflowGran
   return { ok: true, contract: built.contract, boundParams: bound.params, afterUntrusted, checksum, binding, tuples };
 }
 
-/** A name typed into the dialog, as stored: trimmed, control characters out, capped. */
+/** A name typed into the dialog, as stored: trimmed, control, line-separator, bidi and
+ *  zero-width characters out (a displayed name must read as what it is), capped. */
 export function grantName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
-  const cleaned = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const cleaned = raw
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, 120);
   return cleaned === '' ? undefined : cleaned;
 }
 
@@ -225,8 +249,8 @@ export type GrantAcceptResult<T> =
  * Accept a grant the person was shown: recompute it from the same request, refuse with 409
  * when the checksum differs from the one the preview returned, then create the schedule
  * FIRST and write contract, stamp (with the schedule's id) and confirm in ONE statement.
- * Both steps are synchronous with nothing awaited between them. If the write fails, the
- * schedule is deleted again rather than left without its grant.
+ * Both steps are synchronous with nothing awaited between them. If the write fails or
+ * throws, the schedule is deleted again rather than left without its grant.
  *
  * The caller has already checked the feature switch, the workflow (template, autonomous)
  * and the cron expression; `by` is the auth origin of the accepting request.
@@ -250,15 +274,20 @@ export function acceptWorkflowGrant<T extends { id: string }>(
   });
   const now = new Date().toISOString();
   const name = grantName(req.name);
-  const written = stores.history.setWorkflowReviewedGrant(planned.id, prepared.contract, {
-    by,
-    ...(name !== undefined ? { name } : {}),
-    at: now,
-    checksum: prepared.checksum,
-    binding: prepared.binding,
-    triggerId: task.id,
-    afterUntrusted: prepared.afterUntrusted,
-  }, now);
+  let written = false;
+  try {
+    written = stores.history.setWorkflowReviewedGrant(planned.id, prepared.contract, {
+      by,
+      ...(name !== undefined ? { name } : {}),
+      at: now,
+      checksum: prepared.checksum,
+      binding: prepared.binding,
+      triggerId: task.id,
+      afterUntrusted: prepared.afterUntrusted,
+    }, now);
+  } catch {
+    written = false;
+  }
   if (!written) {
     stores.history.deleteTrigger(task.id);
     return { ok: false, status: 500, error: 'The grant could not be saved; nothing was scheduled.' };

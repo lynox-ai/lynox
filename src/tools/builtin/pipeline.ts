@@ -18,7 +18,8 @@ import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
-import type { GrantDecision } from '../../core/workflow-grant.js';
+import { sameBoundValues, type GrantDecision } from '../../core/workflow-grant.js';
+import { maskSecretPatterns } from '../../core/secret-store.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 
 const MAX_PLANS = 10;
@@ -551,19 +552,34 @@ export interface RunSavedWorkflowResult {
   stepErrors?: Array<{ stepId: string; error?: string | undefined; costUsd: number }> | undefined;
   /** Why the run went ahead without the workflow's write grant, when it has one. */
   grantNote?: string | undefined;
-  /** Writes the run was refused, or that may have landed before a refused redirect —
-   *  one line each, as the step's `http_request` reported it. For the owner's run report:
-   *  a refused write leaves its step `completed`, so nothing else would surface it. */
+  /** Writes a top-level step was refused, or that may have landed before a refused
+   *  redirect — one line each, as the refusal reported it (`collectWriteNotes`). For the
+   *  owner's run report: a refused write leaves its step `completed`, so nothing else
+   *  would surface it. */
   writeNotes?: string[] | undefined;
 }
 
-const WRITE_NOTE_LINE = new RegExp(`(?:${UNGRANTED_WRITE_PREFIX}|${WRITE_POSSIBLY_LANDED_PREFIX})[^\\n"]*`, 'g');
+/**
+ * How a refusal's result STARTS: the agent loop's headless refusal, the consent gate's
+ * block, or the possibly-landed redirect. Notes are taken only from such a result, never
+ * from a response body — a remote server controls that text, and could otherwise write
+ * lines into the owner's run record and notifications.
+ */
+const REFUSAL_HEAD = new RegExp(`^(?:Permission denied \\(non-interactive\\): http_request\\n|Blocked: outbound [^\\n]*\\n|${WRITE_POSSIBLY_LANDED_PREFIX} )`);
+const MAX_WRITE_NOTES = 10;
+const MAX_WRITE_NOTE_CHARS = 300;
 
-/** Collects the refused and possibly-landed write lines from a step's tool calls. */
+/**
+ * Collects the refused and possibly-landed write lines from the tool calls of a run's
+ * top-level steps (nested pipelines are not observed). Masked for credential shapes and
+ * capped, because the lines reach notification channels as well as the run record.
+ */
 export function collectWriteNotes(into: Set<string>): (call: { toolName: string; outputJson: string }) => void {
   return (call) => {
-    if (call.toolName !== 'http_request') return;
-    for (const m of call.outputJson.matchAll(WRITE_NOTE_LINE)) into.add(m[0].trim());
+    if (call.toolName !== 'http_request' || into.size >= MAX_WRITE_NOTES) return;
+    if (!REFUSAL_HEAD.test(call.outputJson)) return;
+    const line = call.outputJson.split('\n').find((l) => l.startsWith(UNGRANTED_WRITE_PREFIX) || l.startsWith(WRITE_POSSIBLY_LANDED_PREFIX));
+    if (line !== undefined) into.add(maskSecretPatterns(line.trim()).slice(0, MAX_WRITE_NOTE_CHARS));
   };
 }
 
@@ -692,6 +708,15 @@ export async function runSavedWorkflow(
     };
   }
 
+  // Whether this run passes the workflow's contract on — decided before binding, because a
+  // granted run runs with the values the person accepted, not with the caller's.
+  let grant: GrantDecision = runtime?.decideGrant
+    ? runtime.decideGrant(planned)
+    : { contract: undefined, note: planned.capabilityContract !== undefined ? 'Ran without its write grant: this way of starting it does not carry one.' : null };
+  // A granted run started without values (a library Run with no body) takes the schedule's;
+  // otherwise unbound parameters would stay open placeholders for the step model to fill.
+  const runParams = grant.contract !== undefined && params === undefined ? grant.boundParams : params;
+
   // Bind the supplied re-target values against the workflow's parameter schema.
   // Strict only when the caller actually supplied values (HTTP `/run` body / the
   // run UI): a missing required param then fails fast. An autonomous run with no
@@ -700,12 +725,18 @@ export async function runSavedWorkflow(
   // Slice B: a contract-governed workflow constrains its re-targetable params at
   // bind (enum/regex/min-max) so a supplied value can't redirect an outbound
   // call before it resolves raw into the literal step call (S1).
-  const bound = bindWorkflowParameters(planned.parameters ?? [], params, {
-    requireAll: params !== undefined,
+  const bound = bindWorkflowParameters(planned.parameters ?? [], runParams, {
+    requireAll: runParams !== undefined,
     constraints: planned.capabilityContract?.paramConstraints,
   });
   if (!bound.ok) {
     return { ok: false, error: bound.error };
+  }
+
+  // Values other than the accepted ones never run under the grant — including parameters
+  // that reach only a step's task text, which no constraint pins.
+  if (grant.contract !== undefined && !sameBoundValues(bound.params, grant.boundParams)) {
+    grant = { contract: undefined, note: 'Ran without its write grant: it was started with other values than the ones the grant was accepted with.' };
   }
 
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
@@ -717,9 +748,6 @@ export async function runSavedWorkflow(
     return { ok: false, error: `Workflow exceeds maximum of ${maxSteps} steps.` };
   }
 
-  const grant: GrantDecision = runtime?.decideGrant
-    ? runtime.decideGrant(planned)
-    : { contract: undefined, note: planned.capabilityContract !== undefined ? 'Ran without its write grant: this way of starting it does not carry one.' : null };
   const writeNotes = new Set<string>();
 
   try {

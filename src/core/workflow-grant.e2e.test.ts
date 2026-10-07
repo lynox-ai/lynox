@@ -39,7 +39,7 @@ import { createToolContext } from './tool-context.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { taskCreateTool } from '../tools/builtin/task.js';
-import { getPipeline, _resetPipelineStore, forgetPipeline } from '../tools/builtin/pipeline.js';
+import { getPipeline, _resetPipelineStore, forgetPipeline, storePipeline } from '../tools/builtin/pipeline.js';
 import { _resetTenantInvariantForTests, runGuardedSavedWorkflow } from './saved-workflow-runner.js';
 import { acceptWorkflowGrant, prepareWorkflowGrant } from './workflow-grant.js';
 import type { IAgent, PlannedPipeline, TriggerRecord } from '../types/index.js';
@@ -152,6 +152,9 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     await fire(trigger);
     expect(posts()).toEqual([]);
     expect(lastRun(trigger.id)).toContain(`Not granted for an unattended run: POST ${TARGET}`);
+    // The run completed, so it is recorded as a success: a failed status would retry the
+    // whole run and flip the trigger, on instances where the grant is not even enabled.
+    expect(tm.getTrigger(trigger.id)?.last_run_status).toBe('success');
   });
 
   it('steps changed after the acceptance by a raw blob write: the checksum differs and the run does not write', async () => {
@@ -223,6 +226,63 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined);
     expect(result.grantNote).toMatch(/does not carry one/);
     expect(posts()).toEqual([]);
+  });
+
+  it('a workflow still in the pipeline cache when it is granted runs under the grant once read back', async () => {
+    // What a workflow saved in chat looks like before a restart: steps carry keys holding
+    // `undefined`, which the stored blob does not have.
+    const stored = saveWorkflow();
+    const cached = { ...stored, steps: stored.steps.map((st) => ({ ...st, input_from: undefined })) } as PlannedPipeline;
+    storePipeline(stored.id, cached);
+    expect(getPipeline(stored.id, history)).toBe(cached);
+    const shown = prepareWorkflowGrant(cached, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false }, engineDb);
+    if (!shown.ok) throw new Error(shown.error);
+    const r = acceptWorkflowGrant(cached, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: undefined, title: 't' }, 'local', { history, taskManager: tm, hasher: engineDb });
+    if (!r.ok) throw new Error(r.error);
+    forgetPipeline(stored.id);
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+    await fire(r.task);
+    expect(posts().map((p) => p.url)).toEqual([TARGET]);
+  });
+
+  describe('a library start of a workflow with parameters', () => {
+    // `withTaskParam`: a second parameter that reaches only the step's task text. Such a
+    // value is wrapped as untrusted data in the step's prompt (`resolveTaskTemplate`), which
+    // arms the run's taint — so that workflow is only used where the grant is withheld anyway.
+    function grantedParamWorkflow(withTaskParam = false): void {
+      history.insertPlannedPipeline({
+        id: 'wf-vals', name: 'wf-vals', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true,
+        steps: [{ id: 's1', task: withTaskParam ? 'post the week, mention {{params.note}}' : 'post the week', tools: ['http_request'], input_template: { url: TARGET, body: '{{params.week}}' } }],
+        ...{ mode: 'autonomous', parameters: [
+          { name: 'week', description: '', type: 'string', source: 'user_input' },
+          { name: 'note', description: '', type: 'string', source: 'user_input' },
+        ] },
+      } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
+      forgetPipeline('wf-vals');
+      const wf = getPipeline('wf-vals', history)!;
+      const values: Record<string, string> = withTaskParam ? { week: '40', note: 'as agreed' } : { week: '40', note: 'unused' };
+      const shown = prepareWorkflowGrant(wf, { ...ENTRY, params: values, cron: CRON, afterUntrusted: false }, engineDb);
+      if (!shown.ok) throw new Error(shown.error);
+      const r = acceptWorkflowGrant(wf, { ...ENTRY, params: values, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: undefined, title: 't' }, 'local', { history, taskManager: tm, hasher: engineDb });
+      if (!r.ok) throw new Error(r.error);
+      forgetPipeline('wf-vals');
+    }
+
+    it('without values runs with the schedule\'s values, under the grant', async () => {
+      grantedParamWorkflow();
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library' } });
+      expect(result.grantNote).toBeUndefined();
+      expect(posts().map((p) => p.url)).toEqual([TARGET]);
+    });
+
+    it('with another value for a parameter no constraint pins (task text only) runs without the grant', async () => {
+      grantedParamWorkflow(true);
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', { week: '40', note: 'something else' }, { origin: { kind: 'library' } });
+      expect(result.grantNote).toMatch(/other values than the ones the grant was accepted with/);
+      expect(posts()).toEqual([]);
+    });
   });
 
   it('a library start with other values than the schedule\'s does not run under the grant', async () => {

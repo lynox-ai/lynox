@@ -553,6 +553,7 @@
 				<input
 					bind:value={scheduleCron}
 					placeholder="0 9 * * *"
+					oninput={dropGrantPreview}
 					onkeydown={onScheduleKey}
 					class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 font-mono text-[16px] md:text-sm focus:border-accent focus:outline-none"
 				/>
@@ -571,6 +572,7 @@
 								bind:value={paramValues[param.name]}
 								type={param.type === 'date' ? 'date' : 'text'}
 								inputmode={param.type === 'number' ? 'decimal' : undefined}
+								oninput={dropGrantPreview}
 								onkeydown={onScheduleKey}
 								class="w-full rounded-[var(--radius-sm)] border border-border bg-bg-subtle px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 							/>
