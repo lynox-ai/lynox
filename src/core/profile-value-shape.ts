@@ -89,5 +89,14 @@ export function slotNameForModel(name: unknown, derived: string): string {
  * prints (an unknown one is a fact worth stating), anything else does not.
  */
 export function authTypeForModel(type: unknown): string {
-  return type === undefined ? 'none' : shapedForLog(type, /^[a-z0-9_]{1,20}$/, 20);
+  return type === undefined ? 'none' : wordForModel(type, 20);
+}
+
+/**
+ * A profile value that should be one lowercase word of at most `max` characters,
+ * printed only if it is one. Measured on one character more than `max`, so an
+ * over-long value is refused rather than cut down to something that looks valid.
+ */
+export function wordForModel(value: unknown, max: number): string {
+  return shapedForLog(value, new RegExp(`^[a-z0-9_]{1,${max}}$`), max + 1);
 }
