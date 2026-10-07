@@ -1,6 +1,7 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { configDefaults, defineConfig } from 'vitest/config';
 import { ONLINE_TESTS_GLOB, onlineTestsSkipReason } from './scripts/vitest-online-opt-in.js';
+import { rejectSvelteModules } from './scripts/vitest-node-project-guard.js';
 
 // Printed, not silent: a run that leaves the online tests out says so and says how to include them.
 const onlineSkip = onlineTestsSkipReason(process.env);
@@ -27,10 +28,9 @@ export default defineConfig({
     maxWorkers: 2,
     projects: [
       {
-        // The svelte compiler lets a test import a Svelte 5 rune module and drive its logic,
-        // instead of matching its source text. It only transforms `.svelte` and `.svelte.*` files,
-        // so every other test is compiled exactly as before.
-        plugins: [svelte()],
+        // No Svelte module loads here: it would compile for the server. A test that reaches one,
+        // directly or through a helper, fails with a message naming the fix (`*.svelte.test.ts`).
+        plugins: [rejectSvelteModules()],
         test: {
           ...SHARED,
           name: 'node',
@@ -39,12 +39,13 @@ export default defineConfig({
         },
       },
       {
-        // Rune-module tests run in jsdom, which makes the svelte plugin compile for the client, as
-        // the browser runs it. In the default (node) environment it compiles for the server, where
-        // a `$state` list is the array it was given; in the browser it is a proxy, and writes
-        // through it do not reach that array, so code that leans on the two being one array passes
-        // there and fails here. `svelte-compile-mode.svelte.test.ts` checks this project really
-        // compiles for the client.
+        // The svelte compiler lets a test import a Svelte 5 rune module and drive its logic,
+        // instead of matching its source text. These tests run in jsdom, which makes the svelte
+        // plugin compile for the client, as the browser runs it. In the default (node) environment
+        // it compiles for the server, where a `$state` list is the array it was given; in the
+        // browser it is a proxy, and writes through it do not reach that array, so code that leans
+        // on the two being one array passes there and fails here.
+        // `svelte-compile-mode.svelte.test.ts` checks this project really compiles for the client.
         plugins: [svelte()],
         test: {
           ...SHARED,
