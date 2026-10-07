@@ -70,6 +70,27 @@ export function classifyRefreshFailure(httpStatus: number, body: string): Refres
 }
 
 /**
+ * Whether a token-endpoint failure names the requested scope as the problem
+ * (`invalid_scope`, RFC 6749 §5.2).
+ *
+ * {@link classifyRefreshFailure} leaves this `transient`, and for the grant that is
+ * right: the token is not shown to be dead and nothing should be recorded. What
+ * it gets wrong is the remedy. Retrying never helps, because the request asks for
+ * a scope the grant or the client does not cover, and the same request gets the
+ * same answer. A separate predicate rather than a fourth kind, because the
+ * Google path maps every kind to a remedy and never sends a scope on refresh.
+ */
+export function isScopeRejection(httpStatus: number, body: string): boolean {
+  if (httpStatus >= 500 || httpStatus === 429) return false;
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    return parsed.error === 'invalid_scope';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Separate "the user revoked the grant" from "we presented the token to the
  * wrong client" — the two cases {@link classifyRefreshFailure} cannot tell apart.
  *

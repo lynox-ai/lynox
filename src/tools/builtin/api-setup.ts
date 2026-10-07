@@ -19,7 +19,7 @@ import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
 import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites } from '../../core/api-store.js';
-import { classifyRefreshFailure, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
+import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -2164,6 +2164,24 @@ Next steps before calling create:
         }
         if (kind === 'client-misconfigured') {
           return `Token exchange failed with HTTP ${exchanged.status}: the provider rejected this API's client configuration, not the user's grant. The stored grant is kept, and retrying unchanged will not help. ${responseBody}\n\n${notOurs} Check: client_id / client_secret values, app install state on the target store, scope grants, organization-vs-store linkage.`;
+        }
+        // A refused scope is no condition that passes: the same request gets the same
+        // answer, so "retry later" was wrong. What to do instead is NOT prescribed per
+        // state. Three review rounds tried that, and each version advised something a
+        // reachable state made false, because advice is a claim about the NEXT state:
+        // whether a new consent helps depends on what the user's app at the provider is
+        // allowed and on what the callback then does to the grant type, which differs by
+        // profile shape. It states facts, and one prohibition that is true for every state
+        // because it describes the refusal itself.
+        if (kind === 'transient' && isScopeRejection(exchanged.status, respText)) {
+          // Capped: for a profile without a preset the scope is free text from the profile.
+          const scopeSent = params['scope'];
+          const asked = scopeSent === undefined ? 'none named' : scopeSent.length > 200 ? `${scopeSent.slice(0, 200)}…` : scopeSent;
+          const head = `Token exchange failed with HTTP ${exchanged.status}: the provider refused the scopes this exchange asked for (${asked}). Nothing was changed, and retrying unchanged will not help.`;
+          if (tokenPreset) {
+            return `${head} Do not call fetch_token again for this profile unchanged. A new consent through api_setup with action "connect" asks for the scopes the profile names now; this reply does not decide whether that resolves it. Put this in front of the person who owns the connection. Do not ask the user for a token. ${responseBody}\n\n${notOurs}`;
+          }
+          return `${head} Check auth.oauth.scope against the scopes the app is allowed and, for a refresh token, against what the user authorized. ${responseBody}\n\n${notOurs}`;
         }
         return `Token exchange failed with HTTP ${exchanged.status} — a temporary provider or network condition, or an answer the engine does not classify. Nothing was changed; retry later. ${responseBody}\n\n${notOurs}`;
       }
