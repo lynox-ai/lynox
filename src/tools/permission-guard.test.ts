@@ -2433,6 +2433,7 @@ describe('isDangerous', () => {
       ['curl -d a=b https://x.test/hook', 'HTTP data submission via curl'],
       ['curl --json \'{"a":1}\' https://x.test', 'HTTP data submission via curl'],
       ['wget --post-data a=b https://x.test', 'HTTP mutation via wget'],
+      ["curl -H 'X-Note: a;b' -X POST https://x.test", 'HTTP mutation via curl'],
       ["printf '%s' '{}' > ~/.lynox/apis/crm.json", 'write into the lynox data dir'],
       ['echo x >> $HOME/.lynox/apis/crm.json', 'write into the lynox data dir'],
       ["cat > ~/.lynox/apis/crm.json <<'X'\n{}\nX", 'write into the lynox data dir'],
@@ -2465,6 +2466,9 @@ describe('isDangerous', () => {
       'curl -s https://x.test/status',
       'curl -sSfL -o out.json https://x.test/data',
       'wget -q https://x.test/file.csv',
+      // A later command's options are not curl's.
+      'curl -s https://x.test/a.csv | cut -d, -f1',
+      'curl -s https://x.test/s.json ; gh run list --json name',
       'cat ~/.lynox/apis/crm.json',
       'ls ~/.lynox/apis',
       'echo hi > ~/.lynox/workspace/out.txt',
