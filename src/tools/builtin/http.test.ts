@@ -511,6 +511,60 @@ describe('httpRequestTool', () => {
       }));
     });
 
+    // ⚠ These three test the WIRE, which `model-json-body.test.ts` cannot: that file proves the
+    // rule is right, and would keep passing in full if nothing ever called it. What is asserted
+    // here is that the repaired body is the one `fetch` receives, and that an untouched body
+    // still arrives byte-for-byte.
+    it('a JSON body ending in a stray close tag reaches fetch REPAIRED', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '[{"location_code":2756}]</body>',
+      }, agentWithPromptFn());
+
+      expect(fetchMock).toHaveBeenCalledWith('http://example.com/api', expect.objectContaining({
+        body: '[{"location_code":2756}]',
+      }));
+    });
+
+    it('and the result says the body was repaired, naming what came off', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+      }, agentWithPromptFn());
+
+      expect(String(result)).toContain('</body>');
+      expect(String(result)).toContain('repaired');
+    });
+
+    it('a legitimate HTML POST reaches fetch UNCHANGED, tag and all', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const html = '<!DOCTYPE html><html><body><p>hi</p></body>';
+
+      const result = await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'text/html' },
+        body: html,
+      }, agentWithPromptFn());
+
+      expect(fetchMock).toHaveBeenCalledWith('http://example.com/api', expect.objectContaining({ body: html }));
+      // …and no note claims otherwise, or the engine would be reporting an edit it did not make.
+      expect(String(result)).not.toContain('repaired');
+    });
+
     // Slice B: the capability-contract is the headless write's consent — without
     // this the http tool's own first-use-consent gate blocks every unattended
     // POST (no promptUser), making the isDangerous grant inert end-to-end.

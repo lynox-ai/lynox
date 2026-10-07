@@ -13,6 +13,7 @@ import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
+import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
@@ -2251,8 +2252,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // classified `none` and scanned. Folding stays because the declaration needs it — a
     // lowercase write must classify, and `undo-declaration.test.ts` pins that — so the cost
     // lands on one unreachable spelling and is paid knowingly.
-    if (input.body && isWriteMethod(method)) {
-      const secretMatch = detectSecretInContent(input.body);
+    // ⚠ Repair a model's stray trailing close tag BEFORE the scan below, not after, so the body
+    // that gets scanned is the body that goes out. The three conditions and the evidence live in
+    // `model-json-body.ts`; the short version is that `minimax-m3` ends JSON bodies with a
+    // literal `</body>`, which makes every POST through the API store fail at the far end with a
+    // misleading error, and the model then repeats the identical call.
+    const repairedBody =
+      typeof input.body === 'string' ? repairStrayCloseTag(input.body, headers) : null;
+    const outboundBody = repairedBody?.body ?? input.body;
+
+    if (outboundBody && isWriteMethod(method)) {
+      const secretMatch = detectSecretInContent(outboundBody);
       if (secretMatch) {
         blockedVerbatim(egressSecretRefusal('request body', secretMatch, profileState()));
       }
@@ -2309,8 +2319,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     const opts: RequestInit = { method, headers };
-    if (input.body && method !== 'GET' && method !== 'HEAD') {
-      opts.body = input.body;
+    if (outboundBody && method !== 'GET' && method !== 'HEAD') {
+      opts.body = outboundBody;
     }
     // Hard cap. The original 30s default + agent-overridable timeout meant a
     // hung Shopify endpoint locked cat's session for 28 min on 2026-05-19 —
@@ -2469,6 +2479,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
+
+      // ⚠ A repair that nobody can see is a defect that stops being reported. This call's result
+      // says so, outside the untrusted_data wrap because it is engine guidance, not response
+      // data. It lands in the run ledger (`run_tool_calls.output_json`) — there is no field that
+      // records without also being read, so the MODEL sees this line too. That is a cost worth
+      // naming and, here, also the useful half: the party that produced the broken argument is
+      // the one being told. The user's chat is unaffected; tool results do not render as text.
+      if (repairedBody !== null) {
+        wrapped += `\n\n**[Engine note — your request body was repaired before it was sent]**\nIt ended in \`${repairedBody.removed}\`, which is not valid JSON, so the API would have rejected it. The engine removed that and sent the rest unchanged. Do not add a closing tag to a JSON body.`;
+      }
 
       // Engine-managed-auth 401-hint. When the engine DECLINED to attach a
       // credential it did not fail the request — a profile that works today keeps
