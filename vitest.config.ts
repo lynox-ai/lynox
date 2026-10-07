@@ -20,6 +20,11 @@ export default defineConfig({
   test: {
     // Runs once per run, here at the root: the projects below do not inherit it.
     globalSetup: ['./scripts/vitest-global-setup.ts'],
+    // Two forks for the whole run, both projects together. Left unset, vitest starts one fork per
+    // core but one, and a machine running several suites fills up. It stays here at the root:
+    // a project's own value wins over `--maxWorkers`, so set per project it could not be lowered
+    // or raised from the command line any more.
+    maxWorkers: 2,
     projects: [
       {
         // The svelte compiler lets a test import a Svelte 5 rune module and drive its logic,
