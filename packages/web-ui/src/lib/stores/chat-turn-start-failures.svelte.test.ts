@@ -1,7 +1,4 @@
-// @vitest-environment jsdom
-// jsdom on purpose: it makes vitest compile Svelte for the browser, where a `$state` list is a
-// proxy over a copy of the array it was given. Under the default (server) compile it is the
-// array itself, and tests pass that the browser would fail.
+// Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // A turn whose start fails before the server answers (no connection, a request cut off) is
@@ -69,10 +66,7 @@ function expectFailedAndFree(text: string): void {
 }
 
 beforeEach(async () => {
-	// jsdom's storage is real and outlives a test, and the store saves on a 500 ms debounce through
-	// whatever storage is there when it fires: let earlier tests' saves land, then start empty.
-	await wait(700);
-	globalThis.localStorage?.clear();
+	// Storage starts empty and earlier tests' saves have landed: the project's setup file does both.
 	listeners = {};
 	vi.stubGlobal('navigator', { onLine: true });
 	vi.stubGlobal('window', { addEventListener: (type: string, fn: () => void) => { listeners[type] = fn; } });
