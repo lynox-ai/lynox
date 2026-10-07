@@ -2282,7 +2282,13 @@ describe('spawn_agent tool', () => {
           { agents: [{ name: 'local', task: 'A', profile: 'local' }] },
           agent,
         );
-        expect(result, 'admitted, where a fallback-priced floor refused').not.toContain('cannot share');
+        // ⚠ POSITIVE, and this is the THIRD copy of the same vacuous assertion: `cannot
+        // share` exists at exactly one place in `src/`, inside a `throw`, so the `await`
+        // above would have rejected first and `not.toContain` could never fail. Two were
+        // replaced a round earlier and this one survived — for the reason a comment a few
+        // lines up already records, that the sweep ran over the phrasing instead of over
+        // the claim.
+        expect(result, 'admitted, where a fallback-priced floor refused').toMatch(/^## local/m);
         expect(childCaps(MockAgent)[0]).toBeCloseTo(0.1, 6);
       } finally {
         vi.unstubAllEnvs();
@@ -2379,8 +2385,8 @@ describe('spawn_agent tool', () => {
         expect(err!.message, 'and so is the share').toMatch(/\$0\.0010/);
         // ⚠ Scoped on purpose: this holds for THIS fixture, not for the function. Four
         // decimals narrow the class, they do not close it — anything below $0.00005 still
-        // renders "$0.0000", which a delta round measured and which is filed rather than
-        // claimed away here.
+        // renders "$0.0000", which a delta round measured and which this assertion does not
+        // claim away.
         expect(err!.message, 'no figure rounds away in this fixture').not.toMatch(/\$0\.00[^0-9]/);
       } finally {
         vi.unstubAllEnvs();
@@ -2428,6 +2434,119 @@ describe('spawn_agent tool', () => {
           { agents: [{ name: 'free', task: 'A', profile: 'local', max_budget_usd: 0 }] },
           agent,
         )).rejects.toThrow(/cannot share/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it("prices the floor against a cap that arrives through a profile", async () => {
+      // ⛔ THE HALF A FIRST ATTEMPT MISSED, and the reason that attempt was reverted rather
+      // than shipped: the wire cap is `spec.max_tokens ?? profile?.max_tokens`, and reading
+      // only the spec half leaves exactly the case the argument exists for. Measured: a
+      // profile carrying 64 000 was admitted on the $0.192 balanced floor while that child's
+      // first turn costs $0.408 priced the way this floor prices.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        wide: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-sonnet-4-6', max_tokens: 64000 },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(0.25);
+        await expect(spawnAgentTool.handler(
+          { agents: [{ name: 'wide', task: 'A', profile: 'wide' }] },
+          agent,
+        )).rejects.toThrow(/costs about \$0\.41/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it("prices each child against ITS OWN cap, not the first child's", async () => {
+      // ⛔ THE INDEX, and it is unwitnessed by any single-child fixture — a mutant reading
+      // `childCaps[0]` survived one. Here child one carries no cap (floor $0.192) and child
+      // two carries 64 000 (floor $0.408); a $0.50 remainder gives each $0.25, so child one
+      // clears its floor and child two does not. Under the mutant child two would be priced
+      // on child one's absent cap, i.e. at $0.192, and the batch would be ADMITTED.
+      const { agent } = parentWithCeiling(0.5);
+      await expect(spawnAgentTool.handler(
+        {
+          agents: [
+            { name: 'narrow', task: 'A' },
+            { name: 'wide', task: 'B', max_tokens: 64_000 },
+          ],
+        },
+        agent,
+      )).rejects.toThrow(/"wide" would get \$0\.25, and one turn on its model costs about \$0\.41/);
+    });
+
+    it('admits a child whose narrower cap lowers its own floor', async () => {
+      // ⛔ THE OTHER DIRECTION, and it owes a witness as much as the first: pricing the cap
+      // does not only tighten. A child capped at 500 output tokens really costs $0.12225 by
+      // this floor's own method, so a $0.15 share now clears — where the model-default floor
+      // of $0.192 refused it. A reader who takes this change for "stricter" has it wrong.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const { agent } = parentWithCeiling(0.15);
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'tight', task: 'A', max_tokens: 500 }] },
+        agent,
+      );
+      // ⚠ A POSITIVE assertion, because the refusal path THROWS: `not.toContain('cannot
+      // share')` can never fail here — the `await` would have rejected first — so it was a
+      // mislabelled mechanism rather than a check. What proves admission is a section
+      // header for this child, which only the admitted path writes.
+      expect(result, 'admitted, where the model-default floor refused').toMatch(/^## tight/m);
+      expect(childCaps(MockAgent)[0], 'and it ran with the remainder').toBeCloseTo(0.15, 6);
+    });
+
+    it("lets the spec's cap win over the profile's, as the wire does", async () => {
+      // The chain is `spec.max_tokens ?? profile?.max_tokens`, so a spec cap overrides a
+      // profile one — and the floor has to agree with the wire about which wins. Profile
+      // says 64 000 (floor $0.408, which $0.15 would not clear); the spec says 500 (floor
+      // $0.12225, which it does). Admitted means the spec half won here too.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        wide: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-sonnet-4-6', max_tokens: 64000 },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(0.15);
+        const result = await spawnAgentTool.handler(
+          { agents: [{ name: 'both', task: 'A', profile: 'wide', max_tokens: 500 }] },
+          agent,
+        );
+        // Positive, for the same reason as above: the refusal path throws.
+        expect(result, "the spec's narrower cap decided the floor").toMatch(/^## both/m);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('keeps a spec cap of zero instead of falling through to the profile', async () => {
+      // ⛔ A SURVIVING MUTANT: `??` → `||` passed all 265 tests, because the two operators
+      // differ at exactly ONE input — a spec cap of `0` WITH a profile cap behind it. `??`
+      // keeps the 0 (which the floor's guard then reads as "no usable cap", so the model's
+      // own ceiling applies, $0.192); `||` falls through to the profile's 64 000 and prices
+      // $0.408. The wire uses `??`, so the floor has to as well, and the precedence witness
+      // beside this one only pins a TRUTHY spec cap.
+      //
+      // A $0.25 share clears $0.192 and does not clear $0.408, so admission is the
+      // discriminator: under the mutant this batch is refused.
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        wide: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-sonnet-4-6', max_tokens: 64000 },
+      }));
+      reloadConfig();
+      try {
+        const { agent } = parentWithCeiling(0.25);
+        const result = await spawnAgentTool.handler(
+          { agents: [{ name: 'zero', task: 'A', profile: 'wide', max_tokens: 0 }] },
+          agent,
+        );
+        expect(result, 'admitted on the model ceiling, not the profile cap').toMatch(/^## zero/m);
       } finally {
         vi.unstubAllEnvs();
         reloadConfig();

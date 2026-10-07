@@ -45,7 +45,7 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
  * after: below this a child stops right after that turn, so the money buys an abort
  * instead of an answer, and the parent is handed a truncated child to reason about.
  *
- * ⛔ DERIVED PER MODEL, and every figure names the SET it is counted over — because a
+ * ⛔ DERIVED PER MODEL AND PER CAP, and every figure names the SET it is counted over — a
  * child's model is not restricted to the tier defaults, and because an earlier version of
  * this comment counted a set it had not measured. Over all **39** ids in
  * `MODEL_CAPABILITIES` a cold first turn runs from **$0.000898** (`ministral-3b-2410`) to
@@ -74,32 +74,38 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
  * the turn's price is UNKNOWN — that is the premise of the carve-out, not something to
  * assume small — and the bound is per CHILD, so a ten-child batch is ten such turns. The
  * class is not only free local models: a profile pinning an expensive model through a
- * custom endpoint is unpriced too, and this file takes the opposite stance on the same
- * predicate one screen up (`profileBandIsDeepOrUnknown` treats an unknown band as DEEP,
- * precisely so an expensive custom model cannot run unconsented). The zero-share refusal
- * below bounds the degenerate case; the general one is filed, with that contradiction
- * named.
+ * custom endpoint is unpriced too. The zero-share refusal below bounds the degenerate case.
+ *
+ * ⛔ AND THE TWO CONTROLS IN THIS FILE TAKE OPPOSITE DEFAULTS ON THAT SAME PREDICATE, ON
+ * PURPOSE — decided 2026-10-07, so that nobody "fixes" the asymmetry later. Here an unknown
+ * price means NO floor; at {@link profileBandIsDeepOrUnknown} an unknown band means DEEP,
+ * i.e. consent is asked. They point in opposite directions because they protect different
+ * things: consent runs BEFORE the expensive case and already covers it, while a floor
+ * derived from a price nobody pays would refuse a free local model its whole remainder. The
+ * floor's residual exposure is bounded per child, which is why it is the one allowed to
+ * stay open.
  *
  * `estimateFirstTurnUSD` prices the COLD turn — prefix written at the cacheWrite rate,
  * not read — because a run's first turn always is one.
  *
- * ⚠ WHAT IT DOES NOT PRICE, measured and filed rather than left implicit: the child's own
- * output cap. The wire cap is `spec.max_tokens ?? profile?.max_tokens` and reaches the
- * provider unclamped, and the gap cuts BOTH ways. Each figure below says which method
- * produced it, because the two differ by the fill factor and an earlier version of this
- * paragraph mixed them in one sentence:
- *   · a child setting `max_tokens: 64000` is admitted on the balanced floor of $0.192.
- *     Priced the way this floor prices (the 0.3 fill), its first turn is $0.408 — 2.13x the
- *     threshold that let it in; emitting the whole cap, $1.08 — 5.6x.
- *   · a child setting `max_tokens: 500` costs $0.12225 by the same fill method and is
- *     REFUSED by that same $0.192 floor — work the flat $0.05 would have admitted.
- * So the floor is too low in one direction and too high in the other, and only the first is
- * a gap against the figure it replaces. Pricing the cap needs both halves of that fallback
- * chain and is its own change.
+ * ⛔ AND AGAINST THE CAP THE CALL WILL CARRY, not the model's registry ceiling. That cap is
+ * `spec.max_tokens ?? profile?.max_tokens`, it reaches the provider unclamped, and pricing
+ * it moves the floor in BOTH directions. Each figure says which method produced it, because
+ * the two differ by the fill factor (`claude-sonnet-4-6`):
+ *   · the model's own 16 000 ceiling gives $0.192;
+ *   · a cap of 64 000 gives $0.408 priced the way this floor prices (the 0.3 fill), and
+ *     $1.08 if the child emits the whole cap — so on the model-default floor such a child
+ *     was admitted at $0.192 and could spend 5.625x it;
+ *   · a cap of 500 gives $0.12225, which ADMITS a share the $0.192 floor refused.
+ *
+ * ⚠ The caller passes the cap because the caller is the only one holding the whole chain —
+ * and an earlier attempt passed only the `spec` half, which left exactly the case the
+ * argument exists for. It was reverted rather than shipped, because an argument that works
+ * in half the cases reads as a guarantee and is not one.
  */
-function minChildBudgetUSD(model: string): number {
+function minChildBudgetUSD(model: string, maxOutputTokens: number | undefined): number {
   if (!hasKnownPricing(model)) return 0;
-  return estimateFirstTurnUSD(model);
+  return estimateFirstTurnUSD(model, maxOutputTokens);
 }
 /**
  * Dollars for a model-facing message.
@@ -301,6 +307,14 @@ interface SpawnAgentInput {
  * unknown bands under a restrictive ceiling for the same reason. Single source
  * of truth for the rule — the check, the actual-tier report, and the headless
  * refuse all read it.
+ */
+/**
+ * ⛔ UNKNOWN BAND COUNTS AS DEEP, and the opposite default sits at {@link minChildBudgetUSD},
+ * where an unknown PRICE means no floor at all. Both are deliberate — decided 2026-10-07 —
+ * and the reason is that they protect different things: this gate runs before the expensive
+ * case and is the cheap place to be conservative, while a floor built on a price nobody pays
+ * would refuse a free local model its whole remainder. Changing one to match the other is
+ * not a consistency fix; it is a different decision.
  */
 function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
   const band = modelCapability(profile.model_id)?.tier;
@@ -1566,11 +1580,22 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const requested: number[] = [];
     /** The resolved model per child, index-aligned with `specs` — the floor is per model. */
     const childModels: string[] = [];
+    /**
+     * The output cap each child's call will carry, index-aligned with `specs`; `undefined`
+     * means the model's own ceiling. Collected here rather than derived at the floor,
+     * because this is where the profile is resolved.
+     */
+    const childCaps: Array<number | undefined> = [];
     specs.forEach((spec, i) => {
+      // ⛔ RESOLVED ONCE, into a local. It used to be an inline argument, and the floor had
+      // no way to see it — which is how a floor that was supposed to price the child's cap
+      // ended up reading only the spec half of `spec.max_tokens ?? profile.max_tokens`.
+      // Two readers of one question is the defect class; this is the one reader.
+      const childProfile = spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined;
       const { model, tier } = resolveSpawnChildRouting({
         spec,
         role: spec.role ? getRole(spec.role) : undefined,
-        profile: spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined,
+        profile: childProfile,
         userConfig: cfg,
         baseProvider: provider,
         parent: readParentProviderConfig(agent),
@@ -1589,6 +1614,17 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // the ANNOUNCEMENT; `executeThinker` resolves again from a freshly loaded config,
       // so this is not a proof that the child cannot end up elsewhere.)
       childModels.push(model);
+      // ⛔ THE SAME CHAIN the child is BUILT with (`maxTokens: spec.max_tokens ??
+      // profile?.max_tokens`), not half of it. The value reaches the provider unclamped, so
+      // a floor computed from the model's default ceiling admits a child that can emit five
+      // times it — measured: a profile carrying `max_tokens: 64000` was admitted on the
+      // $0.192 balanced floor, and that child's first turn costs $0.408 priced the way this
+      // floor prices, $1.08 if it emits the whole cap.
+      //
+      // ⚠ Same limit as the model beside it: this is the ANNOUNCEMENT-time resolution, and
+      // `executeThinker` resolves again from a freshly loaded config. It is the best
+      // available answer here, not a proof that the child cannot end up with another cap.
+      childCaps.push(spec.max_tokens ?? childProfile?.max_tokens);
       // The SAME check the identity block and the result header use. This site
       // had its own charset — one that stripped `/` and cut at 64 — so a
       // Fireworks child was announced to the UI as
@@ -1680,7 +1716,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // and a balanced one both get $0.015, and the `fast` child is under ITS floor
       // ($0.052288), so the message names the CHEAP one. The expensive child is named only
       // when the cheap one clears its own floor.
-      const floors = childModels.map((m) => minChildBudgetUSD(m));
+      const floors = childModels.map((m, i) => minChildBudgetUSD(m, childCaps[i]));
       // ⛔ A SHARE OF ZERO IS REFUSED WHATEVER THE FLOOR SAYS, and this line is what keeps
       // the unpriced carve-out above from opening a hole. `share < 0` is false for a share
       // of exactly 0, so on a model with no price (floor 0) a caller-supplied
@@ -1708,12 +1744,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // is not known to be. That case is reachable only because of the carve-out above, so
         // it is this change's to get right.
         //
-        // ⚠ What this message still gets wrong is NOT touched here: on a run with ample
-        // remainder, where a child's own small `max_budget_usd` is what binds, "N
-        // sub-agent(s) cannot share" is false and main's two remedies do not work either.
-        // That defect is PRE-EXISTING and filed. A first attempt to split the message by
-        // `factor` shipped a second text that was false in its own case, so the fix is its
-        // own change with a witness per branch.
+        // ⚠ This message is not the subject of this change and is unchanged by it. Its
+        // wording is a question of its own: a case distinction here needs a true sentence
+        // per branch and a witness per branch, and an attempt to split it by `factor` alone
+        // produced a second text that was false in its own case. Whoever takes it on starts
+        // from that.
         const name = specs[tooSmall]!.name;
         const got = shares[tooSmall]!;
         const need = floors[tooSmall]!;

@@ -141,8 +141,14 @@ export function hasKnownPricing(model: string): boolean {
 }
 
 /**
- * What a run's FIRST model call costs on `model`, in dollars, against the model's own
- * output ceiling.
+ * What a run's FIRST model call costs, in dollars: on `model`, against `maxOutputTokens`
+ * when the caller carries a USABLE cap (finite and positive), and against the model's own
+ * ceiling otherwise.
+ *
+ * ⚠ That sentence is the one a reader hovers, and it said "against the model's own output
+ * ceiling" for one revision too long — the pre-fix verdict, in different words from the
+ * docblock that was corrected one file over. A sweep for THAT file's phrasing could not find
+ * it. The sweep has to run over the CLAIM.
  *
  * ⛔ WHY THE COLD RATE, and this is the whole point of the function. A cost guard books
  * a turn BEFORE it compares, so any run — however small its budget — completes one full
@@ -150,13 +156,20 @@ export function hasKnownPricing(model: string): boolean {
  * be measured against that first turn, and a first turn is always cold: its prefix is
  * written at the `cacheWrite` rate, not read at the `cacheRead` one.
  *
- * ⚠ WHAT THE SENTENCE ABOVE EXCLUDES, and it is excluded on purpose rather than forgotten:
- * a caller may carry its own output cap — a spawn spec's `max_tokens`, or a profile's — and
- * that value reaches the provider unclamped. Measured, a child admitted on the $0.192
- * balanced floor (which assumes 4 800 output tokens) can emit 64 000 and cost about $1.08.
- * Pricing a caller-supplied cap is a second argument and a second lookup chain, and it is
- * filed as its own change: this function answers for the MODEL, and a caller that sets a cap
- * must not read the answer as covering it.
+ * ⚠ `maxOutputTokens` IS THE CAP THE CALL WILL CARRY, and passing it is the caller's job
+ * precisely because the caller is the only one who knows the whole chain. For a spawned
+ * child that chain is `spec.max_tokens ?? profile.max_tokens`, and it reaches the provider
+ * unclamped — measured, a child admitted on the $0.192 balanced floor (which assumes 4 800
+ * output tokens) can emit 64 000 and cost about $1.08. An earlier attempt at this argument
+ * read only the spec half, which left exactly the case the argument exists for; it was
+ * removed again rather than left half wired, because an argument that works in half the
+ * cases reads as a guarantee and is not one.
+ *
+ * ⚠ AND IT CUTS BOTH WAYS, each figure with its method. On `claude-sonnet-4-6`: the model's
+ * own 16 000 ceiling gives $0.192; a cap of 64 000 gives $0.408 by this same 0.3 fill (and
+ * $1.08 if the child emits the whole cap); a cap of 500 gives $0.12225, which ADMITS shares
+ * the model-default floor refused. Narrowing a cap lowers the floor, and that direction owes
+ * a witness as much as the other.
  *
  * ⚠ WHAT THIS REPLACES — every number names the SET it is counted over, because the two
  * sets give very different answers and an earlier version of this comment counted
@@ -188,9 +201,21 @@ export function hasKnownPricing(model: string): boolean {
  * rather than to call the result structural. A caller that seeds pricing by hand is
  * responsible for what it seeds.
  */
-export function estimateFirstTurnUSD(model: string): number {
+export function estimateFirstTurnUSD(model: string, maxOutputTokens?: number): number {
   const pricing = getPricing(model);
-  const output = getDefaultMaxTokens(model) * FIRST_TURN_OUTPUT_FILL;
+  // A cap that is absent, zero, negative or non-finite falls back to the model's own
+  // ceiling rather than producing a floor of 0 (which admits everything) or NaN (which
+  // absorbs the comparison that uses it). `max_tokens` is schema-typed `number` and
+  // otherwise unvalidated, and `JSON.parse('{"max_tokens":1e999}')` is `Infinity`.
+  //
+  // ⚠ TWO predicates for four conditions, not four: `Number.isFinite` already rejects
+  // `undefined`, so an explicit `!== undefined` term was dead code and is gone. A
+  // non-integer cap is honoured as given — the provider rounds, and pricing 500.5 as 500.5
+  // is the conservative direction.
+  const ceiling = Number.isFinite(maxOutputTokens) && (maxOutputTokens as number) > 0
+    ? (maxOutputTokens as number)
+    : getDefaultMaxTokens(model);
+  const output = ceiling * FIRST_TURN_OUTPUT_FILL;
   return (FIRST_TURN_PREFIX_TOKENS / 1_000_000) * pricing.cacheWrite
     + (output / 1_000_000) * pricing.output;
 }
