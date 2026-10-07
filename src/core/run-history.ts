@@ -1304,6 +1304,34 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
    ALTER TABLE run_tool_calls ADD COLUMN connection_id TEXT;
    ALTER TABLE run_tool_calls ADD COLUMN connection_created_at TEXT;`,
+  // v55: the run claim for POST /api/workflows/:id/run (PRD idempotency-bulk-first §3.1).
+  //
+  // `(workflow_id, key)` is the PRIMARY KEY and therefore the refusal: a second call
+  // with the same key loses the INSERT, which is how the route learns it is a repeat.
+  // The index must NOT span `run_id` — a restart swaps that column, and an index over
+  // all three would make every restart a fresh claim, so the refusal would never fire.
+  //
+  // `started_at` is the DISCRIMINATOR, and it is a column rather than a return value
+  // because a process that dies between the run's start and its answer leaves no return
+  // value at all. The onRunStart hook sets it synchronously on this same handle, before
+  // anything is spent. Its two states are not symmetric:
+  //   NULL     — nothing was spent; the claim may be released (boot sweep, request end).
+  //   set      — spent. Even with no `pipeline_runs` row (the SQLITE_BUSY case, where the
+  //              run's own insert was swallowed) the claim is NEVER silently released; it
+  //              counts as `interrupted`, and a restart is allowed.
+  //
+  // No FK to `pipeline_runs`: the claim is written BEFORE that row exists, and it has to
+  // outlive a row whose insert was lost. The soft reference is the point.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE TABLE IF NOT EXISTS workflow_run_claims (
+     workflow_id TEXT NOT NULL,
+     key TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     started_at TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (workflow_id, key)
+   );
+   CREATE INDEX IF NOT EXISTS idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
 ];
 
 export class RunHistory {
@@ -2156,6 +2184,77 @@ export class RunHistory {
          total_duration_ms = (SELECT COALESCE(SUM(duration_ms), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id)
        WHERE status = 'running'`,
     ).run().changes;
+  }
+
+  /** What a claim says, as the route needs it. `startedAt === null` means nothing was
+   *  spent under this claim; a non-null value means it was, whatever `pipeline_runs`
+   *  does or does not hold (PRD idempotency-bulk-first §3.1). */
+  readWorkflowRunClaim(workflowId: string, key: string): { runId: string; startedAt: string | null } | null {
+    const r = this.db.prepare(
+      'SELECT run_id, started_at FROM workflow_run_claims WHERE workflow_id = ? AND key = ?',
+    ).get(workflowId, key) as { run_id: string; started_at: string | null } | undefined;
+    return r === undefined ? null : { runId: r.run_id, startedAt: r.started_at };
+  }
+
+  /** Take the claim, or learn that someone already holds it. The INSERT **is** the
+   *  barrier: `ON CONFLICT DO NOTHING` plus `changes()` distinguishes "key already
+   *  taken" from every other write error, which a thrown insert cannot — and that
+   *  conflation is what would release a claim after a paid crash.
+   *  Returns true only for the caller that took it. */
+  claimWorkflowRun(workflowId: string, key: string, runId: string): boolean {
+    return this.db.prepare(
+      `INSERT INTO workflow_run_claims (workflow_id, key, run_id) VALUES (?, ?, ?)
+       ON CONFLICT (workflow_id, key) DO NOTHING`,
+    ).run(workflowId, key, runId).changes === 1;
+  }
+
+  /** Stamp the claim as having spent something. Called SYNCHRONOUSLY from the run's
+   *  `onRunStart` hook, on this same handle, before the first spend — so a process
+   *  that dies before answering still leaves the mark. Keyed by `run_id` because the
+   *  hook knows the run, not the caller's key. No-op when no claim points here (a
+   *  cron or chat-driven run has none), which is why this returns void rather than a
+   *  boolean nobody could act on. */
+  markWorkflowRunStarted(runId: string): void {
+    this.db.prepare(
+      'UPDATE workflow_run_claims SET started_at = ? WHERE run_id = ? AND started_at IS NULL',
+    ).run(new Date().toISOString(), runId);
+  }
+
+  /** Hand the claim to a NEW run id after the old run ended without a result.
+   *
+   *  The `COALESCE` is load-bearing: a claim whose run row never landed (the
+   *  `SQLITE_BUSY` case) has no status, and a bare subquery would yield NULL, the
+   *  comparison would never match, and a client holding the key would wait at 409
+   *  forever. A missing row with `started_at` set therefore reads as `interrupted`.
+   *
+   *  `started_at IS NOT NULL` is the precondition: a claim that never spent anything
+   *  is released, not restarted. Returns true only for the caller that won the swap,
+   *  so two retries cannot both restart. */
+  restartWorkflowRunClaim(workflowId: string, key: string, oldRunId: string, newRunId: string): boolean {
+    return this.db.prepare(
+      `UPDATE workflow_run_claims SET run_id = ?, started_at = NULL
+         WHERE workflow_id = ? AND key = ? AND run_id = ? AND started_at IS NOT NULL
+           AND COALESCE((SELECT status FROM pipeline_runs WHERE id = ?), 'interrupted')
+               IN ('failed','interrupted')`,
+    ).run(newRunId, workflowId, key, oldRunId, oldRunId).changes === 1;
+  }
+
+  /** Release a claim that spent nothing — the request's own cleanup when the run was
+   *  refused before it started. The `started_at IS NULL` guard is what keeps this from
+   *  releasing a paid run: a refusal before the start and a crash after it arrive at
+   *  the route in the SAME shape, so the shape cannot be the discriminator. */
+  releaseUnstartedWorkflowRunClaim(workflowId: string, key: string, runId: string): boolean {
+    return this.db.prepare(
+      'DELETE FROM workflow_run_claims WHERE workflow_id = ? AND key = ? AND run_id = ? AND started_at IS NULL',
+    ).run(workflowId, key, runId).changes === 1;
+  }
+
+  /** Boot sweep for claims: drop the ones that never spent anything. A claim WITH
+   *  `started_at` is left standing on purpose — its run paid, and the route reads it as
+   *  `interrupted` and allows a restart. Sweeping those would hand a second paid run to
+   *  the next caller. Returns the number of rows dropped. */
+  sweepUnstartedWorkflowRunClaims(): number {
+    return this.db.prepare('DELETE FROM workflow_run_claims WHERE started_at IS NULL').run().changes;
   }
 
   /**
