@@ -236,17 +236,9 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
  * use it match names case-insensitively, as a case-insensitive file system (a macOS self-host)
  * runs `NODE` and opens `~/.LYNOX`; only curl's short options stay case-sensitive.
  */
-/**
- * Where a path ends: whitespace or a shell character the segments do not split at (quotes are
- * removed by the quote-free reading, and `;` ends a segment already).
- */
-const PATH_END = String.raw`(?:$|[\s\x60)<>|&])`;
-const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:${PATH_END}|\/(?!\.\.)))|(?=${PATH_END}))`;
-/** The interpreters that run code they are handed, and the wrappers that hand it on unchanged. */
+const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:$|[\s'"]|\/(?!\.\.)))|(?=$|[\s'"]))`;
+/** The interpreters that run code they are handed. */
 const INTERPRETER = String.raw`(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php|bun|deno)`;
-const WRAPPER = String.raw`(?:(?:exec|command|nice|nohup|timeout|stdbuf|time)(?:\s+(?:-\S+|\d\S*))*\s+)`;
-/** A command continued onto the next line with `\` is one command: `curl x \⏎  -d y` sends. */
-const joinLineContinuations = (cmd: string): string => cmd.replace(/\\\r?\n/g, ' ');
 const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // Code passed inline to an interpreter, or fed to one on stdin.
   { pattern: /\bnode\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b|-(?=\s|$))/i, label: 'node code execution' },
@@ -257,7 +249,7 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bdeno\s+eval\b/i, label: 'deno code execution' },
   { pattern: /\bbun\s+(?:-[a-zA-Z]*[ep]\b|--eval\b|--print\b)/i, label: 'bun code execution' },
   { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
-  { pattern: new RegExp(String.raw`(?:\|&?|>\()\s*(?:[({]\s*)*${WRAPPER}*(?:[\w.~-]*\/)*(?:env\s+(?:\w+=\S*\s+)*)?${INTERPRETER}\b`, 'i'), label: 'input piped to an interpreter' },
+  { pattern: new RegExp(String.raw`\|\s*(?:[\w.~-]*\/)*(?:env\s+(?:\w+=\S*\s+)*)?${INTERPRETER}\b`, 'i'), label: 'input piped to an interpreter' },
   { pattern: new RegExp(String.raw`\b${INTERPRETER}\b[^|;&\n]{0,256}<`, 'i'), label: 'input redirected to an interpreter' },
   // Data sent out over HTTP. (A DELETE is already blocked in autonomous mode and asked about in
   // interactive mode by the rules above.) Short options are case-sensitive: `-d`, `-F` and `-T`
@@ -271,7 +263,7 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   // The path before `.lynox` in a redirection holds no `>`, for the same reason.
   { pattern: new RegExp(String.raw`>\|?\s*[^\s<>|;&]*${LYNOX_OUTSIDE_WORKSPACE}`, 'i'), label: 'write into the lynox data dir' },
   { pattern: new RegExp(String.raw`^(?=[^\n]*?\b(?:cp|mv|install|ln|rsync|dd|tee|touch|mkdir|tar|unzip|sed|curl|wget|git|rm|rmdir|unlink|patch)\b)(?=[^\n]*?${LYNOX_OUTSIDE_WORKSPACE})`, 'i'), label: 'write into the lynox data dir' },
-  { pattern: new RegExp(String.raw`\b(?:cd|pushd)\s+[^\s;&|]*${LYNOX_OUTSIDE_WORKSPACE}`, 'i'), label: 'write into the lynox data dir' },
+  { pattern: new RegExp(String.raw`\b(?:cd|pushd)\s+['"]?[^\s;&|]*${LYNOX_OUTSIDE_WORKSPACE}`, 'i'), label: 'write into the lynox data dir' },
 ];
 
 const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
@@ -849,7 +841,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       if (hit) {
         return `⚠ ${toolName}: ${hit.label} — "${preview}" [BLOCKED — this action needs to be run manually for safety]`;
       }
-      const ask = _scanBashDanger(joinLineContinuations(rawCmd), SENDS_OR_KEEPS_BASH);
+      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
       if (ask) {
         return `⚠ ${toolName}: ${ask.label} — "${preview}"`;
       }
@@ -858,7 +850,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
 
     // The ask list after the full dangerous scan, not merged into it: a merged list would let a
     // new rule on an earlier segment take the label of an old rule on a later one.
-    const hit = _scanBashDanger(rawCmd, DANGEROUS_BASH) ?? _scanBashDanger(joinLineContinuations(rawCmd), SENDS_OR_KEEPS_BASH);
+    const hit = _scanBashDanger(rawCmd, DANGEROUS_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
     if (hit) {
       return `⚠ ${toolName}: ${hit.label} — "${preview}"`;
     }
