@@ -142,8 +142,8 @@ export interface RunManifestOptions {
    * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
    * the library Run button, the HTTP re-target, and the worker loop's own scheduled
    * pipelines, which go through the same `runGuardedSavedWorkflow`. Nothing aborts those
-   * steps, which is the filed gap rather than a reason to fall back on a process-wide
-   * set.
+   * steps. A process-wide set is not the fallback: it is what let a stop in one thread
+   * abort another thread's agents.
    *
    * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
    * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
@@ -184,8 +184,8 @@ export interface RunCtxInput {
    * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
    * the library Run button, the HTTP re-target, and the worker loop's own scheduled
    * pipelines, which go through the same `runGuardedSavedWorkflow`. Nothing aborts those
-   * steps, which is the filed gap rather than a reason to fall back on a process-wide
-   * set.
+   * steps. A process-wide set is not the fallback: it is what let a stop in one thread
+   * abort another thread's agents.
    *
    * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
    * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is

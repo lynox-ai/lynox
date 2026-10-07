@@ -491,7 +491,7 @@ export const CAPABILITIES: readonly Capability[] = [
       // the tokenizer and this repo has none to call, so treat any figure in tokens as
       // an estimate: at roughly 3-4 characters per token for German, that is somewhere
       // around 170k-230k — comfortably large, and NOT the >1M this case's floor asks
-      // for. See the register row on that mismatch.
+      // for.
       const N = 5000;
       const lines: string[] = [];
       for (let i = 0; i < N; i++) { if (i === Math.floor(N / 2)) lines.push(needle); lines.push(filler(i)); }

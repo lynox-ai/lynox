@@ -317,7 +317,7 @@ export function scopeSecretStore(
             // It does NOT cover `ask_secret`, whose write goes through the HTTP
             // route to the ENGINE's store and never touches this view. A scoped
             // child that collects a secret from the user still cannot read it
-            // back — registered as its own row rather than half-fixed here.
+            // back.
             allowed.add(n);
           },
         }

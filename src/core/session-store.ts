@@ -28,8 +28,7 @@ export function buildResumeContext(thread: ThreadRecord, messages: BetaMessagePa
     // MAX_RESUME_DELTA — strictly more coverage than the old 40 window, but NOT
     // an unconditional "no turn dropped": a tail longer than the cap still falls
     // back to the recent window (rare — occupancy-triggered auto-compaction
-    // normally re-fires first; a freshness-triggered re-summarize to close that
-    // residual gap is a deferred follow-up).
+    // normally re-fires first).
     const len = messages.length;
     const upTo = thread.summary_up_to;
     const recent = Number.isInteger(upTo) && upTo > 0 && upTo <= len

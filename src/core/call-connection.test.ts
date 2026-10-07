@@ -138,12 +138,12 @@ describe('connection stamp — persistence and identity', () => {
     expect(after).not.toBe(before);
   });
 
-  it('(c) KNOWN GAP: re-authorising the same row under another account keeps the stamp', () => {
+  it('(c) re-authorising the same row under another account keeps the stamp', () => {
     // The upsert keeps created_at by design (connection-store.ts), so a profile
     // whose token is replaced by one for a different account — without deleting
     // the profile — carries the same (id, created_at) as before. The stamp tells
-    // apart connection ROWS, not grants. A grant identity is the PRD's open Q1 key
-    // question; this test pins the gap so a fix has to change it on purpose.
+    // apart connection ROWS, not grants. This test pins that, so a change to it has
+    // to be made on purpose.
     const { engine, store } = setup();
     store.save(profile('shop'));
     age(engine, 'shop');

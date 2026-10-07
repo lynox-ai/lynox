@@ -637,9 +637,8 @@ ${safe}
  * bypass-with-a-frame into a correctness bug; it does nothing for the
  * bypass-without-one. `data-boundary.test.ts` pins both.
  *
- * Making the interpolation fail at CI needs `@typescript-eslint/no-base-to-string`,
- * which currently reports 17 unrelated pre-existing violations and so is its own
- * piece of work, not a rider on this one.
+ * Making the interpolation fail at CI would take `@typescript-eslint/no-base-to-string`,
+ * which this repo does not enable.
  */
 const FENCE_TEXT = Symbol('fence.text');
 export interface Fence { readonly [FENCE_TEXT]: string }

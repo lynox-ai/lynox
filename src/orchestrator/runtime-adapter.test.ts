@@ -1287,7 +1287,7 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     // The inline runtime refuses that shape loudly when the role sits on the step itself; a
     // role on the OUTER step reaches the pool before the sub-manifest exists, so that refusal
     // cannot see it. Asserted exactly, so that adding the loud path later turns this red
-    // instead of passing quietly — a tripwire on a filed gap, not an approval of it.
+    // instead of passing quietly — a tripwire, not an approval.
     expect(innerNames).toEqual([]);
   });
 

@@ -307,8 +307,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     // `workflow_id` joins the list because a pipeline task FIRES: createPipelineTask
     // forces `assignee: 'lynox'` internally, and a lynox-assignee task with no
     // run_at fires immediately — so a caller who passed neither assignee nor
-    // schedule slipped past this scan while creating a firing trigger. Pre-existing;
-    // surfaced by adding `params`, which is the payload that makes it worth having.
+    // schedule slipped past this scan while creating a firing trigger.
     const willFire = Boolean(input.schedule) || Boolean(input.watch_url)
       || Boolean(input.run_at) || input.assignee === 'lynox' || Boolean(input.workflow_id);
     if (willFire) {

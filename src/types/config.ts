@@ -21,7 +21,7 @@ import type { CapabilityContract } from './capability-contract.js';
  * aborted every spawned and every step agent IN THE PROCESS: a stop in one thread killed
  * another thread's fan-out, and in the worker loop it killed foreign TRIGGER runs — which
  * are then recorded `failed` and re-fire through the backoff, so the collateral STARTS
- * autonomous runs. Filed 2026-08-24; this is that fix.
+ * autonomous runs.
  *
  * ⛔ AND IT IS CARRIED BY THE AGENT, which is what makes it transitive without a walk: a
  * child is built from a config derived from its parent's, so a grandchild lands in the

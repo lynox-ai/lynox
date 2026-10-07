@@ -112,9 +112,9 @@ export class SubjectGraphBackfill {
           if (!from || !to || from === to) { counts.relationsDropped++; continue; }
           // source_memory_id is intentionally NOT carried here: relationships.source_memory_id
           // is a REAL FK to engine.db `memories`. Even with the S5a memory pass on, an edge
-          // created in pass 2 predates its memory stub (pass 3), so re-establishing edge
-          // provenance is a follow-up (it needs a legacy-relation → engine-relationship id
-          // map pass 2 does not keep). The memory STUBS themselves land in pass 3.
+          // created in pass 2 predates its memory stub (pass 3), so edge provenance is not
+          // re-established (that would need a legacy-relation → engine-relationship id map
+          // pass 2 does not keep). The memory STUBS themselves land in pass 3.
           this.relationships.createRelationship({
             fromSubjectId: from,
             toSubjectId: to,
@@ -232,7 +232,7 @@ export class SubjectGraphBackfill {
    * the resolved primary can differ from what the live mirror chose. That only moves
    * the denormalized `memories.subject_id` pointer (the `memory_subjects` links are
    * identical either way); the pick is deterministic per store, so a re-run is
-   * idempotent. Unifying the tie-break is a follow-up if the pointer ever matters.
+   * idempotent.
    */
   private _pickPrimarySubject(subjectIds: string[], subjectKind: Map<string, string>): string | null {
     let first: string | null = null;

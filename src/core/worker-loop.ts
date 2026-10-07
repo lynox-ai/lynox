@@ -31,9 +31,8 @@ import { compose, engineText, renderFence } from './data-boundary.js';
 /** The canonical "the human did not answer" value. Spelled the same in
  *  `http-api.ts` (which calls it "the canonical skip marker") and in
  *  `onboarding-promotion.ts` (`ONBOARDING_SKIP_MARKER`), and recognised by
- *  `ask-user.ts`. It is a fourth literal copy, which is itself drift — hoisting
- *  all four to one exported constant is a follow-up, kept out of this change
- *  because it would edit http-api.ts (held by core#1196). */
+ *  `ask-user.ts`. It is a fourth literal copy, so all four must stay spelled
+ *  the same. */
 const DISMISSED_ANSWER = '__dismissed__';
 
 /** What a swept run's result reads as. It is a RESULT, not a status: the status
@@ -107,8 +106,8 @@ const WORKER_MAX_COST_USD = 15;
  * not separate "can run" from "cannot"; it bounds how small a breach we are willing to
  * book, and keeps the day's last cents from buying a run that stops immediately.
  *
- * A figure derived from the run's resolved model pricing would be the honest version of
- * this constant. That is filed, not built here.
+ * A figure derived from the run's resolved model pricing would be more precise than
+ * this constant.
  */
 const MIN_VIABLE_RUN_USD = 0.05;
 /**
@@ -379,8 +378,8 @@ export class WorkerLoop {
     // (the trigger is no longer `waiting`) can collect it, for its full 24-hour TTL.
     //
     // ⚠ Reachable through a DEPLOY only since the teardown fix: before it, a graceful
-    // shutdown left nothing waiting, so the window was crash-only. Closed here rather
-    // than filed because the state is now created by design.
+    // shutdown left nothing waiting, so the window was crash-only. Closed here because
+    // the state is now created by design.
     //
     // ⛔ THE CONJUNCTION, and each half closes a lockout the other caused. The status
     // alone is a correlate: a trigger stuck `waiting` by a swallowed `endTriggerWait`
@@ -399,9 +398,7 @@ export class WorkerLoop {
     // `pending_prompts(session_id) WHERE status='pending'`, so the next `ask_user` in that
     // chat throws `PromptConflictError` — uncaught on that path. Before the teardown fix
     // a deploy drained it; now it survives, which is what makes collecting it here a
-    // repair and not a courtesy. The caller-side fix (`complete`/`update` settling the row
-    // they orphan) needs a prompt store on `TaskManager`, which has only a `RunHistory`,
-    // and is filed.
+    // repair and not a courtesy.
     const promptStore = this.engine.getPromptStore();
     const open = promptStore?.getPendingForTrigger(trigger.id);
     if (open && trigger.status === 'waiting') return { ok: false, reason: 'awaiting_answer' };
@@ -600,16 +597,14 @@ export class WorkerLoop {
         //   · the cost guard books a turn and only then compares, so the bound is
         //     `grant + one turn`, not `grant` (see MIN_VIABLE_RUN_USD);
         //   · `spawn_agent` children and the in-run `run_workflow` tool carry their own
-        //     budgets and bill the same daily cap — the note at the head of this file
-        //     has always said those two are unbounded;
-        //   · a manual run through `runTriggerNow` reserves nothing at all.
-        // Each is filed. What this change removes is the standstill, not the overshoot.
+        //     budgets and bill the same daily cap;
+        //   · a manual run through `runTriggerNow` reserves nothing.
+        // What this coupling removes is the standstill.
         //
         // Only `run_agent` is couplable: `executeStandard` and `executeWatch` each set a
         // per-run `costGuard`, so there is a number to lower. `run_workflow` has no
         // per-run cap of its own — its bound is the per-session ceiling — so it keeps the
-        // worst-case reservation rather than a grant that nothing would enforce. That
-        // leaves the same defect alive for scheduled workflows, which is filed, not fixed.
+        // worst-case reservation rather than a grant that nothing would enforce.
         const headroom = persistentBudgetHeadroom();
         // ⛔ The SESSION ceiling is in the min, and leaving it out was a real hole: the
         // worker is the one caller that always passes a `costGuard`, and
@@ -1512,9 +1507,7 @@ export class WorkerLoop {
     // that covers it. A cap that lands on a finished answer stays an ordinary end of
     // turn; reporting that as a failure would train the reader to ignore the real one.
     //
-    // ⚠ Not covered, and filed rather than guessed at: `absolute_cap` and `max_tokens`
-    // both report zero pending tools, and whether either is reachable on this path has
-    // not been measured.
+    // Only those two causes take this line; `absolute_cap` and `max_tokens` do not.
     // `?.()` on the METHOD: this sits in the RESULT path, where a throw is recorded as the
     // run's own failure — a successful task would be reported failed with a TypeError as
     // the text the owner reads. The partial-double case is not hypothetical; it is why
@@ -1554,8 +1547,7 @@ export class WorkerLoop {
         // ⚠ And the LIMIT of that, stated rather than left to look deliberate: the
         // unanswered-question path above records `failed` and still notifies as a ✓ at
         // `normal`. That asymmetry is older than this change and no test pins it either
-        // way; whether such a run should notify as a failure is a question about that
-        // path, so it is filed rather than answered by a keystroke here.
+        // way.
         title: `${budgetCut === null ? '\u2713' : '\u2717'} ${task.title}`,
         body: truncatedResult,
         taskId: task.id,

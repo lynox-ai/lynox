@@ -203,7 +203,7 @@ export async function listMistralVoices(): Promise<VoiceInfo[]> {
   const now = Date.now();
   if (_voicesCache && _voicesCache.expiresAt > now) return _voicesCache.voices;
   // Join the walk already running. Returns the same array the starter gets, which is
-  // the same sharing the cached path above already has (filed separately as a row) —
+  // the same sharing the cached path above already has —
   // consistent on purpose rather than copying on one path only.
   if (_voicesInFlight) return _voicesInFlight;
   const walk = walkMistralVoices(now);
@@ -245,8 +245,7 @@ async function walkMistralVoices(now: number): Promise<VoiceInfo[]> {
   // Earlier mechanisms for this property were built and retired, each defeated by
   // something its author had not enumerated. No count here: two files carried two
   // different ones (seven retired against six), and neither was derivable from the tree.
-  // The history and the open shapes are a register row; what belongs here is which
-  // mechanism holds which half.
+  // What belongs here is which mechanism holds which half.
   let doubtful = false;
   const report = (message: string): void => {
     doubtful = true;
