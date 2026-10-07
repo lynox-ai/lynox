@@ -496,16 +496,38 @@ describe('gate-record — the shipped template does not answer its own questions
     // the template left all 145 green — the guard satisfied, the template swept twice and the
     // script never swept at all. Measured, and silent, which is the direction that matters.
     //
-    // ⚠ And each token is STRUCTURAL, not prose. The fence is what `extractRecord` parses. The
-    // export is what this file imports at the top, so it cannot vanish while the test compiles.
-    // The script deliberately keeps the string `gate-record` out of its own code — it assembles
-    // `MARK` from parts — so every occurrence there is a COMMENT, and anchoring on a comment in a
-    // file whose comments are rewritten every commit buys a red with the wrong diagnosis.
-    // Measured: rewording those five comments reds the guard while the sweep reads the right file.
-    for (const [label, text, token] of [
+    // ⚠ And each token is STRUCTURAL, not prose: the fence is what `extractRecord` parses, the
+    // export is the declaration this file imports at the top. Structural does NOT mean unloseable,
+    // and an earlier version of this comment claimed it did — «it cannot vanish while the test
+    // compiles» was wrong, and wrong in the expensive direction, because it promised an absence of
+    // false reds. `const REVIEW_FORMAT = …; export { REVIEW_FORMAT }` compiles, imports fine, and
+    // deletes the token: this guard CAN red while the sweep is reading the right file. What is
+    // true is the narrower thing — the message names the token, so that red costs one second to
+    // diagnose. Prose would be worse, not better: the script keeps the string `gate-record` out of
+    // its own code (it assembles `MARK` from parts), so every occurrence there is a COMMENT, and
+    // the comments in that file are rewritten most commits. Measured: rewording those five
+    // comments reds a comment-anchored guard while the sweep reads the right file.
+    const surfaces: Array<[string, string, string]> = [
       ['the PR template', TEMPLATE, '```gate-record'],
       ['scripts/gate-record.mjs', SCRIPT, 'export const REVIEW_FORMAT'],
-    ] as Array<[string, string, string]>) {
+    ];
+
+    // ⚠ The property that makes a token IDENTIFY its surface, asserted instead of entrusted to the
+    // choice of value: a token must be ABSENT from every other surface. Without this the whole
+    // repair has no witness — set both tokens back to the shared `gate-record` and all 145 stay
+    // green while the hole described above is silently restored. Measured, both directions: each
+    // token occurs exactly once in its own surface and zero times in the other.
+    for (const [label, , token] of surfaces) {
+      for (const [otherLabel, otherText] of surfaces) {
+        if (otherLabel === label) continue;
+        expect(
+          otherText,
+          `the token chosen for ${label} (\`${token}\`) also occurs in ${otherLabel}, so it cannot tell the two reads apart — a shared token satisfies this guard without identifying anything`,
+        ).not.toContain(token);
+      }
+    }
+
+    for (const [label, text, token] of surfaces) {
       expect(text, `the sweep is not reading ${label} — it found no \`${token}\``).toContain(token);
       expect(text, `${label} contains an example of the form the grammar refuses — an author who reads it writes a record that fails`)
         .not.toContain(PLURAL);
