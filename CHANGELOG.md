@@ -1,5 +1,172 @@
 # Changelog
 
+## 2.15.2 — 2026-10-07
+
+### Changed — BREAKING (library consumers): `IAgent` gains three budget methods
+
+- `IAgent` has three new required methods, used by the fan-out budget fitting
+  below: `getRemainingRunBudgetUSD()`, `reserveExternalCost(usd)` and
+  `releaseExternalCost(usd)`. An `IAgent` implemented outside this package needs
+  them to compile. `CostGuard` gains the matching `remainingBudgetUSD()`,
+  `reserveExternalCost(usd)` and `releaseExternalCost(usd)`. (#1545)
+- Additive: `IAgent.runSignal` and `PromptMeta.signal` (both optional) carry the
+  asking run's abort signal to prompt implementations, and `Agent.send` accepts
+  a `disposableDeadline` option. (#1548) `ownEntry` and `profileNamed` are new
+  exports. (#1554) `Engine.resolveWorkerRunModel()` is new. (#1551)
+
+### Fixed: a sub-agent fan-out's budgets are fitted to what the run that started it has left
+
+- Before a fan-out started, only an estimate of its cost was checked, and only
+  against the session ceiling. The sub-agents' own budgets — `max_budget_usd`,
+  $5 by default — were not compared with what the delegating run still had under
+  its own cost ceiling. A fan-out could therefore start sub-agents whose budgets
+  together exceeded that remainder. On a run with a cost ceiling, the budgets of
+  a fan-out are now checked before any sub-agent starts: when they add up to
+  more than the run has left, each is scaled down in proportion so that together
+  they fit, and each sub-agent is held to its scaled budget. The spawn result
+  then carries a note that names, per sub-agent, the budget asked for and the
+  budget given, and says that a sub-agent which stopped at its budget did not
+  fail. A run without a cost ceiling is unaffected. (#1545)
+- On a run with a cost ceiling, a fan-out in which a sub-agent's share would be
+  less than an estimate of one first turn on that sub-agent's model is refused,
+  with a message naming the sub-agent, its share and that estimate. The estimate
+  is priced on the model resolved for that sub-agent (#1558) and on the output
+  limit resolved for its call — its own `max_tokens`, else its profile's, else
+  the model's default — so a lower output limit also lowers it (#1562). A share
+  of zero is always refused. Amounts under one cent in these messages are shown
+  to four decimal places.
+- The shares are held against the run's ceiling as soon as a fan-out is
+  admitted, so two fan-outs started in the same turn cannot both be given the
+  same remainder: the second is refused if the first already took it. Each share
+  is given back when its sub-agent finishes. (#1545)
+
+### Fixed: the 10-minute spawn time limit stops the sub-agent
+
+- A spawned sub-agent has a time limit of 10 minutes, but reaching it did not
+  stop the sub-agent, so one that hung held its parent's run until something
+  else ended it. The limit now stops the sub-agent: it stops waiting for tool
+  calls still in flight, and fails with "Stopped after the 10-minute spawn time
+  limit without finishing." Its run is recorded as failed with the stop reason
+  `spawn_timeout`; a stop by the parent is still recorded as aborted. Its share
+  of a fan-out's budget is given back. (#1548)
+- Time a sub-agent spends waiting for a person — a question, a confirmation or a
+  secret request — does not count against the limit. Once a sub-agent has
+  finished, a question from work it left behind is not passed on to its parent.
+- When a chat run over the HTTP API (the one the web UI uses) is stopped, a
+  question it still has open — a question, a confirmation or a secret request —
+  is now withdrawn. An answer given after the stop is not acted on, and a
+  question raised by a run that was already stopped is not shown.
+
+### Fixed: chat turns that could not start
+
+- A chat turn whose start failed before the server answered — no connection, a
+  request cut off, a session that could not be re-created — left the chat marked
+  as running with an empty reply, and the turns queued behind it did not go. Now
+  the message is kept and marked failed, the empty reply is removed, the chat is
+  free again, and the error is shown. If the connection is up when the turn
+  fails, the next queued turn goes. (#1547)
+- Such a turn may still have reached the server, so tapping the failed message —
+  or reconnecting — first asks the server whether a turn is still running in
+  that chat. If one is, nothing is sent again: the chat says so and shows the
+  running turn's answer. If the server cannot be asked, nothing is sent either.
+- When the turn fails after you have moved to another chat, or while its own
+  chat is being reloaded, the message is marked failed in that chat's saved copy
+  instead of being lost when the server's transcript arrives, and it can be sent
+  again from there. A chat deleted in the meantime is not brought back. (#1555,
+  #1559)
+
+### Fixed: OAuth renewals in `http_request`
+
+- `http_request` renews an OAuth access token from five minutes before it
+  expires onward, including after it has expired. A renewal that failed was
+  attempted again on every following request. After a failed renewal, the
+  profile is now held back for one minute: requests in that minute go out with
+  the stored token, and the log says that the renewal was skipped and until
+  when. A change to the profile's OAuth settings, a new token expiry or a newly
+  stored refresh token lifts the hold at once, and a successful renewal clears
+  it. The hold is kept in memory only. (#1560)
+- A renewal that succeeded but left the profile still due for renewal — the
+  profile could not be saved, or the provider issues tokens that live less than
+  five minutes — was run again on the next request. When the new token's
+  lifetime is known, the profile is now held back after such a renewal as well,
+  for at most a minute and never longer than the new token can still carry a
+  request. (#1563)
+- When a provider refuses the requested scopes (`invalid_scope`), `api_setup`'s
+  `fetch_token` called this a temporary failure and suggested retrying later. It
+  now says the provider refused the scopes, names the scopes asked for, says
+  nothing was changed and that retrying unchanged will not help, and points to
+  the profile's scope setting — or, for a profile set up from a provider preset,
+  to a new consent through `api_setup connect`. (#1556)
+
+### Fixed: a JSON request body with a stray closing tag
+
+- Some models append a closing tag such as `</body>` to the JSON body of an
+  `http_request` call. The API then received invalid JSON, rejected the call,
+  and the model could repeat the same call. When a body looks like JSON or is
+  declared as `application/json`, does not parse, and parses once a single
+  trailing closing tag is removed, that tag is now removed before the request is
+  sent, and the result tells the model that its body was repaired. Any other
+  body is sent as before. (#1565)
+
+### Fixed: secret scanning of long text
+
+- The patterns that find JWT-shaped tokens took time growing with the square of
+  the input's length on long base64-like text without the token's dots. They now
+  run in time linear in the length of the text, with the same matches. This
+  covers credential masking and detection, the outbound scan of `http_request`,
+  debug output, security-audit previews, the redaction applied before a
+  conversation is saved as a workflow, the inbox's sensitive-content rules, and
+  the web UI's masking and pasted-key guard. (#1552)
+- The web UI's Telegram bot token mask bounds the length of the numeric id for
+  the same reason; a token directly after `/bot` in an API URL is still masked.
+
+### Fixed: model ids and profile names that match built-in object properties
+
+- A model id or a model-profile name such as `toString`, `constructor` or
+  `__proto__` was looked up on plain objects and found built-in properties
+  instead of nothing, so it could come back as a capability, a price or a
+  profile. Such a name is now treated as unknown: model capabilities and prices
+  fall back to their defaults, `spawn_agent` refuses it as an unknown profile,
+  and a `worker_profile` naming one is cleared at load. A `"__proto__"` entry in
+  `pricing.json` or in `LYNOX_MODEL_PROFILES_JSON` is kept as an ordinary entry.
+  The web UI's cost display reads its prices the same way. (#1554)
+
+### Fixed: refusing to take back a merge in a chain
+
+- Taking back a merge whose resulting entry was later merged again (A into B,
+  then B into C) was refused with "This merge is no longer in effect — it was
+  taken back already, or the entry was merged elsewhere since.", which did not
+  describe that case. The refusal now names the merge to take back first — the
+  latest in the chain — and says to try again afterwards; it carries the code
+  `merge_chained`. When no such merge can be named, the refusal says that the
+  later merge cannot be taken back here, so this one cannot either. (#1550)
+
+### Changed: sub-processor contact
+
+- The contact section of `SUBPROCESSORS.md` now lists only the privacy address;
+  the link to an EU representative was removed. (#1553)
+
+### Internal
+
+- The rule that picks a session agent's model and the provider serving it now
+  lives in one function, which a worker run can also call before its session
+  exists; behaviour is unchanged. (#1551)
+- The web UI's Svelte rune-module tests run in jsdom, compiled as the browser
+  runs them; `jsdom` joins the web UI's dev dependencies. A test checks that the
+  Markdown sanitizer removes the marker the renderer puts on its own controls.
+  (#1546, #1561)
+- The JWT linear-time test has a longer time budget, so that it also passes
+  under coverage. (#1557)
+- The pull-request template's `gate-record` skeleton can be filled in as
+  written, and its format is held to one source by a test. (#1566)
+- The chat view's floating promises are handled, so the lint rule against them
+  is an error in every web UI component. (#1547)
+
+### Upgrade and rollback
+
+No schema changes: `engine.db` stays at **19**, `history.db` at **54** and the
+mail state at **17**. Rolling back to 2.15.1 needs no step.
+
 ## 2.15.1 — 2026-10-07
 
 ### Fixed: scheduled agent tasks start again under a daily spend cap
