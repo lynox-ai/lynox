@@ -52,9 +52,23 @@ describe('what it warns about', () => {
     '// that is pre-existing.',
   ];
 
+  // One is missed on purpose: a bare `a follow-up` is far more often the product's own
+  // noun than a deferral (measured over the tree: it was most of the noise), so only
+  // `is a follow-up` and `a follow-up <piece of work>` count.
   it(`at least ten of the ${PUT_OFF.length} ways of saying work was put off`, () => {
     const missed = PUT_OFF.filter((l) => kindOf(l) === null);
-    expect(missed, 'missed').toEqual([]);
+    expect(missed, 'missed').toEqual(['// a follow-up']);
+  });
+
+  it('a follow-up as work put off, in the forms the tree uses', () => {
+    for (const line of [
+      '* Unifying the tie-break is a follow-up if the pointer ever matters.',
+      '// provenance is a follow-up (it needs a mapping)',
+      '*     it is caught by the generic path and measured as a follow-up.',
+      '// a follow-up hardening — not in this scope.',
+    ]) {
+      expect(kindOf(line), line).toBe('marks work as put off');
+    }
   });
 
   // A zero-width space or fullwidth letters, as an editor or a paste can leave them, read
@@ -73,6 +87,11 @@ describe('what it warns about', () => {
       '// deferred rendering keeps the iframe out of the stream',
       '// the store went out of scope when the block ended',
       '// refuses a preset id that is not in the register',
+      '/** Cancel a follow-up (user says "I don\'t care anymore"). */',
+      '// the user may have sent a turn (tapped a follow-up pill',
+      '// user image, an assistant reply, then a follow-up.',
+      '// Accepts both a TODO (TaskRecord: has priority + due_date) and a trigger',
+      '* UNBOUNDED full-scan of every USER-TODO (`tasks`) row',
     ]) {
       expect(kindOf(line), line).toBeNull();
     }
