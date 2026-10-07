@@ -567,10 +567,30 @@ describe('httpRequestTool', () => {
         body: '{"a":1}</body>',
       }, agentWithPromptFn());
 
+      // ⚠ The call has to have HAPPENED, asserted before anything else, or the rest is vacuous.
+      // `calls[0]?.[1]` is `undefined` when fetch was never invoked, and
+      // `expect(undefined).not.toHaveProperty('body')` PASSES — so any future gate that refuses
+      // this shape would leave both assertions green with nothing witnessed. The optional chain
+      // is precisely what converts a loud failure into a silent pass.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(result)).not.toContain('repaired');
-      // …and the body really was dropped rather than repaired-and-sent, or this would pass for
-      // the wrong reason.
-      expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('body');
+      // …and the body really was dropped rather than repaired-and-sent. `lastPinnedInputs` is the
+      // DIRECT witness — what the pinned transport actually received — rather than the init this
+      // harness reconstructs one layer above it.
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.body).toBeUndefined();
+      // ⚠ BOTH witnesses, because the review that asked for the direct one did not ask for the
+      // other to go, and replacing rather than adding is its own mistake. This second one reads
+      // the init the harness reconstructs, one layer above the wire.
+      //
+      // ⚠ What NEITHER of them sees, stated so the pair is not mistaken for more than it is:
+      // setting `opts.body = outboundBody` unconditionally — i.e. attaching `null` instead of
+      // omitting the key — is invisible here. The redirect wrapper re-attaches a non-`undefined`
+      // body (`http.ts:231`) and `materialiseBody` maps `null` to `undefined`
+      // (`network-guard.ts:560`), so that transformation changes nothing at the wire or here. A
+      // mutation round confirmed it survives both assertions; it is behaviour-equivalent, not a
+      // hole, and no test is owed for it.
+      expect(fetchMock.mock.calls[0]![1]).not.toHaveProperty('body');
     });
 
     it('⭐ the note survives a timeout — the silent path is the one that mattered', async () => {
@@ -589,25 +609,113 @@ describe('httpRequestTool', () => {
         headers: { 'Content-Type': 'application/json' },
         body: '{"a":1}</body>',
         timeout_ms: 50,
-      }, agentWithPromptFn())).rejects.toThrow(/repaired before it was sent/);
+      }, agentWithPromptFn())).rejects.toThrow(/the engine repaired your request body/);
     });
 
-    it('⭐ no comment in the handler claims the scan reads the repaired body', async () => {
-      // ⚠ A TEXT sweep, and it says so: it checks a sentence, not the behaviour. The behaviour
-      // has its own witness ("the egress scan reads the ORIGINAL body"), and the two are not
-      // interchangeable — the code was right and the comment was wrong for one commit, which is
-      // exactly the state a behavioural test cannot see. A claim about security behaviour in a
-      // public repo is worth a sweep even when the sweep is only a correlate.
+    it('⭐ the note claims nothing about the request having been sent', async () => {
+      // ⚠ The regression this pins is MINE, one commit old. The note used to read "your request
+      // body was repaired before it was sent" and rode the success path only, where a response
+      // proves the send. Putting it on the timeout path made that clause unprovable: `timeout_ms`
+      // has no schema minimum, the clamp floor is 1ms, the abort timer is armed before the `try`,
+      // and `fetchPinned` resolves DNS before a byte leaves — so an early abort reaches this
+      // message with nothing on the wire. The clause was removed rather than gated.
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => { /* never settles */ })));
+
+      const err = await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"a":1}</body>',
+        timeout_ms: 50,
+      }, agentWithPromptFn()).then(() => null, (e: unknown) => e);
+      const msg = String(err instanceof Error ? err.message : err);
+
+      // Positive control: the note is THERE. Without this the absence below is satisfied by a
+      // message that carries no note at all.
+      expect(msg).toContain('**[Engine note — the engine repaired your request body]**');
+
+      // ⚠ And the needles are proven to be real substrings of the wording they came from, in
+      // the same run. A `not.toContain(X)` where X occurs nowhere is not a weak control, it is
+      // NO control — indistinguishable from a passing one.
+      const RETIRED = 'your request body was repaired before it was sent';
+      for (const needle of ['before it was sent', 'and sent the rest']) {
+        expect(`${RETIRED}. The engine removed that tag and sent the rest unchanged.`,
+          'the needle is not a substring of the wording it is meant to forbid').toContain(needle);
+        expect(msg, 'the note asserts a send this handler cannot establish').not.toContain(needle);
+      }
+    });
+
+    it('⭐ the handler carries no copy of one retired sentence about which body is scanned', async () => {
+      // ⚠ A TEXT sweep of ONE SPELLING, and the title says so rather than claiming the property.
+      // It checks a sentence, not the behaviour; the behaviour has its own witness ("the egress
+      // scan reads the ORIGINAL body"), and the two are not interchangeable — the code was right
+      // and the comment was wrong for two commits, which is exactly the state a behavioural test
+      // cannot see. What this CANNOT do is recognise the same false claim re-worded, and nothing
+      // here should be read as if it could.
       const { readFileSync } = await import('node:fs');
       const src = readFileSync(new URL('./http.ts', import.meta.url), 'utf8');
       const WRONG = 'gets scanned is the body that goes out';
 
-      // Positive control FIRST: the sweep must be reading the handler at all. Without this, a
-      // moved file makes the assertion below vacuous and green — the failure mode I shipped in
-      // the gate-record test and had to come back for.
-      expect(src, 'the sweep is not reading http.ts').toContain('repairStrayCloseTag');
+      // ⚠ Positive control FIRST, and it has to identify the SURFACE — not merely prove that some
+      // file was read. `repairStrayCloseTag` was the first choice and it is the gate-record
+      // defect verbatim: that symbol is declared in `model-json-body.ts` as well, so aiming the
+      // read one file sideways left the control satisfied and the needle absent — green, having
+      // swept nothing. A control token has to be ABSENT from every other surface, which is the
+      // property `tests/gate-record.test.ts` asserts for its own marker. This one occurs once in
+      // this handler and nowhere else under `tools/builtin`.
+      //
+      // A moved file, incidentally, is NOT the failure this guards: `readFileSync` throws ENOENT
+      // and the test goes loudly red. The reachable failure was always the wrong TARGET.
+      expect(src, 'the sweep is not reading http.ts').toContain('export const httpRequestTool');
       expect(src, 'a comment claims the scan reads the repaired body; it reads the original')
         .not.toContain(WRONG);
+    });
+
+    it('⭐ an EMPTY body attaches nothing — the term must not widen what goes out', async () => {
+      // ⚠ Written because a mutation that deleted the `length > 0` test from `bodySent` SURVIVED.
+      // Without it an empty body becomes an attached zero-length body: the shape this replaced
+      // read `outboundBody && …`, where `''` is falsy and nothing was attached. The whole claim
+      // of that term is that it preserves the old set exactly, and no test held it to that.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await handler({
+        url: 'http://example.com/api',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '',
+      }, agentWithPromptFn());
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(lastPinnedInputs[0]!.body).toBeUndefined();
+      expect(fetchMock.mock.calls[0]![1]).not.toHaveProperty('body');
+    });
+
+    it('⭐ a non-string body is refused LOUDLY, not silently dropped', async () => {
+      // ⚠ Also a regression of my own, and in the direction that costs something. Folding the
+      // `typeof` test into the term that decides whether a body leaves made a non-string body
+      // yield `null` — no `body` key on `opts`, so a BODYLESS POST went out and returned 200,
+      // creating an empty record on the remote with no error anywhere. The shape this replaced
+      // forwarded the value and the transport threw, which was loud. Unreachable from a model
+      // (the validated dispatch rejects it against `body: {type:'string'}`), so this test is the
+      // only thing that can see it — and the narrowing now DEPENDS on that other file's
+      // guarantee, which is why the guard is asserted rather than assumed.
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await visible({
+        url: 'http://example.com/api',
+        method: 'POST',
+        body: 5,
+      } as unknown as Parameters<typeof handler>[0], agentWithPromptFn());
+
+      expect(String(result)).toContain('Blocked: request body must be a string.');
+      // The refusal has to come BEFORE the wire, or it is a report rather than a guard.
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('a legitimate HTML POST reaches fetch UNCHANGED, tag and all', async () => {
