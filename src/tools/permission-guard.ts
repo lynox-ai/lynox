@@ -686,9 +686,9 @@ const OPTION_VARIANT_TAIL = 64;
 /**
  * A shell word: a closed quoted span is part of the word it sits in (`-C "my dir"` is two words,
  * not three), and `\X` is one character. A quote that never closes does not swallow the rest of
- * the line; that word falls back to plain whitespace splitting.
+ * the line: it belongs to no word, and the words after it stay words.
  */
-const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+|\S+/g;
+const SHELL_WORD = /(?:\\[\s\S]|[^\s"'\\]+|"(?:[^"\\]|\\[\s\S])*"|'[^']*')+/g;
 
 /**
  * The same segment with the options between a command and its subcommand dropped.
