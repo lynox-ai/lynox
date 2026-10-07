@@ -236,7 +236,9 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
  * use it match names case-insensitively, as a case-insensitive file system (a macOS self-host)
  * runs `NODE` and opens `~/.LYNOX`; only curl's short options stay case-sensitive.
  */
-const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:$|[\s'"\x60)<>|;&]|\/(?!\.\.)))|(?=$|[\s'"\x60)<>|;&]))`;
+/** Where a path ends: whitespace, a quote, or a shell character. */
+const PATH_END = String.raw`(?:$|[\s'"\x60)<>|;&])`;
+const LYNOX_OUTSIDE_WORKSPACE = String.raw`(?<![\w.-])\.lynox(?:\/+(?!workspace(?:${PATH_END}|\/(?!\.\.)))|(?=${PATH_END}))`;
 /** The interpreters that run code they are handed, and the wrappers that hand it on unchanged. */
 const INTERPRETER = String.raw`(?:sh|bash|dash|zsh|ksh|node|python[23]?|perl|ruby|php|bun|deno)`;
 const WRAPPER = String.raw`(?:(?:exec|command|nice|nohup|timeout|stdbuf|time)(?:\s+(?:-\S+|\d\S*))*\s+)`;

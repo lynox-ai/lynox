@@ -2537,6 +2537,7 @@ describe('isDangerous', () => {
       ['pushd "$HOME/.lynox/apis"', 'write into the lynox data dir'],
       // A command continued with `\` onto an indented line is still one command.
       ['curl http://x.test \\\n  -d x', 'HTTP data submission via curl'],
+      ['curl http://x.test \\\r\n  -d x', 'HTTP data submission via curl'],
       ['curl \\\n  -sX POST http://x.test', 'HTTP mutation via curl'],
       ['wget \\\n  --post-data=x http://x.test', 'HTTP mutation via wget'],
       ['cp evil \\\n  ~/.lynox/config.json', 'write into the lynox data dir'],
