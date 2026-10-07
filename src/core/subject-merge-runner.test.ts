@@ -933,6 +933,69 @@ describe('owner rollback of a merge chain A→B→C', () => {
       .toEqual({ ok: false, reason: 'chained', blocking: null });
   });
 
+  it('⭐ detects a cycle the walk reaches LATER, with a ledger for either tip', () => {
+    // ⚠ THE FIXTURE THAT ACTUALLY EXERCISES THE LOOP. The two-link cycle above
+    // never enters it: the walk's first edge already closes the cycle, so the
+    // loop condition is true at entry and the body never runs. Measured — which
+    // means the loop's cycle detection had NO coverage at all until this test,
+    // and a mutation deleting the in-loop `seen.add` survived the whole suite.
+    //
+    // Here the cycle starts one step in: `A→B, B→C, C→B`. Asked for `A→B`, the
+    // walk steps B→C, then C→B, and only then meets an id it has seen. ⚠ The
+    // kill signature is NON-RETURN, not a red assertion: the walk is synchronous,
+    // so without the guard the event loop never yields and vitest's own timeout
+    // cannot fire. Run such a mutant under `timeout -k 5` AND a heap cap
+    // (`NODE_OPTIONS=--max-old-space-size=1024`) — a timeout bounds the wall
+    // clock, not the heap, and an uncapped run of exactly this mutant took a
+    // shared machine to 0.4 GB free before the limit expired.
+    //
+    // ⚠ And there is a LEDGER FOR BOTH candidate tips, which is the point of the
+    // shape rather than decoration. Depending on how `seen` is seeded the walk
+    // exits naming either `B→C` or `C→B` as the tip; with a ledger for each, a
+    // seeding change that altered the answer would show up here instead of being
+    // argued in a comment. Both must still answer «no blocking id», and the
+    // reason is in the last assertion: no ledger in a cycle can be in effect,
+    // because `inEffect` wants a canonical with `merged_into === null` and every
+    // node on a cycle has one.
+    const { dir, sweeps, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Proseware GmbH' });
+    const b = store.createSubject({ kind: 'organization', name: 'Proseware' });
+    const c = store.createSubject({ kind: 'organization', name: 'Proseware Group' });
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    expect(runMerge(store, null, threadStore, dir, b, c).ok).toBe(true);
+    const runs = listMergeRuns(store, sweeps);
+    const ab = runs.find(r => r.dupName === 'Proseware GmbH')!;
+    const bc = runs.find(r => r.dupName === 'Proseware')!;
+
+    // The ledger for the OTHER candidate tip, `C→B`. Hand-written: `planMerge`
+    // refuses it (its canonical is already merged), which is exactly why the
+    // cycle needs raw SQL below.
+    const other = `${bc.id.slice(0, -1)}${bc.id.endsWith('z') ? 'y' : 'z'}`;
+    const bcFile = JSON.parse(readFileSync(join(sweeps, `${bc.id}.json`), 'utf-8')) as {
+      entry: { dupId: string; canonicalId: string };
+    };
+    bcFile.entry = { ...bcFile.entry, dupId: c, canonicalId: b };
+    writeFileSync(join(sweeps, `${other}.json`), JSON.stringify(bcFile));
+    expect(listMergeRuns(store, sweeps).some(r => r.id === other),
+      'the second ledger was rejected by the reader — this fixture tests nothing').toBe(true);
+
+    // Close the cycle one step in: C points back at B.
+    const raw = (store as unknown as { db: import('better-sqlite3').Database }).db;
+    raw.prepare('UPDATE subjects SET merged_into = ? WHERE id = ?').run(b, c);
+    expect(store.getSubject(a)!.merged_into).toBe(b);
+    expect(store.getSubject(b)!.merged_into).toBe(c);
+    expect(store.getSubject(c)!.merged_into, 'the fixture is not a cycle').toBe(b);
+
+    // It returns, and names nothing — whichever tip the walk picked.
+    expect(rollbackMergeById(store, null, threadStore, sweeps, ab.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+    expect(rollbackMergeById(store, null, threadStore, sweeps, bc.id))
+      .toEqual({ ok: false, reason: 'chained', blocking: null });
+    // The reason no tip can be named, asserted rather than reasoned about.
+    expect(listMergeRuns(store, sweeps).filter(r => r.inEffect).length,
+      'a ledger in a cycle is in effect — then the refusal could name one').toBe(0);
+  });
+
   it('⭐ does not name a step this instance could not carry out either', () => {
     // ⚠ `inEffect && applied` does NOT establish «takeable», and naming a step
     // the owner cannot take is the one defect this refusal exists to remove. A
@@ -950,8 +1013,8 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // step can therefore still answer «The merge could not be taken back» in a
     // narrow state. The reason it is left out is duplication risk, not
     // impossibility — the full argument sits beside the filter in
-    // `subject-merge-runner.ts`, and the gap is registered rather than patched
-    // here. This test covers the two STORE preconditions and nothing more.
+    // `subject-merge-runner.ts`. This test covers the two STORE preconditions and
+    // nothing more.
     const { dir, sweeps, store, threadStore } = setup();
     const a = store.createSubject({ kind: 'organization', name: 'Fabrikam GmbH' });
     const b = store.createSubject({ kind: 'organization', name: 'Fabrikam' });

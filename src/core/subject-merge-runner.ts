@@ -484,17 +484,25 @@ export function rollbackMergeById(
     let edge = { dup: file.entry.canonicalId, canonical: firstOnward };
     // `seen` is not decoration: the column is a self-referencing FK with no check
     // against a cycle, and a corrupt one would hang the request, not refuse it.
-    // It also makes the walk finite without a hop cap — every iteration either
-    // breaks or adds an id to a set drawn from a finite table.
     //
-    // ⚠ Seeded with the DUP only. A version seeded `edge.dup` as well, and that
-    // term could not change an answer: the loop tests `edge.canonical`, and in
-    // any cycle every node has `merged_into !== null`, so no ledger whose dup
-    // lies on it can be `inEffect` and the answer is «no blocking id» either
-    // way. A mutation removing it survived the suite — which is the same
-    // standard this block applies to the canonical match a few lines down, so
-    // the term is gone rather than kept for symmetry.
-    const seen = new Set<string>([file.entry.dupId]);
+    // ⚠ IT STARTS EMPTY, and that took two corrections to arrive at. The set started as
+    // `{dupId, edge.dup}`; the second term could not change an answer, so it
+    // went — and then a mutation emptying the set ENTIRELY also survived, which
+    // meant the remaining seed was unobservable too. Two symmetric terms, one
+    // removed by a rule that applied equally to the other: that is a rule applied
+    // to whichever half was noticed first.
+    //
+    // A seed short-circuits the walk at entry; the in-loop `add` catches a cycle
+    // reached later. EITHER alone terminates, which is why no single-term
+    // mutation of `seen` dies — and why the honest cut is to keep exactly one.
+    // The in-loop add is the one that generalises, so the seed is gone and the
+    // cycle fixture below exercises the loop rather than short-circuiting past it
+    // (the old seed made the committed cycle test exit before the loop ran, so
+    // the loop's cycle detection had no coverage at all).
+    //
+    // Termination without a hop cap: every pass either breaks or adds an id to a
+    // set drawn from a finite table, so the walk is bounded by the subject count.
+    const seen = new Set<string>();
     while (!seen.has(edge.canonical)) {
       seen.add(edge.canonical);
       const onward = store.getSubject(edge.canonical)?.merged_into ?? null;
@@ -527,25 +535,40 @@ export function rollbackMergeById(
     // of `failed`, which has at least three causes that are pure predicates
     // over the ledger and the store: `entry.repoints` failing `isRepointTarget`
     // (an exported pure function), a `dataStore` record reading `'foreign'` —
-    // whose own site a few lines up in this file says «Ask first, so such a
-    // ledger changes nothing», i.e. it IS a pre-check — and a dup row whose
-    // `kind` no longer matches the ledger's.
+    // whose own site in `rollbackMergeRun` says «Ask first, so such a ledger
+    // changes nothing», i.e. it IS a pre-check — and a dup row whose `kind` no
+    // longer matches the ledger's. A named step can therefore still answer «The
+    // merge could not be taken back»: the shape this refusal exists to remove,
+    // one step further out.
     //
-    // So a named step can still answer «The merge could not be taken back»:
-    // narrow (it needs a ledger from a version whose `REPOINT_TARGETS` has since
-    // changed, a dropped-and-retyped collection, or a record the reader admits
-    // because it validates only `ids`) but reachable without touching SQLite by
-    // hand, and measured on this tree. It is the shape this refusal exists to
-    // remove, one step further out.
+    // ⚠ WHAT IS MEASURED HERE IS THE CONSEQUENCE, NOT THE ROUTES. The dead-end
+    // pair of answers was reproduced on this tree, through a hand-written ledger.
+    // The ways a real instance gets there are read off the code, and they are not
+    // equal: a dropped-and-retyped collection is reachable from the shipped
+    // `data_store` tool; a record the reader admits (it validates only `ids`)
+    // needs a hand-written or imported ledger, as does a drifted `kind`, since
+    // `subjects.kind` is never written after creation; and a ledger from a
+    // version whose `REPOINT_TARGETS` had an entry since removed is EMPTY TODAY
+    // — measured over that constant's whole history, 22 additions and zero
+    // removals. That route is a future removal, not a current state. Said apart
+    // from the measurement because a measured consequence next to a route list
+    // lends the list a credibility it has not earned.
     //
-    // Left out on DUPLICATION RISK, not on impossibility, and that is the honest
-    // reason: those three predicates live inside `rollbackMergeRun`'s own
-    // prologue, and re-stating them here would make a second copy with nothing
-    // keeping the two in step — the next person to add a precondition would have
-    // to know this filter exists. Closing it properly means one shared
-    // «would this refuse before changing anything?» predicate that both sides
-    // call, which is a change to the rollback's own shape and not to this
-    // sentence. Registered rather than bolted on here.
+    // Left out on DUPLICATION RISK, not on impossibility — and the first version
+    // of this paragraph got the premise wrong while reaching the right
+    // conclusion. It said all three predicates live in `rollbackMergeRun`'s
+    // prologue. Only the `'foreign'` one does; `isRepointTarget` and the `kind`
+    // comparison sit inside `SubjectStore.rollbackMerge`'s transaction, which
+    // makes the argument STRONGER: they are behind another module's boundary.
+    //
+    // ⚠ And the remedy relocates the duplication rather than removing it, which
+    // the first version promised away with «both sides». There are THREE sites,
+    // and the two in-transaction ones must stay: their own comment says they are
+    // «Checked INSIDE the transaction so nothing can change these rows between
+    // the check and the writes». So the shape is one shared «would this refuse
+    // before changing anything?» predicate called by this filter and by the
+    // prologue, with the in-transaction checks remaining as defence in depth.
+    // That is a change to the rollback's own shape, not to this sentence.
     // «Then try this one again» is the clause that carries the rest.
     //
     // ⚠ AND REQUIRE EXACTLY ONE. Its value is second-order and worth stating
