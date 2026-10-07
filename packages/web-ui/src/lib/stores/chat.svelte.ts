@@ -341,7 +341,16 @@ function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
  * falsely "resurrect" stale local messages after the server already
  * forgot the thread.
  */
+/** Threads whose saved copy was dropped in this session: nothing writes them back. */
+const _droppedThreads = new Set<string>();
+
+/** A thread brought back (unarchived): its saved copy may be written again. */
+export function forgetDroppedThread(threadId: string): void {
+	_droppedThreads.delete(threadId);
+}
+
 export function dropPersistedThread(threadId: string): void {
+	_droppedThreads.add(threadId);
 	const root = readPersistedRoot();
 	if (threadId in root.threads || root.queues?.[threadId]) {
 		delete root.threads[threadId];
@@ -1015,7 +1024,16 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined): void {
 	// Still the turn's thread: its own message is in the list (the list may have been rebuilt),
 	// or, for a turn that failed before adding one, the list is the one it started in.
-	const ownMsg = turn.userMsg && messages.includes(turn.userMsg) ? turn.userMsg : null;
+	let ownMsg = turn.userMsg && messages.includes(turn.userMsg) ? turn.userMsg : null;
+	// The turn's thread reloaded meanwhile (left and come back to, or resumed in place): its list
+	// holds new objects. A local copy keeps the turn's text and time, so it is found by those. A
+	// list without it (the server's, or one saved before the turn) is left alone: the server's
+	// copy may be the turn itself, and another turn may own the list by now.
+	const inTurnThread = turn.sid !== null && sessionId === turn.sid;
+	if (!ownMsg && turn.userMsg !== null && inTurnThread) {
+		const sent = turn.userMsg;
+		ownMsg = messages.find((m) => isSameTurn(m, sent)) ?? null;
+	}
 	const sameThread = ownMsg !== null || (turn.userMsg === null && messages === turn.messages);
 	if (sameThread) {
 		let userMsg: ChatMessage | undefined = ownMsg ?? undefined;
@@ -1031,9 +1049,11 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 			userMsg.failed = true;
 			userMsg.sendUnconfirmed = true;
 		}
-		const aIdx = turn.assistantMsg ? messages.indexOf(turn.assistantMsg) : -1;
+		let aIdx = turn.assistantMsg ? messages.indexOf(turn.assistantMsg) : -1;
+		// In a reloaded copy the empty reply is a new object too: the one right after the turn.
+		if (aIdx < 0 && ownMsg) aIdx = messages.indexOf(ownMsg) + 1;
 		const a = aIdx >= 0 ? messages[aIdx] : undefined;
-		if (a && !a.content && !a.blocks?.length && !a.toolCalls?.length) {
+		if (a && a.role === 'assistant' && !a.content && !a.blocks?.length && !a.toolCalls?.length) {
 			messages.splice(aIdx, 1);
 		}
 		// The 404 path drops the session to re-create it; if that failed, keep the thread.
@@ -1048,7 +1068,19 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 		streamingToolPhase = null;
 		retryStatus = null;
 	}
-	if (!sameThread) return;
+	if (!sameThread) {
+		// The user is in another thread now. Keep the turn in its own thread's saved copy, failed,
+		// so going back shows it, can send it again, and is not replaced by the server's shorter
+		// transcript (which never got it). Not when the turn's thread is the one on screen: what
+		// is shown there is what gets saved.
+		if (turn.userMsg && turn.sid !== null && !inTurnThread) markFailedInSavedThread(turn.sid, turn.userMsg);
+		return;
+	}
+	// Another turn is streaming in this thread by now: the screen and the queue are its.
+	if (isStreaming) {
+		persistChat();
+		return;
+	}
 	chatError = t('chat.error_connection');
 	chatErrorDetail = null;
 	persistChat();
@@ -1060,6 +1092,34 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 		persistChatNow();
 		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
 	}
+}
+
+/** The same user turn in another copy of a thread's list: same text, sent at the same time. */
+function isSameTurn(a: ChatMessage, b: ChatMessage): boolean {
+	return a.role === 'user' && a.content === b.content && a.createdAt === b.createdAt;
+}
+
+/** Mark a turn failed in a thread's saved copy, adding it when the copy predates it. */
+function markFailedInSavedThread(threadId: string, msg: ChatMessage): void {
+	// A thread archived or deleted meanwhile stays gone.
+	if (_droppedThreads.has(threadId)) return;
+	const root = readPersistedRoot();
+	const list = root.threads[threadId] ?? [];
+	let i = list.findIndex((m) => isSameTurn(m, msg));
+	if (i < 0) {
+		list.push({ role: 'user', content: msg.content, ...(msg.createdAt ? { createdAt: msg.createdAt } : {}) });
+		i = list.length - 1;
+	}
+	const saved = list[i]!;
+	saved.queued = false;
+	saved.failed = true;
+	saved.sendUnconfirmed = true;
+	const next = list[i + 1];
+	if (next && next.role === 'assistant' && !next.content && !next.blocks?.length && !next.toolCalls?.length) {
+		list.splice(i + 1, 1);
+	}
+	root.threads[threadId] = list;
+	writePersistedRoot(root);
 }
 
 let _resendProbeInFlight = false;
