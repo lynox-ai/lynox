@@ -1094,7 +1094,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.basics_save': { de: 'Speichern & weiter', en: 'Save & continue' },
 	'onboard.basics_save_failed': { de: 'Konnte nicht gespeichert werden — deine Antworten stehen noch hier. Nochmal versuchen?', en: 'Could not be saved — your answers are still here. Try again?' },
 	'onboard.basics_saving': { de: 'Speichern…', en: 'Saving…' },
-	'onboard.limits_note': { de: 'Ich merke mir Geschäftskontext dauerhaft und schlage vor, bevor ich etwas Wichtiges tue. E-Mails versende ich nie ohne deine Freigabe.', en: 'I keep your business context and propose before doing anything important. I never send email without your OK.' },
+	'onboard.limits_note': { de: 'Ich merke mir Geschäftskontext dauerhaft und schlage vor, bevor ich etwas Wichtiges tue. E-Mails aus deinem Postfach versende ich erst nach deiner Freigabe.', en: 'I keep your business context and propose before doing anything important. Email from your mailbox goes out only after you approve it.' },
 	'onboard.relayer_title': { de: 'Onboarding', en: 'Onboarding' },
 	'onboard.relayer_desc': { de: 'Die Schichten einzeln neu durchlaufen', en: 'Re-run the onboarding layers individually' },
 	'onboard.relayer_knowledge': { de: 'Knowledge — dein Geschäft', en: 'Knowledge — your business' },

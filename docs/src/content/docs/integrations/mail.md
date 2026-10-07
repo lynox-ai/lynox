@@ -110,7 +110,7 @@ Searches across all configured accounts by default, or specify one: *"Search my 
 - *"Reply all to the team update"*
 
 :::caution[Send confirmation]
-Sending and replying always require your explicit confirmation. lynox shows you the full message before sending — nothing goes out without your approval.
+Sending and replying ask for your explicit confirmation: lynox shows you the full message and waits for your answer. A scheduled run asks the same way; in autonomous mode the mail tools do not send.
 :::
 
 ### Follow-Up Tracking
