@@ -86,11 +86,13 @@ describe('repairStrayCloseTag — the shape the model actually produced', () => 
     // ⚠ Asserted as a PROPERTY, not as a string, so that a change to how much whitespace the
     // repair removes does not read as a regression here.
     //
-    // ⚠ CORRECTED: this comment used to say "the linear replacement leaves it [the whitespace
-    // before the tag]". That was false when written and is false now — `withoutTrailingCloseTag`
-    // trims the prefix deliberately, which is what rescues a body ending in U+00A0 or U+FEFF, and
+    // ⚠ CORRECTED, and the retired sentence is deliberately NOT quoted here — the same rule
+    // `http.ts` follows for its own retired claim, because a sweep with an exception is a sweep
+    // somebody will widen. What it asserted: that the linear replacement preserves the whitespace
+    // before the tag. That was false when written and is false now. `withoutTrailingCloseTag`
+    // trims the prefix on purpose — it is what rescues a body ending in U+00A0 or U+FEFF — and
     // `repairStrayCloseTag('{"a":1}\n  </body>\n')` returns `{"a":1}`. The engine note in
-    // `http.ts` now says the whitespace around the tag goes too, so the two would have
+    // `http.ts` now states that the whitespace around the tag goes too, so the two would have
     // contradicted each other in print.
     const got = repairStrayCloseTag('{"a":1}\n  </body>\n', JSON_CT);
     expect(JSON.parse(got?.body ?? 'null')).toEqual({ a: 1 });
