@@ -142,9 +142,12 @@ describe('the run claim reaches the view that holds its key', () => {
     // red for a refactor and green for a genuinely orphaned key, i.e. wrong in both
     // directions. The keys are split by where they belong, so neither file can satisfy the
     // other's.
-    const inView = ['run_already_running', 'run_outcome_unknown', 'run_claim_held',
-      'run_refused', 'run_outcome_unknown_force', 'run_outcome_unknown_released'];
-    const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_replayed_cost', 'run_restarted_cost', 'run_restarted_free'];
+    // Only the two the view still names itself; the 409 sentences moved to the composer.
+    const inView = ['run_outcome_unknown_force', 'run_outcome_unknown_released'];
+    const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_replayed_cost',
+      'run_restarted_cost', 'run_restarted_free',
+      // moved here with `refusalBanner`
+      'run_already_running', 'run_outcome_unknown', 'run_claim_held', 'run_refused'];
     for (const [key, source, where] of [
       ...inView.map(k => [k, VIEW, 'the view'] as const),
       ...inComposer.map(k => [k, NOTICE, 'the notice composer'] as const),
@@ -205,41 +208,31 @@ describe('the run claim reaches the view that holds its key', () => {
       .not.toMatch(/runWorkflow\(/);
   });
 
-  it('the local sentence WINS over the server message for the codes it knows', () => {
-    // The route always sends an `error`, so a `msg?.error ?? t(…)` fallback never fires and
-    // a German reader got the English sentence. The translation has to be chosen by code,
-    // with the server's text kept only for a code this build does not know.
-    expect(RUN_FN).toMatch(/code === 'run_claim_held'\) \{\s*\n\s*error = t\('workflow_library\.run_claim_held'\)/);
-    expect(RUN_FN).toContain("t('workflow_library.run_outcome_unknown')");
-    // ⚠ And the FALLBACK for an unknown 409 code is the cautious sentence, not "the run
-    // failed": a 409 means the route refused, and a mangled or newer 409 must not be
-    // reported as a failed run. One revision replaced that true sentence with a false one.
+  it('the view ASKS which sentence to show instead of deciding it', () => {
+    // ⚠ WHAT THIS TEST USED TO DO, and why it could not hold: it matched the if/else chain
+    // as TEXT — the first condition's suffix and the unknown-outcome arm. A refuter
+    // prepended one code to that condition, the suffix stayed intact, every test stayed
+    // green, and the arm became unreachable: `run_outcome_unknown` rendered "already
+    // running" again, which is the defect the commit before it had fixed. A regex over
+    // source cannot see reachability.
     //
-    // Scoped to the 409 BRANCH, because `msg?.error ?? t('…run_failed')` is correct in the
-    // `!res.ok` branch below it — a first version of this line forbade the pattern anywhere
-    // in the function and so condemned the one place it belongs.
+    // The mapping is now a pure function, driven over every code in `run-notice.test.ts`.
+    // What is left here is the half no unit test can reach: that this component asks it,
+    // and takes both banners from the one answer.
     const branch409 = RUN_FN.slice(
       RUN_FN.indexOf('if (res.status === 409)'),
       RUN_FN.indexOf('if (!res.ok)'),
     );
     expect(branch409.length, 'the 409 branch has to be found at all').toBeGreaterThan(100);
-    // The CALL form, not the bare key: the branch's own comment explains why `run_failed`
-    // is not used there, and a substring check counted that prose as a use. A text
-    // instrument has to be told the difference between a call and a sentence about one.
-    expect(branch409, 'an unknown 409 must not be reported as a failure')
-      .not.toContain("t('workflow_library.run_failed')");
-    // ⚠ The message is chosen by CODE, not by whether the key survives. Those two stopped
-    // coinciding when `run_outcome_unknown` became non-terminal, and a branch on `keepKey`
-    // then sent that code into the "already running" banner while its own sentence became
-    // unreachable. Asserted as the structure, because that is what went wrong.
-    expect(branch409, 'the banner belongs to the two ALIVE codes only')
-      .toMatch(/code === 'run_claim_in_flight' \|\| msg\?\.code === 'run_in_progress'\) \{\s*\n\s*notice = t\('workflow_library\.run_already_running'\)/);
-    expect(branch409, 'and the unknown-outcome sentence is reached by its own code')
-      .toMatch(/code === 'run_outcome_unknown'\) \{\s*\n\s*error = t\('workflow_library\.run_outcome_unknown'\)/);
-    expect(branch409, 'an unrecognised 409 gets a sentence that asserts nothing about a run')
-      .toContain("t('workflow_library.run_refused')");
-    // Positive control on the slice: it really is the branch, so the absence above means
-    // something. (An empty or mis-sliced string would satisfy the negative assertion.)
-    expect(branch409).toContain("t('workflow_library.run_outcome_unknown')");
+    expect(branch409, 'the view must not decide the sentence itself')
+      .toMatch(/const banner = refusalBanner\(msg\?\.code\)/);
+    expect(branch409, 'and must take both banners from that one answer')
+      .toMatch(/notice = banner\.kind === 'notice'[\s\S]{0,160}error = banner\.kind === 'error'/);
+    expect(branch409, 'no hand-rolled code comparison may choose a sentence any more')
+      .not.toMatch(/code === 'run_(claim_in_flight|in_progress|claim_held)'/);
+    // The release question is the one `code` test that stays here: it is an ACTION, not a
+    // sentence, and it must fire for exactly one code.
+    expect(branch409).toMatch(/if \(msg\?\.code === 'run_outcome_unknown'\) \{/);
   });
+
 });

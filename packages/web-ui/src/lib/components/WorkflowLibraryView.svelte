@@ -5,7 +5,7 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import { attemptKey, clearAttemptKey, clearAllAttemptKeys, attemptIsOver } from '../utils/run-attempt-key.js';
-	import { composeRunNotice } from '../utils/run-notice.js';
+	import { composeRunNotice, refusalBanner } from '../utils/run-notice.js';
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
@@ -308,21 +308,13 @@
 				// branch on `keepKey` sent that code into the "already running" banner — a
 				// sentence that is false for it — while the specific wording written for it
 				// became unreachable. Two questions, two conditions.
-				notice = '';
-				error = '';
-				if (msg?.code === 'run_claim_in_flight' || msg?.code === 'run_in_progress') {
-					notice = t('workflow_library.run_already_running');
-				} else if (msg?.code === 'run_outcome_unknown') {
-					error = t('workflow_library.run_outcome_unknown');
-				} else if (msg?.code === 'run_claim_held') {
-					error = t('workflow_library.run_claim_held');
-				} else {
-					// A 409 whose code this build does not know, or one a proxy mangled. The
-					// sentence says only what a 409 guarantees — the server refused this start
-					// — and asserts nothing about an earlier run, which `run_outcome_unknown`
-					// would have done without warrant.
-					error = t('workflow_library.run_refused');
-				}
+				// Composed in `run-notice.ts`, for the reason recorded there: as an if/else chain
+				// here, a one-line change that prepended a code to the first condition restored
+				// the defect this branch had just fixed, with every test green — the witnesses
+				// were regexes over this file and cannot see reachability.
+				const banner = refusalBanner(msg?.code);
+				notice = banner.kind === 'notice' ? t(banner.key) : '';
+				error = banner.kind === 'error' ? t(banner.key) : '';
 				if (msg?.code === 'run_outcome_unknown') {
 					// ⚠ The ONE state where the earlier run may still be alive and still
 					// spending. The key is kept (so no click can silently duplicate it), and

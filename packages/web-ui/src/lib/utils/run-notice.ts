@@ -91,3 +91,43 @@ export function composeRunNotice(data: RunNoticeInput, t: Translate): RunNotice 
   const head = `${t('workflow_library.run_failed')}${earlierAttempt(data, t, false)}`;
   return { kind: 'error', text: detail ? `${head} — ${detail}` : head };
 }
+
+/**
+ * Which sentence a 409 shows its owner, and in which banner.
+ *
+ * ⚠ WHY THIS IS A FUNCTION. In the view this was an `if/else if` chain, and the witnesses
+ * for it were regexes over the component's source — because a Svelte component cannot be
+ * imported in vitest here. A refuter then changed ONE line: it prepended
+ * `run_outcome_unknown` to the chain's first condition, which left the asserted suffix
+ * intact, and 46 of 46 tests stayed green while the headline defect of that very commit
+ * came back — that code rendered "already running" and its own sentence became dead code.
+ *
+ * A regex over text cannot see reachability. A mapping can be driven. Same reason
+ * `attemptIsOver` was extracted, one defect later.
+ *
+ * `notice` is the green banner, `error` the red one. Exactly one is ever filled, which is
+ * a property of the return type rather than of two assignments the next edit can separate.
+ */
+export type RefusalBanner = { kind: 'notice' | 'error'; key: string };
+
+export function refusalBanner(code: string | undefined): RefusalBanner {
+  switch (code) {
+    // The attempt is ALIVE: its run is starting or still going. Not a failure, so the
+    // green banner — and the key survives, which `attemptIsOver` decides separately.
+    case 'run_claim_in_flight':
+    case 'run_in_progress':
+      return { kind: 'notice', key: 'workflow_library.run_already_running' };
+    // Spent, outcome never recorded: it may still be running. Its own sentence says so and
+    // points at the run history; the view asks before releasing the key.
+    case 'run_outcome_unknown':
+      return { kind: 'error', key: 'workflow_library.run_outcome_unknown' };
+    // Spent and over in a status the route does not act on.
+    case 'run_claim_held':
+      return { kind: 'error', key: 'workflow_library.run_claim_held' };
+    // A code this build does not know, or one a proxy mangled. Says only what a 409
+    // guarantees — the server refused this start — and asserts nothing about an earlier
+    // run, which the previous fallback did without warrant.
+    default:
+      return { kind: 'error', key: 'workflow_library.run_refused' };
+  }
+}

@@ -6367,11 +6367,18 @@ export class LynoxHTTPApi {
                 // like more: it keeps THIS request from starting a second run. It does not
                 // keep the key's owner from paying again — the view discards the key on THIS
                 // code, so the next click is a new attempt. That is specific to
-                // `run_claim_held`: `unknown-outcome` and `in-flight` keep the key, so of the
-                // six verdicts only `restart` hands out a second run without being asked, and
-                // it discloses what the earlier attempt cost. (An earlier version of this
-                // sentence counted two verdicts instead of four; the client's rule changed
-                // under it and the comment stayed.)
+                // `run_claim_held`: `in-flight`, `running` and `unknown-outcome` all keep the
+                // key, so of the six verdicts only `restart` hands out a second run without
+                // being asked, and it discloses what the earlier attempt cost.
+                //
+                // ⚠ Two corrections to this comment, both from rounds on it: an earlier
+                // version counted two verdicts instead of four, and the version after that
+                // listed two key-keeping codes instead of three (it omitted `running`). And
+                // one thing the sentence does NOT cover, named so it reads as what it is: a
+                // claim that was RELEASED and then re-claimed reaches no verdict at all —
+                // `claimWorkflowRun` simply succeeds — so a refused restart followed by a
+                // fresh click does start a second paid run without disclosure. That is the
+                // deferred accumulation question, not something this count speaks to.
                 errorResponse(
                   res, 409,
                   `A run for this key is held in status "${heldRun?.status ?? 'unknown'}".`,

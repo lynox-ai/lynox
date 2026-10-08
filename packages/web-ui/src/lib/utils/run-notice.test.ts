@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { composeRunNotice, type RunNoticeInput } from './run-notice.js';
+import { composeRunNotice, refusalBanner, type RunNoticeInput } from './run-notice.js';
 import { fillTemplate } from '../i18n-fill.js';
 
 /**
@@ -16,6 +16,49 @@ import { fillTemplate } from '../i18n-fill.js';
  * So the assertions are about the SENTENCE: what it claims about money, and whether it
  * claims anything it does not then print.
  */
+describe('refusalBanner — which sentence a 409 shows, driven not grepped', () => {
+  // ⚠ This exists because the mapping was an if/else chain in a component vitest cannot
+  // import, witnessed by regexes over its source. A refuter prepended ONE code to the
+  // chain's first condition — the asserted suffix stayed intact, 46 of 46 tests stayed
+  // green, and the defect the commit had just fixed came back: `run_outcome_unknown`
+  // rendered "already running" and its own sentence became unreachable. A regex over text
+  // cannot see reachability, so every code is driven here instead.
+  it('the two ALIVE codes get the green banner, and nothing else does', () => {
+    for (const code of ['run_claim_in_flight', 'run_in_progress']) {
+      expect(refusalBanner(code)).toEqual({ kind: 'notice', key: 'workflow_library.run_already_running' });
+    }
+    // The mutation that started this file: `run_outcome_unknown` must NOT reach that arm.
+    for (const code of ['run_outcome_unknown', 'run_claim_held', 'something_new', undefined]) {
+      expect(refusalBanner(code).kind, `${String(code)} is not an alive attempt`).toBe('error');
+      expect(refusalBanner(code).key).not.toBe('workflow_library.run_already_running');
+    }
+  });
+
+  it('each remaining code reaches its OWN sentence', () => {
+    expect(refusalBanner('run_outcome_unknown'))
+      .toEqual({ kind: 'error', key: 'workflow_library.run_outcome_unknown' });
+    expect(refusalBanner('run_claim_held'))
+      .toEqual({ kind: 'error', key: 'workflow_library.run_claim_held' });
+  });
+
+  it('an unknown or absent code says only what a 409 guarantees', () => {
+    for (const code of [undefined, '', 'run_something_future', 'RUN_IN_PROGRESS']) {
+      expect(refusalBanner(code), `${String(code)} must not borrow another code's sentence`)
+        .toEqual({ kind: 'error', key: 'workflow_library.run_refused' });
+    }
+  });
+
+  it('exactly one banner is ever named — the type makes both impossible', () => {
+    // The property the view used to hold with two assignments and a reset line, which a
+    // one-line deletion could separate. Now it is the shape of the return value.
+    for (const code of ['run_claim_in_flight', 'run_in_progress', 'run_outcome_unknown', 'run_claim_held', undefined, 'x']) {
+      const b = refusalBanner(code);
+      expect(['notice', 'error']).toContain(b.kind);
+      expect(b.key).toMatch(/^workflow_library\./);
+    }
+  });
+});
+
 describe('the run notice, rendered', () => {
   /**
    * The REAL strings, read out of `i18n.svelte.ts` the way its sibling tests read it — the

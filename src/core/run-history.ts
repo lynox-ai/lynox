@@ -2298,9 +2298,14 @@ export class RunHistory {
    *  key that a person chose, not a silent restart of a run whose outcome nobody knows.
    *
    *  ⚠ This said "the library view discards the key", which was true when written and false
-   *  one commit later: a security round showed that discarding it on that code let the next
-   *  click start a second, possibly concurrent, paid run, so it became a confirm. The
+   *  FIVE commits later: a security round showed that discarding it on that code let the
+   *  next click start a second, possibly concurrent, paid run, so it became a confirm. The
    *  decision here is unchanged; its recorded reason had stopped describing the mechanism.
+   *  (The retraction first said "one commit later" — wrong, and wrong on the one thing in
+   *  it that can be checked: the sentence was written in "Restart a claim only on a run
+   *  with a definitive end" and falsified in "Stop the client from undoing the server's own
+   *  refusal", five apart. A correction carrying a wrong number is worse than none, because
+   *  the number is what a reader trusts.)
    *
    *  So what restarts is a run with a DEFINITIVE end: a `pipeline_runs` row saying `failed`
    *  or `interrupted`. `started_at IS NOT NULL` is the other precondition — a claim that
