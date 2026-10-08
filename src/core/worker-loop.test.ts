@@ -3182,6 +3182,79 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     loop.stop();
   });
 
+  /** A real prompt store on the same history db, and an engine that parks through it. */
+  function parkingLoop(owner: boolean): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; answered: Promise<string>; finished: () => boolean } {
+    const store = new PromptStore(history.getDb());
+    const t = tm.create({
+      title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z',
+      ...(owner ? { createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner' } : { createdBy: M }),
+    }) as TriggerRecord;
+    let resolveAnswered!: (v: string) => void;
+    const answered = new Promise<string>((r) => { resolveAnswered = r; });
+    let done = false;
+    const session = {
+      sessionId: `ask-${t.id}`, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null,
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => { resolveAnswered(await session.promptUser!('Which list?', ['A', 'B'])); done = true; return 'Asked.'; }),
+    };
+    const engine = Object.assign(
+      makeEngine({ taskManager: tm as unknown as TaskManager, session: session as unknown as Session, promptStore: store }),
+      { getRunHistory: () => history },
+    ) as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    return { loop, store, t, answered, finished: () => done };
+  }
+  async function startParked(owner: boolean): Promise<ReturnType<typeof parkingLoop>> {
+    const h = parkingLoop(owner);
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+    const row = tm.getTrigger(h.t.id)!;
+    void exec.executeTask(row, null, owner ? undefined : h.loop.claimHandRunMinter()(h.t.id, EVA));
+    await until(() => tm.getTrigger(h.t.id)?.status === 'waiting');
+    return h;
+  }
+
+  it('F-1a: the owner stamps while a test question is open, and it expires — the stamped one-shot stays fireable', async () => {
+    const h = await startParked(false);
+    tm.confirmTrigger(h.t.id, undefined, 'owner');
+    history.updateTrigger(h.t.id, { waitingUntil: '2020-01-01T00:00:00.000Z' });
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).not.toBe('failed');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('F-1b: the owner stamps while a test question is open, and it is answered — the proposal keeps its own time', async () => {
+    const h = await startParked(false);
+    tm.confirmTrigger(h.t.id, undefined, 'owner');
+    const row = h.store.getPending(`ask-${h.t.id}`)!;
+    // Answer, then the tick's re-arm in the SAME synchronous turn: the run's own
+    // continuation is a later microtask, so the re-arm sees the trigger still parked.
+    expect(h.store.answerUser(row.id, 'A')).toBe(true);
+    const tick = h.loop.tick();
+    await expect(h.answered).resolves.toBe('A');
+    await tick;
+    await until(h.finished);
+    await until(() => tm.getTrigger(h.t.id)?.last_run_status === 'success');
+    expect(tm.getTrigger(h.t.id)!.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('twin: an ORDINARY run parked on a question is swept and re-armed as before', async () => {
+    const a = await startParked(true);
+    history.updateTrigger(a.t.id, { waitingUntil: '2020-01-01T00:00:00.000Z' });
+    await a.loop.tick();
+    expect(tm.getTrigger(a.t.id)!.last_run_status).toBe('failed');
+    a.loop.stop();
+    const b = await startParked(true);
+    const row = b.store.getPending(`ask-${b.t.id}`)!;
+    expect(b.store.answerUser(row.id, 'A')).toBe(true);
+    const tick = b.loop.tick();
+    await tick;
+    expect(tm.getTrigger(b.t.id)!.next_run_at).not.toBe('2030-01-01T00:00:00.000Z');
+    b.loop.stop();
+  });
+
   it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
     const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
     const { session, started, release } = heldSession(new Error('provider down'));
