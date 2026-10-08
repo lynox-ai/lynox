@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
+import { scopeToDir } from '../core/scope-resolver.js';
 import type { Memory } from '../core/memory.js';
 import type { ArtifactStore } from '../core/artifact-store.js';
 import type { MailStateDb } from '../integrations/mail/state.js';
@@ -95,9 +96,14 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
   });
 
   it('refuses with 409 and erases nothing while the data dir holds an entry it does not know', async () => {
+    // In the scope the flat-file step empties (the current one, a context), so an
+    // unchanged marker says that step did not run.
+    const memory = engineOf().getMemory();
+    if (memory === null) throw new Error('fixture: no flat-file memory');
+    const memPath = join(dir, 'memory', scopeToDir(memory.currentScope()), 'knowledge.txt');
     const memMark = mark('memory');
-    mkdirSync(join(dir, 'memory', 'global'), { recursive: true });
-    writeFileSync(join(dir, 'memory', 'global', 'knowledge.txt'), memMark);
+    mkdirSync(join(memPath, '..'), { recursive: true });
+    writeFileSync(memPath, memMark);
     writeFileSync(join(dir, 'zz-unknown.db'), mark('unknown'));
     const genBefore = internals().erasureGeneration;
 
@@ -108,7 +114,7 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(unknown.map(u => u.name)).toEqual(['zz-unknown.db']);
     // Nothing erased: the FIRST destructive step (flat-file memory) did not run, the
     // flag is down, and the erasure counted nothing.
-    expect(readFileSync(join(dir, 'memory', 'global', 'knowledge.txt'), 'utf8')).toBe(memMark);
+    expect(readFileSync(memPath, 'utf8')).toBe(memMark);
     expect(internals().erasureInProgress).toBe(false);
     expect(internals().erasureGeneration).toBe(genBefore);
 

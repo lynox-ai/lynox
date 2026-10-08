@@ -8,6 +8,7 @@ import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { handleRunBackfillMetadata, type InboxApiDeps } from '../integrations/inbox/api.js';
 import type { Engine } from '../core/engine.js';
+import { scopeToDir } from '../core/scope-resolver.js';
 import type { SecretVault } from '../core/secret-vault.js';
 import type { BackfillMetadataReport } from '../integrations/inbox/backfill-metadata.js';
 
@@ -93,12 +94,19 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
   const erase = (): ReturnType<typeof call> => call('DELETE', '/api/data', { confirm: 'DELETE_ALL_DATA' });
 
   // What "nothing was erased" is measured against: the FIRST destructive step (flat-file
-  // memory), a vault row, the flag and the erasure counter.
-  const MARK_PATH = (): string => join(dir, 'memory', 'global', 'knowledge.txt');
+  // memory), a vault row, the flag and the erasure counter. The marker sits in the scope
+  // that step empties — the memory's CURRENT scope, which is a context, not `global`; a
+  // marker anywhere else survives that step and proves nothing about its position.
+  const MARK_DIR = (): string => {
+    const m = engineOf().getMemory();
+    if (m === null) throw new Error('fixture: no flat-file memory');
+    return join(dir, 'memory', scopeToDir(m.currentScope()));
+  };
+  const MARK_PATH = (): string => join(MARK_DIR(), 'knowledge.txt');
   let memMark = '';
   function seedNothingErased(): number {
     memMark = `ZZMARK-${randomBytes(4).toString('hex')}`;
-    mkdirSync(join(dir, 'memory', 'global'), { recursive: true });
+    mkdirSync(MARK_DIR(), { recursive: true });
     writeFileSync(MARK_PATH(), memMark);
     vaultOf().set('ZZ_SEED', memMark);
     return internals().erasureGeneration;
