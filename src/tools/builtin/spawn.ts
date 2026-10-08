@@ -173,7 +173,8 @@ function admitsEveryChild(asks: readonly number[], floors: readonly number[], re
  * ⛔ IT IS ONE FUNCTION BECAUSE TWO COPIES DISAGREED, and the disagreement was VISIBLE. The
  * remedy computation modelled the share as `ask · factor` while the admission check modelled it
  * with the give-back, so one function carried two fidelities of the same arithmetic. Measured
- * over 296 352 share computations: the give-back moves a share in 13 413 of them by at most
+ * over 296 352 share computations, with the overshoot-only give-back this function had then: it
+ * moved a share in 13 413 of them by at most
  * 1.8e-15 — and in **152 of them the two disagree at the precision the message PRINTS**, because
  * flooring at a boundary turns `0.001` into `0.0009999999999999983`. The direction is the bad
  * one: the naive copy prints the bound one display unit too HIGH, so a model costing exactly the
@@ -201,9 +202,15 @@ function scaledShares(asks: readonly number[], remainingRunUSD: number): number[
   //
   // ⚠ The sum lands ON the remainder in most batches but not all, and that is arithmetic, not a
   // gap: with the other shares fixed, `prefix + x` can step over `R` under round-half-to-even for
-  // every `x`, so the closest reachable sum is one ULP under. Measured: exact in 384 106 of
-  // 385 624 scaled batches, one ULP short in the rest, never over. A lone child has no prefix and
-  // always gets exactly `R`.
+  // every `x`, so the closest reachable sum is one ULP under. Measured offline over 385 624 scaled
+  // batches with realistic asks: exact in 384 106, one ULP short in the rest, never over. With a
+  // last ask far below `ulp(R)` the cap at the ask leaves the prefix's own rounding error, a few
+  // ULPs, unabsorbed — under, never over. A lone child has no prefix and always gets exactly `R`.
+  //
+  // ⚠ THE STEP-DOWN IS NOT DECORATION. When the last child takes more than half the remainder,
+  // `R − prefix` can round UP, and `prefix + share` then lands one ULP past `R` — refused by the
+  // reservation with a message blaming a concurrent batch. Asks [1.42, 5.46] against $1.51 is one
+  // such case; the share test pins three.
   if (total > remainingRunUSD && shares.length > 0) {
     const last = shares.length - 1;
     const prefix = shares.slice(0, last).reduce((sum, u) => sum + u, 0);

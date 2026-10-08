@@ -2251,10 +2251,17 @@ describe('spawn_agent tool', () => {
      * actually BUILT with. Four properties, and the third is the reason this test exists:
      *   1. no child gets more than it asked for;
      *   2. when every share is positive, the shares never sum past the remainder (the
-     *      reservation compares strictly — a few ULPs over is a refusal blaming nobody);
+     *      reservation compares strictly — a few ULPs over is a refusal blaming nobody).
+     *      ⚠ Through the handler a sum past `R` never shows up as an admitted batch: the
+     *      reservation REFUSES it. So this property is asserted on the refusal, not on the
+     *      admission — a batch refused for a concurrent claim that does not exist is a break.
+     *      A first cut checked `sum > R` only on admitted batches, which cannot fail, and the
+     *      step-down loop in `scaledShares` could be deleted with the whole file green;
      *   3. a lone child that asked for more than the remainder gets EXACTLY the remainder;
-     *   4. a scaled batch lands within one ULP of the remainder. Not exactly on it: moving the
-     *      last share alone cannot always hit `R`, because round-half-to-even can step over it;
+     *   4. a scaled batch on this grid lands within one ULP of the remainder. Not exactly on it:
+     *      moving the last share alone cannot always hit `R`, because round-half-to-even can
+     *      step over it. (Not a general bound: with a last ask far below `ulp(R)` the cap at
+     *      the ask leaves the prefix's own rounding error, a few ULPs, unabsorbed.)
      *   5. a batch that was NOT scaled gets exactly what it asked for. This is what keeps the
      *      give-back inside the scaled branch: lifted or trimmed there, the last child of a batch
      *      that fits the remainder exactly comes out one ULP under its ask — and is then
@@ -2271,15 +2278,29 @@ describe('spawn_agent tool', () => {
       const asks = [0.0001, 0.001, 0.01, 0.05, 0.1, 0.192, 0.2, 0.3, 0.384, 1, 1.2370370276, 5, 10, 50];
       const breaks: string[] = [];
       let lone = 0, scaled = 0, exact = 0, fitsExactly = 0;
+      // The grid, plus batches whose last child takes more than half the remainder — where
+      // `R − prefix` rounds UP and only the step-down keeps the sum inside it. Found by a
+      // review round; each was refused on the reservation without the step-down.
+      const batches: number[][] = [];
       for (const a of asks) for (const b of [null, ...asks]) for (const c of [null, 0.3, 5]) {
-        const want = [a, b, c].filter((x): x is number => x !== null);
+        batches.push([a, b, c].filter((x): x is number => x !== null));
+      }
+      const roundsUp: Array<[number[], number]> = [[[1.42, 5.46], 1.51], [[0.38, 8.61], 4.86], [[2.25, 2.58, 6.53], 3.73]];
+      let roundsUpAdmitted = 0;
+      for (const want of [...batches, ...roundsUp.map(([w]) => w)]) {
         const asked = want.reduce((s, x) => s + x, 0);
-        for (const R of [...remainders, asked]) {
+        const pinned = roundsUp.find(([w]) => w === want);
+        for (const R of pinned ? [pinned[1]] : [...remainders, asked]) {
           vi.mocked(MockAgent).mockClear();
           resetSessionSpawnCost(testCounters);
           const { agent } = parentWithCeiling(R);
           const agents = want.map((usd, i) => ({ name: `c${String(i)}`, task: 'A', model: 'fast', max_tokens: 500, max_budget_usd: usd }));
-          if (await spawnAgentTool.handler({ agents } as never, agent).then(() => true, () => false) === false) continue;
+          const refusal = await spawnAgentTool.handler({ agents } as never, agent).then(() => null, (e: unknown) => (e as Error).message);
+          if (refusal !== null) {
+            if (refusal.includes('Another sub-agent batch')) breaks.push(`refused on the reservation, with no other batch @ asks=${JSON.stringify(want)} R=${String(R)}`);
+            continue;
+          }
+          if (pinned) roundsUpAdmitted++;
           const got = childCaps(MockAgent);
           const where = `asks=${JSON.stringify(want)} R=${String(R)} got=${JSON.stringify(got)}`;
           const sum = got.reduce((s, x) => s + x, 0);
@@ -2300,6 +2321,7 @@ describe('spawn_agent tool', () => {
       // exactly on R) · fits exactly 400. Each gate sits at about two thirds of it.
       expect(lone, 'the lone scaled case must be exercised').toBeGreaterThan(42);
       expect(fitsExactly, 'and the batch that fits the remainder exactly').toBeGreaterThan(265);
+      expect(roundsUpAdmitted, 'and every batch whose remainder rounds up is admitted').toBe(roundsUp.length);
       expect(scaled, 'and the scaled batch').toBeGreaterThan(880);
       expect(breaks.length, `${String(breaks.length)} broken — ${breaks.slice(0, 3).join(' | ')}`).toBe(0);
       expect(exact, 'and most scaled batches land on R exactly').toBeGreaterThan(scaled * 0.9);
