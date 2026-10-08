@@ -160,17 +160,28 @@ export class CRM {
     try {
       this.ensureSchema();
     } finally {
-      // In a `finally`, and the trade it makes is deliberate. `ensureSchema` sets
-      // the flag as its LAST statement, so anything before it — `listCollections`
-      // on a locked database, a `createCollection` that hits SQLITE_BUSY — used to
-      // leave the latch OPEN for the life of the process, and `roles.ts` admits
-      // `contacts_search` to the read-only tool surface on the strength of that
-      // latch being closed. Closing it here means a failed rebuild leaves the memo
-      // claiming collections that are missing, so CRM reads throw until a restart —
-      // the bug this method exists to fix, back on its own failure path. That is
-      // the lesser harm: the route reports the failure (`degraded: ['crm_schema']`)
-      // and nobody is told the data survived, whereas a read-only agent running
-      // `CREATE TABLE` is a property nothing else enforces.
+      // In a `finally`, and the trade is deliberate — but stated correctly, which
+      // the first version of this comment was not.
+      //
+      // `ensureSchema` sets the flag as its LAST statement, so a throw before it
+      // (`listCollections` on a locked database, a `createCollection` that hits
+      // SQLITE_BUSY) left the latch open **until the next `ensureSchema` that
+      // completed**, not for the life of the process — and on a transient lock that
+      // next caller was most likely a CRM read, which would have closed the latch
+      // and re-created the collections, i.e. done the repair that was wanted. So
+      // the old window was narrow and self-healing, not a standing hole.
+      //
+      // What it was not is BOUNDED by anything. `roles.ts` admits `contacts_search`
+      // to the read-only tool surface on the strength of the latch being closed,
+      // and a justification that depends on who happens to call next is not a
+      // justification. (That nobody can observe the latch open DURING this call
+      // rests on `ensureSchema` being fully synchronous — an `await` added to it
+      // later would reopen the window silently.) Closing it here makes that
+      // sentence unconditional, at a real
+      // price: a failed rebuild leaves the memo claiming collections that are
+      // missing, so CRM reads — including the one inside `GET /api/export` — throw
+      // until a restart. The route reports it (`degraded: ['crm_schema']`) and
+      // nobody is told the data survived.
       this._initialized = true;
     }
   }

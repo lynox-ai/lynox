@@ -325,14 +325,15 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
     // And at the SOURCE as well as in the answer.
     //
-    // ⚠ What this half does and does not do, corrected after a refuter demonstrated
-    // the overclaim twice. It catches a dropped export key and an accessor gone
-    // null. It is NOT an independent witness: every line below calls the same store
-    // method the export route calls (`listActive`, `getBlock`, `listNames`,
-    // `listCollections`, `load`), so a LISTING that stopped returning rows which are
-    // still on disk satisfies both halves at once — demonstrated with a DataStore
-    // table whose `ds_collections` meta row was gone while its rows remained. The
-    // independent check is the re-seed at the end of this test, not these lines.
+    // ⚠ What this half does and does not do, corrected twice after refuters
+    // demonstrated the overclaim twice. It catches a dropped export key and an
+    // accessor gone null. For the stores read through their own API below
+    // (`listActive`, `getBlock`, `listNames`, `load`) it is NOT an independent
+    // witness: those are the same methods the export route calls, so a listing that
+    // stopped returning rows which are still on disk satisfies both halves at once.
+    // The DataStore is the exception and deliberately so — it is read from the FILE
+    // further down, because that is exactly the case a refuter demonstrated. For the
+    // rest, the independent check is the re-seed at the end of this test.
     const e = engineOf();
     // Through the EXHAUSTIVE reader, not the overview listing: the listing caps at
     // 200 and filters `message_count > 0`, so it reports "no threads" for a table
@@ -377,6 +378,13 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       // And the fixture's own table is gone as a TABLE, not merely absent from the
       // catalogue — the distinction the old assertion could not make.
       expect(tables, 'the seeded data table survived as a table').not.toContain('ds_marked_rows');
+      // The INVERSE defect, which the assertion this replaced did cover: the table
+      // dropped and the catalogue row left behind. That row carries the collection
+      // name the user chose and its `schema_json` column names, and the export
+      // substitutes `[]` for a collection whose table is missing — so without this
+      // line the state is invisible to the whole file.
+      const metaNames = (dsDb.prepare('SELECT name FROM ds_collections').all() as Array<{ name: string }>).map(r => r.name);
+      expect(metaNames, 'a catalogue row outlived its table').not.toContain('marked_rows');
     } finally {
       dsDb.close();
     }

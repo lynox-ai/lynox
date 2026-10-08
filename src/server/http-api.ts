@@ -9450,13 +9450,20 @@ export class LynoxHTTPApi {
         // repeat one row while losing another. `listThreadsForExport` keys on the
         // immutable `id` instead; its docblock carries the reasoning.
         //
-        // The cap is a REAL cap, not a page bound: the whole dump is materialised
-        // and then serialised into one string, so an unbounded walk trades a short
-        // answer for no answer at all (a `RangeError` past ~512 MB, or an OOM of the
-        // process that also serves the Web UI). It is surfaced in the PAYLOAD, like
-        // the `durable_knowledge` block below and unlike this route's entity loop,
-        // because a recipient who cannot see the truncation reads a short answer as
-        // a complete one — which is the defect this whole route is being fixed for.
+        // The cap is a REAL cap, not a page bound: the whole dump is materialised and
+        // then serialised into one string, so an unbounded walk trades a short answer
+        // for no answer at all (a `RangeError` past ~512 MB, or an OOM of the process
+        // that also serves the Web UI).
+        //
+        // ⚠ It bounds THREADS, not the dump. Each thread still carries up to 50 000
+        // messages (below), uncapped in aggregate, so 20 000 threads can materialise
+        // far more than this number suggests. It is tighter than the 200 000-row
+        // ceiling it replaces and it is not the byte bound this route still lacks.
+        //
+        // Surfaced in the PAYLOAD, like the `durable_knowledge` block below and
+        // unlike this route's entity loop, because a recipient who cannot see the
+        // truncation reads a short answer as a complete one — which is the defect
+        // this whole route is being fixed for.
         const THREAD_PAGE = EXPORT_PAGE_MAX;
         const THREAD_CAP = 20_000;
         const threads: ThreadRecord[] = [];
@@ -9674,18 +9681,51 @@ export class LynoxHTTPApi {
       // to prevent — and `crm_schema` reproduced it two statements later.
       const failed: string[] = [];
       const degraded: string[] = [];
+      // A THIRD list, and it is deliberately not one of the other two. A `null`
+      // store handle is not a failed wipe (nothing threw) and not a completed one
+      // either — it is a store this route could not open, and a caught boot failure
+      // leaves exactly that state with the file intact on disk. Until this existed
+      // the step was skipped in silence and the answer still read "All user data has
+      // been permanently deleted" over an untouched `engine.db`; the tenant could
+      // not discover it from the export either, because that reads the same null
+      // handle.
+      //
+      // What this does NOT decide: whether a null handle means a fault or a store
+      // the instance legitimately does not have. That needs a per-store answer (the
+      // file exists, or it never did) and a register row carries it. The claim is
+      // what gets fixed here — a route that could not look does not get to say
+      // "all".
+      const skipped: string[] = [];
+      const reach = <T>(key: string, store: T | null): T | null => {
+        if (store === null || store === undefined) skipped.push(key);
+        return store ?? null;
+      };
       // Store keys only in the body, never the error text: a SQLite message carries
       // file paths, and this body goes to a browser.
       //
-      // ⚠ The stderr line masks CREDENTIAL SHAPES (`sk-…`, `AKIA…`), which is what
-      // `maskSecretPatterns` does — it does NOT remove file paths, so do not read
-      // this as handling the path disclosure. The key is masked too, because an
-      // `attemptEach` key carries a collection or secret NAME, and a secret stored
-      // under a credential-shaped name would otherwise reach the log in clear.
+      // ⚠ The stderr line masks CREDENTIAL SHAPES — it does NOT remove file paths,
+      // so do not read this as handling the path disclosure. The key is masked too,
+      // because an `attemptEach` key carries a collection or secret NAME, and a
+      // secret stored under a credential-shaped name would otherwise reach the log
+      // in clear. `includeGeneric` because a log IS the machine-read sink the
+      // masker's own docblock reserves it for: without it the generic 40+ token
+      // rule is dropped, and an opaque 48-character credential matches nothing
+      // else.
+      // Each key AT MOST ONCE, and this is a bound rather than tidiness. A loop
+      // that re-lists what it could not delete calls this with the same key every
+      // round: measured on the per-item wrapper below before this line existed,
+      // 10 000 rounds × 200 undeletable rows gave 2 000 000 entries, a 136 MB
+      // response body and 687 MB of RSS — out of ONE locked database. `failed` is
+      // the retry instruction, so a repeated id also destroys the one thing it is
+      // for: saying how many rows actually failed.
+      const noted = new Set<string>();
       const note = (key: string, err: unknown, list: string[] = failed): void => {
+        if (noted.has(key)) return;
+        noted.add(key);
         list.push(key);
         const detail = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`⚠ /api/data: ${maskSecretPatterns(key)} failed: ${maskSecretPatterns(detail)}\n`);
+        const mask = (t: string): string => maskSecretPatterns(t, { includeGeneric: true });
+        process.stderr.write(`⚠ /api/data: ${mask(key)} failed: ${mask(detail)}\n`);
       };
       const attempt = (key: string, fn: () => void): void => {
         try {
@@ -9738,13 +9778,13 @@ export class LynoxHTTPApi {
       // answered success — plus it never reached a thread whose rollup counter is 0,
       // whose title is user-written text. The store owns the completeness of its own
       // tables; a caller can only delete what some listing chose to return.
-      const threadStore = engine.getThreadStore();
+      const threadStore = reach('threads', engine.getThreadStore());
       if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 
       // Delete all flat-file memory — the DEFAULT scope only. A tenant whose agent
       // wrote under a second context or a `user-…` scope keeps those files, and the
       // export cannot show them either, so neither route sees that half.
-      const memory = engine.getMemory();
+      const memory = reach('memory', engine.getMemory());
       if (memory) {
         for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
           await attemptAsync(`memory:${ns}`, async () => { await memory.save(ns, ''); });
@@ -9752,7 +9792,7 @@ export class LynoxHTTPApi {
       }
 
       // Delete all knowledge graph entities (cascades to relations, mentions, cooccurrences)
-      const kg = engine.getKnowledgeLayer();
+      const kg = reach('knowledge_graph', engine.getKnowledgeLayer());
       if (kg) {
         attempt('knowledge_graph', () => {
           // Bounded, like both loops in the export route — and for a reason
@@ -9769,20 +9809,28 @@ export class LynoxHTTPApi {
           let entities = db.listEntities({ limit: 200 });
           for (let round = 0; entities.length > 0; round++) {
             if (round >= MAX_ROUNDS) {
-              // It counts ROUNDS, not progress — with a working delete this is
-              // 2 000 000 entities genuinely removed, so a message claiming "no
-              // progress" would state the opposite of what happened to whoever
-              // debugs the 500.
+              // Rounds, not progress — with a working delete this is 2 000 000
+              // entities genuinely removed, so "no progress" would state the
+              // opposite of what happened to whoever debugs the 500. This is the
+              // outer backstop; the progress check below is what normally stops it.
               throw new Error(`entity wipe did not finish within ${MAX_ROUNDS} rounds`);
             }
-            // Per ITEM here too, and this is the loop where it matters most: one
-            // undeletable row used to abort the whole attempt, leaving every other
-            // entity in `agent-memory.db` in place while the answer named only the
-            // store. It is also the largest table this route touches. Termination
-            // still holds — an undeletable row keeps coming back in the listing, so
-            // `MAX_ROUNDS` is the backstop rather than being unreachable.
+            // Per ITEM, and this is the loop where it matters most: one undeletable
+            // row used to abort the whole attempt, leaving every other entity in
+            // `agent-memory.db` in place while the answer named only the store. It
+            // is also the largest table this route touches.
             attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
-            entities = db.listEntities({ limit: 200 });
+            const remaining = db.listEntities({ limit: 200 });
+            // ⚠ Stop on NO PROGRESS, and this is the half the per-item wrapper took
+            // away: the wrapper does not rethrow, so without it a database that
+            // refuses every delete spun the full 10 000 rounds. The claim is now
+            // measured rather than assumed — a round that removed nothing will not
+            // remove anything on the next pass either, and the message says exactly
+            // that.
+            if (remaining.length >= entities.length) {
+              throw new Error(`entity wipe made no progress — ${String(remaining.length)} entities remain`);
+            }
+            entities = remaining;
           }
         });
         // Its own attempt: a throw in the entity loop above used to skip this line,
@@ -9814,7 +9862,7 @@ export class LynoxHTTPApi {
       // ⚠ A null handle here is NOT an empty database: a caught boot failure leaves
       // `engineDb === null` with the file intact, and this route then skips it and
       // still answers success.
-      const engineDb = engine.getEngineDb();
+      const engineDb = reach('engine_db', engine.getEngineDb());
       // The wipe is one atomic transaction: a failure leaves ALL engine.db PII
       // intact, which is exactly why it has to reach the answer rather than only
       // stderr.
@@ -9824,11 +9872,11 @@ export class LynoxHTTPApi {
       // non-destructive v44 no longer drops the legacy `triggers` + workflow-def
       // `pipeline_runs`). Without this an Art.17 erasure would leave trigger/workflow
       // PII on disk, and an engine.db recreate would re-backfill it into live reads.
-      const runHistoryForWipe = engine.getRunHistory();
+      const runHistoryForWipe = reach('legacy_verb_defs', engine.getRunHistory());
       if (runHistoryForWipe) attempt('legacy_verb_defs', () => { runHistoryForWipe.clearLegacyVerbDefs(); });
 
       // Delete all DataStore collections (includes CRM tables)
-      const ds = engine.getDataStore();
+      const ds = reach('datastore', engine.getDataStore());
       if (ds) {
         try {
           // The LISTING is wrapped too, and that is not symmetry for its own sake:
@@ -9837,7 +9885,7 @@ export class LynoxHTTPApi {
           // outer handler, no `failed` list, and the answer could not say which
           // store had failed. The same holds for the secret names below.
           let collections: ReturnType<typeof ds.listCollections> = [];
-          attempt('datastore:list', () => { collections = ds.listCollections(); });
+          attempt('datastore#list', () => { collections = ds.listCollections(); });
           attemptEach('datastore', collections, col => { ds.dropCollection(col.name); }, col => col.name);
         } finally {
           // In a `finally`, and the position IS the fix rather than a detail of it:
@@ -9858,10 +9906,10 @@ export class LynoxHTTPApi {
 
       // Delete all secrets from the vault. `LYNOX_SECRET_*` env-sourced entries are
       // re-read at every boot, so those return after a restart.
-      const secretStore = engine.getSecretStore();
+      const secretStore = reach('secrets', engine.getSecretStore());
       if (secretStore) {
         let names: string[] = [];
-        attempt('secrets:list', () => { names = secretStore.listNames(); });
+        attempt('secrets#list', () => { names = secretStore.listNames(); });
         attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
       }
 
@@ -9898,8 +9946,16 @@ export class LynoxHTTPApi {
         jsonResponse(res, 500, {
           deleted: true,
           degraded,
-          error: 'Data erased, but a post-erasure step failed',
+          error: 'Data erased, but a post-erasure step failed — this instance may need a restart',
         });
+        return;
+      }
+      if (skipped.length > 0) {
+        // 200 and `deleted: true`, because every store this route COULD open was
+        // erased and nothing failed — but no completeness sentence, because one it
+        // could not open may hold data. The absence of `message` is the signal, the
+        // same way it is in the two branches above, and `skipped` says where to look.
+        jsonResponse(res, 200, { deleted: true, skipped });
         return;
       }
       jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });

@@ -11100,6 +11100,43 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/data keeps the failure list BOUNDED when every entity delete throws', async () => {
+      // The regression a delta round measured, in the shape that caused it: the
+      // per-item wrapper does not rethrow, so a database that refuses every delete
+      // used to run the full 10 000-round bound and append one key PER ROW PER
+      // ROUND — 2 000 000 entries, a 136 MB response body and 687 MB of RSS, out of
+      // one locked file. Two things bound it now: the loop stops as soon as a round
+      // removes nothing, and `note` records each key at most once.
+      //
+      // `failed` is the retry instruction, so the repetition also destroyed the one
+      // thing it is for — saying how many rows actually failed.
+      const page = Array.from({ length: 200 }, (_, i) => ({ id: `ent-${i}` }));
+      const listEntities = vi.fn(() => page);
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({
+          getDb: () => ({
+            listEntities,
+            deleteEntity: () => { throw new Error('database is locked'); },
+            deactivateAllMemories: () => [],
+          }),
+        }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        const entityKeys = body.failed.filter(k => k.startsWith('knowledge_graph_entity:'));
+        // One per ROW, not one per row per round.
+        expect(entityKeys).toHaveLength(200);
+        expect(new Set(entityKeys).size, 'a key must not repeat').toBe(200);
+        // And the loop stopped on the first fruitless round rather than spinning to
+        // the bound: two listings, the initial one and the progress check.
+        expect(listEntities.mock.calls.length).toBeLessThanOrEqual(3);
+        expect(body.failed).toContain('knowledge_graph');
+      });
+    });
+
     it('DELETE /api/data answers rather than hanging when the entity wipe makes no progress', async () => {
       // `attempt` catches a THROW; it cannot catch a non-termination, and the
       // entity wipe is the one loop here that re-lists after deleting. A refuter
@@ -11203,8 +11240,12 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // Four, not three, and the fourth is the point: `knowledge_graph_memories`
         // is its own attempt, so a KG handle that throws no longer takes the
         // memory deactivation down with the entity loop silently — it is named.
+        // `#`, not `:` — a collection or secret literally named `list` would
+        // otherwise produce the same key as "enumerating the store failed", and
+        // those two call for different next steps. `#` cannot occur in a
+        // collection name (`^[a-z][a-z0-9_]{0,62}$`).
         expect([...body.failed].sort()).toEqual([
-          'datastore:list', 'engine_db', 'knowledge_graph', 'knowledge_graph_memories',
+          'datastore#list', 'engine_db', 'knowledge_graph', 'knowledge_graph_memories',
         ]);
       });
     });
@@ -11224,7 +11265,19 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data still 200s when engine.db is absent (getEngineDb null)', async () => {
+    it('DELETE /api/data still 200s when engine.db is absent — but claims no completeness', async () => {
+      // The 200 is kept and the SENTENCE is withdrawn, which is the whole change
+      // here. A `null` handle is not a failed wipe (nothing threw) and not a
+      // completed one: a caught boot failure leaves exactly that state with the
+      // file intact on disk, so `knowledge_entries`, `subjects` and
+      // `people.email/phone` can all still be there while this route reports
+      // success — and the tenant cannot discover it from the export either, because
+      // that reads the same null handle.
+      //
+      // What this route is NOT deciding is whether a null handle is a fault or a
+      // store the instance legitimately does not have. That needs a per-store
+      // answer and is registered. A route that could not look does not get to say
+      // "all"; that part needs no decision.
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
@@ -11237,6 +11290,35 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
         });
         expect(res.status).toBe(200);
+        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string };
+        expect(body.deleted, 'what could be reached WAS erased').toBe(true);
+        expect(body.skipped, 'the store it could not open must be named').toContain('engine_db');
+        expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
+        expect(JSON.stringify(body)).not.toContain('permanently deleted');
+      });
+    });
+
+    it('DELETE /api/data claims completeness only when every store was reachable', async () => {
+      // The other direction, and the reason the one above cannot stand alone: a
+      // `skipped` list that is always non-empty would withdraw the sentence from
+      // every erasure, which is the same loss of information in the other
+      // direction. Every accessor the route reads is handed over here, so the
+      // sentence is earned.
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData: () => undefined }),
+        getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
+        getThreadStore: () => ({ deleteAllThreads: () => 0 }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+        }),
+        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getCRM: () => ({ rebuildSchema: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string };
+        expect(body.skipped, 'nothing was unreachable').toBeUndefined();
+        expect(body.message).toBe('All user data has been permanently deleted');
       });
     });
   });
