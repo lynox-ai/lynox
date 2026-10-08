@@ -14,6 +14,7 @@ import { wrapChannelMessage, wrapUntrustedData } from '../../../core/data-bounda
 import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
+import { oneBlockLine } from '../block-line.js';
 
 interface MailReadInput {
   account?: string | undefined;
@@ -75,29 +76,47 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
         // <untrusted_data> boundary alongside the body. Otherwise a
         // crafted subject like "Ignore previous instructions, …" would
         // appear in the model's trusted framing.
+        //
+        // The same holds for the Message-ID and for each attachment's file name and
+        // content type: they read like metadata, but the sender writes them. A well-formed
+        // Message-ID can still be a sentence (`<Ignore.all.previous.instructions@x>`), so
+        // they are placed in the block rather than checked against a shape.
+        //
+        // Each value is put on one line, and each attachment gets its own line, so a
+        // decoded line break or a `; part 1:` inside a value cannot start another
+        // `Label:` line or another part→name pairing.
+        const attachmentList = msg.attachments.length > 0
+          ? msg.attachments
+            .map(att => `\n  - part ${att.partId}: ${oneBlockLine(att.filename ?? '(unnamed)')} (${oneBlockLine(att.contentType)})`)
+            .join('')
+          : null;
+        // A subject made only of line breaks becomes blank on one line, and a blank field
+        // is not rendered at all — so it gets the same fallback as a missing subject.
+        const subjectLine = oneBlockLine(msg.envelope.subject);
         const wrappedMessage = wrapChannelMessage({
           source: `mail:${provider.accountId}:${fromAddr}`,
           fields: {
-            Subject: msg.envelope.subject || '(no subject)',
-            From: fromDisplay,
-            To: toDisplay,
-            Cc: ccDisplay,
-            'Reply-To': replyToDisplay,
+            Subject: subjectLine.trim() === '' ? '(no subject)' : subjectLine,
+            From: oneBlockLine(fromDisplay),
+            To: oneBlockLine(toDisplay),
+            Cc: ccDisplay === null ? null : oneBlockLine(ccDisplay),
+            'Reply-To': replyToDisplay === null ? null : oneBlockLine(replyToDisplay),
+            'Message-ID': msg.envelope.messageId ? oneBlockLine(msg.envelope.messageId) : null,
+            Attachments: attachmentList,
             Body: cleaned.visible || msg.text || '(empty body)',
           },
         });
 
         const lines: string[] = [];
-        // Operational metadata only — engine-generated (UID, folder, dates,
-        // attachment manifest), not attacker-controlled, stays in the
-        // trusted framing above the wrapped envelope.
+        // The trusted framing above the wrapped envelope holds only what the server or
+        // the engine produced: date, UID, folder, and per attachment its part number and
+        // size. Names, types and the Message-ID are in the block (see above).
         lines.push(`Date: ${msg.envelope.date.toISOString()}`);
         lines.push(`UID: ${String(msg.envelope.uid)}   Folder: ${msg.envelope.folder}`);
-        if (msg.envelope.messageId) lines.push(`Message-ID: ${msg.envelope.messageId}`);
         if (msg.envelope.attachmentCount > 0) {
-          lines.push(`Attachments (${String(msg.envelope.attachmentCount)}):`);
+          lines.push(`Attachments (${String(msg.envelope.attachmentCount)}; names and types inside the message block):`);
           for (const att of msg.attachments) {
-            lines.push(`  - ${att.filename ?? '(unnamed)'} (${att.contentType}, ${String(att.sizeBytes)} bytes, part ${att.partId})`);
+            lines.push(`  - part ${att.partId}, ${String(att.sizeBytes)} bytes`);
           }
         }
         lines.push('');
