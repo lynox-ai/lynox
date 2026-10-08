@@ -40,7 +40,9 @@ function maskSecretText(text: string): string {
  * `isSensitiveParamName`, not by alternation here, which backtracked quadratically on a
  * long run of name-like text.
  */
-const QUERY_PARAM = /(^|[?&;#])([A-Za-z0-9_-]+)=([^&#;\s"']+)/g;
+const QUERY_PARAM_NAME = /(^|[?&;#])([A-Za-z0-9_-]+)=/g;
+/** A parameter value, read from where its name ends. */
+const QUERY_PARAM_VALUE = /[^&#;\s"']+/y;
 
 /** Words that make a parameter's value a credential whatever its length. */
 const SENSITIVE_PARAM_WORDS: ReadonlySet<string> = new Set([
@@ -77,10 +79,26 @@ function isSensitiveParamName(name: string): boolean {
  * in a provider's short format, a password. Here the parameter's NAME decides, so the
  * value goes whatever it looks like. Inside a sentence (`exited with code=1`) a pair is
  * not in query syntax and stays as written.
+ *
+ * Only a sensitive value is consumed. After any other name the scan goes on right behind
+ * its `=`, so a query nested in a harmless value (`next=/app?token=…`,
+ * `redirect=https://…/cb?code=…`) is still read.
  */
 function maskSensitiveParams(text: string): string {
-  return text.replace(QUERY_PARAM, (match, lead: string, name: string) =>
-    isSensitiveParamName(name) ? `${lead}${name}=***` : match);
+  let out = '';
+  let copied = 0;
+  QUERY_PARAM_NAME.lastIndex = 0;
+  for (let m = QUERY_PARAM_NAME.exec(text); m !== null; m = QUERY_PARAM_NAME.exec(text)) {
+    if (!isSensitiveParamName(m[2]!)) continue;
+    const valueStart = m.index + m[0].length;
+    QUERY_PARAM_VALUE.lastIndex = valueStart;
+    const value = QUERY_PARAM_VALUE.exec(text);
+    if (value === null) continue;
+    out += `${text.slice(copied, valueStart)}***`;
+    copied = valueStart + value[0].length;
+    QUERY_PARAM_NAME.lastIndex = copied;
+  }
+  return out + text.slice(copied);
 }
 
 /**

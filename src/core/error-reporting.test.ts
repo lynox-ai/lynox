@@ -497,6 +497,21 @@ describe('error-reporting scrubbing', () => {
     expect(qs).toBe('apiKey=***&accessToken=***&apikey=***&userPassword=***&pageSize=20');
   });
 
+  it('reads a query nested inside a harmless value', async () => {
+    // A redirect target or a return path carries its own query; the outer value must not
+    // hide it from the scan.
+    const { beforeSend } = await hooks();
+    const out = beforeSend({
+      request: {
+        query_string: 'redirect=https://x/cb?code=c1&next=/app?token=t2',
+        url: 'https://x/login?url=https://c/d?access_token=a3&q=hello',
+      },
+    });
+    const req = (out as { request: Record<string, string> }).request;
+    expect(req['query_string']).toBe('redirect=https://x/cb?code=***&next=/app?token=***');
+    expect(req['url']).toBe('https://x/login?url=https://c/d?access_token=***&q=hello');
+  });
+
   it('masks a token in a URL fragment', async () => {
     const { beforeSend } = await hooks();
     const out = beforeSend(eventWith('redirect landed at https://x/cb#access_token=t9&token_type=bearer'));
