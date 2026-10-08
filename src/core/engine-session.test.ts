@@ -2627,14 +2627,14 @@ describe('Engine + Session (Orchestrator)', () => {
       const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       await engine.init();
       engine.getUserConfig().max_tier = 'balanced';
-      const session = engine.createSession({ model: 'balanced' });
+      // Below the ceiling and not the default tier, so neither a clamp nor a fall back to the
+      // default could leave it where it is by accident.
+      const session = engine.createSession({ model: 'fast' });
       try {
-        const setModel = vi.spyOn(session, 'setModel');
         bumpConfigVersion(engine); // an unrelated config change
         mockSend.mockResolvedValueOnce('ok');
         await session.run('a turn after an unrelated change');
-        expect(session.getModelTier()).toBe('balanced');
-        expect(setModel, 'no model switch').not.toHaveBeenCalled();
+        expect(session.getModelTier(), 'no model switch').toBe('fast');
       } finally {
         delete engine.getUserConfig().max_tier;
       }
@@ -2656,6 +2656,30 @@ describe('Engine + Session (Orchestrator)', () => {
         mockSend.mockResolvedValueOnce('ok');
         await session.run('a turn after the rise');
         expect(session.getModelTier(), 'the tier set was deep').toBe('deep');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('still clamps when another rebuild ran between the change and the turn', async () => {
+      // Any agent rebuild stamps the current config version. The clamp keeps its own stamp, so
+      // a rebuild in between (here a setter; in production a registry hot-reload or the
+      // restore after a compaction) does not swallow the ceiling change.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      try {
+        engine.getUserConfig().max_tier = 'fast';
+        bumpConfigVersion(engine);
+        session.setEffort('low');
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('first turn after the drop');
+        expect(session.getModelTier()).toBe('fast');
+        // And the agent the turn ran on was built for it, not only the field.
+        const ranOn = vi.mocked(Agent).mock.calls.at(-1)![0].model as string;
+        engine.createSession({ model: 'fast' });
+        const fastModel = vi.mocked(Agent).mock.calls.at(-1)![0].model as string;
+        expect(ranOn).toBe(fastModel);
       } finally {
         delete engine.getUserConfig().max_tier;
       }
