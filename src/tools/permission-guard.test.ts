@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments, withoutLeadingOptions } from './permission-guard.js';
+import { isDangerous, isCriticalTool, contractGrants, normalizeCommand, splitCommandSegments, withoutLeadingOptions } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2914,5 +2914,42 @@ describe('bash allowlist observe mode', () => {
       'program=other;reason=program;current=free',
       'program=grep;reason=ok;current=free',
     ]);
+  });
+});
+
+describe('reviewed grant — which headers the caller may set', () => {
+  const contract: CapabilityContract = {
+    version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+    hostPatterns: ['host.example'], pathPatterns: ['/pfad'], paramConstraints: {},
+  };
+  const grants = (headers: Record<string, string>, c: CapabilityContract = contract): boolean =>
+    contractGrants('http_request', { url: 'https://host.example/pfad', method: 'POST', headers }, c);
+
+  // Not a list of known re-targeting headers: any name outside the allowed set is refused,
+  // including ones no list here has ever named.
+  it.each([
+    ['Forwarded'], ['X-Original-Host'], ['X-Host'], ['X-Forwarded-Server'], ['X-Forwarded-Prefix'],
+    ['Authorization'], ['Cookie'], ['X-Api-Key'], ['X-Made-Up-Header'], ['Version'],
+  ])('refuses a caller-set %s header', (name) => {
+    expect(grants({ [name]: 'x' })).toBe(false);
+  });
+
+  it('refuses the whole call when one header of several is outside the set', () => {
+    expect(grants({ 'Content-Type': 'application/json', 'X-Forwarded-Server': 'x' })).toBe(false);
+  });
+
+  it.each([
+    ['Content-Type'], ['Accept'], ['Accept-Language'], ['Idempotency-Key'], ['If-Match'], ['If-None-Match'],
+    ['Notion-Version'], ['Stripe-Version'], ['X-GitHub-Api-Version'], ['anthropic-version'], [' content-type '],
+  ])('admits a caller-set %s header', (name) => {
+    expect(grants({ [name]: 'x' })).toBe(true);
+  });
+
+  it('CONTROL: no headers at all is admitted', () => {
+    expect(contractGrants('http_request', { url: 'https://host.example/pfad', method: 'POST' }, contract)).toBe(true);
+  });
+
+  it('CONTROL: a contract without origin is not held to the reviewed set', () => {
+    expect(grants({ Forwarded: 'host=other.example' }, { ...contract, origin: undefined })).toBe(true);
   });
 });

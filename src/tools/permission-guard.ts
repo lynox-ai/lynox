@@ -582,7 +582,7 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // leaves the instance only once it is confirmed in the chat.
   if (isMailProviderTarget(obj.url)) return false;
   if (contract.origin === 'reviewed' && !isReviewableUrl(parsed, obj.url)) return false;
-  if (contract.origin === 'reviewed' && carriesTargetOverride((input as { headers?: unknown }).headers)) return false;
+  if (contract.origin === 'reviewed' && carriesUnreviewedHeader((input as { headers?: unknown }).headers)) return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!_matchesAnyGlob(host, contract.hostPatterns)) return false;
   if (!_matchesAnyGlob(parsed.pathname, contract.pathPatterns)) return false;
@@ -590,20 +590,35 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
 }
 
 /**
- * Request headers that re-target a call past the tuple a person was shown: a caller-set
- * `Host` (or a forwarded host, or a rewritten URL a front end honours) routes the request
- * to another virtual host or path on the same address (TLS and the pin still follow the
- * URL), and the method-override headers make a server that honours them run another verb —
- * DELETE included — under a granted POST.
+ * The request headers a reviewed grant lets the caller set. Some headers re-target a call
+ * past the tuple a person was shown: a caller-set `Host` (or a forwarded host, or a
+ * rewritten URL a front end honours) routes the request to another virtual host or path on
+ * the same address (TLS and the pin still follow the URL), and a method-override header
+ * makes a server that honours it run another verb — DELETE included — under a granted POST.
+ *
+ * ⛔ A LIST OF WHAT IS ALLOWED, not of what re-targets. Which headers a proxy or framework
+ * honours is not a closed set, so a list of the dangerous ones is never finished. These
+ * describe the body or the wanted answer and change neither where the call goes nor what
+ * it does. Credentials are not among them: the engine attaches a profile's credential
+ * itself, after this check.
  */
-const TARGET_OVERRIDE_HEADERS = new Set([
-  'host', 'x-forwarded-host', 'x-original-url', 'x-rewrite-url',
-  'x-http-method-override', 'x-http-method', 'x-method-override',
+const REVIEWED_HEADERS = new Set([
+  'content-type', 'accept', 'accept-language', 'idempotency-key', 'if-match', 'if-none-match',
 ]);
 
-function carriesTargetOverride(headers: unknown): boolean {
+/**
+ * Plus the API version an endpoint asks for (`Notion-Version`, `Stripe-Version`,
+ * `X-GitHub-Api-Version`, `X-Shopify-Api-Version`): a name that ends in `version` selects
+ * a version of the same endpoint, not another one.
+ */
+const VERSION_HEADER = /^[a-z0-9]+(?:-[a-z0-9]+)*-version$/;
+
+function carriesUnreviewedHeader(headers: unknown): boolean {
   if (headers === null || typeof headers !== 'object') return false;
-  return Object.keys(headers).some((name) => TARGET_OVERRIDE_HEADERS.has(name.trim().toLowerCase()));
+  return Object.keys(headers).some((raw) => {
+    const name = raw.trim().toLowerCase();
+    return !REVIEWED_HEADERS.has(name) && !VERSION_HEADER.test(name);
+  });
 }
 
 /**
