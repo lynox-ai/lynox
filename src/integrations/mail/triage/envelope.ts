@@ -13,6 +13,7 @@
 
 import type { MailEnvelope } from '../provider.js';
 import { wrapUntrustedData } from '../../../core/data-boundary.js';
+import { oneBlockLine } from '../block-line.js';
 
 export interface TriageEnvelopeView {
   /** Display string: '"Alice" <alice@x.com>' or 'alice@x.com'. */
@@ -86,10 +87,14 @@ export function renderTriageList(
     // Headers + snippet collected as one untrusted block per envelope.
     // Single-block wrapping (vs separate wrappers per field) keeps the
     // boundary scanner running once per envelope and reduces token cost.
-    const body = v.snippet ? truncate(v.snippet.replace(/\s+/g, ' '), 200) : '';
+    const body = v.snippet ? truncate(oneBlockLine(v.snippet).replace(/\s+/g, ' '), 200) : '';
+    // ⛔ ONE LINE EACH. A subject or display name with an encoded line break decodes to
+    // two lines, and the second can imitate the `N. uid:… · date:…` label above — inside
+    // this envelope's block, but naming another message's uid. Collapsing it here, at the
+    // renderer, covers every provider that fills the envelope.
     const headerBlock = [
-      `From: ${v.from}`,
-      `Subject: ${v.subject}`,
+      `From: ${oneBlockLine(v.from)}`,
+      `Subject: ${oneBlockLine(v.subject)}`,
       ...(body ? ['', body] : []),
     ].join('\n');
     lines.push(wrapUntrustedData(headerBlock, `mail:${acctLabel}:envelope:${String(v.uid)}`));
