@@ -11141,9 +11141,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // The case no test drained before, and the one a working wipe fails without
       // this fix: `listEntities` clamps its limit to 200, so a progress check that
       // compares the length of two listings sees 200 twice while 200 rows were
-      // genuinely deleted. Measured on the real store: 399 rows completed, 400 threw
-      // after 200 successful deletes and 300 survived — an Art. 17 request on any
-      // instance with a used knowledge graph answering 500.
+      // genuinely deleted. Measured on the real store: 399 rows completed; 400 threw
+      // after 200 successful deletes with 200 surviving; 500 threw with 300
+      // surviving — an Art. 17 request on any instance with a used knowledge graph
+      // answering 500. (The first version of this comment said "400 … with 300
+      // surviving", splicing one run's throw with another's survivor count.)
       //
       // The mock caps at 200 exactly as `AgentMemoryDb` does; that clamp IS the
       // property under test, so a fixture without it would witness nothing.

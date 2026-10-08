@@ -9825,9 +9825,17 @@ export class LynoxHTTPApi {
           let entities = db.listEntities({ limit: 200 });
           for (let round = 0; entities.length > 0; round++) {
             if (round >= MAX_ROUNDS) {
-              // Rounds, not progress: a page is at most 200, so reaching this means
-              // two million entities were genuinely removed, and "no progress" would
-              // state the opposite of what happened to whoever debugs the 500.
+              // Rounds, not progress — and deliberately NOT a claim about how much
+              // was removed. An earlier version of this comment said reaching the
+              // bound "means two million entities were genuinely removed", which runs
+              // the arithmetic backwards: 200 per page is an UPPER bound, the floor is
+              // one success per round (10 000), and for a delete that neither throws
+              // nor removes the row it is ZERO — the shape the note below says this
+              // bound exists for. Measured: that shape reaches the bound with 2 000 000
+              // calls and nothing removed; a second process writing the same file
+              // reaches it after 500 250. So the message says what it knows, which is
+              // that the loop did not finish, and the progress check below is what
+              // normally stops it.
               throw new Error(`entity wipe did not finish within ${MAX_ROUNDS} rounds`);
             }
             // Per ITEM, and this is the loop where it matters most: one undeletable
@@ -9841,18 +9849,32 @@ export class LynoxHTTPApi {
             // REJECTED on a measurement: without the bound, a delete that neither
             // throws nor removes the row spins forever on the event loop, and the
             // test below wedges the worker rather than failing. A demonstrated hang
-            // in an HTTP handler is worse than the guards' residual risk. What the
-            // history does mean is that this loop is where a reader should look
-            // first; the regressions are named in the two notes that follow.
+            // in an HTTP handler is worse than the guards' residual risk — and that
+            // risk is understated by the test that drives it, whose store is an O(1)
+            // closure answering in 18 ms: the same shape against the real store cost
+            // 5.58 s and 949 MB for 200 of the 10 000 rounds, and a probe replaying it
+            // reached 9,1 GiB before it was killed by hand. Finite still beats
+            // infinite; the suite cannot see the size of what it is choosing against.
+            //
+            // What the history does mean is that this loop is where a reader should
+            // look first. The two regressions are named at the progress note just
+            // below and at the dedupe note beside `note` further up — not both below,
+            // as an earlier version of this line said.
             //
             // ⚠ Stop when a round DELETED NOTHING, and read that from the deletes
             // rather than from the row count. The first version of this check
             // compared the length of the next listing against the last one, which is
             // wrong in a way that only shows past one page: `listEntities` clamps its
             // limit to 200, so a working wipe of 400 rows removes 200, lists 200
-            // again and "no progress" fires over a success — measured on the real
-            // store, 399 rows completed and 400 threw with 300 surviving. A count is
-            // not progress; whether an attempt succeeded is.
+            // again and "no progress" fires over a success. Measured on the real
+            // store: 399 rows completed, 400 threw after 200 successful deletes with
+            // 200 surviving, 500 threw with 300 surviving. A count is not progress;
+            // whether an attempt succeeded is.
+            //
+            // (An earlier version of this comment, and of its commit message, said
+            // "400 threw with 300 surviving" — it spliced a 400-row run's throw with
+            // a 500-row run's survivor count. The boundary is right, the number was
+            // not, and it is the number that justifies the fix.)
             const removed = attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
             if (removed === 0) {
               throw new Error(`entity wipe made no progress — ${String(entities.length)} entities remain`);
