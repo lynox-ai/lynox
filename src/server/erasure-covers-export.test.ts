@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import BetterSqlite3 from 'better-sqlite3';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,7 @@ import type { SecretStore } from '../core/secret-store.js';
 import type { CRM } from '../core/crm.js';
 import type { FlatFileMemory } from '../core/memory.js';
 import { HISTORY_KEPT_ON_ERASURE, type RunHistory } from '../core/run-history.js';
+import { MEMORY_KEPT_ON_ERASURE } from '../core/agent-memory-db.js';
 import type { PromptStore } from '../core/prompt-store.js';
 
 /**
@@ -583,6 +584,108 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // And the engine still WORKS on the emptied file: a run can be written again.
     const rh = engineOf().getRunHistory()!;
     expect(() => rh.insertRun({ taskText: 'after', modelTier: 'balanced', modelId: 'fixture-model' })).not.toThrow();
+  }, 120_000);
+
+  /**
+   * The legacy memory store, `agent-memory.db`. The erasure used to SOFT-delete its
+   * memories (`UPDATE memories SET is_active = 0`): every row, its text plaintext
+   * by design on this store, stayed readable until a later `gc()`, and a row that
+   * was already inactive stayed exactly as it was. And it reached the other tables only through
+   * the entity listing, so `metrics` and anything not hanging off an entity stayed.
+   *
+   * Same shape as the history.db test above: over the FILE, against a list written
+   * here. The seed includes a memory that is ALREADY inactive, because that is the
+   * row a soft delete never touches.
+   */
+  const MEMORY_KEPT = new Set(['schema_version']);
+
+  function memoryTables(): Array<{ name: string; rows: number }> {
+    const path = join(dir, 'agent-memory.db');
+    expect(existsSync(path), 'fixture: agent-memory.db must exist where the engine keeps it').toBe(true);
+    const db = new BetterSqlite3(path, { readonly: true });
+    try {
+      const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>;
+      return names.map(({ name }) => ({
+        name,
+        rows: (db.prepare(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }).n,
+      }));
+    } finally {
+      db.close();
+    }
+  }
+
+  function seedLegacyMemory(): void {
+    const kg = engineOf().getKnowledgeLayer();
+    if (kg === null) throw new Error('fixture: no knowledge layer');
+    const am = kg.getDb();
+    const scope = { namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] };
+    const live = am.createMemory({ text: 'ZZMARKER-memory-live-7f3a', ...scope });
+    const old = am.createMemory({ text: 'ZZMARKER-memory-retired-7f3a', ...scope });
+    // ALREADY inactive before the erasure: the row a soft delete never touches.
+    am.supersedMemory(old, live);
+    am.createSupersedes(live, old, 'ZZMARKER-supersede-reason-7f3a');
+    const person = am.createEntity({ canonicalName: 'ZZMARKER-memory-entity-7f3a', entityType: 'person', scopeType: 'global', scopeId: '' });
+    const org = am.createEntity({ canonicalName: 'ZZMARKER-memory-org-7f3a', entityType: 'organization', scopeType: 'global', scopeId: '' });
+    am.createMention(live, person);
+    am.createRelation(person, org, 'works_at', 'ZZMARKER-relation-7f3a', live);
+    am.upsertMetric({ metricName: 'zzmarker_metric', value: 1 });
+  }
+
+  it('empties every table of agent-memory.db, retired memories included, except what it names as kept', async () => {
+    seedLegacyMemory();
+    const before = new Map(memoryTables().map(t => [t.name, t.rows]));
+    // POSITIVE CONTROL: the seed reached every table this test is about.
+    for (const t of ['memories', 'entities', 'mentions', 'relations', 'supersedes', 'metrics']) {
+      expect(before.get(t), `fixture: ${t} must hold the seeded row before the erasure`).toBeGreaterThan(0);
+    }
+
+    const { status } = await erase();
+    expect(status).toBe(200);
+
+    const left = memoryTables()
+      .filter(t => !MEMORY_KEPT.has(t.name) && t.rows > 0)
+      .map(t => `${t.name}=${String(t.rows)}`);
+    expect(left, 'every table of agent-memory.db must be empty after an Art. 17 erasure').toEqual([]);
+
+    const db = new BetterSqlite3(join(dir, 'agent-memory.db'), { readonly: true });
+    try {
+      // Zero memories, the rows that were inactive before included.
+      expect((db.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n).toBe(0);
+    } finally {
+      db.close();
+    }
+
+    // And the store still WORKS on the emptied file.
+    const am = engineOf().getKnowledgeLayer()!.getDb();
+    expect(() => am.createMemory({ text: 'after', namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] })).not.toThrow();
+  }, 120_000);
+
+  it('keeps exactly the agent-memory.db tables this test names as kept', () => {
+    expect([...MEMORY_KEPT_ON_ERASURE].sort()).toEqual([...MEMORY_KEPT].sort());
+  });
+
+  it('rolls agent-memory.db back and names the store when its wipe fails midway', async () => {
+    // The old per-entity loop could stop half done; one transaction cannot. A
+    // trigger refuses the delete of `metrics`, which comes after `memories` in the
+    // file, so the memories are deleted first and must come back.
+    seedLegacyMemory();
+    const path = join(dir, 'agent-memory.db');
+    const before = memoryTables().find(t => t.name === 'memories')!.rows;
+    expect(before, 'fixture: memories seeded').toBeGreaterThan(0);
+    const w = new BetterSqlite3(path);
+    try {
+      // Proves rollback only if `memories` is deleted BEFORE the refused table.
+      const order = memoryTables().map(t => t.name);
+      expect(order.indexOf('memories'), 'fixture: memories must come before metrics').toBeLessThan(order.indexOf('metrics'));
+      w.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
+      const { status, body } = await erase();
+      expect(status).toBe(500);
+      expect((body['failed'] as string[]).filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+      expect(memoryTables().find(t => t.name === 'memories')!.rows, 'a failed wipe must leave every memory in place').toBe(before);
+    } finally {
+      w.exec('DROP TRIGGER IF EXISTS refuse_metrics');
+      w.close();
+    }
   }, 120_000);
 
   /**
