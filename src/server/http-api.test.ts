@@ -387,8 +387,11 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   // engine-init.ts (pulled in by http-api.ts for ensureHttpSecret) reads
   // these from config.js — provide them so the real ensureHttpSecret() can
   // run in the T1-1 ordering test. getLynoxDir honours LYNOX_DATA_DIR so the
-  // test can point it at a throwaway directory.
-  getLynoxDir: vi.fn(() => process.env['LYNOX_DATA_DIR'] ?? '/tmp/lynox-http-api-test-data'),
+  // test can point it at a throwaway directory. Without it, this file's own directory —
+  // not a fixed path: tests call `vi.unstubAllEnvs()`, and a fixed path exists only on a
+  // machine where an earlier run happened to create it, so the erasure's data-dir scan
+  // passed locally and failed in CI.
+  getLynoxDir: vi.fn(() => process.env['LYNOX_DATA_DIR'] ?? fileDataDir),
   setVaultApiKeyExists: vi.fn(),
 }));
 
