@@ -83,6 +83,13 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MagicLinkErrorCode', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkErrorCode') },
   { name: 'isMagicLinkErrorCode', contractFile: 'http.ts', twinPattern: valueTwin('isMagicLinkErrorCode') },
   { name: 'AuthErrorBody', contractFile: 'http.ts', twinPattern: typeTwin('AuthErrorBody') },
+  // Born in the contract: the login principal the control plane hands the web-ui.
+  { name: 'LOGIN_PRINCIPAL_VERSION', contractFile: 'http.ts', twinPattern: valueTwin('LOGIN_PRINCIPAL_VERSION') },
+  { name: 'AuthCodeRequest', contractFile: 'http.ts', twinPattern: typeTwin('AuthCodeRequest') },
+  { name: 'AuthCodeVerifyRequest', contractFile: 'http.ts', twinPattern: typeTwin('AuthCodeVerifyRequest') },
+  { name: 'MandateLoginPrincipal', contractFile: 'http.ts', twinPattern: typeTwin('MandateLoginPrincipal') },
+  { name: 'AuthLoginSuccessBody', contractFile: 'http.ts', twinPattern: typeTwin('AuthLoginSuccessBody') },
+  { name: 'readLoginPrincipal', contractFile: 'http.ts', twinPattern: valueTwin('readLoginPrincipal') },
   { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
   { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
   // Born in the contract rather than migrated into it (W5, PRD Stage 1 §3.4).

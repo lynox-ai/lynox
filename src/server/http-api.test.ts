@@ -4,6 +4,7 @@ import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -841,7 +842,8 @@ describe('LynoxHTTPApi', () => {
       const cases = [
         'lynox_session=',                        // empty value
         'lynox_session=nodelimiter',             // length === 1
-        'lynox_session=a.b.c.d',                 // length > 3
+        'lynox_session=a.b.c.d',                 // length 4, NaN timestamp
+        'lynox_session=a.b.1.c.d',               // length > 4
         'lynox_session=not_a_number.deadbeef',   // NaN timestamp
       ];
       for (const cookie of cases) {
@@ -878,6 +880,97 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const refresh = extractFirstCookiePair(res, 'lynox_session');
       expect(refresh).toBeNull();
+    });
+
+    // ── Mandate sessions: the principal part (PRD customer-granted-operator-access §3.3, §3.5)
+
+    /** Sign `<nonce>.<principal>.<iat>` the way the Web UI does, for shapes it never mints. */
+    function mintPrincipalToken(secret: string, iatSec: number, principal: Record<string, unknown>): string {
+      const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+      const part = Buffer.from(JSON.stringify(principal), 'utf8').toString('base64url');
+      const payload = `${randomBytes(8).toString('hex')}.${part}.${iatSec}`;
+      return `${payload}.${createHmac('sha256', key).update(payload).digest('hex')}`;
+    }
+    const MANDATE_LOGIN = {
+      kind: 'mandate' as const, email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+      mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    };
+    const mandatePrincipal = (exp: number): Record<string, unknown> => ({
+      v: 1, kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandate_id: MANDATE_LOGIN.mandate_id, exp,
+    });
+
+    it('reads the mandate the Web UI minted into the session as the request principal', async () => {
+      // The Web UI's own minter, not a mirror: the two sides must agree on the format.
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const asMandate = await fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/approve`, {
+        method: 'POST', headers: { cookie: `lynox_session=${mandate}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(asMandate.status).toBe(403);
+      expect(((await asMandate.json()) as { error: string }).error).toContain('Only the owner');
+      // Twin: the owner's cookie from the same minter passes the owner check.
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const asOwner = await fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/approve`, {
+        method: 'POST', headers: { cookie: `lynox_session=${owner}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(asOwner.status).not.toBe(403);
+    });
+
+    it('gives a mandate session the user scope even without an admin secret (D6)', async () => {
+      // This suite runs single-secret, where a cookie is otherwise `admin`.
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const res = await fetch(`${baseUrl}/api/vault/rotate`, {
+        method: 'POST', headers: { cookie: `lynox_session=${mandate}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('Admin scope required');
+      // The same session reaches a user route.
+      const user = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${mandate}` } });
+      expect(user.status).toBe(200);
+    });
+
+    it('ends a mandate session at its signed exp', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const live = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS + 60));
+      // exp = now: the session has ended at exp itself, not one second after.
+      const ended = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS));
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${live}` } })).status).toBe(200);
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ended}` } })).status).toBe(401);
+    });
+
+    it('refuses a mandate session stamped more than a minute in the future (D4)', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const ahead = mintPrincipalToken(TEST_SECRET, nowS + 120, mandatePrincipal(nowS + 600));
+      const near = mintPrincipalToken(TEST_SECRET, nowS + 30, mandatePrincipal(nowS + 600));
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ahead}` } })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${near}` } })).status).toBe(200);
+    });
+
+    it('refuses a signed principal it does not know instead of reading it as the owner', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      for (const p of [
+        { ...mandatePrincipal(nowS + 600), kind: 'owner' },
+        { ...mandatePrincipal(nowS + 600), v: 2 },
+        { ...mandatePrincipal(nowS + 600), exp: 'later' },
+        { ...mandatePrincipal(nowS + 600), email: '' },
+        { ...mandatePrincipal(nowS + 600), display: '' },
+        { ...mandatePrincipal(nowS + 600), mandate_id: 5 },
+      ]) {
+        const tok = mintPrincipalToken(TEST_SECRET, nowS, p);
+        const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${tok}` } });
+        expect(res.status, JSON.stringify(p)).toBe(401);
+      }
+    });
+
+    it('never refreshes a principal cookie: a 25-hour-old one comes back without Set-Cookie (D2)', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const old = mintPrincipalToken(TEST_SECRET, nowS - 25 * 60 * 60, mandatePrincipal(nowS + 600));
+      const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${old}` } });
+      expect(res.status).toBe(200);
+      expect(extractFirstCookiePair(res, 'lynox_session')).toBeNull();
+      // Twin: a principal-less cookie of the same age IS refreshed.
+      const plain = mintSessionToken(TEST_SECRET, nowS - 25 * 60 * 60);
+      const res2 = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${plain}` } });
+      expect(extractFirstCookiePair(res2, 'lynox_session')).toBeTruthy();
     });
 
     it('omits Secure on the rolling refresh over plain HTTP', async () => {

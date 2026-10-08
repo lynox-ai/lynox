@@ -198,13 +198,107 @@ export interface HealthBody {
 export interface MagicLinkVerifyRequest {
   token: string;
   instanceId: string;
+  /** See `LOGIN_PRINCIPAL_VERSION`. Absent on a caller that predates it. */
+  principal_version?: typeof LOGIN_PRINCIPAL_VERSION | undefined;
 }
 
-// There is deliberately NO type here for the success body. The control plane
-// answers `{valid: true}`, but the engine branches on `res.ok` and never reads
-// the field — so the wire does not depend on the two sides agreeing about it,
-// which is the membership test in `README.md`. Pinning it would have looked
-// thorough and quietly widened the contract to cover something no one parses.
+// === Login principal — /internal/auth/request, /verify, /verify-magic ===
+
+/**
+ * The login-principal exchange a caller understands.
+ *
+ * A login can now be the owner's or a mandate recipient's: a person the owner
+ * let in for a bounded time. Only a caller that reads the principal in the
+ * success body can tell them apart. A caller that predates the field reads
+ * any success as the owner, so the control plane admits a mandate recipient
+ * only when the request carries a version it accepts. The version names
+ * everything the caller does with a principal, not only that it reads one:
+ * it is raised whenever that grows, and the control plane admits recipients
+ * only to callers of a version that does all of it. Sent on all three auth
+ * requests: the code request too, so that no code is mailed for a login the
+ * caller could not carry.
+ */
+export const LOGIN_PRINCIPAL_VERSION = 1;
+
+/** Body of `POST /internal/auth/request`. */
+export interface AuthCodeRequest {
+  email: string;
+  instanceId: string;
+  principal_version?: typeof LOGIN_PRINCIPAL_VERSION | undefined;
+}
+
+/** Body of `POST /internal/auth/verify`. */
+export interface AuthCodeVerifyRequest {
+  email: string;
+  code: string;
+  instanceId: string;
+  principal_version?: typeof LOGIN_PRINCIPAL_VERSION | undefined;
+}
+
+/**
+ * Who a mandate login is, as the control plane verified it. The control plane
+ * folds `email` (lower case) and `display` (one line) when the mandate is
+ * granted; the reader refuses rather than repairs a value that is not.
+ */
+export interface MandateLoginPrincipal {
+  kind: 'mandate';
+  email: string;
+  display: string;
+  mandate_id: string;
+  /** When the mandate ends, ISO 8601. A session never outlives it. */
+  mandate_expires_at: string;
+}
+
+/**
+ * Success body of `/internal/auth/verify` and `/internal/auth/verify-magic`.
+ * No `principal` means the owner; that is also how every success body read
+ * before the principal existed.
+ */
+export interface AuthLoginSuccessBody {
+  valid: true;
+  principal?: MandateLoginPrincipal | undefined;
+}
+
+export const LOGIN_PRINCIPAL_EMAIL_MAX = 254;
+export const LOGIN_PRINCIPAL_DISPLAY_MAX = 200;
+export const LOGIN_PRINCIPAL_ID_MAX = 64;
+
+// Control and format characters, including line and paragraph separators and
+// the bidi controls: a value carrying one is refused, not folded.
+const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+function isSafeText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max
+    && value.trim() === value && !UNSAFE_TEXT.test(value);
+}
+
+/**
+ * Read the principal off a success body. `null` is the owner (no principal);
+ * `'invalid'` is a principal that is present but not one this reader knows,
+ * and the only safe reading of that is to refuse the login: treating it as
+ * the owner would hand an unknown login the owner's session.
+ */
+export function readLoginPrincipal(body: unknown): MandateLoginPrincipal | null | 'invalid' {
+  if (body === null || typeof body !== 'object') return 'invalid';
+  const principal = (body as { principal?: unknown }).principal;
+  if (principal === undefined) return null;
+  if (principal === null || typeof principal !== 'object') return 'invalid';
+  const p = principal as Record<string, unknown>;
+  if (p['kind'] !== 'mandate') return 'invalid';
+  const email = p['email'];
+  if (!isSafeText(email, LOGIN_PRINCIPAL_EMAIL_MAX) || email !== email.toLowerCase() || !email.includes('@')) return 'invalid';
+  if (!isSafeText(p['display'], LOGIN_PRINCIPAL_DISPLAY_MAX)) return 'invalid';
+  if (!isSafeText(p['mandate_id'], LOGIN_PRINCIPAL_ID_MAX)) return 'invalid';
+  const expires = p['mandate_expires_at'];
+  if (typeof expires !== 'string' || !Number.isFinite(Date.parse(expires))) return 'invalid';
+  return {
+    kind: 'mandate',
+    email,
+    display: p['display'],
+    mandate_id: p['mandate_id'],
+    mandate_expires_at: expires,
+  };
+}
 
 /**
  * Reasons the control plane can refuse a magic link, as sent on the wire.

@@ -22,6 +22,7 @@ import type {
   UsageSummaryResponse,
   HealthBody,
   MagicLinkVerifyRequest,
+  AuthLoginSuccessBody,
   OAuthClaimResponse,
 } from '../http.js';
 import type { ModelProfile } from '../shapes.js';
@@ -104,6 +105,16 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     token: 'TEST-MAGIC-TOKEN',
     instanceId: 'TEST-INSTANCE-1',
   } satisfies MagicLinkVerifyRequest,
+  'auth-login-success.mandate.json': {
+    valid: true,
+    principal: {
+      kind: 'mandate',
+      email: 'recipient@example.invalid',
+      display: 'TEST-DISPLAY',
+      mandate_id: 'TEST-MANDATE-1',
+      mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    },
+  } satisfies AuthLoginSuccessBody,
   'oauth-claim-response.json': {
     access_token: 'TEST-ACCESS-TOKEN',
     refresh_token: 'TEST-REFRESH-TOK',

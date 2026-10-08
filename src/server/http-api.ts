@@ -1534,6 +1534,8 @@ export class LynoxHTTPApi {
   private static readonly SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
+  /** A principal cookie stamped further than this in the future is refused (D4). */
+  private static readonly SESSION_FUTURE_SKEW_S = 60;
 
   /**
    * How each request authenticated, for the records that must say where an approval came
@@ -1543,15 +1545,19 @@ export class LynoxHTTPApi {
    */
   private readonly _authOrigin = new WeakMap<IncomingMessage, string>();
 
+  /** The principal a request's session cookie carried, set by the auth block. */
+  private readonly _sessionPrincipal = new WeakMap<IncomingMessage, RequestPrincipal>();
+
   /**
-   * Who a request acts as (request-principal.ts). Until the recipient's login puts a
-   * principal into the session, every authenticated request is the owner, so this
-   * returns the owner and every rule that reads it behaves as before. The rules are in
-   * place for when it does not: only the owner stamps or approves, and a schedule a
-   * mandate created or changed waits for the owner (PRD customer-granted-operator-access
-   * §3.12, §3.13).
+   * Who a request acts as (request-principal.ts): the mandate its session cookie
+   * carries, and the owner for everything else — a cookie without a principal, a
+   * bearer, no secret at all. Only a mandate login mints a cookie with a principal,
+   * and the control plane admits one only when its switch is on. The rules that read
+   * this: only the owner stamps or approves, and a schedule a mandate created or
+   * changed waits for the owner (PRD customer-granted-operator-access §3.12, §3.13).
    */
-  private _principalResolver: (req: IncomingMessage) => RequestPrincipal = () => OWNER_PRINCIPAL;
+  private _principalResolver: (req: IncomingMessage) => RequestPrincipal =
+    (req) => this._sessionPrincipal.get(req) ?? OWNER_PRINCIPAL;
 
   /**
    * The minter of each worker loop's one-time hand-run door (hand-run-door.ts), claimed in
@@ -1575,9 +1581,8 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Test seam: feed a principal before the session can carry one, so the mandate branch
-   * of the rules is exercised now rather than first in production. Not reachable over
-   * HTTP; the session-borne principal replaces the default resolver.
+   * Test seam: feed a principal without minting a session cookie for it. Not reachable
+   * over HTTP; it replaces the cookie-borne resolver for the whole instance.
    */
   setPrincipalResolverForTesting(resolver: (req: IncomingMessage) => RequestPrincipal): void {
     this._principalResolver = resolver;
@@ -1609,9 +1614,19 @@ export class LynoxHTTPApi {
     return false;
   }
 
-  /** Returns the cookie's issued-at unix-sec on success, null on any failure.
-   *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
-  private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
+  /**
+   * Returns the cookie's issued-at unix-sec and its principal on success, null on any
+   * failure. Caller uses the timestamp to decide whether to roll a fresh cookie.
+   *
+   * Formats: `<ts>.<hmac>` (old), `<nonce>.<ts>.<hmac>`, and
+   * `<nonce>.<principal>.<ts>.<hmac>` — the principal one base64url JSON part, minted
+   * by the Web UI for a mandate login (`createSessionToken` in
+   * packages/web-ui/src/lib/server/auth.ts) and covered by the same HMAC. A principal
+   * cookie ends at its signed `exp` and is refused when stamped more than a minute in
+   * the future; a principal this engine does not know is refused, never read as the
+   * owner.
+   */
+  private _verifySessionCookie(req: IncomingMessage, secret: string): { iat: number; principal: RequestPrincipal | null } | null {
     const cookieHeader = req.headers['cookie'];
     if (!cookieHeader) return null;
 
@@ -1620,16 +1635,17 @@ export class LynoxHTTPApi {
 
     const token = decodeURIComponent(match[1]);
     const parts = token.split('.');
-    if (parts.length < 2 || parts.length > 3) return null;
+    if (parts.length < 2 || parts.length > 4) return null;
 
     const sig = parts[parts.length - 1]!;
     const payload = parts.slice(0, -1).join('.');
-    // Timestamp: last element before sig (supports old ts.hmac and new nonce.ts.hmac)
-    const tsStr = parts.length === 3 ? parts[1]! : parts[0]!;
+    // Timestamp: last element before sig (old ts.hmac, nonce.ts.hmac, nonce.principal.ts.hmac)
+    const tsStr = parts[parts.length - 2]!;
 
     const timestamp = parseInt(tsStr, 10);
     if (Number.isNaN(timestamp)) return null;
-    if (Math.floor(Date.now() / 1000) - timestamp > LynoxHTTPApi.SESSION_MAX_AGE_S) return null;
+    const nowS = Math.floor(Date.now() / 1000);
+    if (nowS - timestamp > LynoxHTTPApi.SESSION_MAX_AGE_S) return null;
 
     try {
       const key = createHmac('sha256', 'lynox-session').update(secret).digest();
@@ -1642,10 +1658,36 @@ export class LynoxHTTPApi {
       const fixed = Buffer.alloc(expBuf.length);
       sigBuf.copy(fixed); // truncates or zero-pads to expBuf.length
       const matched = timingSafeEqual(fixed, expBuf);
-      return matched && sigBuf.length === expBuf.length ? timestamp : null;
+      if (!matched || sigBuf.length !== expBuf.length) return null;
     } catch {
       return null;
     }
+
+    if (parts.length < 4) return { iat: timestamp, principal: null };
+    const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
+    if (session === null) return null;
+    if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
+    if (nowS >= session.exp) return null;
+    return { iat: timestamp, principal: { kind: 'mandate', email: session.email } };
+  }
+
+  /** The signed principal part of a session cookie; null for anything this engine does not know. */
+  private static _parseSessionPrincipal(part: string): { email: string; exp: number } | null {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+    if (raw === null || typeof raw !== 'object') return null;
+    const p = raw as Record<string, unknown>;
+    if (p['v'] !== 1 || p['kind'] !== 'mandate') return null;
+    const { email, display, mandate_id: mandateId, exp } = p;
+    if (typeof email !== 'string' || email.length === 0) return null;
+    if (typeof display !== 'string' || display.length === 0) return null;
+    if (typeof mandateId !== 'string' || mandateId.length === 0) return null;
+    if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null;
+    return { email, exp };
   }
 
   /**
@@ -2406,13 +2448,19 @@ export class LynoxHTTPApi {
           this._authOrigin.set(req, 'bearer');
         }
       } else {
-        const cookieIssuedAt = this._verifySessionCookie(req, secret);
-        if (cookieIssuedAt !== null) {
-          // Session cookie auth (same-origin Web UI requests)
-          authScope = adminSecret ? 'user' : 'admin';
+        const session = this._verifySessionCookie(req, secret);
+        if (session !== null) {
+          // Session cookie auth (same-origin Web UI requests). A mandate session is
+          // `user` even when no admin secret is set (D6): the admin routes are the
+          // owner's, never the recipient's.
+          authScope = adminSecret || session.principal !== null ? 'user' : 'admin';
+          if (session.principal !== null) this._sessionPrincipal.set(req, session.principal);
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
-          this._maybeRefreshSessionCookie(req, res, secret, cookieIssuedAt, trustProxy);
+          // Never re-mint a principal cookie (D2): the refresh below mints a cookie
+          // WITHOUT a principal, so re-minting would turn the mandate into the owner,
+          // and it would restart a clock the mandate session must not outlive.
+          if (session.principal === null) this._maybeRefreshSessionCookie(req, res, secret, session.iat, trustProxy);
         } else {
           errorResponse(res, 401, 'Unauthorized');
           return;
