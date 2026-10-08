@@ -41,7 +41,8 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers } from './worker-loop.js';
+import type { HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -340,6 +341,27 @@ describe('WorkerLoop', () => {
     });
     it('the last party decides: once the owner took a mandate\'s schedule over, losing the stamp does not hold it', () => {
       expect(mandateNeedsOwnerStamp({ created_by: M, edited_by: 'owner' })).toBe(false);
+    });
+  });
+
+  describe('handRunCovers', () => {
+    const EVA = { triggerId: 't', principal: { kind: 'mandate' as const, email: 'eva@kanzlei.example' } };
+    const M = 'mandate:eva@kanzlei.example';
+    it('covers the proposal its holder set up or last changed', () => {
+      expect(handRunCovers(EVA, { created_by: M })).toBe(true);
+      expect(handRunCovers(EVA, { created_by: 'owner', edited_by: M })).toBe(true);
+    });
+    it('covers nothing without a grant, whoever the last party is', () => {
+      expect(handRunCovers(null, { created_by: M })).toBe(false);
+    });
+    it('covers no one else\'s: another mandate, the owner, an untagged row, or a proposal the owner took over', () => {
+      expect(handRunCovers(EVA, { created_by: 'mandate:arno@kanzlei.example' })).toBe(false);
+      expect(handRunCovers(EVA, { created_by: 'owner' })).toBe(false);
+      expect(handRunCovers(EVA, {})).toBe(false);
+      expect(handRunCovers(EVA, { created_by: M, edited_by: 'owner' })).toBe(false);
+    });
+    it('never covers the owner, even for an owner grant', () => {
+      expect(handRunCovers({ triggerId: 't', principal: { kind: 'owner' } }, { created_by: 'owner' })).toBe(false);
     });
   });
 
@@ -2210,6 +2232,137 @@ describe('WorkerLoop', () => {
     expect(session.run).not.toHaveBeenCalled();
   });
 
+  // ---- the one-time hand-run door (PRD customer-granted-operator-access §3.12 point 6) ----
+  describe('the one-time hand-run door', () => {
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+    const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example' };
+    /** Eva's unstamped proposal: an autonomous agent action, the strictest backstop. */
+    const proposal = (over?: Partial<TriggerRecord>): TriggerRecord => makeTask({
+      id: 'hr-prop', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example',
+      confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined, ...over,
+    });
+    function setup(task: TriggerRecord): { loop: WorkerLoop; tm: TaskManager; session: Session } {
+      const tm = makeTaskManager([task]);
+      const session = makeSession('Tested by hand.');
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(false), 60_000);
+      return { loop, tm, session };
+    }
+    type Exec = { executeTask: (t: TriggerRecord, cap: number | null, m?: HandRunMarker) => Promise<void> };
+
+    it('runs the proposal once on a marker minted for it, under the name of the one who set it up', async () => {
+      const task = proposal();
+      const { loop, tm, session } = setup(task);
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', 'Tested by hand.', 'success');
+    });
+
+    it('refuses a look-alike marker: an in-process caller cannot mint one', async () => {
+      const { loop, tm, session } = setup(proposal());
+      loop.claimHandRunMinter();
+      const forged = Object.freeze({}) as HandRunMarker;
+      expect(await loop.runTriggerNow('hr-prop', forged)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).not.toHaveBeenCalled();
+      expect(tm.recordTaskRun).not.toHaveBeenCalled();
+    });
+
+    it('refuses the same marker a second time', async () => {
+      const { loop, tm, session } = setup(proposal());
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(tm.recordTaskRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses the marker up at the dispatch backstop itself, not only at the door', async () => {
+      const task = proposal();
+      const { loop, tm, session } = setup(task);
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      const exec = loop as unknown as Exec;
+      await exec.executeTask(task, null, marker);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      await exec.executeTask(task, null, marker);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(tm.recordTaskRun).toHaveBeenLastCalledWith('hr-prop', expect.stringContaining('runs only after you confirm it'), 'failed');
+    });
+
+    it('refuses a marker minted for another trigger, and leaves it usable there', async () => {
+      const other = proposal({ id: 'hr-other' });
+      const task = proposal();
+      const tm = makeTaskManager([task, other]);
+      const session = makeSession('Tested by hand.');
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(false), 60_000);
+      const mint = loop.claimHandRunMinter();
+      const forOther = mint('hr-other', EVA);
+      // At the door: refused before anything is recorded, like any proposal without one.
+      expect(await loop.runTriggerNow('hr-prop', forOther)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      expect(tm.recordTaskRun).not.toHaveBeenCalled();
+      const forOtherAgain = mint('hr-other', EVA);
+      const exec = loop as unknown as Exec;
+      await exec.executeTask(task, null, forOtherAgain);
+      expect(session.run).not.toHaveBeenCalled();
+      await exec.executeTask(other, null, forOtherAgain);
+      expect(session.run).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens only the proposal of the principal it was minted for', async () => {
+      const { loop, session } = setup(proposal());
+      const marker = loop.claimHandRunMinter()('hr-prop', ARNO);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).not.toHaveBeenCalled();
+    });
+
+    it('does not step over the consent stamp of the owner\'s own agent action', async () => {
+      // The owner's unconfirmed run_agent: no mandate gate, only the consent stamp. A
+      // mandate's marker for it must not stand in for the owner's consent.
+      const task = proposal({ created_by: 'owner' });
+      const { loop, tm, session } = setup(task);
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      await (loop as unknown as Exec).executeTask(task, null, marker);
+      expect(session.run).not.toHaveBeenCalled();
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', expect.stringContaining('needs your confirmation'), 'failed');
+    });
+
+    it('drops a marker whose run was refused for another reason, so a later call cannot use it', async () => {
+      const { loop, tm, session } = setup(proposal());
+      (tm.claimLease as ReturnType<typeof vi.fn>).mockReturnValueOnce('held');
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'already_running' });
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).not.toHaveBeenCalled();
+    });
+
+    it('hands its minter out once', () => {
+      const { loop } = setup(proposal());
+      loop.claimHandRunMinter();
+      expect(() => loop.claimHandRunMinter()).toThrow(/already been claimed/);
+    });
+
+    it('lives in one process only: a marker from before a restart opens nothing', async () => {
+      // §9 Q11, the restart path. The marker is not persisted, so a hand run whose
+      // question outlived the process does not come back through the door; the answered
+      // question waits for the owner's stamp. Mutation: keep issued markers anywhere
+      // that outlives the loop (a module-level map, a row) → the second loop admits it.
+      const task = proposal();
+      const before = setup(task);
+      const marker = before.loop.claimHandRunMinter()('hr-prop', EVA);
+      const after = setup(task);
+      after.loop.claimHandRunMinter();
+      expect(await after.loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await (after.loop as unknown as Exec).executeTask(task, null, marker);
+      expect(after.session.run).not.toHaveBeenCalled();
+    });
+  });
+
   it('runTriggerNow returns not_found for an unknown trigger id', async () => {
     const tm = makeTaskManager([]); // getTrigger → undefined
     const engine = makeEngine({ taskManager: tm });
@@ -2416,6 +2569,45 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     if (!store.getPending(SESSION_ID)) throw new Error('park(): no prompt row appeared — the task never reached ask_user');
     return { store, loop, taskId: task.id, answered };
   }
+
+  // §9 Q11 (PRD customer-granted-operator-access), the in-process path: a mandate's test
+  // run by hand that asks a question goes on after the answer, in the same run. The door
+  // is passed once, at the start; the wait does not go back through a stamp check, so
+  // nothing has to mint again. Mutation: re-check the stamp after the wait, or release
+  // the run on a park → the answer never reaches the agent and the run never succeeds.
+  it('a mandate\'s hand run goes on after its question is answered, in the same run', async () => {
+    const store = makeRealStore();
+    const task = makeTask({
+      id: 'hr-ask', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined,
+      schedule_cron: undefined, next_run_at: undefined,
+    });
+    let resolveAnswered!: (v: string) => void;
+    const answered = new Promise<string>((r) => { resolveAnswered = r; });
+    const session = {
+      sessionId: SESSION_ID, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null,
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => {
+        resolveAnswered(await session.promptUser!('Which list?', ['A', 'B']));
+        return 'Tested with list A.';
+      }),
+    };
+    const tm = makeTaskManager([task]);
+    const loop = new WorkerLoop(
+      makeEngine({ taskManager: tm, session: session as unknown as Session, promptStore: store }),
+      makeNotificationRouter(), 60_000,
+    );
+    closers.unshift(() => { loop.stop(); });
+    const marker = loop.claimHandRunMinter()('hr-ask', { kind: 'mandate', email: 'eva@kanzlei.example' });
+    expect(await loop.runTriggerNow('hr-ask', marker)).toEqual({ ok: true });
+    for (let i = 0; i < 200 && !store.getPending(SESSION_ID); i++) await new Promise((r) => setTimeout(r, 5));
+    const row = store.getPending(SESSION_ID);
+    expect(row).toBeDefined();
+    expect(store.answerUser(row!.id, 'A')).toBe(true);
+    await expect(answered).resolves.toBe('A');
+    for (let i = 0; i < 200 && (tm.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-ask', 'Tested with list A.', 'success');
+    expect(session.run).toHaveBeenCalledTimes(1);
+  });
 
   // 1 — persistence. Mutation: go back to a bare in-memory Promise → no row.
   it('writes the background question to pending_prompts', async () => {

@@ -10,7 +10,8 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { isMandateTag } from './request-principal.js';
+import { isMandateTag, principalTag } from './request-principal.js';
+import { HandRunDoor, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -371,10 +372,24 @@ export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; c
   return !t.confirmed_at && isMandateTag(t.edited_by ?? t.created_by);
 }
 
+/**
+ * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
+ * it. The door lets the person who set up or last changed a proposal test it; it does not
+ * let a mandate run what someone else wrote — the owner's own unstamped agent action least
+ * of all, whose consent stamp the door would otherwise step over.
+ */
+export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: string | undefined; edited_by?: string | undefined }): boolean {
+  if (grant === null) return false;
+  const lastParty = t.edited_by ?? t.created_by;
+  return isMandateTag(lastParty) && lastParty === principalTag(grant.principal);
+}
+
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
   private readonly activeTasks = new Map<string, ActiveTask>();
+  /** The one-time door for a mandate's hand run. Private: its minter goes out once. */
+  readonly #handRunDoor = new HandRunDoor();
   /**
    * Task id → when it was last SAID to be deferred for budget. Drives both halves of
    * the visibility rule: a task absent from here is at its first deferral and speaks
@@ -551,6 +566,33 @@ export class WorkerLoop {
    */
   async runTriggerNow(
     triggerId: string,
+    marker?: HandRunMarker,
+  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
+    // A marker that is not dispatched is dropped on the way out, whatever refused it: it
+    // was minted for this one request and must not wait for a later one.
+    let dispatched = false;
+    try {
+      const outcome = await this.#runTriggerNow(triggerId, marker);
+      dispatched = outcome.ok;
+      return outcome;
+    } finally {
+      if (!dispatched) this.#handRunDoor.revoke(marker);
+    }
+  }
+
+  /**
+   * Claim the minter of the one-time hand-run door (PRD customer-granted-operator-access
+   * §3.12 point 6). Exactly once per worker loop; the HTTP layer takes it and keeps it
+   * private, and a second claim throws. See hand-run-door.ts for why a marker, not a
+   * principal, is what passes the stamp checks.
+   */
+  claimHandRunMinter(): HandRunMinter {
+    return this.#handRunDoor.claimMinter();
+  }
+
+  async #runTriggerNow(
+    triggerId: string,
+    marker: HandRunMarker | undefined,
   ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
     const taskManager = this.engine.getTaskManager();
     if (!taskManager) return { ok: false, reason: 'not_found' };
@@ -560,7 +602,11 @@ export class WorkerLoop {
     // access §3.12). Refused here, before any run is recorded: the dispatch backstop would
     // refuse it too, but by recording a failed run, and a one-shot proposal recorded as
     // failed loses its next run — pressing "Run now" would destroy what it was asked to start.
-    if (mandateNeedsOwnerStamp(trigger)) return { ok: false, reason: 'awaits_owner_stamp' };
+    // The one exception is a live marker for this trigger: the test run by hand (§3.12
+    // point 6). Checked here without using it up; the dispatch consumes it.
+    if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
+      return { ok: false, reason: 'awaits_owner_stamp' };
+    }
     if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
@@ -607,7 +653,7 @@ export class WorkerLoop {
     if (lease === 'held') return { ok: false, reason: 'already_running' };
     // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
     // activeTasks guard + run history key on exactly the row we found.
-    void this.executeTask(trigger);
+    void this.executeTask(trigger, null, marker);
     return { ok: true };
   }
 
@@ -926,7 +972,7 @@ export class WorkerLoop {
    * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
-  private async executeTask(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
+  private async executeTask(task: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -1001,12 +1047,17 @@ export class WorkerLoop {
         // so a value the union doesn't know — a newer schema, a synced/corrupt row —
         // is possible at runtime) → the default fails CLOSED, never a money run.
         const effect: string = task.effect;
+        // The one-time door (PRD customer-granted-operator-access §3.12 point 6): a marker
+        // minted by a request for THIS trigger is the second disjunct of both stamp checks
+        // below, and it is used up here, by the first dispatch that sees it. Nothing else
+        // passes them — not a principal, not a look-alike object, not the same marker twice.
+        const handRun = handRunCovers(this.#handRunDoor.consume(marker, task.id), task);
         // Mandate gate — DEFENSE-IN-DEPTH backstop to the getDueTriggers exclusion (PRD
         // customer-granted-operator-access §3.12, §3.13). A trigger a mandate created or
         // last changed runs only after the OWNER stamped it, whatever its effect: a
         // `run_workflow` would otherwise run on the stamp of the workflow it names. The
         // owner's triggers never reach this (their tags are `owner` or absent).
-        if (mandateNeedsOwnerStamp(task)) {
+        if (mandateNeedsOwnerStamp(task) && !handRun) {
           this.recordAndNotify(task, 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.', false);
           return;
         }
@@ -1038,7 +1089,7 @@ export class WorkerLoop {
             // a `confirmed_at`-less run_agent trigger ever reaches dispatch (a direct
             // executeTask call, a bypassed read path), refuse it — record + stop,
             // NEVER mint the autonomous run.
-            if (!task.confirmed_at) {
+            if (!task.confirmed_at && !handRun) {
               this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
               break;
             }
