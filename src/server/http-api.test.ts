@@ -211,6 +211,8 @@ vi.mock('../core/engine.js', () => ({
       set: mockSecretSet,
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
+      // The erasure truncates the vault's WAL after its deletes (`SecretStore.truncateWal`).
+      truncateWal: vi.fn(),
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
@@ -233,6 +235,8 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
+      // The erasure truncates history.db's WAL after its deletes (`RunHistory.truncateWal`).
+      truncateWal: vi.fn(),
       // The Art.17 erasure calls this (`RunHistory.deleteAllData`). Its predecessor,
       // the legacy verb-def wipe, was MISSING here for as long as the route had the
       // call, so every erasure test ran against a route whose wipe threw a TypeError
@@ -11239,11 +11243,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     it('DELETE /api/data wipes engine.db PII via deleteAllData (Right to Erasure)', async () => {
       const deleteAllData = vi.fn();
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', {
           method: 'DELETE',
@@ -11270,12 +11274,12 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const dropCollection = vi.fn();
       const deleteSecret = vi.fn();
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
-        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getSecretStore: () => ({ truncateWal: () => undefined, listNames: () => ['S1'], deleteSecret }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status, 'a recorded failure must not read as success').toBe(500);
@@ -11298,11 +11302,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // of the sentence all hang on one failure.
       const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11327,7 +11331,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getEngineDb: () => null,
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
-        getRunHistory: () => ({ deleteAllData }),
+        getRunHistory: () => ({ truncateWal: () => undefined, deleteAllData }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
@@ -11343,7 +11347,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getDataStore: () => null,
-        getKnowledgeLayer: () => ({ getDb: () => ({ deleteAllData }) }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ truncateWal: () => undefined, deleteAllData }) }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
@@ -11368,8 +11372,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const dropCollection = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
-        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
-        getKnowledgeLayer: () => ({ getDb: () => ({ deleteAllData: () => { throw new Error('database is locked'); } }) }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => { throw new Error('database is locked'); } }) }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11389,7 +11393,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getEngineDb: () => null,
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
-        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
+        getSecretStore: () => ({ truncateWal: () => undefined, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11461,10 +11465,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // `failed` is the retry instruction, so a list that stops at the first entry
       // sends a human to look in one place out of three.
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData: () => { throw new Error('a'); } }),
+        getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData: () => { throw new Error('a'); } }),
         getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
-        getDataStore: () => ({ listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
-        getSecretStore: () => ({ listNames: () => [], deleteSecret: () => undefined }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
+        getSecretStore: () => ({ truncateWal: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11481,19 +11485,21 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // those two call for different next steps. `#` cannot occur in a
         // collection name (`^[a-z][a-z0-9_]{0,62}$`).
         expect([...body.failed].sort()).toEqual([
-          'datastore#list', 'engine_db', 'knowledge_graph',
+          'datastore#list', 'engine_db', 'knowledge_graph', 'knowledge_graph#wal',
         ]);
+        // `knowledge_graph#wal` too: its handle throws, so the WAL step that follows the
+        // wipes cannot run on it either, and an unrun step is named, not assumed.
       });
     });
 
     it('DELETE /api/data without the confirm token 400s and never touches engine.db (guard still holds after the DELETE-body-parse fix)', async () => {
       const deleteAllData = vi.fn();
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'nope' }) });
         expect(res.status).toBe(400);
@@ -11517,9 +11523,9 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', {
           method: 'DELETE',
@@ -11553,13 +11559,13 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const OPAQUE = 'Zq7Z'.repeat(12); // 48 chars, no vendor prefix
       try {
         await swapEngine({
-          getEngineDb: () => ({ deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
-          getRunHistory: () => ({ deleteAllData: () => undefined }),
+          getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
+          getRunHistory: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
           getThreadStore: () => ({ deleteAllThreads: () => 0 }),
           getKnowledgeLayer: () => ({
-            getDb: () => ({ deleteAllData: () => undefined }),
+            getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
           }),
-          getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+          getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
           getCRM: () => ({ rebuildSchema: () => undefined }),
         }, async () => {
           const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
@@ -11585,13 +11591,13 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // mock Engine's constructor defaults, not from nowhere; an earlier version of
       // this comment claimed every one was handed over here, which is false.
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData: () => undefined }),
-        getRunHistory: () => ({ deleteAllData: () => undefined }),
+        getEngineDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
+        getRunHistory: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         getThreadStore: () => ({ deleteAllThreads: () => 0 }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ truncateWal: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ truncateWal: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
         getCRM: () => ({ rebuildSchema: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });

@@ -10140,6 +10140,18 @@ export class LynoxHTTPApi {
         attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
       }
 
+      // Clear what the deletes above left in the files' bytes. Every store opens its
+      // connection with `secure_delete`, so deleted content is overwritten with zeros
+      // in the main file; the WAL still holds the page images each value was WRITTEN
+      // with until it is checkpointed and truncated. A blocked checkpoint is a
+      // failure of that store, not a degradation: the old images may still be there.
+      // history.db carries the threads too (`ThreadStore` shares the connection).
+      if (runHistoryForWipe) attempt('run_history#wal', () => { runHistoryForWipe.truncateWal(); });
+      if (kg) attempt('knowledge_graph#wal', () => { kg.getDb().truncateWal(); });
+      if (engineDb) attempt('engine_db#wal', () => { engineDb.truncateWal(); });
+      if (ds) attempt('datastore#wal', () => { ds.truncateWal(); });
+      if (secretStore) attempt('secrets#wal', () => { secretStore.truncateWal(); });
+
       // Reset config to defaults. The reset and the engine's reload are separate
       // attempts on purpose: a failed reload leaves no customer data behind, so
       // reporting it as `config` would tell the caller that a store still holds

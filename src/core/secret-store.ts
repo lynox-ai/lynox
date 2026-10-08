@@ -635,6 +635,11 @@ export class SecretStore implements SecretStoreLike {
    * Delete a secret from the vault and in-memory cache.
    * Returns true if the secret was deleted.
    */
+  /** Checkpoint and truncate the vault's WAL, if a vault is attached. */
+  truncateWal(): void {
+    this.vault?.truncateWal();
+  }
+
   deleteSecret(name: string): boolean {
     const hadInMemory = this.secrets.delete(name);
     this.consented.delete(name);

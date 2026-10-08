@@ -1724,7 +1724,7 @@ describe('RunHistory', () => {
     it('runs without error', () => {
       const h = createHistory();
       h.insertRun({ taskText: 'Vacuum test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
-      expect(() => h.vacuum()).not.toThrow();
+      expect(() => h.truncateWal()).not.toThrow();
       h.close();
     });
   });

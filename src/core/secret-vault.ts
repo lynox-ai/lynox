@@ -7,6 +7,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
 import { ensureDirSync } from './atomic-write.js';
+import { truncateWal, zeroDeletedContent } from './sqlite-constants.js';
 
 // Lazy — must not evaluate at import time (setDataDir may not have been called yet)
 function getVaultDbPath(): string {
@@ -97,6 +98,7 @@ export class SecretVault {
     try { chmodSync(dbPath, FILE_MODE_PRIVATE); } catch { /* best-effort — may fail on some filesystems */ }
 
     this.db.pragma('journal_mode = WAL');
+    zeroDeletedContent(this.db);
 
     // Set restrictive permissions on WAL journal files
     for (const suffix of ['-wal', '-shm']) {
@@ -482,6 +484,11 @@ export class SecretVault {
   /**
    * Close the database connection and clear key material from memory.
    */
+  /** Checkpoint the WAL into the main file and truncate it; see `truncateWal` in `sqlite-constants.ts`. */
+  truncateWal(): void {
+    truncateWal(this.db);
+  }
+
   close(): void {
     // Zero ONLY this instance's copy of the key material. We deliberately do
     // NOT touch _derivedKeyCache: the cached Buffer is the shared canonical key

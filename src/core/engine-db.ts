@@ -5,7 +5,7 @@ import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHash, cr
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, truncateWal, zeroDeletedContent } from './sqlite-constants.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -964,6 +964,11 @@ export class EngineDb {
     this.db.prepare('UPDATE verb_backfill_marker SET done = 1 WHERE id = 1').run();
   }
 
+  /** Checkpoint the WAL into the main file and truncate it; see `truncateWal` in `sqlite-constants.ts`. */
+  truncateWal(): void {
+    truncateWal(this.db);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -1042,6 +1047,7 @@ export class EngineDb {
     try {
       db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
       db.pragma('journal_mode = WAL');
+      zeroDeletedContent(db);
       db.pragma('foreign_keys = ON');
       this.db = db;
       this._ensureSchemaVersion();
