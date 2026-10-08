@@ -11636,7 +11636,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     });
 
     expect(res.status).toBe(409);
-    // This route answers 409 from three branches; the sentence names the first.
+    // This route answers 409 from four branches; the sentence names the first.
     expect(await res.text()).toContain('no longer exists');
     expect(mockSecretSet).not.toHaveBeenCalled();
   });

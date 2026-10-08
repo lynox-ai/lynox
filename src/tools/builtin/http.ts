@@ -1649,7 +1649,7 @@ async function attachEngineManagedAuth(
       return { hint: () => `api_profile "${profile.id}" is auth.type="${auth.type}" but names no vault key, so the engine could not attach the credential. Set auth.vault_keys: ["YOUR_KEY_NAME"] via api_setup({ action: "update", ... }) and store the value with ask_secret.` };
     }
     // The same bound the oauth2 branch has, but the oauth2 branch gets it elsewhere:
-    // its key is derived from the profile id, and `ApiStore.register` refuses an
+    // its key is derived from the profile id, and the ApiStore admission gate refuses an
     // oauth2 profile whose derived slot is protected (`protectedDerivedSlot`), so
     // no such profile reaches this function. Deriving alone bounds nothing — the id
     // is the agent's too. This name comes from the PROFILE, which a prompt-injected agent can author:

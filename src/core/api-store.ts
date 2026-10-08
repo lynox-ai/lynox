@@ -631,8 +631,14 @@ export function refreshTokenKey(id: string): string {
  * OAuth callback writes both. `fetch_token` refuses a protected output name;
  * the other paths had no such check.
  *
+ * Both halves are asked although today one answers for both: every infra
+ * pattern is a prefix, which the two names share, and no provider slot ends in
+ * `_ACCESS_TOKEN` or `_REFRESH_TOKEN`. That is a fact about the current set, not
+ * a rule — a protected name with either suffix would split them, and dropping
+ * the refresh half would then go unnoticed by every test here.
+ *
  * Kept pure and exported so the question can be asserted on its own; the
- * refusal lives in {@link ApiStore.register}, the one gate every profile
+ * refusal lives in `_admit`, behind both {@link ApiStore.register} and save — the one gate every profile
  * passes before any of those paths can see it.
  */
 export function protectedDerivedSlot(profile: ApiProfile): string | null {
