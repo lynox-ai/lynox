@@ -1373,80 +1373,25 @@ export class WorkerLoop {
     }
   }
 
-  /** Execute a standard or scheduled task via headless Session. */
-  private async executeStandard(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
-    // §0 A10 — is this run happening BECAUSE a question was answered?
-    //
-    // The answered row carries both halves the new run needs: the thread the
-    // question was asked in, and the question and answer themselves. Reusing the
-    // thread alone would not be enough, and that is a measured claim rather than
-    // a cautious one: answering updates a `pending_prompts` row and nothing else
-    // — `prompt-store.ts` writes to that table and to no other — so the reply
-    // reaches a thread only through the run that was waiting for it, and after a
-    // restart there is no such run. A new turn in the old thread would see its
-    // own unanswered question.
-    //
-    // Not a resumption. Nothing about the paused run is restored; the answer is
-    // read out of a row and handed to a fresh turn as input, which is why §0 E3's
-    // objection — that "continuing" would promise a state restoration that does
-    // not exist — does not apply to it.
-    const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
-    const session = this.engine.createSession({
-      autonomy: 'autonomous',
-      // Same thread, so the run's own history shows the exchange it continues.
-      ...(answered ? { sessionId: answered.session_id } : {}),
-      systemPromptSuffix: WORKER_PROMPT_SUFFIX,
-      // Per-run cost ceiling: without this an autonomous background task could
-      // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
-      // stops the agent loop once estimated spend crosses the cap.
-      //
-      // ⛔ `capUSD` is the admission's GRANT and it must win when there is one. The
-      // admission reserved that amount against the daily cap on the strength of this
-      // line; restoring the bare constant here would let the run spend the full $15 on
-      // a grant of, say, $0.40 — the reservation would then under-count by the
-      // difference and the daily cap would be the thing that breaks. Null means nobody
-      // reserved (a manual run), and then the constant is the only bound there is.
-      costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
-    });
-    // Cost control: cap agent loop iterations for background tasks
-    // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
-    const workerProfile = this.engine.getUserConfig().worker_profile;
-    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
-
-    // §0 A7 — did every question this run asked actually get an answer?
-    //
-    // `DISMISSED_ANSWER` is a RETURN VALUE, not an exception: an unanswered
-    // question hands the agent the string `'__dismissed__'` and it carries on
-    // reasoning as if that were a reply. Whatever it then produces was built on
-    // an answer nobody gave, and reporting that as `success` is the failure this
-    // whole arc started from — a trigger that says it did its job after asking
-    // something and hearing nothing.
-    //
-    // Set from every path that fabricates an answer, not just the expiry: an
-    // aborted wait and a missing prompt store produce the same fiction.
-    let questionWentUnanswered = false;
-
-    // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
-    // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
-    // whose `resolve` sat in memory under `activeTasks`, and that second,
-    // poorer copy is what made a background question unanswerable: no
-    // persistence, no 24h expiry, no abort, and an answer method
-    // (`resolveTaskInput`) with zero callers because the route that settles a
-    // prompt — `POST /api/sessions/:id/reply` -> `answerUser` — only ever knew
-    // about store rows. Going through the store INHERITS all four rather than
-    // re-implementing them.
-    // Captured ONCE, here, where `executeTask` has just put the entry in the map
-    // (both entry points — `tick` and `runTriggerNow` — go through it). Looking
-    // it up per call instead was a real defect: `stop()` CLEARS the map, so a
-    // second `ask_user` after a cancellation found `undefined`, skipped the
-    // aborted-check below, and then waited with NO signal — an unabortable park
-    // for the full 24h TTL. The entry object outlives the map entry, which is
-    // exactly what makes the cancellation observable after a `stop()`.
-    const active = this.activeTasks.get(task.id);
-    // The owner's stop handle, attached to the SAME captured entry the prompt wiring
-    // below uses — so a stop reaches this run whether it is computing or parked.
-    WorkerLoop.attachSession(active, session);
-    session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+  /**
+   * The question path a background run asks through: the PROMPT STORE, with the trigger parked
+   * on the question, a notification that carries it, and a wait that ends on an answer, the
+   * 24-hour expiry, or the run's own controller.
+   *
+   * ⭐ ONE copy, for every background run that can ask. It was written inline in
+   * `executeStandard`, and a saved workflow run had no question path at all; a second copy for
+   * it would be the poorer-copy defect the comment inside describes, one level up. Callers hand
+   * in what differs and nothing else: the thread the question belongs to, read at ask time
+   * because a session's id is resolved late, and what to note when the wait ends without an
+   * answer.
+   */
+  private storeBackedPrompt(
+    task: TriggerRecord,
+    sessionId: () => string,
+    active: ActiveTask | undefined,
+    onUnanswered: () => void,
+  ): (rawQuestion: string | PromptText, options?: string[]) => Promise<string> {
+    return async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
       // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
       // null and is assigned during init (engine.ts:1101), and is set back to
       // null if that init fails — so a store captured when the task started
@@ -1460,15 +1405,15 @@ export class WorkerLoop {
       // Already cancelled: `waitForSettled` would settle 'aborted' at once, but
       // only AFTER this inserted a row and pushed a high-priority question at a
       // user whose task is gone. Refuse before either side effect.
-      if (active?.controller.signal.aborted === true) { questionWentUnanswered = true; return DISMISSED_ANSWER; }
+      if (active?.controller.signal.aborted === true) { onUnanswered(); return DISMISSED_ANSWER; }
       if (!promptStore) {
         // No store: no durable park and no way to answer. The canonical marker
         // is the honest outcome — hanging would be worse, and a prose sentence
         // would land in the slot an answer occupies.
-        questionWentUnanswered = true;
+        onUnanswered();
         return DISMISSED_ANSWER;
       }
-      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id);
+      const promptId = promptStore.insertAskUser(sessionId(), question, options, undefined, undefined, undefined, task.id);
       // §0 A8/A11 — PARK the trigger. Until now the pairing between this trigger
       // and the question it is waiting on existed only in a notification payload
       // and in this closure's stack frame, neither of which survives the process.
@@ -1530,7 +1475,7 @@ export class WorkerLoop {
         // Deep-link to the asking thread so a tap opens the conversation where
         // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
         // `promptId` rides along so a client can settle this exact row.
-        data: { threadId: session.sessionId, promptId },
+        data: { threadId: sessionId(), promptId },
         inquiry: { question: offBoxQuestion, options },
       });
       try {
@@ -1572,7 +1517,7 @@ export class WorkerLoop {
         // awaiting it" is not the issue-#77 shape here but the durable wait working as
         // designed — the next process re-arms the run when the answer lands.
         if (keepsQuestionForNextProcess(active)) {
-          questionWentUnanswered = true;
+          onUnanswered();
           return DISMISSED_ANSWER;
         }
 
@@ -1601,7 +1546,7 @@ export class WorkerLoop {
             `[lynox:worker] prompt drain failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
           );
         }
-        questionWentUnanswered = true;
+        onUnanswered();
         return DISMISSED_ANSWER;
       } finally {
         // Detach the prompt from the trigger — once, here, for every way this
@@ -1689,6 +1634,82 @@ export class WorkerLoop {
         }
       }
     };
+  }
+
+  /** Execute a standard or scheduled task via headless Session. */
+  private async executeStandard(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
+    // §0 A10 — is this run happening BECAUSE a question was answered?
+    //
+    // The answered row carries both halves the new run needs: the thread the
+    // question was asked in, and the question and answer themselves. Reusing the
+    // thread alone would not be enough, and that is a measured claim rather than
+    // a cautious one: answering updates a `pending_prompts` row and nothing else
+    // — `prompt-store.ts` writes to that table and to no other — so the reply
+    // reaches a thread only through the run that was waiting for it, and after a
+    // restart there is no such run. A new turn in the old thread would see its
+    // own unanswered question.
+    //
+    // Not a resumption. Nothing about the paused run is restored; the answer is
+    // read out of a row and handed to a fresh turn as input, which is why §0 E3's
+    // objection — that "continuing" would promise a state restoration that does
+    // not exist — does not apply to it.
+    const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
+    const session = this.engine.createSession({
+      autonomy: 'autonomous',
+      // Same thread, so the run's own history shows the exchange it continues.
+      ...(answered ? { sessionId: answered.session_id } : {}),
+      systemPromptSuffix: WORKER_PROMPT_SUFFIX,
+      // Per-run cost ceiling: without this an autonomous background task could
+      // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
+      // stops the agent loop once estimated spend crosses the cap.
+      //
+      // ⛔ `capUSD` is the admission's GRANT and it must win when there is one. The
+      // admission reserved that amount against the daily cap on the strength of this
+      // line; restoring the bare constant here would let the run spend the full $15 on
+      // a grant of, say, $0.40 — the reservation would then under-count by the
+      // difference and the daily cap would be the thing that breaks. Null means nobody
+      // reserved (a manual run), and then the constant is the only bound there is.
+      costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
+    });
+    // Cost control: cap agent loop iterations for background tasks
+    // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
+    const workerProfile = this.engine.getUserConfig().worker_profile;
+    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
+
+    // §0 A7 — did every question this run asked actually get an answer?
+    //
+    // `DISMISSED_ANSWER` is a RETURN VALUE, not an exception: an unanswered
+    // question hands the agent the string `'__dismissed__'` and it carries on
+    // reasoning as if that were a reply. Whatever it then produces was built on
+    // an answer nobody gave, and reporting that as `success` is the failure this
+    // whole arc started from — a trigger that says it did its job after asking
+    // something and hearing nothing.
+    //
+    // Set from every path that fabricates an answer, not just the expiry: an
+    // aborted wait and a missing prompt store produce the same fiction.
+    let questionWentUnanswered = false;
+
+    // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
+    // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
+    // whose `resolve` sat in memory under `activeTasks`, and that second,
+    // poorer copy is what made a background question unanswerable: no
+    // persistence, no 24h expiry, no abort, and an answer method
+    // (`resolveTaskInput`) with zero callers because the route that settles a
+    // prompt — `POST /api/sessions/:id/reply` -> `answerUser` — only ever knew
+    // about store rows. Going through the store INHERITS all four rather than
+    // re-implementing them.
+    // Captured ONCE, here, where `executeTask` has just put the entry in the map
+    // (both entry points — `tick` and `runTriggerNow` — go through it). Looking
+    // it up per call instead was a real defect: `stop()` CLEARS the map, so a
+    // second `ask_user` after a cancellation found `undefined`, skipped the
+    // aborted-check below, and then waited with NO signal — an unabortable park
+    // for the full 24h TTL. The entry object outlives the map entry, which is
+    // exactly what makes the cancellation observable after a `stop()`.
+    const active = this.activeTasks.get(task.id);
+    // The owner's stop handle, attached to the SAME captured entry the prompt wiring
+    // below uses — so a stop reaches this run whether it is computing or parked.
+    WorkerLoop.attachSession(active, session);
+    session.promptUser = this.storeBackedPrompt(task, () => session.sessionId, active, () => { questionWentUnanswered = true; });
 
     const base = task.description && task.description.trim() !== task.title.trim()
       ? `Task: ${task.title}\n\n${task.description}`
