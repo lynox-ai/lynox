@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import BetterSqlite3 from 'better-sqlite3';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
@@ -680,12 +680,54 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       w.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
       const { status, body } = await erase();
       expect(status).toBe(500);
-      expect((body['failed'] as string[]).filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+      // The store once, plus its scrub as not run: a store that still holds its data
+      // is not VACUUMed.
+      expect((body['failed'] as string[]).filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph', 'knowledge_graph#scrub']);
       expect(memoryTables().find(t => t.name === 'memories')!.rows, 'a failed wipe must leave every memory in place').toBe(before);
     } finally {
       w.exec('DROP TRIGGER IF EXISTS refuse_metrics');
       w.close();
     }
+  }, 120_000);
+
+  /**
+   * The BYTES, not the rows. A `DELETE` takes a row out of every query, but SQLite
+   * puts the page on its freelist without clearing it, and the WAL keeps the page
+   * images it was written with — so a value a query can no longer return can still
+   * be read from the file with `strings`. Every file under the data directory is
+   * scanned after the erasure, the `-wal` files included, for every seeded value.
+   * Its scope is what this fixture creates there: the stores the route wipes. The
+   * data directory is fresh, so it has no freelist from before secure_delete; that
+   * case is pinned on a bare connection in `sqlite-constants.test.ts`.
+   */
+  function filesUnder(root: string): string[] {
+    const out: string[] = [];
+    for (const name of readdirSync(root)) {
+      const p = join(root, name);
+      if (statSync(p).isDirectory()) out.push(...filesUnder(p));
+      else out.push(p);
+    }
+    return out;
+  }
+
+  it('leaves no erased value in the bytes of any store it wipes, the WAL included', async () => {
+    await seedEverySurface();
+    seedRunSpine();
+    const needle = Buffer.from('ZZMARKER');
+    const holding = (): string[] => filesUnder(dir).filter(f => readFileSync(f).includes(needle)).map(f => relative(dir, f));
+    // POSITIVE CONTROL, per store: an empty scan below proves something only for a
+    // file that held a seeded value in clear beforehand. engine.db is NOT in this
+    // list: the values this fixture writes there are encrypted at rest, so the scan
+    // cannot see them either way.
+    const before = holding();
+    for (const f of ['history.db-wal', 'agent-memory.db-wal', 'datastore.db-wal', 'vault.db-wal']) {
+      expect(before, `fixture: ${f} must hold a seeded value in clear before the erasure`).toContain(f);
+    }
+
+    const { status } = await erase();
+    expect(status).toBe(200);
+
+    expect(holding(), 'an erased value is still readable from these files').toEqual([]);
   }, 120_000);
 
   /**

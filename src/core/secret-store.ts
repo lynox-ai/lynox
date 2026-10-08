@@ -631,6 +631,11 @@ export class SecretStore implements SecretStoreLike {
     this.recordConsent(name);
   }
 
+  /** Drop the vault's free pages and empty its WAL, if a vault is attached. */
+  scrubFreedPages(): void {
+    this.vault?.scrubFreedPages();
+  }
+
   /**
    * Delete a secret from the vault and in-memory cache.
    * Returns true if the secret was deleted.

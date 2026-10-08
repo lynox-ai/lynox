@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
-import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type {
   DataStoreSchemaType,
   DataStoreColumnDef,
@@ -152,6 +152,7 @@ export class DataStore {
     // instead of throwing an instant SQLITE_BUSY.
     this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     this.db.pragma('journal_mode = WAL');
+    zeroDeletedContent(this.db);
     this.db.pragma('foreign_keys = ON');
     this._initMeta();
   }
@@ -932,6 +933,11 @@ export class DataStore {
       }
     }
     return dropped;
+  }
+
+  /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */
+  scrubFreedPages(): void {
+    scrubFreedPages(this.db);
   }
 
   close(): void {

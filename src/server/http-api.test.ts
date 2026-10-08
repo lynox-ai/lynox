@@ -212,6 +212,8 @@ vi.mock('../core/engine.js', () => ({
       set: mockSecretSet,
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
+      // The erasure scrubs the vault's free pages and WAL after its deletes (`SecretStore.scrubFreedPages`).
+      scrubFreedPages: vi.fn(),
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
@@ -234,6 +236,8 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
+      // The erasure scrubs history.db's free pages and WAL after its deletes (`RunHistory.scrubFreedPages`).
+      scrubFreedPages: vi.fn(),
       // The Art.17 erasure calls this (`RunHistory.deleteAllData`). Its predecessor,
       // the legacy verb-def wipe, was MISSING here for as long as the route had the
       // call, so every erasure test ran against a route whose wipe threw a TypeError
@@ -11332,11 +11336,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     it('DELETE /api/data wipes engine.db PII via deleteAllData (Right to Erasure)', async () => {
       const deleteAllData = vi.fn();
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', {
           method: 'DELETE',
@@ -11363,12 +11367,12 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const dropCollection = vi.fn();
       const deleteSecret = vi.fn();
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
-        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status, 'a recorded failure must not read as success').toBe(500);
@@ -11391,22 +11395,42 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // of the sentence all hang on one failure.
       const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
         const body = await res.json() as { deleted: boolean; failed: string[]; message?: string; error: string };
         expect(body.deleted).toBe(false);
-        expect(body.failed).toEqual(['engine_db']);
+        // `engine_db#scrub` is the step after the wipes, named as not run: the store
+        // still holds its data, so it is not VACUUMed.
+        expect(body.failed).toEqual(['engine_db', 'engine_db#scrub']);
         expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
         expect(JSON.stringify(body)).not.toContain('permanently deleted');
         // The store key, never the SQLite message — it carries file paths and this
         // body goes to a browser.
         expect(JSON.stringify(body)).not.toContain('disk full');
+      });
+    });
+
+    it('DELETE /api/data scrubs the free pages and WAL of every store it erased', async () => {
+      // An IDENTIFIER witness for the wiring; that the files then hold no erased value
+      // is asserted on the real files in `erasure-covers-export.test.ts` (and for
+      // engine.db, whose fixture values are encrypted, in `engine-db.test.ts`).
+      const wal = { engine: vi.fn(), history: vi.fn(), memory: vi.fn(), data: vi.fn(), secrets: vi.fn() };
+      await swapEngine({
+        getEngineDb: () => ({ scrubFreedPages: wal.engine, deleteAllData: () => undefined }),
+        getRunHistory: () => ({ scrubFreedPages: wal.history, deleteAllData: () => undefined }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ scrubFreedPages: wal.memory, deleteAllData: () => undefined }) }),
+        getDataStore: () => ({ scrubFreedPages: wal.data, listCollections: () => [], dropCollection: () => undefined }),
+        getSecretStore: () => ({ scrubFreedPages: wal.secrets, listNames: () => [], deleteSecret: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        for (const [store, fn] of Object.entries(wal)) expect(fn, store).toHaveBeenCalledTimes(1);
       });
     });
 
@@ -11420,7 +11444,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getEngineDb: () => null,
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
-        getRunHistory: () => ({ deleteAllData }),
+        getRunHistory: () => ({ scrubFreedPages: () => undefined, deleteAllData }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
@@ -11436,7 +11460,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getDataStore: () => null,
-        getKnowledgeLayer: () => ({ getDb: () => ({ deleteAllData }) }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData }) }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
@@ -11461,13 +11485,14 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const dropCollection = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
-        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
-        getKnowledgeLayer: () => ({ getDb: () => ({ deleteAllData: () => { throw new Error('database is locked'); } }) }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => { throw new Error('database is locked'); } }) }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
         const body = await res.json() as { failed: string[] };
-        expect(body.failed.filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+        // The store ONCE; `#scrub` is a different step (not run, the wipe failed).
+        expect(body.failed.filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph', 'knowledge_graph#scrub']);
         expect(dropCollection, 'a later store must still be wiped').toHaveBeenCalledWith('c1');
       });
     });
@@ -11482,7 +11507,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getEngineDb: () => null,
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
-        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
+        getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11527,10 +11552,12 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // including the one inside `GET /api/export`: the tenant is told to retry and
       // cannot export to see what survived their partial erasure.
       const rebuildSchema = vi.fn();
+      const scrubFreedPages = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => null,
         getDataStore: () => ({
+          scrubFreedPages,
           listCollections: () => [{ name: 'contacts' }, { name: 'boom' }],
           dropCollection: (n: string) => { if (n === 'boom') throw new Error('database is locked'); },
         }),
@@ -11542,6 +11569,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // Named per ITEM: one locked collection used to abandon the rest of the
         // loop and report only the store.
         expect(body.failed).toContain('datastore:boom');
+        // One collection left behind does NOT skip the store's scrub: `contacts` WAS
+        // dropped, and its values are in the freelist and the WAL until it runs.
+        expect(body.failed).not.toContain('datastore#scrub');
+        expect(scrubFreedPages, 'the dropped collections must still be scrubbed').toHaveBeenCalledTimes(1);
         expect(rebuildSchema, 'the repair must run on the failing path, not only the happy one').toHaveBeenCalledTimes(1);
         // The repair itself is not a wipe: when IT fails the drops have already
         // happened, so it belongs in `degraded`. Here it succeeds, so neither list
@@ -11553,11 +11584,12 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     it('DELETE /api/data reports EVERY failed store, not just the first', async () => {
       // `failed` is the retry instruction, so a list that stops at the first entry
       // sends a human to look in one place out of three.
+      const scrubbed = { engine: vi.fn(), data: vi.fn() };
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData: () => { throw new Error('a'); } }),
+        getEngineDb: () => ({ scrubFreedPages: scrubbed.engine, deleteAllData: () => { throw new Error('a'); } }),
         getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
-        getDataStore: () => ({ listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
-        getSecretStore: () => ({ listNames: () => [], deleteSecret: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: scrubbed.data, listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
+        getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11574,19 +11606,25 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // those two call for different next steps. `#` cannot occur in a
         // collection name (`^[a-z][a-z0-9_]{0,62}$`).
         expect([...body.failed].sort()).toEqual([
-          'datastore#list', 'engine_db', 'knowledge_graph',
+          'datastore#list', 'datastore#scrub', 'engine_db', 'engine_db#scrub',
+          'knowledge_graph', 'knowledge_graph#scrub',
         ]);
+        // Each failed store's `#scrub` too, named as not run rather than left out.
+        // The scrub is a VACUUM, and a store whose wipe failed still holds its data:
+        // rewriting that full file would only cost space, so it must not be called.
+        expect(scrubbed.engine, 'no VACUUM of an engine.db that was not wiped').not.toHaveBeenCalled();
+        expect(scrubbed.data, 'no VACUUM of a datastore whose listing failed').not.toHaveBeenCalled();
       });
     });
 
     it('DELETE /api/data without the confirm token 400s and never touches engine.db (guard still holds after the DELETE-body-parse fix)', async () => {
       const deleteAllData = vi.fn();
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData }),
+        getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'nope' }) });
         expect(res.status).toBe(400);
@@ -11610,9 +11648,9 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', {
           method: 'DELETE',
@@ -11646,13 +11684,13 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const OPAQUE = 'Zq7Z'.repeat(12); // 48 chars, no vendor prefix
       try {
         await swapEngine({
-          getEngineDb: () => ({ deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
-          getRunHistory: () => ({ deleteAllData: () => undefined }),
+          getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
+          getRunHistory: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
           getThreadStore: () => ({ deleteAllThreads: () => 0 }),
           getKnowledgeLayer: () => ({
-            getDb: () => ({ deleteAllData: () => undefined }),
+            getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
           }),
-          getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+          getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
           getCRM: () => ({ rebuildSchema: () => undefined }),
         }, async () => {
           const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
@@ -11678,13 +11716,13 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // mock Engine's constructor defaults, not from nowhere; an earlier version of
       // this comment claimed every one was handed over here, which is false.
       await swapEngine({
-        getEngineDb: () => ({ deleteAllData: () => undefined }),
-        getRunHistory: () => ({ deleteAllData: () => undefined }),
+        getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
+        getRunHistory: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         getThreadStore: () => ({ deleteAllThreads: () => 0 }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ deleteAllData: () => undefined }),
+          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
-        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
         getCRM: () => ({ rebuildSchema: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });

@@ -6,7 +6,7 @@ import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
@@ -1543,6 +1543,7 @@ export class RunHistory {
     try {
       db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
       db.pragma('journal_mode = WAL');
+      zeroDeletedContent(db);
       db.pragma('foreign_keys = ON');
       this.db = db;
       this._migrate();
@@ -3350,15 +3351,18 @@ export class RunHistory {
   }
 
   /**
-   * VACUUM the database to reclaim space and purge deleted records from WAL.
+   * Drop the free pages and empty the WAL; see `scrubFreedPages` in
+   * `sqlite-constants.ts`. Called `vacuum()` until its name was measured against its
+   * body: it only checkpointed the WAL and never ran a `VACUUM`. It does now, because
+   * `secure_delete` alone does not reach pages freed before it was turned on. Throws
+   * when another connection blocks the checkpoint.
    */
-  vacuum(): void {
-    this.db.pragma('wal_checkpoint(TRUNCATE)');
-    this.db.prepare('SELECT 1').get(); // force checkpoint
+  scrubFreedPages(): void {
+    scrubFreedPages(this.db);
   }
 
   /**
-   * Delete all run data and vacuum the database.
+   * Delete all run data, then drop the free pages and empty the WAL.
    * Used for clean-slate release upgrades (e.g. to eliminate mixed-mode encryption).
    * This is destructive and cannot be undone.
    */
@@ -3386,7 +3390,7 @@ export class RunHistory {
       this.db.prepare(`DELETE FROM "${table}"`).run();
     }
     this.db.pragma('foreign_keys = ON');
-    this.vacuum();
+    this.scrubFreedPages();
   }
 
   /**

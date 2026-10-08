@@ -7,6 +7,7 @@ import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
 import { ensureDirSync } from './atomic-write.js';
+import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 
 // Lazy — must not evaluate at import time (setDataDir may not have been called yet)
 function getVaultDbPath(): string {
@@ -97,6 +98,10 @@ export class SecretVault {
     try { chmodSync(dbPath, FILE_MODE_PRIVATE); } catch { /* best-effort — may fail on some filesystems */ }
 
     this.db.pragma('journal_mode = WAL');
+    // Same wait as the other stores: without it the erasure's checkpoint reports
+    // `busy` the instant another connection reads, instead of waiting it out.
+    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    zeroDeletedContent(this.db);
 
     // Set restrictive permissions on WAL journal files
     for (const suffix of ['-wal', '-shm']) {
@@ -477,6 +482,11 @@ export class SecretVault {
     if (!tenantId) throw new Error('tenantId is required for tenant key derivation');
     const derived = hkdfSync('sha256', masterKey, tenantId, 'lynox-tenant-vault', CRYPTO_KEY_LENGTH);
     return Buffer.from(derived).toString('hex');
+  }
+
+  /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */
+  scrubFreedPages(): void {
+    scrubFreedPages(this.db);
   }
 
   /**
