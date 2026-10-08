@@ -489,6 +489,30 @@ describe('error-reporting scrubbing', () => {
     expect(qs, 'a word that merely starts with a name').toContain('keyword=x');
   });
 
+  it('reads camelCase and joined names too', async () => {
+    const { beforeSend } = await hooks();
+    const out = beforeSend({ request: { query_string: 'apiKey=a1&accessToken=a2&apikey=a3&pageSize=20' } });
+    const qs = (out as { request: Record<string, string> }).request['query_string'];
+    expect(qs).toBe('apiKey=***&accessToken=***&apikey=***&pageSize=20');
+  });
+
+  it('reads a string that starts with a pair as a query string, since one arrives on its own too', async () => {
+    const { beforeSend } = await hooks();
+    const out = beforeSend(eventWith('code=abc then more'));
+    expect(firstValue(out as Record<string, unknown>)).toBe('code=*** then more');
+  });
+
+  it('stays linear on a long run of name-like text', async () => {
+    // Event text is attacker-influenced. A pattern that decides the name by alternation
+    // backtracked quadratically here: 64 KB took about 2 s, and each doubling took four times
+    // as long. On 128 KB the whole scrub takes well under 100 ms; the bound sits far between
+    // that and the roughly 8 s the quadratic form needs, so a loaded machine does not cross it.
+    const { beforeSend } = await hooks();
+    const started = Date.now();
+    beforeSend(eventWith('key-'.repeat(32_000)));
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it('leaves name=value in free prose alone: the names are read in query syntax only', async () => {
     const { beforeSend } = await hooks();
     const out = beforeSend(eventWith('child exited with code=1 after state=draining'));

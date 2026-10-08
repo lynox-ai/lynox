@@ -32,12 +32,42 @@ function maskSecretText(text: string): string {
 }
 
 /**
- * Query-parameter names whose value is a credential whatever its length: an OAuth
- * `code` or `state`, a `token`, a `key`, a password. Matched as a whole word, alone
- * or as one part of a `_`/`-` compound (`access_token`, `client_secret`, `api-key`),
- * so `monkey` and `keyword` are not names this covers.
+ * A `name=value` pair in query syntax: the name at the start of the string or after
+ * `?`, `&` or `;`. The start counts because a query string arrives on its own too
+ * (`request.query_string`, and the SDK stores a breadcrumb's query and fragment without
+ * their `?`/`#`), so a free-text string that BEGINS with `code=…` is read as one as
+ * well. Deliberately loose, and linear: whether the name is sensitive is decided in
+ * `isSensitiveParamName`, not by alternation here, which backtracked quadratically on a
+ * long run of name-like text.
  */
-const SENSITIVE_PARAM = /(^|[?&;])((?:[a-z0-9]+[_-])*(?:code|state|token|key|secret|password|passwd|pwd|auth|signature|sig|session|sid|nonce|otp|ticket|credential)s?(?:[_-][a-z0-9]+)*)=([^&#;\s"']+)/gi;
+const QUERY_PARAM = /(^|[?&;])([A-Za-z0-9_-]+)=([^&#;\s"']+)/g;
+
+/** Words that make a parameter's value a credential whatever its length. */
+const SENSITIVE_PARAM_WORDS: ReadonlySet<string> = new Set([
+  'code', 'state', 'token', 'key', 'secret', 'password', 'passwd', 'pwd', 'pass',
+  'auth', 'authorization', 'bearer', 'jwt', 'assertion', 'signature', 'sig',
+  'session', 'sid', 'nonce', 'otp', 'ticket', 'credential',
+]);
+/** The same, written as one word. */
+const SENSITIVE_PARAM_JOINED: ReadonlySet<string> = new Set([
+  'apikey', 'accesstoken', 'refreshtoken', 'idtoken', 'clientsecret', 'accesskey',
+]);
+
+/**
+ * Whether a parameter name names a credential: one of the words, alone or as a part of
+ * a `_`/`-` or camelCase compound (`access_token`, `api-key`, `accessToken`), plural
+ * included, or one of the joined forms (`apikey`). `monkey` and `keyword` contain a
+ * word without being made of one, and stay.
+ */
+function isSensitiveParamName(name: string): boolean {
+  if (SENSITIVE_PARAM_JOINED.has(name.toLowerCase())) return true;
+  return name
+    .split(/[_-]+|(?<=[a-z0-9])(?=[A-Z])/)
+    .some((part) => {
+      const word = part.toLowerCase();
+      return SENSITIVE_PARAM_WORDS.has(word) || (word.endsWith('s') && SENSITIVE_PARAM_WORDS.has(word.slice(0, -1)));
+    });
+}
 
 /**
  * Replace the value of every sensitive query parameter with `***`.
@@ -45,11 +75,12 @@ const SENSITIVE_PARAM = /(^|[?&;])((?:[a-z0-9]+[_-])*(?:code|state|token|key|sec
  * The shape masker above recognises a credential by its form — a known prefix, a JWT,
  * a long opaque run — and a short value has none: a 32-character token, an OAuth code
  * in a provider's short format, a password. Here the parameter's NAME decides, so the
- * value goes whatever it looks like. It reads query syntax only (`?`, `&`, `;` or the
- * start of a query string before the name), which keeps `code=` in free prose intact.
+ * value goes whatever it looks like. Inside a sentence (`exited with code=1`) a pair is
+ * not in query syntax and stays as written.
  */
 function maskSensitiveParams(text: string): string {
-  return text.replace(SENSITIVE_PARAM, (_m, lead: string, name: string) => `${lead}${name}=***`);
+  return text.replace(QUERY_PARAM, (match, lead: string, name: string) =>
+    isSensitiveParamName(name) ? `${lead}${name}=***` : match);
 }
 
 /**
