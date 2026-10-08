@@ -2590,6 +2590,95 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  // -- an OPEN session follows a ceiling change on its next turn --
+
+  describe('a config change re-clamps an open session to max_tier', () => {
+    // `reloadUserConfig` bumps the config version on any config change, and the session
+    // rebuilds its agent on its next turn. Bumped directly here: the reload path itself
+    // reads config.json, which this suite does not write.
+    const bumpConfigVersion = (engine: Engine): void => {
+      (engine as unknown as { _configVersion: number })._configVersion++;
+    };
+
+    it('clamps an open session down when the ceiling drops, and gives the tier back when it rises', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      try {
+        expect(session.getModelTier(), 'no ceiling yet').toBe('deep');
+
+        engine.getUserConfig().max_tier = 'fast';
+        bumpConfigVersion(engine);
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('first turn after the drop');
+        expect(session.getModelTier(), 'the lowered ceiling reaches the open session').toBe('fast');
+
+        delete engine.getUserConfig().max_tier;
+        bumpConfigVersion(engine);
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('first turn after the rise');
+        expect(session.getModelTier(), 'the tier it was asked for comes back').toBe('deep');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('leaves the tier alone when the change does not touch the ceiling', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().max_tier = 'balanced';
+      const session = engine.createSession({ model: 'balanced' });
+      try {
+        const setModel = vi.spyOn(session, 'setModel');
+        bumpConfigVersion(engine); // an unrelated config change
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('a turn after an unrelated change');
+        expect(session.getModelTier()).toBe('balanced');
+        expect(setModel, 'no model switch').not.toHaveBeenCalled();
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('clamps from a tier set directly, too', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'fast' });
+      try {
+        session.setModel('deep');
+        engine.getUserConfig().max_tier = 'balanced';
+        bumpConfigVersion(engine);
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('a turn after the drop');
+        expect(session.getModelTier()).toBe('balanced');
+        delete engine.getUserConfig().max_tier;
+        bumpConfigVersion(engine);
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('a turn after the rise');
+        expect(session.getModelTier(), 'the tier set was deep').toBe('deep');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('clamps from the last pick, not from its clamped form', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().max_tier = 'balanced';
+      const session = engine.createSession({ model: 'fast' });
+      try {
+        expect(session.repickModel('deep')).toMatchObject({ ok: true, tier: 'balanced' });
+        delete engine.getUserConfig().max_tier;
+        bumpConfigVersion(engine);
+        mockSend.mockResolvedValueOnce('ok');
+        await session.run('a turn after the ceiling is lifted');
+        expect(session.getModelTier(), 'the pick was deep').toBe('deep');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+  });
+
   // -- a per-session opts.model is clamped to the cost ceiling at ctor --
 
   describe('ctor clamps opts.model to max_tier', () => {

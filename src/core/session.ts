@@ -412,6 +412,12 @@ export class Session {
    */
   private _configVersionAtAgentBuild = 0;
   private _model: ModelTier;
+  /**
+   * The tier this session was asked for, before the cost ceiling: the creation request or the
+   * last pick. `_model` is this, clamped to `max_tier`; keeping both lets a later config change
+   * clamp an open session down when the ceiling drops and give its tier back when it rises.
+   */
+  private _tierIntent: ModelTier;
   private _effort: EffortLevel;
   private _thinking: ThinkingMode | undefined;
   private _maxTokens: number | undefined;
@@ -440,6 +446,7 @@ export class Session {
     // with the run-path clamp. `engine.config.model` is already clamped at engine
     // init, so only the request-supplied branch needs it.
     this._model = sessionInitialTier(engine, opts?.model);
+    this._tierIntent = opts?.model ?? this._model;
     this._effort = opts?.effort ?? engine.config.effort ?? 'medium';
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
@@ -679,6 +686,12 @@ export class Session {
     // until the session is destroyed (rafael 2026-05-27 Settings provider
     // switch from Anthropic → Mistral).
     if (this.engine.getConfigVersion() !== this._configVersionAtAgentBuild) {
+      // The config change may have moved the cost ceiling. Clamp the session's tier again
+      // through the same chokepoint the constructor uses, from what it was asked for, so a
+      // lowered `max_tier` reaches an OPEN session from its next turn and a raised one gives
+      // the tier back. The tier only moves when the ceiling actually cuts it, so an unrelated
+      // config change does not switch models.
+      this._model = sessionInitialTier(this.engine, this._tierIntent);
       this._recreateAgent();
     }
 
@@ -1970,6 +1983,7 @@ export class Session {
 
   setModel(tier: ModelTier): string {
     this._model = tier;
+    this._tierIntent = tier;
     this._rebuildAgentKeepingConversation();
     return this._resolveModel(tier, getActiveProvider()).modelId;
   }
@@ -2074,6 +2088,8 @@ export class Session {
     });
 
     const modelId = this.setModel(clampedTier);
+    // The pick, not its clamped form, is what a later ceiling change clamps from.
+    this._tierIntent = requestedTier;
     return { ok: true, tier: clampedTier, modelId };
   }
 
