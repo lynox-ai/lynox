@@ -6235,6 +6235,20 @@ describe('LynoxHTTPApi', () => {
     // this describe, so its `beforeAll`/`afterAll` already bracket these requests, and a
     // second declaration would not parse.
 
+    it('a stop through the SIGNAL is told the run halts, not that it may finish on its own', async () => {
+      // A bulk preview has no model call and no tool handler; the session sentence would
+      // tell its owner the wrong thing.
+      const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'signal' });
+      await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(202);
+        const body = await res.json() as { via: string; note: string };
+        expect(body.via).toBe('signal');
+        expect(body.note).toContain('halted');
+        expect(body.note).not.toContain('finish on its own');
+      });
+    });
+
     it('POST /api/tasks/:id/stop answers 202 — a stop is REQUESTED, not completed', async () => {
       const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'session' });
       await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {

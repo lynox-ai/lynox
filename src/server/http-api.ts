@@ -6765,7 +6765,7 @@ export class LynoxHTTPApi {
     // task" and "that task is not working right now" are different answers, and a
     // caller that cannot tell them apart will retry the wrong one.
     //
-    // ⛔ AND IT NEVER ANSWERS `stopped: true`. A stop is delivered, not completed: what
+    // ⛔ AND IT NEVER ANSWERS `stopped: true`. A stop is requested, not completed: what
     // ends the run is an abort unwinding somewhere else, so 202 is the true code and
     // `via` says what the abort reached. FIVE of the seven effects have nothing that
     // reads an abort — `run_workflow`, `bulk_apply`, `bulk_undo`, `backup`, `notify` —
@@ -6811,12 +6811,17 @@ export class LynoxHTTPApi {
         id,
         requested: true,
         via: outcome.via,
+        // One sentence per handle, because each reaches something different.
+        //
+        // ⚠ `session` says "requested", not "delivered": that handle reaches a model call
+        // in flight, and between calls there is none, so the run can still finish on its
+        // own. What does persist is the aborted controller, so if it asks a question
+        // next, the question is dismissed and the run is recorded stopped.
         note: outcome.via === 'wait'
           ? 'The run was parked on a question; the wait has been ended.'
-          // ⚠ "requested", not "delivered": the session handle reaches a model call in
-          // flight, and between calls there is none, so a run there can still finish on
-          // its own. The wording says what the 202 knows.
-          : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own.',
+          : outcome.via === 'signal'
+            ? 'The run stops before its next unit of work and is halted; resume it to continue.'
+            : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
       });
     }));
 

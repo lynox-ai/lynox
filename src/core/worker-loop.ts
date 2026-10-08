@@ -309,8 +309,8 @@ export type StopOutcome =
  *    it in the `finally`), so before the first send and between sends there is nothing
  *    to abort. Inside a tool handler there IS — the handler runs within that `try`, so
  *    the abort lands and the run ends at the next provider call with `RunAbortedError`;
- *    the handler itself is not cancelled. Either way a delivered REQUEST and not a
- *    confirmation, which is why the route answers 202.
+ *    the handler itself is not cancelled. Either way a REQUEST and not a confirmation,
+ *    which is why the route answers 202.
  *  · `signal` — the handler polls the signal and stops between units of work.
  */
 export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
@@ -1103,8 +1103,11 @@ export class WorkerLoop {
       // send is in flight, and the flag is never cleared — so a provider error twenty
       // minutes after a stop that missed was recorded as the owner's stop, told the
       // model "STOPPED BY ITS OWNER: <provider error>", and lost the retry it was owed.
-      // A stop that did not arrive has no effect, which is exactly what the route's 202
-      // promises: a request, never a confirmation.
+      // A stop that missed does not rename a failure with a cause of its own, which is
+      // what the route's 202 promises: a request, never a confirmation. ⚠ It is not
+      // without ANY effect: the controller stays aborted, so a question the run asks
+      // afterwards is dismissed at once and the run is recorded stopped (the 202 note
+      // says so).
       //
       // ⛔ The EXACT class, not `instanceof`. `ToolLoopBreakError` and
       // `ContinuationLoopError` extend `RunAbortedError`, and both are the agent ending
@@ -1824,16 +1827,17 @@ export class WorkerLoop {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
-        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: the
-        // unanswered-question path above records `failed` and still notifies as a ✓ at
-        // `normal`. That asymmetry is older than this change and no test pins it either
-        // way.
+        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: a question
+        // left unanswered by a shutdown or by its expiry records `failed` and still
+        // notifies as a ✓ at `normal`. That asymmetry is older than this change and no
+        // test pins it either way. (Left unanswered because the OWNER stopped the run, it
+        // takes the branch below.)
         //
         // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
         // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
         // the body; the title answers who ended it.
         title: `${endedByOwner ? '\u23f9' : (budgetCut === null ? '\u2713' : '\u2717')} ${task.title}`,
-        body: endedByOwner ? `Stopped on your instruction: ${truncatedResult}` : truncatedResult,
+        body: endedByOwner ? `Stopped on your instruction.\n\n${truncatedResult}` : truncatedResult,
         taskId: task.id,
         priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
