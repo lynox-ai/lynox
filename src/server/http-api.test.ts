@@ -921,6 +921,27 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
+    it('starts a run under the principal of the request — the mandate\'s and, after it, the owner\'s (D1, §3.13 E1)', async () => {
+      // The session keeps the last run's principal when a run names none, so the route must
+      // name the owner too: otherwise an owner's run after a mandate's would stay locked.
+      // The run route's key pre-flight, as the `runs` block sets it.
+      mockSecretResolve.mockImplementation((name: string) => name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null);
+      const runAs = async (token: string): Promise<unknown> => {
+        mockSessionRun.mockClear();
+        const res = await fetch(`${baseUrl}/api/sessions/test/run`, {
+          method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task: 'set up the instance' }),
+        });
+        await res.text();
+        expect(mockSessionRun).toHaveBeenCalledTimes(1);
+        return (mockSessionRun.mock.calls[0] as unknown[])[1];
+      };
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      expect(await runAs(mandate)).toMatchObject({ principal: { kind: 'mandate', email: MANDATE_LOGIN.email } });
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      expect(await runAs(owner)).toMatchObject({ principal: { kind: 'owner' } });
+    });
+
     it('gives a mandate session the user scope even without an admin secret (D6)', async () => {
       // This suite runs single-secret, where a cookie is otherwise `admin`.
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;

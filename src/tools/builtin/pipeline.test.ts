@@ -1662,6 +1662,8 @@ const RUN_CTX_KEYS = [
   // `isAcceptedParam` is the grant's own record of the values the person accepted; dropped,
   // every accepted value goes back behind the boundary (fails closed, but silently).
   'isAcceptedParam',
+  // The run's principal: a mandate's steps run under its lock (PRD D1, §3.13 E5).
+  'principal',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -2063,6 +2065,40 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
       mockRetryManifest.mockResolvedValueOnce(makeRunState());
       await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
       expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['abortScope']).toBe(scope);
+    });
+  });
+
+  // The same value witness for the principal: `buildRunCtx` emits the key either way, so only
+  // the value says a mandate's lock reaches the steps (PRD customer-granted-operator-access D1).
+  describe('the calling agent\'s principal reaches the run', () => {
+    const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org' };
+    function mandateAgent(): IAgent {
+      const agent = makeAutonomyAgent(undefined);
+      (agent as unknown as { principal: unknown }).principal = MANDATE;
+      return agent;
+    }
+
+    it('inline run', async () => {
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ name: 'inline', steps: [makeStep('s1', 'do thing')] }, mandateAgent());
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['principal']).toEqual(MANDATE);
+    });
+
+    it('stored run', async () => {
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id }, mandateAgent());
+      expect((mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['principal']).toEqual(MANDATE);
+    });
+
+    it('retry', async () => {
+      const agent = mandateAgent();
+      const id = seedStoredPipeline();
+      mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+      await runWorkflowTool.handler({ workflow_id: id }, agent);
+      mockRetryManifest.mockResolvedValueOnce(makeRunState());
+      await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+      expect((mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>)['principal']).toEqual(MANDATE);
     });
   });
 

@@ -83,6 +83,8 @@ import type { DataStore } from './data-store.js';
 import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
+import type { RequestPrincipal } from './request-principal.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
  *  The primary path is user-triggered "prepare & compact" from COMPACT_PREPARE_PERCENT
@@ -190,6 +192,11 @@ export interface RunOptions {
    *  this undefined → `runs.trigger_origin` NULL). A SEPARATE dimension from
    *  `run_type`; observability only, never gates money. */
   triggerOrigin?: string | undefined;
+  /** Who started this run (PRD customer-granted-operator-access D1, §3.13): a mandate's run
+   *  gets the mandate's tool lock. ABSENT MEANS "THE SAME AS BEFORE", never "the owner": the
+   *  compaction summary run this session starts on its own passes none, and must not lift
+   *  the lock of the turn that started it. The HTTP layer passes it on every run it starts. */
+  principal?: RequestPrincipal | undefined;
 }
 
 export interface SessionOptions {
@@ -223,6 +230,8 @@ export interface SessionOptions {
    *  same reason: only a surface that can SHOW a proposal should make one. */
   captureFallback?: boolean | undefined;
   costGuard?: import('../types/index.js').CostGuardConfig | undefined;
+  /** Who the session's first agent is built for — see `RunOptions.principal`. Absent = owner. */
+  principal?: RequestPrincipal | undefined;
 }
 
 /**
@@ -334,6 +343,13 @@ export class Session {
   private briefing: string | undefined;
   private _briefingConsumed = false;
   private currentRunId: string | null = null;
+  /**
+   * The principal of the run in flight, or of the last one. Kept between runs on purpose:
+   * the agent can be rebuilt outside a run (`setModel`, `reloadUserConfig`, the restore
+   * after a compaction), and a session a mandate drove must not come back unlocked from
+   * such a rebuild. The next run that names a principal replaces it.
+   */
+  private _principal: RequestPrincipal = OWNER_PRINCIPAL;
   /** Per-run hook fired right after each eager-persist checkpoint so the HTTP
    *  layer can record the run buffer's high-water seq as `last_persisted_seq`
    *  (Tier-2 resumable re-attach uses it as the replay `?since=`). Stashed for
@@ -504,6 +520,7 @@ export class Session {
     if (opts?.costGuard) {
       this.agentOverrides.costGuard = opts.costGuard;
     }
+    if (opts?.principal) this._principal = opts.principal;
     this._createAgent();
 
     // Tool-call persistence is INJECTED into the agent, not subscribed from a
@@ -683,6 +700,9 @@ export class Session {
 
   async run(task: string | unknown[], runOptions?: RunOptions): Promise<string> {
     if (!this.agent) throw new Error('Session not initialized — agent missing');
+    // Before anything that could rebuild the agent below, so every rebuild of this run is
+    // built for this run's principal. Absent = keep the one before (see `RunOptions`).
+    if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
 
     // Serialize user turns behind an in-flight background auto-compaction: it
     // mutates session-shared state (the message buffer + the cheap-tier
@@ -993,6 +1013,12 @@ export class Session {
     // after every `_recreateAgent` above, so a rebuilt agent still carries it (mirrors
     // currentRunId); reset in the finally.
     this.agent.isInternalRun = runOptions?.internal === true;
+    // The lock this run runs under. Set on the agent that will SEND, whichever it is: the
+    // session keeps its agent across runs and rebuilds it only when the registry, the
+    // config or the tier moved, so an agent built during an owner's run is the one a
+    // mandate's run reuses. `_createAgent` also builds every new agent with it, which is
+    // what carries it across a rebuild in the middle of this run.
+    this.agent.principal = this._principal;
 
     const usageBefore = { ...this.usage };
 
@@ -2537,6 +2563,10 @@ export class Session {
     }
 
     this.agent = new Agent({
+      // Every agent this session builds is built for the principal of the run in flight, or
+      // of the last run: a rebuild in the middle of a mandate's run (compaction, a tier
+      // override, a registry change) must not hand the model the tools the lock withholds.
+      principal: this._principal,
       // ⛔ CARRIED ACROSS THE REBUILD. Without this line every rebuild mints a fresh,
       // empty scope and orphans whatever is registered — a later `abort()` then reaches
       // nothing. `_createAgent` is reached from the ctor, `addTool` and every rebuild that

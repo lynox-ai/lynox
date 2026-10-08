@@ -436,6 +436,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
+      // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
+      principal: deps.parentAgent?.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -688,6 +690,8 @@ export async function runSavedWorkflow(
     memory?: IMemory | null | undefined;
     /** What the session that scheduled this run had taken in (see `TriggerRecord.created_untrusted`). */
     seed?: UntrustedCause | undefined;
+    /** Who started the run, when a request did; its steps are built for it (PRD D1). Absent = the owner. */
+    principal?: import('../../core/request-principal.js').RequestPrincipal | undefined;
     /**
      * Whether this run passes the workflow's contract on (`decideRunGrant`), asked with the
      * workflow exactly as this function read it. Absent = no contract, whatever is stored:
@@ -797,6 +801,7 @@ export async function runSavedWorkflow(
       runHistory,
       parentTools: runtime?.tools,
       parentToolContext: runtime?.toolContext,
+      principal: runtime?.principal,
       parentMemory: runtime?.memory ?? null,
       // The decided contract — never the stored one directly — authorises this
       // headless run's declared outbound writes (enforced per-tool-call at
@@ -921,6 +926,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         autonomy: deps.autonomy,
         parentTools: deps.tools,
         parentToolContext: deps.toolContext,
+        // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
+        principal: deps.parentAgent?.principal,
         parentActiveScopes: deps.parentAgent?.activeScopes,
         // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
         // abort is dead code for workflows: registration is conditional on a scope, and nothing
@@ -1010,6 +1017,8 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       autonomy: deps.autonomy,
       parentTools: deps.tools,
       parentToolContext: deps.toolContext,
+      // The calling agent's principal: its steps run under the same lock (PRD D1, §3.13 E5).
+      principal: deps.parentAgent?.principal,
       parentActiveScopes: deps.parentAgent?.activeScopes,
       // ⛔ The scope the run's step agents register in — WITHOUT this the whole scoped
       // abort is dead code for workflows: registration is conditional on a scope, and nothing

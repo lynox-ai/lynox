@@ -2225,6 +2225,38 @@ describe('a step agent joins the caller\'s abort scope', () => {
   });
 });
 
+describe('step agents are built for the run\'s principal (PRD customer-granted-operator-access D1, §3.13 E5)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org' };
+
+  it.each([
+    ['spawnInline', async () => {
+      const step: ManifestStep = { id: 'p', agent: 'p', runtime: 'inline', task: 'tidy up tasks' };
+      await spawnInline(
+        step, {}, mockConfig, mockParentTools,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, MANDATE,
+      );
+    }],
+    ['spawnViaAgent', async () => {
+      const step: ManifestStep = { id: 'p', agent: 'p', runtime: 'agent', task: 'tidy up tasks' };
+      const agentDef: AgentDef = { id: 'p', name: 'p', systemPrompt: 'do it', tools: [] };
+      await spawnViaAgent(
+        step, agentDef, {}, mockConfig, undefined, 'run-1',
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, MANDATE,
+      );
+    }],
+  ])('%s hands the principal to the step agent', async (_name, drive) => {
+    mockSend.mockResolvedValueOnce('done');
+    await drive();
+    expect((vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
+  });
+});
+
 describe('spawnViaAgent — tool_gates reach the tools the agent runs', () => {
   // `wrapWithGate` has its own tests above; this covers the CALL: that a gated name in
   // `step.tool_gates` actually reaches the tool list handed to the Agent. A name the step cannot

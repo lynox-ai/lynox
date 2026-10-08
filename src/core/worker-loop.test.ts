@@ -3275,3 +3275,127 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('provider down') }));
   });
 });
+
+/**
+ * A run a mandate starts by hand runs under the mandate's tool lock (PRD
+ * customer-granted-operator-access D1, §3.13 E4). Whether the run is a TEST of a proposal is
+ * a separate question: a schedule the mandate set up and the owner has since stamped is no
+ * test, and it is still a turn the mandate started. The lock itself is the Agent's
+ * (agent.test.ts); these pin that the worker hands the starter to every build site.
+ */
+describe('hand runs carry the starter\'s principal', () => {
+  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+  type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+  const runAgentRow = (over: Partial<TriggerRecord>): TriggerRecord => makeTask({
+    id: 'hr-lock', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example',
+    schedule_cron: undefined, next_run_at: undefined, ...over,
+  });
+  function setup(task: TriggerRecord): { loop: WorkerLoop; engine: Engine; session: Session } {
+    const session = makeSession('Ran.');
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), engine, session };
+  }
+  const runOptsOf = (session: Session): Record<string, unknown> | undefined =>
+    (session.run as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] as Record<string, unknown> | undefined;
+  const sessionOptsOf = (engine: Engine): Record<string, unknown> | undefined =>
+    (engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+
+  it('a test of the mandate\'s own proposal builds and runs the worker session for the mandate', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: undefined });
+    const { loop, engine, session } = setup(task);
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
+    expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  it('a stamped schedule the mandate set up, started by the mandate, is no test and still runs under the mandate', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, engine, session } = setup(task);
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    expect(session.run).toHaveBeenCalledTimes(1);
+    expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
+    expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  it('control: the same stamped schedule dispatched without a marker runs as the owner\'s', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, engine, session } = setup(task);
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(session.run).toHaveBeenCalledTimes(1);
+    expect(sessionOptsOf(engine)?.['principal']).toBeUndefined();
+    expect(runOptsOf(session)?.['principal']).toBeUndefined();
+  });
+
+  it('a watch started by the mandate builds its analysis session for the mandate', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({
+      source: 'watch', confirmed_at: undefined,
+      watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }),
+    });
+    const { loop, engine, session } = setup(task);
+    mockFetchPinned.mockResolvedValueOnce(new Response('<html><body><main>One</main></body></html>', { status: 200 }));
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
+    expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  // RF-1 (PRD H2 row): a run_workflow proposal of a mandate, on a workflow the owner stamped,
+  // with the mandate's parameters, run through the one-time door. Its steps are built from
+  // the list `runGuardedSavedWorkflow` hands the runner — there is no session on this path.
+  async function workflowParentTools(marker: 'mandate' | 'none'): Promise<string[]> {
+    mockRunManifest.mockReset();
+    mockRunManifest.mockResolvedValue({ status: 'completed', outputs: {}, totalCostUsd: 0 });
+    const template = {
+      id: 'rf1-wf', name: 'RF1', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'saved',
+      estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z', executed: false,
+      executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      confirmedAt: '2026-06-24T00:00:00.000Z',
+    };
+    const tools = ['bash', 'read_file', 'task_list', 'plugin_reader'].map(name => ({ definition: { name }, handler: vi.fn() }));
+    const task = makeTask({
+      id: 'rf1-prop', pipeline_id: 'rf1-wf', effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined,
+      created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, pipeline_params: JSON.stringify({ who: 'eva' }),
+    });
+    const engine = {
+      getTaskManager: vi.fn(() => makeTaskManager([task])),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+      getContext: vi.fn(() => null),
+      getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools })),
+      getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'rf1-wf', manifest_json: JSON.stringify(template) })),
+        insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline('rf1-wf', JSON.parse(JSON.stringify(template)) as PlannedPipeline);
+    const m = marker === 'mandate' ? loop.claimHandRunMinter()('rf1-prop', EVA) : undefined;
+    // Without a marker the proposal is refused at the stamp check; the control below uses an
+    // owner's schedule instead, so the runner is reached both times.
+    const row = marker === 'mandate' ? task : { ...task, created_by: 'owner' };
+    await (loop as unknown as Exec).executeTask(row, null, m);
+    expect(mockRunManifest, 'the workflow ran').toHaveBeenCalledTimes(1);
+    const opts = mockRunManifest.mock.calls[0]![2] as { parentTools?: Array<{ definition: { name: string } }> };
+    return (opts.parentTools ?? []).map(t => t.definition.name);
+  }
+
+  it('RF-1: the mandate\'s test run of a run_workflow proposal hands the steps only the lock\'s tools', async () => {
+    vi.useRealTimers();
+    expect(await workflowParentTools('mandate')).toEqual(['task_list']);
+    // And the steps are built for the mandate, so its lock also refuses them the protected
+    // secrets and their writes carry its name.
+    expect((mockRunManifest.mock.calls[0]![2] as { principal?: unknown }).principal).toEqual(EVA);
+  });
+
+  it('RF-1 control: the owner\'s schedule of the same workflow keeps the engine\'s set', async () => {
+    vi.useRealTimers();
+    expect(await workflowParentTools('none')).toEqual(['bash', 'read_file', 'task_list', 'plugin_reader']);
+  });
+});

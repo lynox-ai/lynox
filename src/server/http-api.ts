@@ -3138,6 +3138,10 @@ export class LynoxHTTPApi {
       const runOptions: import('../core/session.js').RunOptions = {
         ...(runEffort ? { effort: runEffort } : {}),
         ...(runThinking ? { thinking: runThinking } : {}),
+        // Always named, the owner included: the session keeps the last run's principal
+        // when a run names none, so an owner's run after a mandate's must say who it is
+        // to get its tools back (PRD customer-granted-operator-access D1, §3.13 E1).
+        principal: this._principalOf(req),
       };
 
       // User's IANA timezone for the per-turn `[Now: …]` marker. The client

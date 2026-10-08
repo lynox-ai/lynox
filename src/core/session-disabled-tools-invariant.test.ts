@@ -43,9 +43,17 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 vi.mock('./agent.js', () => ({
-  Agent: vi.fn().mockImplementation(function () {
+  Agent: vi.fn().mockImplementation(function (config?: { principal?: unknown }) {
+    // @ts-expect-error mock constructor — like the real one: built for the config's principal,
+    // the owner when it names none, and reassignable afterwards.
+    this.principal = config?.principal ?? { kind: 'owner' };
+    // @ts-expect-error mock constructor — which principal each send() went out under
+    this.sentWith = [];
     // @ts-expect-error mock constructor
-    this.send = vi.fn().mockResolvedValue('response');
+    this.send = vi.fn(function (this: { principal: unknown; sentWith: unknown[] }) {
+      this.sentWith.push(this.principal);
+      return Promise.resolve('response');
+    });
     // @ts-expect-error mock constructor
     this.reset = vi.fn();
     // @ts-expect-error mock constructor
@@ -735,3 +743,83 @@ describe('a Tool Toggles change reaches an open session', () => {
   });
 });
 
+
+/**
+ * The tool lock follows the principal of the RUN, onto whichever agent sends (PRD
+ * customer-granted-operator-access D1, §3.13). The real Agent applies the lock from its
+ * `principal` (agent.test.ts, "mandate tool lock"); what this file pins is that the agent
+ * that sends carries the right one, through the three ways a session reaches a send with
+ * an agent the run did not build: an agent kept from an earlier run, a rebuild in the middle
+ * of the run, and the compaction summary run, which names no principal.
+ */
+describe('request principal: every agent that sends carries the run\'s principal', () => {
+  const MANDATE = Object.freeze({ kind: 'mandate' as const, email: 'setup@example.org' });
+  const OWNER = Object.freeze({ kind: 'owner' as const });
+  type Inst = { principal: unknown; sentWith: unknown[] };
+  const instances = (): Inst[] => (Agent as unknown as { mock: { instances: Inst[] } }).mock.instances;
+  const allSends = (): unknown[] => instances().flatMap(i => i.sentWith);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegister.mockReturnThis();
+    currentUserConfig = {};
+  });
+
+  it('a mandate run reuses the agent an owner run built, and sends under the mandate', async () => {
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('owner turn', { principal: OWNER });
+    const built = agentCtor.mock.calls.length;
+    await session.run('mandate turn', { principal: MANDATE });
+    // No rebuild happened in between: the lock must reach the agent the session kept.
+    expect(agentCtor.mock.calls.length).toBe(built);
+    expect(instances().at(-1)!.sentWith.at(-1)).toEqual(MANDATE);
+  });
+
+  it('a run that names no principal keeps the one before — it never reads as the owner', async () => {
+    // The compaction summary run is the caller that names none (session.ts, `compact`).
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('mandate turn', { principal: MANDATE });
+    await session.run('summary', { internal: true, noTools: true });
+    expect(allSends()).toEqual([MANDATE, MANDATE]);
+  });
+
+  it('a rebuild in the middle of a principal-less run (the compaction tier swap) keeps the lock', async () => {
+    // `modelTier` rebuilds the agent before the send and again in the finally — the shape of
+    // the compaction summary run. Both new agents must be built for the mandate: the second
+    // one outlives the run and is the agent the session keeps.
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('mandate turn', { principal: MANDATE });
+    const before = agentCtor.mock.calls.length;
+    await session.run('summary', { internal: true, noTools: true, modelTier: 'fast' });
+    const rebuilt = instances().slice(before);
+    expect(rebuilt.length, 'the tier override rebuilds the agent').toBeGreaterThanOrEqual(2);
+    for (const agent of rebuilt) expect(agent.principal).toEqual(MANDATE);
+    expect(allSends().at(-1)).toEqual(MANDATE);
+  });
+
+  it('a rebuild between runs (a model switch) stays locked until a run names the owner', async () => {
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('mandate turn', { principal: MANDATE });
+    session._recreateAgent({});
+    expect(instances().at(-1)!.principal).toEqual(MANDATE);
+    await session.run('owner turn', { principal: OWNER });
+    expect(allSends().at(-1)).toEqual(OWNER);
+  });
+
+  it('a session built for a mandate builds its first agent for the mandate', async () => {
+    const engine = await createEngineWithDisabledTools([]);
+    engine.createSession({ principal: MANDATE });
+    expect(instances().at(-1)!.principal).toEqual(MANDATE);
+  });
+
+  it('control: a session nobody named stays the owner\'s', async () => {
+    const engine = await createEngineWithDisabledTools([]);
+    const session = engine.createSession();
+    await session.run('turn');
+    expect(allSends()).toEqual([OWNER]);
+  });
+});
