@@ -5697,6 +5697,42 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect((err as Error).message).toContain('***C');
   });
 
+  // The secret gate for any tool but http_request asks before the HANDLER runs, outside the
+  // handler's `try`. With the callback an HTTP engine without its prompt store wires (it throws
+  // "needs input", http-api.ts), that gate must refuse — unwired, it lets an untainted call
+  // resolve the secret unasked (the twin below).
+  const gateStore = () => ({
+    getMasked: vi.fn().mockReturnValue(null), resolve: vi.fn().mockReturnValue('the-value'),
+    listNames: vi.fn().mockReturnValue(['API_KEY']), containsSecret: vi.fn().mockReturnValue(false),
+    maskSecrets: vi.fn((t: string) => t.replace('sk-live-SECRET', '***CRET')),
+    recordConsent: vi.fn(), hasConsent: vi.fn().mockReturnValue(true), isExpired: vi.fn().mockReturnValue(false),
+    findUnresolvedSecretRefs: vi.fn().mockReturnValue([]), extractSecretNames: vi.fn().mockReturnValue(['API_KEY']),
+    resolveSecretRefs: vi.fn((input: unknown) => input),
+  }) as unknown as import('../types/index.js').SecretStoreLike;
+  const gatedCall = { id: 'tu_cmd', name: 'run_cmd', input: { command: 'notify --note "sk-live-SECRET" --with secret:API_KEY' } };
+
+  it('a secret in a tool input with a prompt path that reaches nobody: refused, and the question is masked', async () => {
+    const handler = vi.fn().mockResolvedValue('ran');
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', handler)], secretStore: gateStore(), promptUser });
+    const err = await agent.send('Fetch it').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(handler, 'the secret was never put into the call').not.toHaveBeenCalled();
+    // Raised before the handler's `try`, so only the batch-level rethrow can mask it.
+    expect((err as InputRequiredError).question).not.toContain('sk-live-SECRET');
+    expect((err as Error).message).toContain('***CRET');
+  });
+
+  it('…the same call with NO prompt path at all runs — why the HTTP engine wires one that throws', async () => {
+    const handler = vi.fn().mockResolvedValue('ran');
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall])).mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', handler)], secretStore: gateStore() });
+    await expect(agent.send('Fetch it')).resolves.toBe('done');
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it('with a question path nothing changes: the answer comes back and the run goes on', async () => {
     mockProcess
       .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve?' } }]))

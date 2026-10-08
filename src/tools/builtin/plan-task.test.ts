@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { IAgent, LynoxUserConfig, PromptText } from '../../types/index.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
+import { InputRequiredError } from '../../core/input-required.js';
 
 const mockConfig: LynoxUserConfig = { api_key: 'test-key' };
 
@@ -48,6 +49,18 @@ describe('planTaskTool', () => {
       agent,
     );
     expect(JSON.parse(result)).toEqual({ approved: true });
+  });
+
+  it('a prompt path that reaches nobody does NOT auto-approve: the plan is not approved, the run ends', async () => {
+    // What an HTTP engine without its prompt store wires (http-api.ts): unlike the unwired
+    // case above, nobody approved this plan, so it must not come back approved.
+    const promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Proceed with the plan?'));
+    const agent = makeAgent({ promptUser });
+    await expect(planTaskTool.handler(
+      { summary: 'Test plan', phases: [{ name: 'Step A', steps: ['do'] }] },
+      agent,
+    )).rejects.toBeInstanceOf(InputRequiredError);
+    expect(promptUser).toHaveBeenCalledTimes(1);
   });
 
   it('should return approved on Proceed', async () => {

@@ -90,7 +90,7 @@ import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/
 import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.js';
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
-import { InputRequiredError } from '../core/input-required.js';
+import { InputRequiredError, isInputRequired } from '../core/input-required.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -3641,6 +3641,14 @@ export class LynoxHTTPApi {
         // (The backstop/disconnect paths already set `aborted` and tore down res.)
         if (err instanceof RunAbortedError) {
           if (!res.writableEnded && !res.destroyed) res.end();
+        } else if (isInputRequired(err) && !aborted) {
+          // The run stopped on purpose: it asked a question and nobody can be reached (this
+          // engine has no prompt store). Not a failure to alarm about — ended like a run the
+          // engine refused before the model, with the reason as the result, which the chat shows
+          // when nothing was streamed. The thread keeps the "needs input" note.
+          const msg = capForClient(maskForClient(err.message, { includeGeneric: true }));
+          res.write(`event: done\ndata: ${JSON.stringify({ result: msg, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
+          res.end();
         } else if (!aborted) {
           // Masked AND capped: this string is a runtime/provider error rendered
           // into the tenant's error banner, an 8s toast, and a one-click copy

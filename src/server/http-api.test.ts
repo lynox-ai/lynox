@@ -1501,6 +1501,19 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('"fatal":true');
     });
 
+    it('a run that ended needing input ends with done and its reason — no fatal error, no red toast', async () => {
+      // The twin above is a real failure. This one stopped on purpose (it asked and nobody can
+      // be reached); the chat shows `done.result` when nothing was streamed.
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new InputRequiredError('Approve the refund?');
+      });
+      const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'refund' }) });
+      const text = await res.text();
+      expect(text).not.toContain('event: error');
+      expect(text).toContain('event: done');
+      expect(text).toContain('Approve the refund?');
+    });
+
     it('echoes the run usage in the done event', async () => {
       // The done event carries getLastRunUsage() so the per-message footer
       // survives a lost turn_end frame (PR #518).

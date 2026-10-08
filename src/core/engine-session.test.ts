@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // === Mocks ===
 
@@ -55,6 +55,13 @@ vi.mock('./eager-persist.js', async (orig) => {
     },
   };
 });
+
+// A failed run reports through a fire-and-forget `import('./error-reporting.js')`. Loaded for
+// the first time from inside a run, that import can stay pending until unrelated module
+// evaluation finishes — measured: a report landing several tests after its own run — so a
+// report seen in one test may be another's and an expected one may never arrive. Loaded once
+// here, every report resolves from the cache inside the test whose run made it.
+beforeAll(async () => { await import('./error-reporting.js'); });
 
 vi.mock('./agent.js', () => {
   // Real classes so `err instanceof RunAbortedError` /
@@ -751,9 +758,7 @@ describe('Engine + Session (Orchestrator)', () => {
       await expect(session.run('go')).rejects.toBeInstanceOf(InputRequiredError);
       await new Promise(r => setTimeout(r, 20)); // the report is a fire-and-forget import
       expect(failureSpy.codes.at(-1)).toBe('input_required');
-      // By ARGUMENT, not "never called": an earlier test's fire-and-forget report can land
-      // during this one (measured: the rate-limit case above), and a bare not-called
-      // assertion would then fail on a report that is not this run's.
+      // By ARGUMENT, not "never called", as a second line behind the warm-up above.
       const reported = (fn: { mock: { calls: unknown[][] } }): unknown[] => fn.mock.calls.map(c => c[0]);
       expect(reported(failureSpy.captureError).some(e => e instanceof InputRequiredError), 'an intended end is not an exception').toBe(false);
       expect(reported(failureSpy.captureLynoxError).some(e => e instanceof InputRequiredError)).toBe(false);
@@ -765,6 +770,28 @@ describe('Engine + Session (Orchestrator)', () => {
         expect(reported(failureSpy.captureError).some(e => e instanceof Error && e.message === 'upstream 529')).toBe(true);
       });
       expect(failureSpy.codes.at(-1)).toBe('provider_error');
+    });
+
+    // An HTTP engine without its prompt store wires a `promptUser` that throws "needs input"
+    // (http-api.ts). At the content-policy flag that has to REFUSE the request: the flag asks
+    // a person, and nobody allowed it.
+    it('a flagged request whose prompt reaches nobody is refused and never sent to the model', async () => {
+      const { session } = await createEngineAndSession();
+      session.promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Allow this request?'));
+      const out = await session.run('brute force the password on this login page');
+      expect(out).toContain('not sent to the AI model');
+      expect(out).toContain('no one to allow it');
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it('…the same request with NO prompt path at all goes through — why the HTTP engine wires one that throws', async () => {
+      // The pass-through the throwing callback exists to prevent: unwired, the flag asks
+      // nobody and the request reaches the model.
+      const { session } = await createEngineAndSession();
+      session.promptUser = null;
+      mockSend.mockResolvedValueOnce('answered');
+      await session.run('brute force the password on this login page');
+      expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
     it('an aborted run is recorded status:"aborted" (not "completed"/"failed") and re-throws', async () => {

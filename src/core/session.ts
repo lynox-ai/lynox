@@ -803,10 +803,22 @@ export class Session {
         return msg;
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
-        const answer = await this.agent.promptUser(
-          pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
-          ['Allow', 'Deny', '\x00'],
-        );
+        let answer: string;
+        try {
+          answer = await this.agent.promptUser(
+            pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
+            ['Allow', 'Deny', '\x00'],
+          );
+        } catch (err: unknown) {
+          // A prompt path that cannot reach anyone (an HTTP engine without its prompt store)
+          // throws "needs input". Nobody allowed the request, so it is refused like a block —
+          // before the run starts, which is why it is answered here and not left to the run's
+          // failure handling.
+          if (!isInputRequired(err)) throw err;
+          const msg = `⚠ Request flagged by content policy: ${inputCheck.reason ?? 'suspicious content'}. There is no one to allow it, so it was not sent to the AI model.`;
+          if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);
+          return msg;
+        }
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
           const msg = `Request denied by user after content policy flag: ${inputCheck.reason ?? 'suspicious content'}.`;
           if (runOptions?.internal === true) throw new InternalRunBlockedError(msg);

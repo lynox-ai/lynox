@@ -3586,6 +3586,13 @@ export class Agent implements IAgent {
     });
   }
 
+  /** The question re-built MASKED, whole, so the cap the error applies falls after the mask and
+   *  a secret straddling it is still recognised. Its message leaves the agent: into the ledger,
+   *  the failed run's record and its note. */
+  private _maskedNeedsInput(err: InputRequiredError): InputRequiredError {
+    return new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
+  }
+
   /** Longest tool input shown whole in a secret prompt; longer inputs are refused, not cut. */
   private static readonly SECRET_PROMPT_MAX_CHARS = 4000;
 
@@ -3643,8 +3650,13 @@ export class Agent implements IAgent {
 
     // A call that needs a person and cannot reach one ends the run — after the batch has
     // settled, so the calls beside it finish rather than being cut off mid-flight.
+    // Masked HERE as well: a consent or secret prompt raises before the handler's `try`, so a
+    // question from one of those reaches this point unmasked (the handler's own is masked twice,
+    // which changes nothing).
     const needsInput = settled.find(o => o.status === 'rejected' && isInputRequired(o.reason));
-    if (needsInput !== undefined && needsInput.status === 'rejected') throw needsInput.reason;
+    if (needsInput !== undefined && needsInput.status === 'rejected' && isInputRequired(needsInput.reason)) {
+      throw this._maskedNeedsInput(needsInput.reason);
+    }
 
     const results: BetaToolResultBlockParam[] = settled.map((outcome, i) => {
       if (outcome.status === 'fulfilled') return outcome.value;
@@ -4202,9 +4214,7 @@ export class Agent implements IAgent {
       // below reads it: its message leaves the agent, into the ledger here and into the
       // failed run's record and note. The full question is masked and the cap applied
       // after, so a secret that straddles the cap is still recognised whole.
-      const askedNobody = isInputRequired(err)
-        ? new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question)
-        : undefined;
+      const askedNobody = isInputRequired(err) ? this._maskedNeedsInput(err) : undefined;
       const cause = askedNobody ?? (err instanceof Error ? err : new Error(String(err)));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
