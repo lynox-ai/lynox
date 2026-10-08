@@ -6,6 +6,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
+import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
 import type { IAgent } from '../types/index.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -876,16 +877,15 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
     expect(due()).toBe(true);
   });
 
-  describe('a run of a proposal leaves its schedule as it found it (a test by hand, or the backstop)', () => {
+  describe('a test run by hand leaves the schedule as it found it (decided at dispatch, hand-run-door.ts)', () => {
     const M = 'mandate:eva@kanzlei.example';
-    const oneShot = (stamped = false): TriggerRecord => tm.create({
+    const oneShot = (): TriggerRecord => tm.create({
       title: 'Check the list once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2,
-      ...(stamped ? { confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner' } : {}),
     }) as TriggerRecord;
 
-    it('a success records the run and leaves status, next run and retries; the owner\'s stamp then lets it fire', () => {
+    it('a success records the run and leaves status, next run and retries; the owner\'s stamp then lets it fire', async () => {
       const t = oneShot();
-      tm.recordTaskRun(t.id, 'Tested.', 'success');
+      await runAsHandRun(t.id, async () => { tm.recordTaskRun(t.id, 'Tested.', 'success'); });
       const after = tm.getTrigger(t.id)!;
       expect(after.status).toBe('open');
       expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
@@ -896,9 +896,9 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
       expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(true);
     });
 
-    it('a failure neither ends it nor arms a retry', () => {
+    it('a failure neither ends it nor arms a retry', async () => {
       const t = oneShot();
-      tm.recordTaskRun(t.id, 'boom', 'failed');
+      await runAsHandRun(t.id, async () => { tm.recordTaskRun(t.id, 'boom', 'failed'); });
       const after = tm.getTrigger(t.id)!;
       expect(after.status).toBe('open');
       expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
@@ -906,11 +906,12 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
       expect(after.last_run_status).toBe('failed');
     });
 
-    it('twin: once stamped it is a schedule again, and its runs are recorded as before', () => {
-      const t = oneShot(true);
-      tm.recordTaskRun(t.id, 'Ran.', 'success');
+    it('twin: the same writes outside a test run, or for another trigger, are recorded as before', async () => {
+      const t = oneShot();
+      const other = oneShot();
+      await runAsHandRun(other.id, async () => { tm.recordTaskRun(t.id, 'Ran.', 'success'); });
       expect(tm.getTrigger(t.id)!.status).toBe('completed');
-      const u = oneShot(true);
+      const u = oneShot();
       tm.recordTaskRun(u.id, 'boom', 'failed');
       expect(tm.getTrigger(u.id)!.retry_count).toBe(1);
     });

@@ -20,6 +20,7 @@
  * - It covers only a proposal whose last party is the principal it was minted for
  *   (`handRunCovers` in worker-loop.ts).
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { RequestPrincipal } from './request-principal.js';
 
 declare const handRunMarkerBrand: unique symbol;
@@ -34,6 +35,28 @@ export interface HandRunGrant {
 }
 
 export type HandRunMinter = (triggerId: string, principal: RequestPrincipal) => HandRunMarker;
+
+/**
+ * A test run leaves the proposal's schedule as it found it: status, next run, retry count,
+ * the enabled switch, a watch's baseline. Whether a run IS a test is decided ONCE, at
+ * dispatch, and carried by the run in this scope — never re-derived when a result is
+ * written. Re-deriving it then, from the row or from where the call came from, gives the
+ * wrong answer as soon as the stamp changes while the run is under way: the owner stamping
+ * during a test, or a mandate's edit clearing the stamp during an ordinary run.
+ *
+ * Entering the scope passes no check. It only withholds schedule writes for one trigger,
+ * so a caller that enters it gains nothing it could use to run anything.
+ */
+const handRunScope = new AsyncLocalStorage<string>();
+
+export function runAsHandRun<T>(triggerId: string, fn: () => Promise<T>): Promise<T> {
+  return handRunScope.run(triggerId, fn);
+}
+
+/** Whether the current run is a test run by hand of this trigger, as decided at dispatch. */
+export function isHandRunOf(triggerId: string): boolean {
+  return handRunScope.getStore() === triggerId;
+}
 
 export class HandRunDoor {
   readonly #issued = new Map<object, HandRunGrant>();

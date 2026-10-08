@@ -11,7 +11,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isMandateTag, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
-import { HandRunDoor, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
+import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -715,7 +715,8 @@ export class WorkerLoop {
           if (!answered) continue;
           if (taskManager.endWait(parked.id, 'open')) {
             // A proposal's question came from a test run by hand; its schedule is not the
-            // test's to move. It keeps its own time and runs with the answer once the
+            // test's to move. Outside any run, so this asks the ROW (hand-run-door.ts says
+            // why writers inside a run must not). It keeps its own time and runs with the answer once the
             // owner stamps it, while the answer is still held.
             if (!mandateNeedsOwnerStamp(parked)) {
               this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
@@ -747,8 +748,9 @@ export class WorkerLoop {
             );
           }
           // A proposal's wait came from a test run by hand: it ends back where it was, not
-          // `failed`. (recordTaskRun below withholds its schedule writes on the same rule.)
-          if (taskManager.endWait(parked.id, mandateNeedsOwnerStamp(parked) ? 'open' : 'failed')) {
+          // `failed`. Outside any run, so this asks the ROW.
+          const proposal = mandateNeedsOwnerStamp(parked);
+          if (taskManager.endWait(parked.id, proposal ? 'open' : 'failed')) {
             // Ending the wait is not the whole job, and getting this wrong is a
             // LOOP rather than a stall. `next_run_at` still points at the run that
             // parked — a moment in the past — and `getDue`'s denylist deliberately
@@ -778,7 +780,10 @@ export class WorkerLoop {
             // got its answer still reports success is §0 A7, which this wave does
             // not build; the overwrite is the same defect seen from the other end.
             try {
-              taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
+              // A proposal's expired question was a test's: recorded as one, so its
+              // schedule stays as it was.
+              if (proposal) await runAsHandRun(parked.id, async () => { taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed'); });
+              else taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
             } catch (err: unknown) {
               process.stderr.write(
                 `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -980,19 +985,16 @@ export class WorkerLoop {
     // without one the HTTP layer minted — not a principal, not a look-alike object, not
     // the same marker twice.
     //
-    // A run that passes on it is a TEST of a proposal, and it leaves the proposal's
-    // schedule as it found it. That is not carried by this run but by the ROW: while a
-    // trigger waits for the owner's stamp nothing fires it on schedule, so every schedule
-    // write the worker makes to such a row comes from a test, and each writer withholds it
-    // on `mandateNeedsOwnerStamp` (TaskManager.recordTaskRun, the wait sweeps, the
-    // workflow refusal, the watch baseline).
+    // A run that passes on it is a TEST of a proposal, and that is decided HERE, once,
+    // from the row as it stood at dispatch — a proposal still waiting for the owner's
+    // stamp — and carried by the run (hand-run-door.ts, `runAsHandRun`). Every writer
+    // inside the run asks the run, not the row: the stamp may change while it is under way.
     const grant = this.#handRunDoor.consume(marker, task.id);
-    const handRun = handRunCovers(grant, task);
-    if (handRun && grant) {
-      // One line per hand start, naming who started it. A process log, not a record.
-      process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
-    }
-    return this.#executeTask(task, capUSD, handRun);
+    const handRun = mandateNeedsOwnerStamp(task) && handRunCovers(grant, task);
+    if (!handRun || !grant) return this.#executeTask(task, capUSD, false);
+    // One line per hand start, naming who started it. A process log, not a record.
+    process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
+    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true));
   }
 
   async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean): Promise<void> {
@@ -1227,7 +1229,10 @@ export class WorkerLoop {
       // therefore ended in silence: no retry, and no word to the owner either. Losing
       // the retry is intended (the owner's last instruction was stop); losing the
       // notification with it was not.
+      // A test run by hand is never retried (`recordTaskRun` leaves its schedule alone),
+      // so its failure is reported now or never.
       const willRetry = status !== 'stopped'
+        && !isHandRunOf(task.id)
         && (task.max_retries ?? 0) > 0
         && (task.retry_count ?? 0) < (task.max_retries ?? 0);
 
@@ -2005,7 +2010,7 @@ export class WorkerLoop {
       const tm = this.engine.getTaskManager();
       // A proposal is not switched off by its own test run: it does not fire anyway, and
       // the owner stamping it is how it would start.
-      if (mandateNeedsOwnerStamp(task)) {
+      if (isHandRunOf(task.id)) {
         tm?.recordTaskRun(task.id, `Not run: workflow "${planned.id}" needs first-run confirmation by the owner.`, 'failed');
         return;
       }
@@ -2267,7 +2272,7 @@ export class WorkerLoop {
       taskManager.recordTaskRun(task.id, truncatedAnalysis, 'success');
       // A test run of a proposal does not move the baseline: the first run after the
       // owner's stamp compares against what the proposal was set up with.
-      if (!mandateNeedsOwnerStamp(task)) taskManager.updateWatchConfig(task.id, config);
+      if (!isHandRunOf(task.id)) taskManager.updateWatchConfig(task.id, config);
     }
 
     // Slice B3 — escalation primitive (consumer #2): a watcher finding opens (or

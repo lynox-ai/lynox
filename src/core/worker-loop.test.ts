@@ -44,7 +44,7 @@ vi.mock('./network-guard.js', async (importActual) => {
 });
 
 import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers } from './worker-loop.js';
-import type { HandRunMarker } from './hand-run-door.js';
+import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -2362,9 +2362,16 @@ describe('WorkerLoop', () => {
       const { loop, tm } = setup(task);
       (tm.getExpiredWaitingTriggers as ReturnType<typeof vi.fn>).mockReturnValue([task, twin]);
       (tm.getDueTriggers as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (tm.endWait as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const inScope = new Map<string, boolean>();
+      (tm.recordTaskRun as ReturnType<typeof vi.fn>).mockImplementation((id: string) => { inScope.set(id, isHandRunOf(id)); });
       await loop.tick();
       expect(tm.endWait).toHaveBeenCalledWith('hr-prop', 'open');
       expect(tm.endWait).toHaveBeenCalledWith('hr-own', 'failed');
+      // Outside any run the sweep decides on the row, and records a proposal's expired
+      // test question as a test, so its schedule stays; the owner's schedule as before.
+      expect(inScope.get('hr-prop')).toBe(true);
+      expect(inScope.get('hr-own')).toBe(false);
     });
 
     it('an answered test question does not move the proposal\'s time', async () => {
@@ -2507,28 +2514,25 @@ describe('WorkerLoop', () => {
     expect(recorded[1]).not.toContain('disabled');
   });
 
-  it('a test of a watch proposal does not move its baseline; once stamped, a run does', async () => {
+  it('a test of a watch proposal does not move its baseline; an ordinary run does', async () => {
     vi.useRealTimers();
-    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined } as unknown as Session;
     const updateWatchConfig = vi.fn();
-    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig } as unknown as TaskManager;
-    const engine = {
-      getTaskManager: vi.fn(() => taskManager), getUserConfig: vi.fn(() => ({})),
-      createSession: vi.fn(() => analysisSession), escalateToUser: vi.fn(() => null),
-    } as unknown as Engine;
-    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
-    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
-    const page = '<html><body><main>Headline One</main></body></html>';
     const watch = (over: Partial<TriggerRecord>): TriggerRecord => makeTask({
-      id: 't-watch-prop', source: 'watch', effect: 'run_agent',
+      id: 't-watch-prop', source: 'watch', effect: 'run_agent', schedule_cron: undefined,
       watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }), ...over,
     });
+    const proposalRow = watch({ created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined });
+    const tm = Object.assign(makeTaskManager([proposalRow]), { updateWatchConfig });
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session: analysisSession }), makeNotificationRouter(false), 60_000);
+    const exec = loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+    const page = '<html><body><main>Headline One</main></body></html>';
     mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
-    await fire(watch({ created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined }));
+    await exec.executeTask(proposalRow, null, loop.claimHandRunMinter()('t-watch-prop', { kind: 'mandate', email: 'eva@kanzlei.example' }));
     expect(analysisSession.run).toHaveBeenCalledTimes(1);
     expect(updateWatchConfig).not.toHaveBeenCalled();
     mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
-    await fire(watch({ created_by: 'mandate:eva@kanzlei.example', confirmed_at: '2026-10-08T00:00:00.000Z' }));
+    await exec.executeTask(watch({ created_by: 'owner' }), null);
     expect(updateWatchConfig).toHaveBeenCalledTimes(1);
   });
 });
@@ -3158,6 +3162,22 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     tm.markEditedBy(t.id, M, true);
     release();
     await run;
+    expect(tm.getTrigger(t.id)!.status).toBe('completed');
+    loop.stop();
+  });
+
+  it('D-1: a hand run of a schedule that is already stamped is an ordinary run, recorded as one', async () => {
+    const t = tm.create({
+      title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z',
+      createdBy: M, confirmedAt: '2026-06-01T00:00:00.000Z',
+    }) as TriggerRecord;
+    expect(tm.getTrigger(t.id)!.edited_by ?? tm.getTrigger(t.id)!.created_by).toBe(M);
+    const { session, started, release } = heldSession('Ran.');
+    const loop = loopWith(session);
+    expect(await loop.runTriggerNow(t.id, loop.claimHandRunMinter()(t.id, EVA))).toEqual({ ok: true });
+    await started;
+    release();
+    await until(() => tm.getTrigger(t.id)?.last_run_status === 'success');
     expect(tm.getTrigger(t.id)!.status).toBe('completed');
     loop.stop();
   });
