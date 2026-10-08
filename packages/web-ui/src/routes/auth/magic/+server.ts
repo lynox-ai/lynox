@@ -17,13 +17,11 @@ import type { RequestHandler } from './$types.js';
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import {
-	createSessionToken,
 	verifySessionToken,
 	isRateLimited,
 	recordFailedLogin,
 	clearRateLimit,
 	isHttpsRequest,
-	SESSION_MAX_AGE_S,
 } from '$lib/server/auth.js';
 import { decideMagicLinkOutcome, type MagicLinkOutcome } from '$lib/server/magic-link.js';
 
@@ -42,11 +40,10 @@ function getSecret(): string | null {
 
 function setSessionCookie(
 	cookies: Parameters<RequestHandler>[0]['cookies'],
-	secret: string,
+	session: { token: string; maxAge: number },
 	isSecure: boolean,
-) {
-	const session = createSessionToken(secret);
-	cookies.set('lynox_session', session, {
+): void {
+	cookies.set('lynox_session', session.token, {
 		path: '/',
 		httpOnly: true,
 		secure: isSecure,
@@ -54,7 +51,7 @@ function setSessionCookie(
 		// Mail.app must allow the cookie to land. State-changing POSTs still
 		// need same-site origin so CSRF is unaffected.
 		sameSite: 'lax',
-		maxAge: SESSION_MAX_AGE_S,
+		maxAge: session.maxAge,
 	});
 }
 
@@ -81,8 +78,8 @@ export const GET: RequestHandler = async ({ url, request, cookies, getClientAddr
 		case 'already_logged_in':
 			redirect(303, '/app');
 		case 'success':
+			setSessionCookie(cookies, outcome.session, isHttpsRequest(url, request));
 			clearRateLimit(ip);
-			setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 			redirect(303, '/app');
 		case 'redirect_login':
 			redirect(303, `/login?error=magic_${outcome.reason}`);

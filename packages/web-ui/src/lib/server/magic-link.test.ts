@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { decideMagicLinkOutcome, type MagicLinkDeps, type MagicLinkReason } from './magic-link.js';
 import { MAGIC_LINK_ERROR_CODES } from '../contract/http.js';
+import { readFileSync } from 'node:fs';
+import { readSessionToken, MANDATE_SESSION_MAX_S, SESSION_MAX_AGE_S } from './auth.js';
+import { fileURLToPath } from 'node:url';
+
+// The golden body the control plane sends for a mandate login (core src/contract/fixtures).
+const MANDATE_FIXTURE = fileURLToPath(new URL('../../../../../src/contract/fixtures/auth-login-success.mandate.json', import.meta.url));
 
 // A token that satisfies the shape gate (≥100 chars) — actual content doesn't
 // matter because we stub the CP fetch.
@@ -61,6 +67,33 @@ describe('decideMagicLinkOutcome — CP fetch outcomes', () => {
 		const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ valid: true }), { status: 200 }));
 		const outcome = await decideMagicLinkOutcome(mkDeps({ fetchImpl }));
 		expect(outcome.type).toBe('success');
+		if (outcome.type !== 'success') return;
+		// No principal in the body is the owner: the principal-less 30-day session.
+		expect(readSessionToken(outcome.session.token, 'engine-secret')?.principal).toBeNull();
+		expect(outcome.session.maxAge).toBe(SESSION_MAX_AGE_S);
+	});
+
+	it('gives the mandate session for the mandate the CP verified', async () => {
+		const body = JSON.parse(readFileSync(MANDATE_FIXTURE, 'utf8')) as { principal: { mandate_id: string } };
+		const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+		const outcome = await decideMagicLinkOutcome(mkDeps({ fetchImpl }));
+		if (outcome.type !== 'success') throw new Error(outcome.type);
+		expect(readSessionToken(outcome.session.token, 'engine-secret')?.principal?.mandate_id).toBe(body.principal.mandate_id);
+		expect(outcome.session.maxAge).toBe(MANDATE_SESSION_MAX_S);
+	});
+
+	it('gives no session when the mandate the CP names has already ended', async () => {
+		const body = JSON.parse(readFileSync(MANDATE_FIXTURE, 'utf8')) as { principal: Record<string, unknown> };
+		body.principal['mandate_expires_at'] = '2000-01-01T00:00:00.000Z';
+		const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+		expect(await decideMagicLinkOutcome(mkDeps({ fetchImpl }))).toEqual({ type: 'redirect_login', reason: 'expired' });
+	});
+
+	it('refuses a principal it does not know instead of reading it as the owner', async () => {
+		const onFailedLogin = vi.fn();
+		const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ valid: true, principal: { kind: 'member', email: 'a@example.invalid' } }), { status: 200 }));
+		const outcome = await decideMagicLinkOutcome(mkDeps({ fetchImpl, onFailedLogin }));
+		expect(outcome).toEqual({ type: 'redirect_login', reason: 'cp_unreachable' });
 	});
 
 	it('forwards the structured error_code from the CP body (expired)', async () => {
@@ -138,14 +171,16 @@ describe('decideMagicLinkOutcome — CP request shape', () => {
 		const headers = call[1].headers as Record<string, string>;
 		expect(headers['x-instance-secret']).toBe('engine-secret');
 		expect(headers['x-login-ip']).toBe('203.0.113.1');
-		const body = JSON.parse(call[1].body as string) as { token: string; instanceId: string };
+		const body = JSON.parse(call[1].body as string) as { token: string; instanceId: string; principal_version: number };
 		expect(body.token).toBe(VALID_TOKEN);
 		expect(body.instanceId).toBe('inst-1');
+		// Without it the CP admits only the owner: this caller reads the principal.
+		expect(body.principal_version).toBe(1);
 		// The KEY SET, not just the two keys we care about: the control plane
 		// reads `instanceId` (camelCase) while the OAuth claim on the same
 		// boundary reads `instance_id`. An extra or renamed key here is a wire
 		// change, and the CP would simply see the field as missing.
-		expect(Object.keys(body).sort()).toEqual(['instanceId', 'token']);
+		expect(Object.keys(body).sort()).toEqual(['instanceId', 'principal_version', 'token']);
 	});
 
 	it('attaches an AbortSignal so a hung CP fetch eventually times out', async () => {

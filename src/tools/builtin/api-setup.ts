@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
-import { accessTokenKey, refreshTokenKey, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
@@ -2031,6 +2031,16 @@ ${draftJson}
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
+      // ⛔ Every token this action writes lands in the two names derived from the id. The
+      // store refuses an oauth2 profile whose derived names belong to this instance
+      // (`protectedDerivedSlot`, applied when a profile is admitted), so a registered
+      // profile never has one. Asked once more HERE, before anything is read or sent,
+      // rather than at each write further down: a refusal after the exchange would throw
+      // away a freshly minted token, and with a provider that rotates, the refresh token
+      // the exchange just spent along with it.
+      if (protectedDerivedSlot(profile) !== null) {
+        return `Error: profile "${input.id}" is oauth2, so its tokens would live in a vault slot that belongs to a credential of this instance. Nothing was sent. Choose a different id for this profile.`;
+      }
       const oauth = profile.auth.oauth;
       // A profile that names a preset this engine knows exchanges tokens at the preset's own
       // endpoint — the one the callback used — and its `token_url` is display only. Otherwise a
@@ -2163,16 +2173,13 @@ ${draftJson}
       //
       // The advice is "leave it out", not "pick another name": the attach reads the
       // derived access name and nothing else, so any other chosen name clears this
-      // refusal and leaves a token no request can use. Two shapes the default does
-      // not fix get their own answer — a profile that reads its refresh token from
-      // that very name, and an id whose derived access name is itself protected —
-      // because in both, following "leave it out" walks into the next refusal.
+      // refusal and leaves a token no request can use. One shape the default does
+      // not fix gets its own answer — a profile that reads its refresh token from
+      // that very name — because there, following "leave it out" walks into the
+      // next refusal. (An id whose derived names are protected was refused above.)
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
         const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
         const derivedAccess = accessTokenKey(input.id);
-        if (isProtectedSecretWrite(derivedAccess)) {
-          return `${clash} The name this profile would otherwise use, "${derivedAccess}", is a protected slot, so its id leaves no name for the access token: rename the api_profile so its derived names do not collide.`;
-        }
         // On `refreshKey`, not on the output name: the sentence below asserts that
         // the profile's refresh slot IS the name the access token needs, and that
         // is true for every shape where it holds — including one that arrives with
@@ -2350,10 +2357,8 @@ ${draftJson}
       // sent; writing that again and putting it on the record would make the
       // user's own grant look like the exchange's, and a delete would take it.
       // Computed HERE, above the write of the access token, rather than below the
-      // refresh write where it used to sit. Two saves follow a token write — the
-      // success save and the protected-refresh-name refusal — and only one of them
-      // could reach the value from down there. The other one silently kept the
-      // previous token's expiry.
+      // refresh write where it used to sit: a save that cannot reach the value
+      // silently keeps the previous token's expiry.
       //
       // The bound itself lives in `tokenExpiryFrom` because the callback in
       // `server/http-api.ts` is the second writer of this same field.
@@ -2366,21 +2371,8 @@ ${draftJson}
       exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
       if (rotated !== null) {
-        // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
-        // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
-        // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
-        // close the door and leave the window.
-        if (isProtectedSecretWrite(refreshName)) {
-          // The access token is written already; it goes on the record like any
-          // other write, or no later delete could take it.
-          const accessWrite: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
-          const saved = persistGrant(apiStore, input.id, apisDir, (current) => ({
-            ...current,
-            written: mergeWrites(current, accessWrite),
-          }), tokenExpiresAt);
-          if (saved === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, accessWrite, secretStore);
-          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
-        }
+        // Derived from the profile id, and a protected derived name was refused at the
+        // top of this action — `ID_PATTERN` alone permits ids like `mail-account-x`.
         secretStore.set(refreshName, rotated);
       }
       // Persist the expiry, absolute and in milliseconds. Until now `expires_in`

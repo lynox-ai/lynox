@@ -1534,6 +1534,8 @@ export class LynoxHTTPApi {
   private static readonly SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
+  /** A principal cookie stamped further than this in the future is refused (D4). */
+  private static readonly SESSION_FUTURE_SKEW_S = 60;
 
   /**
    * How each request authenticated, for the records that must say where an approval came
@@ -1543,15 +1545,19 @@ export class LynoxHTTPApi {
    */
   private readonly _authOrigin = new WeakMap<IncomingMessage, string>();
 
+  /** The principal a request's session cookie carried, set by the auth block. */
+  private readonly _sessionPrincipal = new WeakMap<IncomingMessage, RequestPrincipal>();
+
   /**
-   * Who a request acts as (request-principal.ts). Until the recipient's login puts a
-   * principal into the session, every authenticated request is the owner, so this
-   * returns the owner and every rule that reads it behaves as before. The rules are in
-   * place for when it does not: only the owner stamps or approves, and a schedule a
-   * mandate created or changed waits for the owner (PRD customer-granted-operator-access
-   * §3.12, §3.13).
+   * Who a request acts as (request-principal.ts): the mandate its session cookie
+   * carries, and the owner for everything else — a cookie without a principal, a
+   * bearer, no secret at all. Only a mandate login mints a cookie with a principal,
+   * and the control plane admits one only when its switch is on. The rules that read
+   * this: only the owner stamps or approves, and a schedule a mandate created or
+   * changed waits for the owner (PRD customer-granted-operator-access §3.12, §3.13).
    */
-  private _principalResolver: (req: IncomingMessage) => RequestPrincipal = () => OWNER_PRINCIPAL;
+  private _principalResolver: (req: IncomingMessage) => RequestPrincipal =
+    (req) => this._sessionPrincipal.get(req) ?? OWNER_PRINCIPAL;
 
   /**
    * The minter of each worker loop's one-time hand-run door (hand-run-door.ts), claimed in
@@ -1575,9 +1581,8 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Test seam: feed a principal before the session can carry one, so the mandate branch
-   * of the rules is exercised now rather than first in production. Not reachable over
-   * HTTP; the session-borne principal replaces the default resolver.
+   * Test seam: feed a principal without minting a session cookie for it. Not reachable
+   * over HTTP; it replaces the cookie-borne resolver for the whole instance.
    */
   setPrincipalResolverForTesting(resolver: (req: IncomingMessage) => RequestPrincipal): void {
     this._principalResolver = resolver;
@@ -1609,9 +1614,19 @@ export class LynoxHTTPApi {
     return false;
   }
 
-  /** Returns the cookie's issued-at unix-sec on success, null on any failure.
-   *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
-  private _verifySessionCookie(req: IncomingMessage, secret: string): number | null {
+  /**
+   * Returns the cookie's issued-at unix-sec and its principal on success, null on any
+   * failure. Caller uses the timestamp to decide whether to roll a fresh cookie.
+   *
+   * Formats: `<ts>.<hmac>` (old), `<nonce>.<ts>.<hmac>`, and
+   * `<nonce>.<principal>.<ts>.<hmac>` — the principal one base64url JSON part, minted
+   * by the Web UI for a mandate login (`createSessionToken` in
+   * packages/web-ui/src/lib/server/auth.ts) and covered by the same HMAC. A principal
+   * cookie ends at its signed `exp` and is refused when stamped more than a minute in
+   * the future; a principal this engine does not know is refused, never read as the
+   * owner.
+   */
+  private _verifySessionCookie(req: IncomingMessage, secret: string): { iat: number; principal: RequestPrincipal | null } | null {
     const cookieHeader = req.headers['cookie'];
     if (!cookieHeader) return null;
 
@@ -1620,16 +1635,17 @@ export class LynoxHTTPApi {
 
     const token = decodeURIComponent(match[1]);
     const parts = token.split('.');
-    if (parts.length < 2 || parts.length > 3) return null;
+    if (parts.length < 2 || parts.length > 4) return null;
 
     const sig = parts[parts.length - 1]!;
     const payload = parts.slice(0, -1).join('.');
-    // Timestamp: last element before sig (supports old ts.hmac and new nonce.ts.hmac)
-    const tsStr = parts.length === 3 ? parts[1]! : parts[0]!;
+    // Timestamp: last element before sig (old ts.hmac, nonce.ts.hmac, nonce.principal.ts.hmac)
+    const tsStr = parts[parts.length - 2]!;
 
     const timestamp = parseInt(tsStr, 10);
     if (Number.isNaN(timestamp)) return null;
-    if (Math.floor(Date.now() / 1000) - timestamp > LynoxHTTPApi.SESSION_MAX_AGE_S) return null;
+    const nowS = Math.floor(Date.now() / 1000);
+    if (nowS - timestamp > LynoxHTTPApi.SESSION_MAX_AGE_S) return null;
 
     try {
       const key = createHmac('sha256', 'lynox-session').update(secret).digest();
@@ -1642,10 +1658,36 @@ export class LynoxHTTPApi {
       const fixed = Buffer.alloc(expBuf.length);
       sigBuf.copy(fixed); // truncates or zero-pads to expBuf.length
       const matched = timingSafeEqual(fixed, expBuf);
-      return matched && sigBuf.length === expBuf.length ? timestamp : null;
+      if (!matched || sigBuf.length !== expBuf.length) return null;
     } catch {
       return null;
     }
+
+    if (parts.length < 4) return { iat: timestamp, principal: null };
+    const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
+    if (session === null) return null;
+    if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
+    if (nowS >= session.exp) return null;
+    return { iat: timestamp, principal: { kind: 'mandate', email: session.email } };
+  }
+
+  /** The signed principal part of a session cookie; null for anything this engine does not know. */
+  private static _parseSessionPrincipal(part: string): { email: string; exp: number } | null {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+    if (raw === null || typeof raw !== 'object') return null;
+    const p = raw as Record<string, unknown>;
+    if (p['v'] !== 1 || p['kind'] !== 'mandate') return null;
+    const { email, display, mandate_id: mandateId, exp } = p;
+    if (typeof email !== 'string' || email.length === 0) return null;
+    if (typeof display !== 'string' || display.length === 0) return null;
+    if (typeof mandateId !== 'string' || mandateId.length === 0) return null;
+    if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null;
+    return { email, exp };
   }
 
   /**
@@ -2406,13 +2448,19 @@ export class LynoxHTTPApi {
           this._authOrigin.set(req, 'bearer');
         }
       } else {
-        const cookieIssuedAt = this._verifySessionCookie(req, secret);
-        if (cookieIssuedAt !== null) {
-          // Session cookie auth (same-origin Web UI requests)
-          authScope = adminSecret ? 'user' : 'admin';
+        const session = this._verifySessionCookie(req, secret);
+        if (session !== null) {
+          // Session cookie auth (same-origin Web UI requests). A mandate session is
+          // `user` even when no admin secret is set (D6): the admin routes are the
+          // owner's, never the recipient's.
+          authScope = adminSecret || session.principal !== null ? 'user' : 'admin';
+          if (session.principal !== null) this._sessionPrincipal.set(req, session.principal);
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
-          this._maybeRefreshSessionCookie(req, res, secret, cookieIssuedAt, trustProxy);
+          // Never re-mint a principal cookie (D2): the refresh below mints a cookie
+          // WITHOUT a principal, so re-minting would turn the mandate into the owner,
+          // and it would restart a clock the mandate session must not outlive.
+          if (session.principal === null) this._maybeRefreshSessionCookie(req, res, secret, session.iat, trustProxy);
         } else {
           errorResponse(res, 401, 'Unauthorized');
           return;
@@ -9961,14 +10009,14 @@ export class LynoxHTTPApi {
       // instruction, so a repeated id also destroys the one thing it is for: saying
       // how many rows actually failed.
       //
-      // That exact figure is no longer reachable, because the loop now also stops on
-      // the first fruitless round — what this line still covers is the PARTIAL case,
-      // where some rows delete and a stuck one is visited again on the next pass.
+      // That loop — the per-entity wipe of agent-memory.db — is gone: the store is now
+      // emptied by one transaction (`AgentMemoryDb.deleteAllData`), and no step of
+      // this route re-lists any more. The bound stays because it costs nothing, but
+      // no step can reach it today and no test exercises it; a loop that re-lists
+      // would need it again, and a test with it.
       //
       // ⚠ It suppresses the LOG line too, first-wins: a second, different failure of
-      // the same key is never written. If a row fails transiently in one round and
-      // permanently in the next, the operator keeps the transient message, which is
-      // the less diagnostic of the two.
+      // the same key is never written.
       const noted = new Set<string>();
       const note = (key: string, err: unknown, list: string[] = failed): void => {
         if (noted.has(key)) return;
@@ -10049,90 +10097,21 @@ export class LynoxHTTPApi {
         }
       }
 
-      // Delete all knowledge graph entities (cascades to relations, mentions, cooccurrences)
+      // Empty agent-memory.db, the legacy memory store: memories (plaintext on this
+      // store by design), entities, mentions, relations, cooccurrences, the
+      // `supersedes` lineage and `metrics` — every table but the migration ledger,
+      // enumerated from `sqlite_master` (`AgentMemoryDb.deleteAllData`).
+      //
+      // This replaces two steps. The memories were SOFT-deleted (`is_active = 0`):
+      // every row stayed readable until a later `gc()`, and a row that was already
+      // inactive stayed exactly as it was. And everything else was reached only
+      // through a paged entity listing, deleted one entity at a time, which needed
+      // four guards of its own (per item, dedupe, progress, a round bound) against
+      // a delete that throws, no-ops or never ends — and still left `metrics` and
+      // `supersedes`, which hang off no entity. One transaction cannot stop on a
+      // page or spin, and a failure rolls the whole file back and names the store.
       const kg = reach('knowledge_graph', engine.getKnowledgeLayer());
-      if (kg) {
-        attempt('knowledge_graph', () => {
-          // Bounded, like both loops in the export route — and for a reason
-          // `attempt` cannot cover: it catches a THROW, not a non-termination. The
-          // loop re-lists after deleting, so the day `deleteEntity` stops removing
-          // a row the listing returns (a scope filter added on one side only, a
-          // delete that silently no-ops), this spins forever: the request never
-          // answers, the event loop is held by synchronous SQLite calls, and the
-          // caller sees a timeout rather than `failed: ['knowledge_graph']`.
-          // Measured by a refuter with `deleteEntity` stubbed to a no-op: the
-          // request never returned and the run was killed at 120 s.
-          const db = kg.getDb();
-          const MAX_ROUNDS = 10_000;
-          let entities = db.listEntities({ limit: 200 });
-          for (let round = 0; entities.length > 0; round++) {
-            if (round >= MAX_ROUNDS) {
-              // Rounds, not progress — and deliberately NOT a claim about how much
-              // was removed. An earlier version of this comment said reaching the
-              // bound "means two million entities were genuinely removed", which runs
-              // the arithmetic backwards: 200 per page is an UPPER bound, the floor is
-              // one success per round (10 000), and for a delete that neither throws
-              // nor removes the row it is ZERO — the shape the note below says this
-              // bound exists for. Measured: that shape reaches the bound with 2 000 000
-              // calls and nothing removed; a second process writing the same file
-              // reaches it after 500 250. So the message says what it knows, which is
-              // that the loop did not finish, and the progress check below is what
-              // normally stops it.
-              throw new Error(`entity wipe did not finish within ${MAX_ROUNDS} rounds`);
-            }
-            // Per ITEM, and this is the loop where it matters most: one undeletable
-            // row used to abort the whole attempt, leaving every other entity in
-            // `agent-memory.db` in place while the answer named only the store. It
-            // is also the largest table this route touches.
-            //
-            // ⚠ These four guards — per item, dedupe, progress, round bound — cost
-            // three review rounds and introduced two regressions of their own, so
-            // putting the loop back to its pre-change form was considered and
-            // REJECTED on a measurement: without the bound, a delete that neither
-            // throws nor removes the row spins forever on the event loop, and the
-            // test below wedges the worker rather than failing. A demonstrated hang
-            // in an HTTP handler is worse than the guards' residual risk — and that
-            // risk is understated by the test that drives it, whose store is an O(1)
-            // closure answering in 18 ms: the same shape against the real store cost
-            // 5.58 s and 949 MB for 200 of the 10 000 rounds, and a probe replaying it
-            // reached 9,1 GiB before it was killed by hand. Finite still beats
-            // infinite; the suite cannot see the size of what it is choosing against.
-            //
-            // What the history does mean is that this loop is where a reader should
-            // look first. The two regressions are named at the progress note just
-            // below and at the dedupe note beside `note` further up — not both below,
-            // as an earlier version of this line said.
-            //
-            // ⚠ Stop when a round DELETED NOTHING, and read that from the deletes
-            // rather than from the row count. The first version of this check
-            // compared the length of the next listing against the last one, which is
-            // wrong in a way that only shows past one page: `listEntities` clamps its
-            // limit to 200, so a working wipe of 400 rows removes 200, lists 200
-            // again and "no progress" fires over a success. Measured on the real
-            // store: 399 rows completed, 400 threw after 200 successful deletes with
-            // 200 surviving, 500 threw with 300 surviving. A count is not progress;
-            // whether an attempt succeeded is.
-            //
-            // (An earlier version of this comment, and of its commit message, said
-            // "400 threw with 300 surviving" — it spliced a 400-row run's throw with
-            // a 500-row run's survivor count. The boundary is right, the number was
-            // not, and it is the number that justifies the fix.)
-            const removed = attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
-            if (removed === 0) {
-              throw new Error(`entity wipe made no progress — ${String(entities.length)} entities remain`);
-            }
-            entities = db.listEntities({ limit: 200 });
-          }
-        });
-        // Its own attempt: a throw in the entity loop above used to skip this line,
-        // so one undeletable entity left every memory row active.
-        //
-        // ⚠ And this is a SOFT delete — `UPDATE memories SET is_active = 0`. The
-        // text stays on disk, in plaintext by design on this legacy store, until a
-        // later `gc()` run reaps it. The hard-delete primitive exists
-        // (`purgeMemoriesByIds`) and only the single-subject path uses it.
-        attempt('knowledge_graph_memories', () => { kg.getDb().deactivateAllMemories(); });
-      }
+      if (kg) attempt('knowledge_graph', () => { kg.getDb().deleteAllData(); });
 
       // Delete all subject-graph data (engine.db) — Foundation Rework v2 tables.
       // The legacy KG wipe above clears agent-memory.db; this clears the engine.db

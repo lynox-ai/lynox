@@ -10,11 +10,13 @@
  * not from local re-declarations.
  */
 import {
+	LOGIN_PRINCIPAL_VERSION,
 	isMagicLinkErrorCode,
 	type MagicLinkErrorCode,
 	type MagicLinkVerifyRequest,
 	type AuthErrorBody,
 } from '../contract/http.js';
+import { loginSessionFromBody } from './auth.js';
 
 /**
  * Reason codes surfaced to the user on /login?error=magic_<reason>.
@@ -38,7 +40,8 @@ export type MagicLinkReason =
 
 export type MagicLinkOutcome =
 	| { type: 'already_logged_in' }
-	| { type: 'success' }
+	/** The session to set: the owner's, or the mandate session for the login the CP verified. */
+	| { type: 'success'; session: { token: string; maxAge: number } }
 	| { type: 'redirect_login'; reason: MagicLinkReason };
 
 export interface MagicLinkDeps {
@@ -93,6 +96,7 @@ export async function decideMagicLinkOutcome(deps: MagicLinkDeps): Promise<Magic
 			body: JSON.stringify({
 				token,
 				instanceId: deps.managed.instanceId,
+				principal_version: LOGIN_PRINCIPAL_VERSION,
 			} satisfies MagicLinkVerifyRequest),
 			signal: AbortSignal.timeout(CP_FETCH_TIMEOUT_MS),
 		});
@@ -100,7 +104,16 @@ export async function decideMagicLinkOutcome(deps: MagicLinkDeps): Promise<Magic
 		return { type: 'redirect_login', reason: 'cp_unreachable' };
 	}
 
-	if (res.ok) return { type: 'success' };
+	if (res.ok) {
+		// A principal this reader does not know is refused, never read as the
+		// owner. It means a control plane this engine does not understand, the
+		// same reading as an unknown error code below. A mandate that ended
+		// between the CP's check and here gets no session.
+		const session = loginSessionFromBody(deps.instanceSecret, await res.json().catch(() => null));
+		if (session === 'unknown_principal') return { type: 'redirect_login', reason: 'cp_unreachable' };
+		if (session === 'ended') return { type: 'redirect_login', reason: 'expired' };
+		return { type: 'success', session };
+	}
 
 	deps.onFailedLogin();
 

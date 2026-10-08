@@ -555,7 +555,7 @@ describe('wire event types', () => {
 
 describe('two children sharing a name', () => {
 	/**
-	 * `validateSpawnInput` checks a name's length and control characters, never
+	 * `validateSpawnInput` checks a name's length and characters, never
 	 * its uniqueness — so a batch of two "researcher"s is something the engine
 	 * accepts without complaint. Keying the UI on the name merged their work.
 	 */

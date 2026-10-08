@@ -4,6 +4,7 @@ import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -841,7 +842,8 @@ describe('LynoxHTTPApi', () => {
       const cases = [
         'lynox_session=',                        // empty value
         'lynox_session=nodelimiter',             // length === 1
-        'lynox_session=a.b.c.d',                 // length > 3
+        'lynox_session=a.b.c.d',                 // length 4, NaN timestamp
+        'lynox_session=a.b.1.c.d',               // length > 4
         'lynox_session=not_a_number.deadbeef',   // NaN timestamp
       ];
       for (const cookie of cases) {
@@ -878,6 +880,97 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const refresh = extractFirstCookiePair(res, 'lynox_session');
       expect(refresh).toBeNull();
+    });
+
+    // ── Mandate sessions: the principal part (PRD customer-granted-operator-access §3.3, §3.5)
+
+    /** Sign `<nonce>.<principal>.<iat>` the way the Web UI does, for shapes it never mints. */
+    function mintPrincipalToken(secret: string, iatSec: number, principal: Record<string, unknown>): string {
+      const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+      const part = Buffer.from(JSON.stringify(principal), 'utf8').toString('base64url');
+      const payload = `${randomBytes(8).toString('hex')}.${part}.${iatSec}`;
+      return `${payload}.${createHmac('sha256', key).update(payload).digest('hex')}`;
+    }
+    const MANDATE_LOGIN = {
+      kind: 'mandate' as const, email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+      mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    };
+    const mandatePrincipal = (exp: number): Record<string, unknown> => ({
+      v: 1, kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandate_id: MANDATE_LOGIN.mandate_id, exp,
+    });
+
+    it('reads the mandate the Web UI minted into the session as the request principal', async () => {
+      // The Web UI's own minter, not a mirror: the two sides must agree on the format.
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const asMandate = await fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/approve`, {
+        method: 'POST', headers: { cookie: `lynox_session=${mandate}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(asMandate.status).toBe(403);
+      expect(((await asMandate.json()) as { error: string }).error).toContain('Only the owner');
+      // Twin: the owner's cookie from the same minter passes the owner check.
+      const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+      const asOwner = await fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/approve`, {
+        method: 'POST', headers: { cookie: `lynox_session=${owner}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(asOwner.status).not.toBe(403);
+    });
+
+    it('gives a mandate session the user scope even without an admin secret (D6)', async () => {
+      // This suite runs single-secret, where a cookie is otherwise `admin`.
+      const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+      const res = await fetch(`${baseUrl}/api/vault/rotate`, {
+        method: 'POST', headers: { cookie: `lynox_session=${mandate}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('Admin scope required');
+      // The same session reaches a user route.
+      const user = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${mandate}` } });
+      expect(user.status).toBe(200);
+    });
+
+    it('ends a mandate session at its signed exp', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const live = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS + 60));
+      // exp = now: the session has ended at exp itself, not one second after.
+      const ended = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS));
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${live}` } })).status).toBe(200);
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ended}` } })).status).toBe(401);
+    });
+
+    it('refuses a mandate session stamped more than a minute in the future (D4)', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const ahead = mintPrincipalToken(TEST_SECRET, nowS + 120, mandatePrincipal(nowS + 600));
+      const near = mintPrincipalToken(TEST_SECRET, nowS + 30, mandatePrincipal(nowS + 600));
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ahead}` } })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${near}` } })).status).toBe(200);
+    });
+
+    it('refuses a signed principal it does not know instead of reading it as the owner', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      for (const p of [
+        { ...mandatePrincipal(nowS + 600), kind: 'owner' },
+        { ...mandatePrincipal(nowS + 600), v: 2 },
+        { ...mandatePrincipal(nowS + 600), exp: 'later' },
+        { ...mandatePrincipal(nowS + 600), email: '' },
+        { ...mandatePrincipal(nowS + 600), display: '' },
+        { ...mandatePrincipal(nowS + 600), mandate_id: 5 },
+      ]) {
+        const tok = mintPrincipalToken(TEST_SECRET, nowS, p);
+        const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${tok}` } });
+        expect(res.status, JSON.stringify(p)).toBe(401);
+      }
+    });
+
+    it('never refreshes a principal cookie: a 25-hour-old one comes back without Set-Cookie (D2)', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      const old = mintPrincipalToken(TEST_SECRET, nowS - 25 * 60 * 60, mandatePrincipal(nowS + 600));
+      const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${old}` } });
+      expect(res.status).toBe(200);
+      expect(extractFirstCookiePair(res, 'lynox_session')).toBeNull();
+      // Twin: a principal-less cookie of the same age IS refreshed.
+      const plain = mintSessionToken(TEST_SECRET, nowS - 25 * 60 * 60);
+      const res2 = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${plain}` } });
+      expect(extractFirstCookiePair(res2, 'lynox_session')).toBeTruthy();
     });
 
     it('omits Secure on the rolling refresh over plain HTTP', async () => {
@@ -11241,11 +11334,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({
-            listEntities: () => [],
-            deleteEntity: () => undefined,
-            deactivateAllMemories: () => [],
-          }),
+          getDb: () => ({ deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -11276,7 +11365,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          getDb: () => ({ deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
         getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret }),
@@ -11304,7 +11393,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          getDb: () => ({ deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -11339,128 +11428,49 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data keeps the failure list BOUNDED when every entity delete throws', async () => {
-      // The regression a delta round measured, in the shape that caused it: the
-      // per-item wrapper does not rethrow, so a database that refuses every delete
-      // used to run the full 10 000-round bound and append one key PER ROW PER
-      // ROUND — 2 000 000 entries, a 136 MB response body and 687 MB of RSS, out of
-      // one locked file. Two things bound it now: the loop stops as soon as a round
-      // removes nothing, and `note` records each key at most once.
-      //
-      // `failed` is the retry instruction, so the repetition also destroyed the one
-      // thing it is for — saying how many rows actually failed.
-      const page = Array.from({ length: 200 }, (_, i) => ({ id: `ent-${i}` }));
-      const listEntities = vi.fn(() => page);
+    it('DELETE /api/data empties agent-memory.db in one call', async () => {
+      // An IDENTIFIER witness for the wiring; what the call must achieve on a real
+      // file — every table of agent-memory.db empty, memories that were already
+      // inactive included — is asserted in `erasure-covers-export.test.ts`.
+      const deleteAllData = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
         getDataStore: () => null,
-        getKnowledgeLayer: () => ({
-          getDb: () => ({
-            listEntities,
-            deleteEntity: () => { throw new Error('database is locked'); },
-            deactivateAllMemories: () => [],
-          }),
-        }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ deleteAllData }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        expect(deleteAllData).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('DELETE /api/data names the memory store ONCE when its wipe fails, and wipes the rest', async () => {
+      // What the four tests of the per-entity loop pinned, and what carries it now
+      // that the loop is gone (agent-memory.db is emptied by one transaction):
+      //   · a failure list BOUNDED when every delete throws, and a stuck row named
+      //     once across rounds — there are no rows and no rounds in the answer any
+      //     more, only the store, once, because the route makes ONE attempt; the
+      //     outcome is asserted here. (The dedupe in `note` that guarded the loop is
+      //     no longer reached by any step, so nothing here tests it.)
+      //   · a wipe that drains PAST one listing page — `DELETE FROM` has no page;
+      //     the real-file test seeds more than a page (`agent-memory-db.test.ts`);
+      //   · an answer instead of a hang when deletes make no progress — there is no
+      //     loop to spin; nothing to assert.
+      // Rollback on a failure inside the transaction is asserted on the real file in
+      // `erasure-covers-export.test.ts`.
+      const dropCollection = vi.fn();
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ deleteAllData: () => { throw new Error('database is locked'); } }) }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
         const body = await res.json() as { failed: string[] };
-        const entityKeys = body.failed.filter(k => k.startsWith('knowledge_graph_entity:'));
-        // One per ROW, not one per row per round.
-        expect(entityKeys).toHaveLength(200);
-        expect(new Set(entityKeys).size, 'a key must not repeat').toBe(200);
-        // And the loop stopped on the first fruitless round rather than spinning to
-        // the bound: two listings, the initial one and the progress check.
-        expect(listEntities.mock.calls.length).toBeLessThanOrEqual(3);
-        expect(body.failed).toContain('knowledge_graph');
+        expect(body.failed.filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+        expect(dropCollection, 'a later store must still be wiped').toHaveBeenCalledWith('c1');
       });
     });
-
-    it('DELETE /api/data wipes an entity table LARGER than one listing page', async () => {
-      // The case no test drained before, and the one a working wipe fails without
-      // this fix: `listEntities` clamps its limit to 200, so a progress check that
-      // compares the length of two listings sees 200 twice while 200 rows were
-      // genuinely deleted. Measured on the real store: 399 rows completed; 400 threw
-      // after 200 successful deletes with 200 surviving; 500 threw with 300
-      // surviving — an Art. 17 request on any instance with a used knowledge graph
-      // answering 500. (The first version of this comment said "400 … with 300
-      // surviving", splicing one run's throw with another's survivor count.)
-      //
-      // The mock caps at 200 exactly as `AgentMemoryDb` does; that clamp IS the
-      // property under test, so a fixture without it would witness nothing.
-      let pool = Array.from({ length: 450 }, (_, i) => ({ id: `big-${i}` }));
-      const listEntities = vi.fn(() => pool.slice(0, 200));
-      const deleteEntity = vi.fn((id: string) => { pool = pool.filter(e => e.id !== id); });
-      await swapEngine({
-        getEngineDb: () => null,
-        getDataStore: () => null,
-        getKnowledgeLayer: () => ({ getDb: () => ({ listEntities, deleteEntity, deactivateAllMemories: () => [] }) }),
-      }, async () => {
-        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
-        expect(res.status, 'a wipe past one page is not a failure').toBe(200);
-        const body = await res.json() as { deleted: boolean; failed?: string[] };
-        expect(body.deleted).toBe(true);
-        expect(body.failed ?? []).toEqual([]);
-        expect(pool, 'every entity must be gone, not just the first page').toEqual([]);
-        expect(deleteEntity).toHaveBeenCalledTimes(450);
-      });
-    });
-
-    it('DELETE /api/data names a stuck entity ONCE across rounds', async () => {
-      // The case the all-undeletable test cannot reach, and the one the dedupe in
-      // `note` is actually for: when SOME rows delete, the loop makes progress and
-      // runs another round, so a row that is stuck is visited again — and without
-      // the dedupe its key is appended once per round. `failed` is the retry
-      // instruction; an id repeated per round destroys the one thing it is for.
-      let pool = Array.from({ length: 200 }, (_, i) => ({ id: `ent-${i}` }));
-      const listEntities = vi.fn(() => pool.slice(0, 200));
-      const deleteEntity = vi.fn((id: string) => {
-        if (id === 'ent-0') throw new Error('row is locked');
-        pool = pool.filter(e => e.id !== id);
-      });
-      await swapEngine({
-        getEngineDb: () => null,
-        getDataStore: () => null,
-        getKnowledgeLayer: () => ({ getDb: () => ({ listEntities, deleteEntity, deactivateAllMemories: () => [] }) }),
-      }, async () => {
-        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
-        expect(res.status).toBe(500);
-        const body = await res.json() as { failed: string[] };
-        const stuck = body.failed.filter(k => k === 'knowledge_graph_entity:ent-0');
-        expect(stuck, 'the stuck row must be named once, not once per round').toHaveLength(1);
-        // Fixture guard: the other 199 really were deleted, so the loop did take a
-        // second round and the repetition was reachable at all.
-        expect(pool.map(e => e.id)).toEqual(['ent-0']);
-        expect(body.failed.filter(k => k.startsWith('knowledge_graph_entity:'))).toHaveLength(1);
-      });
-    });
-
-    it('DELETE /api/data answers rather than hanging when the entity wipe makes no progress', async () => {
-      // `attempt` catches a THROW; it cannot catch a non-termination, and the
-      // entity wipe is the one loop here that re-lists after deleting. A refuter
-      // stubbed `deleteEntity` to a no-op and the request never answered at all —
-      // the event loop held by synchronous SQLite calls, the caller left with a
-      // timeout instead of `failed: ['knowledge_graph']`. That is reachable from a
-      // scope filter added on one side of the pair only, or a delete that starts
-      // silently no-opping.
-      const entity = { id: 'e1' };
-      await swapEngine({
-        getEngineDb: () => null,
-        getDataStore: () => null,
-        getKnowledgeLayer: () => ({
-          getDb: () => ({
-            listEntities: () => [entity],
-            deleteEntity: () => undefined,
-            deactivateAllMemories: () => [],
-          }),
-        }),
-      }, async () => {
-        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
-        expect(res.status).toBe(500);
-        const body = await res.json() as { failed: string[] };
-        expect(body.failed).toContain('knowledge_graph');
-      });
-    }, 30_000);
 
     it('DELETE /api/data names an unopened store in the FAILURE answer too', async () => {
       // `skipped` was dropped from both 500 bodies, and the omission reinstated the
@@ -11556,15 +11566,15 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // route happens to visit them is not. `toEqual` on the array pinned the
         // visiting order, so re-sequencing the wipe would have failed this case for
         // no semantic reason.
-        // Four, not three, and the fourth is the point: `knowledge_graph_memories`
-        // is its own attempt, so a KG handle that throws no longer takes the
-        // memory deactivation down with the entity loop silently — it is named.
+        // `knowledge_graph` is ONE step since agent-memory.db is emptied by one
+        // transaction (`AgentMemoryDb.deleteAllData`); it used to be two, the entity
+        // loop and a separate `knowledge_graph_memories` soft delete.
         // `#`, not `:` — a collection or secret literally named `list` would
         // otherwise produce the same key as "enumerating the store failed", and
         // those two call for different next steps. `#` cannot occur in a
         // collection name (`^[a-z][a-z0-9_]{0,62}$`).
         expect([...body.failed].sort()).toEqual([
-          'datastore#list', 'engine_db', 'knowledge_graph', 'knowledge_graph_memories',
+          'datastore#list', 'engine_db', 'knowledge_graph',
         ]);
       });
     });
@@ -11574,7 +11584,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          getDb: () => ({ deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -11600,7 +11610,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          getDb: () => ({ deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -11640,7 +11650,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           getRunHistory: () => ({ deleteAllData: () => undefined }),
           getThreadStore: () => ({ deleteAllThreads: () => 0 }),
           getKnowledgeLayer: () => ({
-            getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+            getDb: () => ({ deleteAllData: () => undefined }),
           }),
           getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
           getCRM: () => ({ rebuildSchema: () => undefined }),
@@ -11672,7 +11682,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getRunHistory: () => ({ deleteAllData: () => undefined }),
         getThreadStore: () => ({ deleteAllThreads: () => 0 }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          getDb: () => ({ deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
         getCRM: () => ({ rebuildSchema: () => undefined }),

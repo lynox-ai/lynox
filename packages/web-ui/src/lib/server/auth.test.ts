@@ -3,6 +3,12 @@ import { createHmac } from 'node:crypto';
 import {
 	createSessionToken,
 	verifySessionToken,
+	readSessionToken,
+	loginSession,
+	loginSessionFromBody,
+	mandateSessionPrincipal,
+	MANDATE_SESSION_MAX_S,
+	type SessionPrincipal,
 	secretEquals,
 	isHttpsRequest,
 	SESSION_MAX_AGE_S,
@@ -108,6 +114,7 @@ describe('createSessionToken / verifySessionToken — roundtrip', () => {
 	it('rejects malformed tokens (wrong part count)', () => {
 		expect(verifySessionToken('only-one-part', SECRET)).toBe(false);
 		expect(verifySessionToken('a.b.c.d', SECRET)).toBe(false);
+		expect(verifySessionToken('a.b.1.c.d', SECRET)).toBe(false);
 		expect(verifySessionToken('', SECRET)).toBe(false);
 	});
 
@@ -237,5 +244,137 @@ describe('isHttpsRequest', () => {
 		// app boundary.
 		expect(isHttpsRequest(url, mkRequest(''))).toBe(true);
 		expect(isHttpsRequest(url, mkRequest('http'))).toBe(true);
+	});
+});
+
+// ── Mandate sessions (PRD customer-granted-operator-access §3.3, §3.5) ──────────
+
+const LOGIN = {
+	kind: 'mandate' as const,
+	email: 'recipient@example.invalid',
+	display: 'TEST-DISPLAY',
+	mandate_id: 'TEST-MANDATE-1',
+	mandate_expires_at: '2100-01-01T00:00:00.000Z',
+};
+
+function mandateAt(nowS: number, overrides: Partial<SessionPrincipal> = {}): SessionPrincipal {
+	return { v: 1, kind: 'mandate', email: LOGIN.email, display: LOGIN.display, mandate_id: LOGIN.mandate_id, exp: nowS + MANDATE_SESSION_MAX_S, ...overrides };
+}
+
+/** Sign an arbitrary payload the way createSessionToken does, to forge shapes it never mints. */
+function sign(payload: string, secret = SECRET): string {
+	const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+	return `${payload}.${createHmac('sha256', key).update(payload).digest('hex')}`;
+}
+const b64 = (v: unknown): string => Buffer.from(JSON.stringify(v), 'utf8').toString('base64url');
+
+describe('session tokens with a principal', () => {
+	it('mints `<nonce>.<principal>.<ts>.<sig>` and reads the principal back', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		const tok = createSessionToken(SECRET, mandateAt(nowS));
+		expect(tok.split('.')).toHaveLength(4);
+		expect(readSessionToken(tok, SECRET)).toEqual({ iat: expect.any(Number), principal: mandateAt(nowS) });
+	});
+
+	it('reads a token without a principal as the owner (null), as before', () => {
+		expect(readSessionToken(createSessionToken(SECRET), SECRET)?.principal).toBeNull();
+	});
+
+	it('ends a principal session at its signed exp, not at the 30-day age', () => {
+		vi.useFakeTimers();
+		const t0 = Date.UTC(2026, 9, 8, 12, 0, 0);
+		vi.setSystemTime(t0);
+		const nowS = Math.floor(t0 / 1000);
+		const tok = createSessionToken(SECRET, mandateAt(nowS));
+		vi.setSystemTime(t0 + (MANDATE_SESSION_MAX_S - 1) * 1000);
+		expect(verifySessionToken(tok, SECRET)).toBe(true);
+		// At exp itself the session has ended.
+		vi.setSystemTime(t0 + MANDATE_SESSION_MAX_S * 1000);
+		expect(verifySessionToken(tok, SECRET)).toBe(false);
+	});
+
+	it('refuses a principal session stamped more than a minute in the future', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		const principal = b64(mandateAt(nowS, { exp: nowS + 3600 }));
+		expect(verifySessionToken(sign(`aaaaaaaaaaaaaaaa.${principal}.${nowS + 60}`), SECRET)).toBe(true);
+		expect(verifySessionToken(sign(`aaaaaaaaaaaaaaaa.${principal}.${nowS + 61}`), SECRET)).toBe(false);
+	});
+
+	it('refuses a changed principal: the HMAC covers it', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		const parts = createSessionToken(SECRET, mandateAt(nowS)).split('.');
+		parts[1] = b64(mandateAt(nowS, { email: 'other@example.invalid' }));
+		expect(verifySessionToken(parts.join('.'), SECRET)).toBe(false);
+	});
+
+	it('refuses a signed principal it does not know, never reading it as the owner', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		for (const p of [
+			{ ...mandateAt(nowS), kind: 'owner' },
+			{ ...mandateAt(nowS), v: 2 },
+			{ ...mandateAt(nowS), exp: 'later' },
+			{ ...mandateAt(nowS), email: '' },
+			{ ...mandateAt(nowS), display: 7 },
+			{ ...mandateAt(nowS), mandate_id: null },
+		]) {
+			expect(readSessionToken(sign(`aaaaaaaaaaaaaaaa.${b64(p)}.${nowS}`), SECRET), JSON.stringify(p)).toBeNull();
+		}
+		expect(readSessionToken(sign(`aaaaaaaaaaaaaaaa.not-json.${nowS}`), SECRET)).toBeNull();
+	});
+});
+
+describe('loginSession', () => {
+	it('gives the owner the principal-less 30-day session, unchanged', () => {
+		const s = loginSession(SECRET, null)!;
+		expect(s.maxAge).toBe(SESSION_MAX_AGE_S);
+		expect(s.token.split('.')).toHaveLength(3);
+	});
+
+	it('gives a mandate login a principal session of at most 15 minutes', () => {
+		const s = loginSession(SECRET, LOGIN)!;
+		expect(s.maxAge).toBe(MANDATE_SESSION_MAX_S);
+		expect(readSessionToken(s.token, SECRET)?.principal?.email).toBe(LOGIN.email);
+	});
+
+	it('never lets the session outlive the mandate', () => {
+		vi.useFakeTimers();
+		const t0 = Date.UTC(2026, 9, 8, 12, 0, 0);
+		vi.setSystemTime(t0);
+		const endsIn5Min = { ...LOGIN, mandate_expires_at: new Date(t0 + 300_000).toISOString() };
+		expect(loginSession(SECRET, endsIn5Min)!.maxAge).toBe(300);
+		expect(mandateSessionPrincipal(endsIn5Min)!.exp).toBe(Math.floor(t0 / 1000) + 300);
+	});
+
+	it('gives no session for a mandate that has already ended', () => {
+		vi.useFakeTimers();
+		const t0 = Date.UTC(2026, 9, 8, 12, 0, 0);
+		vi.setSystemTime(t0);
+		expect(loginSession(SECRET, { ...LOGIN, mandate_expires_at: new Date(t0).toISOString() })).toBeNull();
+		expect(loginSession(SECRET, { ...LOGIN, mandate_expires_at: 'not a date' })).toBeNull();
+	});
+});
+
+describe('loginSessionFromBody (the CP success body of a code or link login)', () => {
+	it('gives the owner session for a body without a principal', () => {
+		const s = loginSessionFromBody(SECRET, { valid: true });
+		expect(s).not.toBeTypeOf('string');
+		if (typeof s === 'string') return;
+		expect(readSessionToken(s.token, SECRET)?.principal).toBeNull();
+		expect(s.maxAge).toBe(SESSION_MAX_AGE_S);
+	});
+
+	it('gives the mandate session for a body naming a live mandate', () => {
+		const s = loginSessionFromBody(SECRET, { valid: true, principal: LOGIN });
+		if (typeof s === 'string') throw new Error(s);
+		expect(readSessionToken(s.token, SECRET)?.principal?.mandate_id).toBe(LOGIN.mandate_id);
+	});
+
+	it('refuses a principal it does not know, never giving the owner session', () => {
+		expect(loginSessionFromBody(SECRET, { valid: true, principal: { ...LOGIN, kind: 'member' } })).toBe('unknown_principal');
+		expect(loginSessionFromBody(SECRET, null)).toBe('unknown_principal');
+	});
+
+	it('gives no session for a mandate that has already ended', () => {
+		expect(loginSessionFromBody(SECRET, { valid: true, principal: { ...LOGIN, mandate_expires_at: '2000-01-01T00:00:00.000Z' } })).toBe('ended');
 	});
 });

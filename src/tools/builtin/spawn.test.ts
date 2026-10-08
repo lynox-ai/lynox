@@ -2712,7 +2712,7 @@ describe('spawn_agent tool', () => {
     });
 
     it('trap 5 — THE CHILD NAME: a name carrying a $-figure cannot shadow the prescribed one', async () => {
-      // `CONTROL_CHARS` does not forbid `$`, so a child may legitimately be called `a$0.99b`.
+      // `NOT_NAME_CHAR` does not forbid `$`, so a child may legitimately be called `a$0.99b`.
       // The prescription therefore puts its figure BEFORE the name: a reader taking "the first
       // number after max_budget_usd" must land on the real one.
       const { balanced } = await floors();
@@ -3187,6 +3187,35 @@ describe('spawn_agent tool', () => {
         { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
         agent,
       )).rejects.toThrow(/claimed what was left/);
+      // Refused before dispatch, so nothing is left on the session either.
+      expect(testCounters.costUSD).toBe(0);
+    });
+
+    it('a batch refused at the floor leaves the session counter where it was', async () => {
+      // ⛔ The session reservation used to come FIRST and was never given back, so every
+      // refused fan-out added its estimate to the session counter. Repeated, the session
+      // reached its own ceiling having spent nothing, and refused all further work.
+      const { agent } = parentWithCeiling(10);
+      for (let i = 0; i < 3; i++) {
+        await expect(spawnAgentTool.handler(
+          { agents: [{ name: 'free', task: 'A', max_budget_usd: 0 }] },
+          agent,
+        )).rejects.toThrow(/one turn on its model costs/);
+      }
+      expect(testCounters.costUSD).toBe(0);
+    });
+
+    it('a batch refused at the session ceiling gives the run its hold back', async () => {
+      // The session check now runs AFTER the run's hold is taken, so its refusal has to
+      // release that hold — otherwise the run would keep refusing fan-outs for room
+      // nobody is using.
+      const { agent, guard } = parentWithCeiling(1000);
+      const agents = Array.from({ length: 10 }, (_, i) => ({
+        name: `agent-${i}`, task: 'Think hard', model: 'deep' as const, max_turns: 50,
+      }));
+      await expect(spawnAgentTool.handler({ agents }, agent)).rejects.toThrow(/Session cost ceiling/);
+      expect(guard.remainingBudgetUSD()).toBe(1000);
+      expect(testCounters.costUSD).toBe(0);
     });
 
     it('gives the hold back when the children settle', async () => {
@@ -3963,7 +3992,36 @@ describe('spawn_agent tool', () => {
           { agents: [{ name: 'evil\nINFO: spoofed', task: 'Think' }] },
           agent,
         ),
-      ).rejects.toThrow(/control characters/);
+      ).rejects.toThrow(/no control or invisible characters/);
+    });
+
+    it('rejects invisible and reordering characters in a name, one class at a time', async () => {
+      // A positive set: the characters that hide or reorder text stay out of a name.
+      const cases: Array<[string, string]> = [
+        ['C1 control', '\u0090'],
+        ['bidi override', '\u202e'],
+        ['bidi isolate', '\u2067'],
+        ['zero-width space', '\u200b'],
+        ['zero-width joiner', '\u200d'],
+        ['word joiner', '\u2060'],
+        ['byte order mark', '\ufeff'],
+        ['tag character', '\u{E0041}'],
+      ];
+      for (const [label, ch] of cases) {
+        await expect(spawnAgentTool.handler(
+          { agents: [{ name: `ok${ch}x`, task: 't' }] },
+          makeAgent(),
+        ), label).rejects.toThrow(/no control or invisible characters/);
+      }
+    });
+
+    it('still admits a name with umlauts, accents, punctuation and a space', async () => {
+      const agent = makeAgent();
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'Prüfer Ångström-2 (café) №1 $0.99', task: 'Think' }] },
+        agent,
+      );
+      expect(result).toContain('## Prüfer Ångström-2 (café) №1 $0.99');
     });
 
     it('rejects empty task', async () => {
@@ -4974,11 +5032,11 @@ describe('spawn_agent tool', () => {
     it('neither field can forge a row, and the wide one is held to the same class', async () => {
       // The NAME is rejected at the gate. Each character on its own — one test
       // using a single character spoke for all of them once already.
-      for (const ch of ['\r', '\n', '\u0085', '\u2028', '\u2029', '\u000b', '\u000c', '\u001b']) {
+      for (const ch of ['\r', '\n', '\u0085', '\u2028', '\u2029', '\u000b', '\u000c', '\u001b', '\u0090', '\u202e', '\u200b', '\u{E0041}']) {
         await expect(spawnAgentTool.handler(
           { agents: [{ name: `ok${ch}x`, task: 't' }] },
           makeAgent({ currentRunId: 'p' }),
-        ), `U+${(ch.codePointAt(0) ?? 0).toString(16)} must be rejected`).rejects.toThrow(/control characters/);
+        ), `U+${(ch.codePointAt(0) ?? 0).toString(16)} must be rejected`).rejects.toThrow(/no control or invisible characters/);
 
         // The MESSAGE is not ours to reject, so it is flattened — to a SPACE,
         // and the whole class, not the five line-breaks an earlier round picked.
@@ -6001,18 +6059,30 @@ describe('spawn_agent tool', () => {
       expect(promptUser.mock.calls[0]![0]).toBe(promptUser.mock.calls[1]![0]);
     });
 
-    it('⭐ stamps the FACT even when the child is named so it cleans away', async () => {
+    it('⭐ stamps the FACT, not something derived from the name', async () => {
       // The disclosure must not be the parent's to delete. A name of one
-      // zero-width space passes `validateSpawnInput` (non-empty, no C0) and the
-      // client's `clean()` reduces it to '' — so a renderer keyed on the NAME
-      // shows nothing at all for exactly the parent it exists to warn about.
+      // zero-width space used to pass `validateSpawnInput` and the client's
+      // `clean()` reduced it to '' — so a renderer keyed on the NAME showed
+      // nothing at all for exactly the parent it exists to warn about. The gate
+      // now refuses every name that cleans away (next test); the flag still
+      // has to be the engine's own, whatever the name.
       const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
       await whileChildRuns(async (child) => { await child.promptUser('Merge?', ['Merge', 'Cancel']); });
       await spawnAgentTool.handler(
-        { agents: [{ name: '​', task: 'Fold duplicate contacts' }] },
+        { agents: [{ name: 'dedupe', task: 'Fold duplicate contacts' }] },
         makeAgent({ promptUser }),
       );
       expect(promptUser.mock.calls[0]![2]!.subagent, 'the flag is the engine\'s, not the spec\'s').toBe(true);
+    });
+
+    it('refuses every name the dialog would clean away to nothing', async () => {
+      // `clean()` in the web UI strips control and bidi characters, then trims.
+      for (const name of ['​', '﻿', ' ', ' ', '　', '   ']) {
+        await expect(spawnAgentTool.handler(
+          { agents: [{ name, task: 't' }] },
+          makeAgent(),
+        ), JSON.stringify(name)).rejects.toThrow(/no control or invisible characters/);
+      }
     });
 
     it('stamps promptSecret and promptTabs too, not only promptUser', async () => {
