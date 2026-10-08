@@ -1349,7 +1349,7 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
   const priorKeys = new Set(collectVaultKeys(prior));
   const kept = collectVaultKeys(saved).filter((k) => priorKeys.has(k)).map((k) => shapedForLog(k, DERIVED_NAME_SHAPE, 80));
   const host = hostOf(saved);
-  const keptHost = host !== undefined && host === hostOf(prior) ? shapedForLog(host, HOSTNAME_SHAPE, 253) : undefined;
+  const keptHost = host !== undefined && host === hostOf(prior) ? shapedForLog(host, HOSTNAME_SHAPE, 255) : undefined;
   const lead = 'This profile had been set up in a mandate\'s session; it is now yours.';
   if (kept.length === 0 && keptHost === undefined) {
     return `${lead} Your save keeps none of the vault keys or the host that setup named.`;
@@ -1358,7 +1358,7 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
     ...(kept.length > 0 ? [`the vault keys ${kept.join(', ')}`] : []),
     ...(keptHost !== undefined ? [`the host ${keptHost}`] : []),
   ].join(' and ');
-  const carry = kept.length > 0 ? ' Check what those keys hold: the profile is yours now, so the engine no longer hides any of them from it, values from the environment included.' : '';
+  const carry = kept.length > 0 ? ' Check what those keys hold: the profile is yours now, so the engine resolves them for it as for any of your profiles, values from the environment included.' : '';
   return `${lead} Your save keeps ${what} from that setup.${carry}`;
 }
 

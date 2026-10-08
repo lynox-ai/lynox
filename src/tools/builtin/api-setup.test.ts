@@ -651,6 +651,20 @@ describe('api_setup tool', () => {
         expect(adoptionNote({ ...prior, base_url: url }, { ...prior, base_url: url })).toContain(`the host ${host} from`);
       });
 
+      it('does not print the head of a host too long to be one', () => {
+        const long = `https://${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.${'d'.repeat(60)}.evil.example/v1`;
+        const note = adoptionNote({ ...prior, base_url: long }, { ...prior, base_url: long });
+        expect(note).toContain('the host <unprintable>');
+        expect(note).not.toContain('aaaa');
+      });
+
+      it('prints a host of 254 characters with its trailing dot', () => {
+        const host = `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}.`;
+        expect(host.length).toBe(254);
+        const url = `https://${host}/v1`;
+        expect(adoptionNote({ ...prior, base_url: url }, { ...prior, base_url: url })).toContain(`the host ${host} from`);
+      });
+
       it('prints a bracketed IPv6 host', () => {
         const v6 = 'https://[2001:db8::1]/v1';
         expect(adoptionNote({ ...prior, base_url: v6 }, { ...prior, base_url: v6 })).toContain('the host [2001:db8::1]');
