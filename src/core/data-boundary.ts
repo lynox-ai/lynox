@@ -508,14 +508,8 @@ export function renderProvenanceFact(opts: {
 }
 
 /**
- * Neutralize boundary-breaking tags in content to prevent wrapper escape.
- * Handles literal tags, HTML entity encoded tags, and numeric entity encoded tags.
- *
- * Both halves of the tag. A closer in the content would end the block early; an
- * opener would start what reads as a second block with a `source` the sender
- * wrote, inside the real one. After this, a block's content holds no literal
- * opener or closer of the element; text outside the block (whatever a tool puts
- * around it) is not this function's to change. `\b` after the name keeps
+ * Either half of the element's tag, in every encoding of the opener: the closer
+ * (`BOUNDARY_CLOSE_TAIL`) or the name itself. `\b` after the name keeps
  * `<untrusted_database` untouched.
  */
 const BOUNDARY_TAG_ANY = new RegExp(
@@ -523,6 +517,16 @@ const BOUNDARY_TAG_ANY = new RegExp(
   'gi',
 );
 
+/**
+ * Neutralize boundary-breaking tags in content to prevent wrapper escape.
+ * Handles literal tags, HTML entity encoded tags, and numeric entity encoded tags.
+ *
+ * Both halves of the tag. A closer in the content would end the block early; an
+ * opener would start what reads as a second block with a `source` the sender
+ * wrote, inside the real one. After this, a block's content holds no literal
+ * opener or closer of the element; text outside the block (whatever a tool puts
+ * around it) is not this function's to change.
+ */
 function neutralizeBoundaryTags(text: string): string {
   return (
     // ⚠ The two passes this comment was written for are now ONE, and the
