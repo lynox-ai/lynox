@@ -5691,7 +5691,10 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], secretStore });
     const err = await agent.send('Pay out').then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(InputRequiredError);
-    expect((err as Error).message).not.toContain('sk-live');
+    // The cap falls four characters into the secret, so a cut-then-masked message would
+    // carry exactly those four: `sk-l`. Asserting the longer prefix would miss it.
+    expect((err as Error).message).not.toContain('sk-l');
+    expect((err as Error).message).toContain('***C');
   });
 
   it('with a question path nothing changes: the answer comes back and the run goes on', async () => {
