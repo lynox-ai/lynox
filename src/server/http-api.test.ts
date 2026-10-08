@@ -1840,6 +1840,60 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // The case the counter exists for, driven by a REAL erasure: a /run enters while
+    // the erasure is still in its flat-file step (so the flag is set but the sessions
+    // are not yet dropped), fetches its Session, and is still awaiting when the
+    // erasure has finished and cleared the flag. That Session was dropped and holds
+    // the erased conversation; the run must be refused and must not ingest.
+    it('refuses a run that entered during an erasure and outlasted it', async () => {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = { kl: engineRef['getKnowledgeLayer'], scopes: engineRef['getActiveScopes'], mem: engineRef['getMemory'] };
+      const stored: string[] = [];
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => { stored.push(text); return Promise.resolve({}); },
+      });
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      let openGate: () => void = () => undefined;
+      const gate = new Promise<void>((r) => { openGate = r; });
+      engineRef['getMemory'] = (): unknown => ({ save: async () => { await gate; } });
+      const internals = api as unknown as {
+        erasureInProgress: boolean;
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      };
+      const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
+      try {
+        const erasure = jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        for (let i = 0; i < 200 && !internals.erasureInProgress; i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(internals.erasureInProgress, 'fixture: the erasure is in its flat-file step').toBe(true);
+
+        // A dead, stale run on the session: /run takes it over and awaits its drain.
+        // The drain lets the erasure finish first, then frees the slot.
+        let erasureStatus: number | undefined;
+        internals.runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0,
+          takeover: () => {
+            openGate();
+            void erasure.then((r) => { erasureStatus = r.status; internals.runningSessions.delete('test'); });
+          },
+        });
+        const run = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name: 'during.pdf', type: 'application/pdf', data: pdf }] }),
+        });
+        expect(erasureStatus, 'fixture: the erasure finished while the run was awaiting').toBeDefined();
+        expect(internals.erasureInProgress, 'fixture: the flag is clear again').toBe(false);
+        expect(run.status).toBe(410);
+        expect(stored.some(t => t.includes('during.pdf')), 'the refused run ingested its document').toBe(false);
+      } finally {
+        openGate();
+        internals.runningSessions.delete('test');
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getActiveScopes'] = orig.scopes;
+        engineRef['getMemory'] = orig.mem;
+      }
+    });
+
     it.each([
       ['a plain text file', { name: 'lieferanten.csv', type: 'text/csv', data: Buffer.from('a,b\n1,2').toString('base64') }],
       ['an image',          { name: 'rechnung.png',    type: 'image/png', data: Buffer.from('\x89PNG\r\n\x1a\n').toString('base64') }],
@@ -2355,6 +2409,7 @@ describe('LynoxHTTPApi', () => {
       const deleteAllThreads = vi.fn();
       engineRef.getThreadStore = (): unknown => ({ deleteAllThreads });
       const takeover = vi.fn(); // a run that ignores the stop: the slot stays
+      const genBefore = (api as unknown as { erasureGeneration: number }).erasureGeneration;
       slots.set('erase-stuck-1', { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
@@ -2362,6 +2417,9 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(409);
         expect(deleteAllThreads, 'nothing may be erased beside a live run').not.toHaveBeenCalled();
         expect((api as unknown as { erasureInProgress: boolean }).erasureInProgress, 'the flag must not outlive a refused erasure').toBe(false);
+        // And it does not count as an erasure: nothing was dropped, so a /run that
+        // was waiting meanwhile must not be told its conversation was erased.
+        expect((api as unknown as { erasureGeneration: number }).erasureGeneration, 'a refused erasure counted').toBe(genBefore);
       } finally {
         slots.delete('erase-stuck-1');
         engineRef.getThreadStore = origGetThreadStore;

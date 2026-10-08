@@ -1273,7 +1273,8 @@ export class LynoxHTTPApi {
    * refused. That alone misses a third case: an erasure that starts AND finishes
    * while `/run` is still awaiting its uploads, leaving the flag false again and
    * the request holding a Session the erasure dropped. `erasureGeneration` counts
-   * erasures, so `/run` compares it with the value it saw on entry.
+   * the erasures that dropped the sessions (it moves together with that drop), so
+   * `/run` compares it with the value it saw when it fetched its Session.
    */
   private erasureInProgress = false;
   private erasureGeneration = 0;
@@ -2973,8 +2974,11 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
-      const erasedSinceEntry = (): boolean =>
-        this.erasureInProgress || this.erasureGeneration !== erasureGenAtEntry;
+      const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
+      // Document ingests start only once the run is accepted, below the erasure
+      // checks: a refused request (an erasure running, or one that ran meanwhile,
+      // or a later file that fails) writes nothing into the knowledge store.
+      const deferredIngests: Array<() => void> = [];
 
       // Stale-run takeover. A previous /run whose SSE stream has closed +
       // one of these holds → hand control to the new request:
@@ -3267,26 +3271,27 @@ export class LynoxHTTPApi {
                 // dropped from a turn it had already survived. Found by a route test whose
                 // engine stub lacked `getActiveScopes`, which is exactly the shape of the
                 // production failure (a method absent or throwing).
-                try {
-                  const kl = this.engine?.getKnowledgeLayer();
-                  const durableStore = this.engine?.getKnowledgeStore();
-                  const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
-                  // Not into a knowledge store an erasure is emptying or has emptied:
-                  // this run will be refused below, and the ingest would outlive it.
-                  if (kl && docScope && !erasedSinceEntry()) {
-                    void ingestDocumentText(kl, {
-                      text: safeBody,
-                      fileName: safeName,
-                      scope: docScope,
-                      threadId: session.sessionId,
-                      durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
-                    }).catch(() => { /* best-effort */ });
+                // Deferred until the run is accepted (see `deferredIngests`).
+                deferredIngests.push(() => {
+                  try {
+                    const kl = this.engine?.getKnowledgeLayer();
+                    const durableStore = this.engine?.getKnowledgeStore();
+                    const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
+                    if (kl && docScope) {
+                      void ingestDocumentText(kl, {
+                        text: safeBody,
+                        fileName: safeName,
+                        scope: docScope,
+                        threadId: session.sessionId,
+                        durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
+                      }).catch(() => { /* best-effort */ });
+                    }
+                  } catch (ingestErr) {
+                    process.stderr.write(
+                      `[lynox:upload] document archive wiring failed for "${safeName}": ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}\n`,
+                    );
                   }
-                } catch (ingestErr) {
-                  process.stderr.write(
-                    `[lynox:upload] document archive wiring failed for "${safeName}": ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}\n`,
-                  );
-                }
+                });
                 continue;
               }
             } catch (err) {
@@ -3366,6 +3371,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 410, ERASED_DURING_REQUEST);
         return;
       }
+      for (const ingest of deferredIngests) ingest();
 
       // SSE headers
       res.writeHead(200, {
@@ -10016,7 +10022,6 @@ export class LynoxHTTPApi {
         return;
       }
       this.erasureInProgress = true;
-      this.erasureGeneration++;
       try {
         for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
         const drainStart = Date.now();
@@ -10179,7 +10184,13 @@ export class LynoxHTTPApi {
         // Dropped HERE, inside the synchronous stretch, not before the flat-file step:
         // that step awaits, and a session created or resumed during it would load the
         // threads into memory again just before they are wiped.
+        //
+        // The counter moves in the same synchronous step: a Session fetched before
+        // this line is one the erasure drops, and its /run sees a changed count; one
+        // fetched after is fresh. An erasure that stopped at the 409 above changed
+        // nothing and counts nothing.
         this.sessionStore.resetAll();
+        this.erasureGeneration++;
         const threadStore = reach('threads', engine.getThreadStore());
         if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 
