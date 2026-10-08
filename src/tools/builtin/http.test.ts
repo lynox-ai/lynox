@@ -56,6 +56,20 @@ async function visible(...args: Parameters<typeof handler>): Promise<string> {
   }
 }
 
+/**
+ * The 401 reminder from its header to the END of the result. It is appended
+ * outside the untrusted-data wrap and last, so comparing this slice with `toBe`
+ * pins every byte after the header too; a prefix check let a sentence be
+ * appended unseen. Exactly one header, or the slice would mean nothing.
+ */
+function reminderToEnd(result: string): string {
+  const head = '**[Agent reminder — OAuth2 401';
+  const at = result.indexOf(head);
+  expect(at, 'no 401 reminder in the result').toBeGreaterThanOrEqual(0);
+  expect(result.indexOf(head, at + 1), 'more than one 401 reminder').toBe(-1);
+  return result.slice(at);
+}
+
 // Each test gets a fresh ToolContext + a fresh SessionCounters object via
 // beforeEach. The handler reads network policy / rate-limits from
 // `agent.toolContext` and the per-session http counter from
@@ -2686,7 +2700,9 @@ describe('httpRequestTool', () => {
      * exactly the guard a review beat by writing the instruction in this repo's
      * `api_setup({ action: "update", … })` form. The reminder is FIXED text whose
      * only interpolation is the `_admit`-pinned profile id, so every byte of it
-     * can simply be stated. A sentence added inside it fails here.
+     * can simply be stated. The assert runs from the reminder's header to the end
+     * of the result, so a sentence added inside it or after it fails here (a
+     * prefix check let one be appended unseen).
      *
      * The phrase bans below stay. The lesson of the round that produced this test
      * is that a restructure replaced two working line-level assertions and opened
@@ -2731,7 +2747,12 @@ describe('httpRequestTool', () => {
         + 'access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the '
         + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
         + 'it to the person who owns it. The engine has written the details to its log.';
-      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(REMINDER);
+      // This profile names no header, so the token went out as Bearer and the
+      // reminder carries the header sentence too.
+      const HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
+        + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
+        + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+      expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why').toBe(REMINDER + HINT);
     });
 
     /**
@@ -4184,7 +4205,7 @@ describe('httpRequestTool', () => {
     // Byte for byte, both states: this block is appended outside the untrusted-data
     // wrap, and the only check on the managed branch used to be a substring, so a
     // sentence added inside it (one interpolating a profile field among them) went
-    // unseen. The delegated-access branch has its own literal further up.
+    // unseen. The delegated-access branch has its own literals, further up and below.
     const MANAGED_401 = '**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\n'
       + 'This URL maps to api_profile "store-api" (auth.type=oauth2 with token_url configured). '
       + "The vault's access_token is almost certainly expired. Recover with:\n"
@@ -4205,13 +4226,8 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
       const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
-      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(MANAGED_401);
-      if (hints) {
-        expect(result).toContain(MANAGED_401 + HEADER_HINT);
-      } else {
-        expect(result).not.toContain(MANAGED_401 + '\n');
-        expect(result).not.toContain('auth.header_name');
-      }
+      expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why')
+        .toBe(hints ? MANAGED_401 + HEADER_HINT : MANAGED_401);
     });
 
     // The delegated-access branch (a connection the user authorized) says fetch_token is the
@@ -4229,6 +4245,7 @@ describe('httpRequestTool', () => {
 
     it.each([
       ['without header_name points at the header', undefined, true],
+      ['with header_name Authorization still points at the header', 'Authorization', true],
       ['with its own header_name stays as it was', HEADER, false],
     ])('the delegated 401 reminder %s, byte for byte', async (_label, headerName, hints) => {
       const { ApiStore, accessTokenKey } = await import('../../core/api-store.js');
@@ -4246,13 +4263,8 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
       const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [accessTokenKey('store-api')]: TOKEN }));
-      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(DELEGATED_401);
-      if (hints) {
-        expect(result).toContain(DELEGATED_401 + DELEGATED_HINT);
-      } else {
-        expect(result).not.toContain(DELEGATED_401 + '\n');
-        expect(result).not.toContain('auth.header_name');
-      }
+      expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why')
+        .toBe(hints ? DELEGATED_401 + DELEGATED_HINT : DELEGATED_401);
     });
 
     it('SECURITY: an access token carrying CRLF is refused under its own header, not sent', async () => {

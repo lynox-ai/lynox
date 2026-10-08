@@ -2698,7 +2698,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             //
             // The id is the one value that is safe to name: `_admit` pins it to
             // `/^[a-z0-9][a-z0-9_-]{0,63}$/`. Everything the model needs is in
-            // the two sentences below; everything the OPERATOR needs is in the
+            // the fixed sentences below; everything the OPERATOR needs is in the
             // stderr diagnosis, where free text is a log-hygiene problem and not
             // an instruction channel.
             //

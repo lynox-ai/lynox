@@ -461,8 +461,8 @@ function measureStaticPrefixTokens(): number {
 // sentence on a 401 right after a fresh mint, 23970 for the precise parenthesis with that
 // sentence, 23948 without it, 23950 with "usually". The 401-after-a-fresh-token case is told
 // by the 401 reminder in http.ts (both of its branches), which reaches the model when it
-// happens and is not part of this prefix; a profile the reminder does not fire for (no
-// token_url stored) gets only this rule. Baseline re-measured the same day with main's
+// happens and is not part of this prefix; a 401 the reminder does not fire for (e.g. no
+// token_url stored, or no profile for the host) gets only this rule. Baseline re-measured the same day with main's
 // prompts.ts and api-setup.ts: 23938.
 const STATIC_PREFIX_BUDGET = 23950;
 
