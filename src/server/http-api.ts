@@ -9,7 +9,7 @@
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
-import { readFileSync, accessSync } from 'node:fs';
+import { readFileSync, accessSync, existsSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
@@ -10023,6 +10023,10 @@ export class LynoxHTTPApi {
       }
       this.erasureInProgress = true;
       try {
+        // Before the synchronous stretch: the stores' files are looked up by name below.
+        const { getLynoxDir } = await import('../core/config.js');
+        const dataDir = getLynoxDir();
+        const { AgentMemoryDb } = await import('../core/agent-memory-db.js');
         for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
@@ -10060,15 +10064,19 @@ export class LynoxHTTPApi {
         // not discover it from the export either, because that reads the same null
         // handle.
         //
-        // What this does NOT decide: whether a null handle means a fault or a store
-        // the instance legitimately does not have. That needs a per-store answer (the
-        // file exists, or it never did) and a register row carries it. The claim is
-        // what gets fixed here — a route that could not look does not get to say
-        // "all".
+        // Whether a null handle is a fault or a store the instance legitimately
+        // does not have is decided by the FILE, not the handle: every store but the
+        // flat-file memory lives at a known name in the data directory. A null handle
+        // over an existing file is a store holding data this route could not open, so
+        // it is a failure (500, `failed`), not a skip. A null handle with no file has
+        // nothing to erase, and the answer may say "all". Only a store without a
+        // known file still lands in `skipped`.
         const skipped: string[] = [];
-        const reach = <T>(key: string, store: T | null): T | null => {
-          if (store === null || store === undefined) skipped.push(key);
-          return store ?? null;
+        const reach = <T>(key: string, store: T | null, file?: string): T | null => {
+          if (store !== null && store !== undefined) return store;
+          if (file === undefined) skipped.push(key);
+          else if (existsSync(join(dataDir, file))) note(key, new Error(`store not opened, but ${file} exists`));
+          return null;
         };
         // Store keys only in the body, never the error text: a SQLite message carries
         // file paths, and this body goes to a browser.
@@ -10191,7 +10199,11 @@ export class LynoxHTTPApi {
         // nothing and counts nothing.
         this.sessionStore.resetAll();
         this.erasureGeneration++;
-        const threadStore = reach('threads', engine.getThreadStore());
+        // A missing ThreadStore over a working RunHistory loses nothing: the threads
+        // live in history.db, and its wipe below empties every table of that file.
+        const threadStore = engine.getRunHistory()
+          ? engine.getThreadStore()
+          : reach('threads', engine.getThreadStore(), 'history.db');
         if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 
 
@@ -10208,8 +10220,19 @@ export class LynoxHTTPApi {
         // a delete that throws, no-ops or never ends — and still left `metrics` and
         // `supersedes`, which hang off no entity. One transaction cannot stop on a
         // page or spin, and a failure rolls the whole file back and names the store.
-        const kg = reach('knowledge_graph', engine.getKnowledgeLayer());
-        if (kg) attempt('knowledge_graph', () => { kg.getDb().deleteAllData(); });
+        //
+        // The knowledge layer is null by CONFIGURATION as well as by fault: with the
+        // graph switched off, or no embedding provider, nothing opens this store, but a
+        // file written before that still holds every memory. So with no layer the route
+        // opens the file itself, wipes and scrubs it, and closes it again.
+        const kg = engine.getKnowledgeLayer();
+        const agentMemoryFile = join(dataDir, 'agent-memory.db');
+        let standaloneMemoryDb: InstanceType<typeof AgentMemoryDb> | null = null;
+        if (!kg && existsSync(agentMemoryFile)) {
+          attempt('knowledge_graph', () => { standaloneMemoryDb = new AgentMemoryDb(agentMemoryFile); });
+        }
+        const memoryDbFor = (): InstanceType<typeof AgentMemoryDb> | null => kg ? kg.getDb() : standaloneMemoryDb;
+        if (kg || standaloneMemoryDb) attempt('knowledge_graph', () => { memoryDbFor()!.deleteAllData(); });
 
         // Delete all subject-graph data (engine.db) — Foundation Rework v2 tables.
         // The legacy KG wipe above clears agent-memory.db; this clears the engine.db
@@ -10230,7 +10253,7 @@ export class LynoxHTTPApi {
         // ⚠ A null handle here is NOT an empty database: a caught boot failure leaves
         // `engineDb === null` with the file intact, and this route then skips it and
         // still answers success.
-        const engineDb = reach('engine_db', engine.getEngineDb());
+        const engineDb = reach('engine_db', engine.getEngineDb(), 'engine.db');
         // The wipe is one atomic transaction: a failure leaves ALL engine.db PII
         // intact, which is exactly why it has to reach the answer rather than only
         // stderr.
@@ -10245,11 +10268,11 @@ export class LynoxHTTPApi {
         // counters and the security trail with it, which is acceptable only because
         // `denyOnManagedInstance` refused this route above on every instance with a
         // non-empty billing tier (see `RunHistory.deleteAllData`).
-        const runHistoryForWipe = reach('run_history', engine.getRunHistory());
+        const runHistoryForWipe = reach('run_history', engine.getRunHistory(), 'history.db');
         if (runHistoryForWipe) attempt('run_history', () => { runHistoryForWipe.deleteAllData(); });
 
         // Delete all DataStore collections (includes CRM tables)
-        const ds = reach('datastore', engine.getDataStore());
+        const ds = reach('datastore', engine.getDataStore(), 'datastore.db');
         if (ds) {
           try {
             // The LISTING is wrapped too, and that is not symmetry for its own sake:
@@ -10279,7 +10302,7 @@ export class LynoxHTTPApi {
 
         // Delete all secrets from the vault. `LYNOX_SECRET_*` env-sourced entries are
         // re-read at every boot, so those return after a restart.
-        const secretStore = reach('secrets', engine.getSecretStore());
+        const secretStore = reach('secrets', engine.getSecretStore(), 'vault.db');
         if (secretStore) {
           let names: string[] = [];
           attempt('secrets#list', () => { names = secretStore.listNames(); });
@@ -10310,7 +10333,9 @@ export class LynoxHTTPApi {
           attempt(`${key}#scrub`, fn);
         };
         if (runHistoryForWipe) scrub('run_history', () => { runHistoryForWipe.scrubFreedPages(); });
-        if (kg) scrub('knowledge_graph', () => { kg.getDb().scrubFreedPages(); });
+        if (kg || standaloneMemoryDb) scrub('knowledge_graph', () => { memoryDbFor()!.scrubFreedPages(); });
+        // After the scrub, and a repair rather than a wipe: the file is already empty.
+        if (standaloneMemoryDb) attemptRepair('knowledge_graph#close', () => { standaloneMemoryDb!.close(); });
         if (engineDb) scrub('engine_db', () => { engineDb.scrubFreedPages(); });
         if (ds) scrub('datastore', () => { ds.scrubFreedPages(); });
         if (secretStore) scrub('secrets', () => { secretStore.scrubFreedPages(); });

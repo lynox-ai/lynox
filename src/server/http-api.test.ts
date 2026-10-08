@@ -11746,17 +11746,20 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // where to look, so a tenant whose engine.db never opened — PII intact on disk
       // — would have recorded an answer that does not mention it, and learned of it
       // only from a later retry that happened to succeed everywhere else.
+      // The flat-file memory is the one store without a known file, so it is the
+      // one a null handle still puts in `skipped`.
       await swapEngine({
         getEngineDb: () => null,
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
+        getMemory: () => null,
         getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
         const body = await res.json() as { deleted: boolean; failed: string[]; skipped?: string[] };
         expect(body.failed).toContain('secrets:S1');
-        expect(body.skipped, 'the store that never opened must be in the answer').toContain('engine_db');
+        expect(body.skipped, 'the store that never opened must be in the answer').toContain('memory');
         expect(body.deleted).toBe(false);
       });
     });
@@ -11875,40 +11878,114 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data still 200s when engine.db is absent — but claims no completeness', async () => {
-      // The 200 is kept and the SENTENCE is withdrawn, which is the whole change
-      // here. A `null` handle is not a failed wipe (nothing threw) and not a
-      // completed one: a caught boot failure leaves exactly that state with the
-      // file intact on disk, so `knowledge_entries`, `subjects` and
-      // `people.email/phone` can all still be there while this route reports
-      // success — and the tenant cannot discover it from the export either, because
-      // that reads the same null handle.
-      //
-      // What this route is NOT deciding is whether a null handle is a fault or a
-      // store the instance legitimately does not have. That needs a per-store
-      // answer and is registered. A route that could not look does not get to say
-      // "all"; that part needs no decision.
-      await swapEngine({
-        getEngineDb: () => null,
-        getKnowledgeLayer: () => ({
-          getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
-        }),
-        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
-      }, async () => {
-        const res = await jsonFetch('/api/data', {
-          method: 'DELETE',
-          body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
+    // A null handle is decided by the FILE. Over an existing file it is a store that
+    // holds data the route could not open (a caught boot failure leaves exactly that,
+    // file intact), so the answer is a failure; with no file there is nothing to
+    // erase, and the completeness sentence is earned.
+    function withDataDir(test: (dir: string) => Promise<void>): Promise<void> {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-erase-dir-'));
+      const prev = process.env['LYNOX_DATA_DIR'];
+      process.env['LYNOX_DATA_DIR'] = dir;
+      return test(dir).finally(() => {
+        if (prev === undefined) delete process.env['LYNOX_DATA_DIR']; else process.env['LYNOX_DATA_DIR'] = prev;
+        rmSync(dir, { recursive: true, force: true });
+      });
+    }
+    const reachableExceptEngineDb = {
+      getEngineDb: () => null,
+      getKnowledgeLayer: () => ({
+        getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
+      }),
+      getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
+    };
+
+    it('DELETE /api/data fails, and claims no completeness, when engine.db exists but never opened', async () => {
+      await withDataDir(async (dir) => {
+        writeFileSync(join(dir, 'engine.db'), 'stands in for a file a migration failed on');
+        await swapEngine(reachableExceptEngineDb, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(500);
+          const body = await res.json() as { deleted: boolean; failed: string[]; message?: string };
+          expect(body.failed).toContain('engine_db');
+          expect(body.deleted).toBe(false);
+          expect(JSON.stringify(body)).not.toContain('permanently deleted');
         });
-        expect(res.status).toBe(200);
-        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string; warning?: string };
-        expect(body.deleted, 'what could be reached WAS erased').toBe(true);
-        expect(body.skipped, 'the store it could not open must be named').toContain('engine_db');
-        expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
-        expect(JSON.stringify(body)).not.toContain('permanently deleted');
-        // A positive marker, not only an absence: this branch answers 200 with no
-        // `error`, so a client testing `status === 200 && body.deleted` would read
-        // unqualified success off the two fields it is most likely to read.
-        expect(body.warning, 'the one positive marker on a 200').toContain('could not be opened');
+      });
+    });
+
+    it('DELETE /api/data earns the completeness sentence when engine.db never existed', async () => {
+      await withDataDir(async () => {
+        await swapEngine(reachableExceptEngineDb, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string };
+          expect(body.deleted).toBe(true);
+          expect(body.skipped ?? [], 'no file, nothing to erase: not a skip').not.toContain('engine_db');
+          expect(body.message).toBe('All user data has been permanently deleted');
+        });
+      });
+    });
+
+    // The threads live in history.db, and the run-history wipe empties every table of
+    // that file; a ThreadStore that failed to start over a working RunHistory loses
+    // nothing, so it must not turn the answer into a failure.
+    it('DELETE /api/data does not fail on a missing ThreadStore when history.db is wiped', async () => {
+      await withDataDir(async (dir) => {
+        writeFileSync(join(dir, 'history.db'), 'the run history file');
+        const deleteAllData = vi.fn();
+        await swapEngine({
+          ...reachableExceptEngineDb,
+          getThreadStore: () => null,
+          getRunHistory: () => ({ scrubFreedPages: () => undefined, deleteAllData }),
+        }, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          const body = await res.json() as { failed?: string[]; skipped?: string[] };
+          expect(deleteAllData, 'fixture: history.db is wiped').toHaveBeenCalledTimes(1);
+          expect(body.failed ?? []).not.toContain('threads');
+          expect(body.skipped ?? []).not.toContain('threads');
+          expect(res.status).toBe(200);
+        });
+      });
+    });
+
+    // The knowledge layer is null by configuration too (graph switched off, or no
+    // embedding provider), and then nothing opens agent-memory.db, while a file
+    // written before still holds every memory. The route opens it itself.
+    it('DELETE /api/data empties agent-memory.db even when the knowledge layer is off', async () => {
+      await withDataDir(async (dir) => {
+        const { AgentMemoryDb } = await import('../core/agent-memory-db.js');
+        const Database = (await import('better-sqlite3')).default;
+        const file = join(dir, 'agent-memory.db');
+        new AgentMemoryDb(file).close(); // a migrated store, as the graph left it
+        const seed = new Database(file);
+        seed.prepare('CREATE TABLE zz_probe (v TEXT)').run();
+        seed.prepare("INSERT INTO zz_probe (v) VALUES ('kept from before the graph was switched off')").run();
+        // And a freelist from deletes made without secure_delete: only the scrub's
+        // VACUUM reaches those pages.
+        seed.exec('CREATE TABLE zz_gone (v TEXT)');
+        const put = seed.prepare('INSERT INTO zz_gone (v) VALUES (?)');
+        for (let i = 0; i < 100; i++) put.run(`ZZFREELIST-${String(i)}-${'f'.repeat(300)}`);
+        seed.exec('DELETE FROM zz_gone');
+        seed.pragma('wal_checkpoint(TRUNCATE)');
+        seed.close();
+        expect(readFileSync(file).includes(Buffer.from('ZZFREELIST')), 'fixture: the old freelist is in the file').toBe(true);
+        await swapEngine({ ...reachableExceptEngineDb, getKnowledgeLayer: () => null }, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          const body = await res.json() as { failed?: string[]; skipped?: string[] };
+          expect(body.failed ?? [], 'the store was reachable through its file').not.toContain('knowledge_graph');
+          expect(body.skipped ?? []).not.toContain('knowledge_graph');
+        });
+        // Scrubbed, not only emptied, and closed again: the last connection to a WAL
+        // database removes its `-wal` on close, so a leftover one means it is still open.
+        expect(readFileSync(file).includes(Buffer.from('kept from before')), 'the value is still in the bytes').toBe(false);
+        expect(readFileSync(file).includes(Buffer.from('ZZFREELIST')), 'the old freelist was not scrubbed').toBe(false);
+        expect(existsSync(`${file}-wal`), 'the route left the file open').toBe(false);
+        const after = new Database(file, { readonly: true });
+        try {
+          expect((after.prepare('SELECT COUNT(*) AS n FROM zz_probe').get() as { n: number }).n).toBe(0);
+        } finally {
+          after.close();
+        }
       });
     });
 
