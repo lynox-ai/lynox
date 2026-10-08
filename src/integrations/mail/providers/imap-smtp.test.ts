@@ -808,6 +808,25 @@ describe('ImapSmtpProvider — close', () => {
 });
 
 describe('ImapSmtpProvider — watch', () => {
+  it('does not hand on a poll that was still listing when the watch stopped', async () => {
+    vi.useFakeTimers();
+    try {
+      let answer!: (uids: number[]) => void;
+      probe.search.mockImplementation(() => new Promise<number[]>((r) => { answer = r; }));
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      const types: string[] = [];
+      const handle = await provider.watch({ intervalMs: 60_000 }, async (event) => { types.push(event.type); });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(probe.search).toHaveBeenCalled();   // the tick is inside list()
+      await handle.stop();
+      answer([]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(types).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports an empty successful poll as ok, so an error state can clear without new mail', async () => {
     vi.useFakeTimers();
     try {

@@ -1030,6 +1030,28 @@ describe('OAuthGmailProvider — close', () => {
 });
 
 describe('OAuthGmailProvider — watch', () => {
+  it('does not hand on a poll that was still listing when the watch stopped', async () => {
+    let answer!: () => void;
+    let listing = false;
+    fetchMock.mockImplementation((url: string) => {
+      const s = String(url);
+      if (s.includes('/messages?') && !s.match(/\/messages\/[^?]+/)) {
+        listing = true;
+        return new Promise((r) => { answer = () => { r(respondJson({ messages: [] })); }; });
+      }
+      return Promise.resolve(respondJson({}));
+    });
+    const types: string[] = [];
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    const handle = await provider.watch({ intervalMs: 50 }, async (ev) => { types.push(ev.type); });
+    while (!listing) await new Promise((r) => setTimeout(r, 10));
+    await handle.stop();
+    answer();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(types).toEqual([]);
+    await provider.close();
+  });
+
   it('queries with a 60-second SINCE overlap to absorb clock skew + Gmail index lag', async () => {
     let capturedListUrl: string | undefined;
     fetchMock.mockImplementation((url: string) => {

@@ -555,6 +555,8 @@ export interface RunBackfillMetadataBody {
  */
 let _backfillInFlight = false;
 export function _resetBackfillMutex(): void { _backfillInFlight = false; }
+/** Whether a metadata backfill is running; the Art. 17 erasure refuses while one is. */
+export function isBackfillRunning(): boolean { return _backfillInFlight; }
 
 /**
  * Operator-driven envelope-metadata backfill. Fills the v11 columns

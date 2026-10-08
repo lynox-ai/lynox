@@ -147,6 +147,24 @@ describe('BackupManager', () => {
     rmSync(lynoxDir, { recursive: true, force: true });
   });
 
+  // The Art. 17 erasure refuses while `busy`: a backup or restore that is still running
+  // when the stores are emptied writes their old content back afterwards.
+  it('is busy while a backup or a restore runs, and not after either settles', async () => {
+    expect(manager.busy).toBe(false);
+    const backup = manager.createBackup();
+    expect(manager.busy).toBe(true);
+    const made = await backup;
+    expect(manager.busy).toBe(false);
+
+    const restore = manager.restoreBackup(made.path);
+    expect(manager.busy).toBe(true);
+    await restore;
+    expect(manager.busy).toBe(false);
+
+    await manager.restoreBackup(join(lynoxDir, 'no-such-backup'));
+    expect(manager.busy).toBe(false);
+  });
+
   it('createBackup produces a valid backup', async () => {
     const result = await manager.createBackup();
     expect(result.success).toBe(true);

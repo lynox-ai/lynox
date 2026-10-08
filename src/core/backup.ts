@@ -74,6 +74,8 @@ export class BackupManager {
   private readonly vaultKey: string | null;
   private _gdriveUploader: import('./backup-upload-gdrive.js').GDriveBackupUploader | null;
   private readonly _uploadAllowed: () => boolean;
+  /** Backups and restores running now; read by the Art. 17 erasure, which refuses while one is. */
+  private _running = 0;
 
   constructor(lynoxDir: string, config: BackupConfig, vaultKey: string | null) {
     this.lynoxDir = lynoxDir;
@@ -102,7 +104,23 @@ export class BackupManager {
 
   // ── Create Backup ──
 
+  /**
+   * Whether a backup or a restore is running. Both await between copying and finishing, so
+   * one that started before the erasure would write the stores' old content back after it:
+   * a backup into `backups/`, a restore into the data dir itself.
+   */
+  get busy(): boolean { return this._running > 0; }
+
   async createBackup(): Promise<BackupResult> {
+    this._running++;
+    try {
+      return await this._createBackup();
+    } finally {
+      this._running--;
+    }
+  }
+
+  private async _createBackup(): Promise<BackupResult> {
     const start = Date.now();
     const now = new Date();
     let timestamp = now.toISOString().replace(/[:.]/g, '').slice(0, 19) + 'Z';
@@ -314,6 +332,15 @@ export class BackupManager {
   // ── Restore ──
 
   async restoreBackup(backupPath: string): Promise<RestoreResult> {
+    this._running++;
+    try {
+      return await this._restoreBackup(backupPath);
+    } finally {
+      this._running--;
+    }
+  }
+
+  private async _restoreBackup(backupPath: string): Promise<RestoreResult> {
     const start = Date.now();
 
     // Load and validate manifest

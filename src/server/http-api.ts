@@ -1285,6 +1285,63 @@ export class LynoxHTTPApi {
    * `/run` compares it with the value it saw when it fetched its Session.
    */
   private erasureInProgress = false;
+
+  /**
+   * The first reason the erasure has to wait, or `null`. Each reason is something that
+   * holds user data in this process and writes it back — or hands it on — on its own: a
+   * mail account (its watcher), a Google grant (refreshes write the vault), a sign-in in
+   * flight, the inbox classifier at work, a backup or restore. The way out is named in
+   * each answer: disconnect, or wait. A restart clears every in-process one of them.
+   */
+  private erasureBlockedBy(engine: Engine, isBackfillRunning: () => boolean): { code: string; error: string } | null {
+    const mail = engine.getMailContext();
+    const google = [engine.getGoogleAuth(), mail?.googleAuth ?? null].filter((g): g is NonNullable<typeof g> => g !== null);
+    const restart = ' Restarting the instance also clears it.';
+    if (mail !== null && mail.registry.list().length > 0) {
+      return {
+        code: 'mail_accounts_registered',
+        error: 'Mail accounts are connected. Remove each one first (DELETE /api/mail/accounts/<id>), then erase.',
+      };
+    }
+    if (google.some(g => g.grantPending)) {
+      return {
+        code: 'google_grant_pending',
+        error: 'A Google sign-in is in progress. Wait until it finishes or expires (at most 5 minutes), then erase.' + restart,
+      };
+    }
+    if (google.some(g => g.isAuthenticated())) {
+      return {
+        code: 'google_connected',
+        error: 'Google is connected. Disconnect it first (POST /api/google/revoke, then DELETE /api/mail/accounts/<id> for a connected Gmail account), then erase.',
+      };
+    }
+    const inbox = engine.getInboxRuntime();
+    if (engine.isInboxRebootstrapping() || (inbox !== null && inbox.queue.depth > 0)) {
+      return {
+        code: 'inbox_queue_busy',
+        error: 'The inbox is still classifying mail. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    if (inbox !== null && inbox.coldStartTracker.getSnapshot().active.length > 0) {
+      return {
+        code: 'inbox_cold_start_running',
+        error: 'The inbox is reading in a mail account. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    if (isBackfillRunning()) {
+      return {
+        code: 'inbox_backfill_running',
+        error: 'An inbox backfill is running. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    if (engine.getBackupManager()?.busy === true) {
+      return {
+        code: 'backup_running',
+        error: 'A backup or restore is running. Wait until it has finished, then erase.',
+      };
+    }
+    return null;
+  }
   private erasureGeneration = 0;
 
   /**
@@ -8254,6 +8311,11 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('user', 'POST /api/google/auth', async (_req, res, _params, body) => {
+      // A grant started now would land after the erasure emptied the vault.
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        return;
+      }
       // A brokered tenant has no client pair to run a consent with, so there is
       // nothing this route can do for it — it connects through the control
       // plane instead. Refused on the CONJUNCTION (provisioned AND no pair):
@@ -8304,6 +8366,11 @@ export class LynoxHTTPApi {
       // Fallback: device flow (self-hosted / headless)
       try {
         const flow = await google.startDeviceFlow(scopes);
+        // Asked again after the await: the poll below is what writes the grant.
+        if (this.erasureInProgress) {
+          jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+          return;
+        }
         jsonResponse(res, 200, {
           verificationUrl: flow.verificationUrl,
           userCode: flow.userCode,
@@ -8318,6 +8385,13 @@ export class LynoxHTTPApi {
 
     // Google OAuth callback — handles redirect from Google after user consent
     this.addStatic('user', 'GET /api/google/callback', async (req, res) => {
+      // Before the state cookie is read: a consent the user finishes while the erasure
+      // runs must not exchange its code into the vault the erasure is emptying.
+      if (this.erasureInProgress) {
+        res.writeHead(409, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1>Not connected</h1><p>Your data is being erased right now. Connect Google again after it has finished.</p></body></html>');
+        return;
+      }
       const google = engine.getGoogleAuth();
       if (!google) {
         res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -8485,38 +8559,50 @@ export class LynoxHTTPApi {
         return;
       }
 
-      try {
-        // cpFetch, not googleFetch: this posts to the CONTROL PLANE, not to
-        // Google. Routing it through the Google host set would refuse the CP
-        // host and break the claim on every `guarded` tenant (§3.8).
-        const claimRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-instance-secret': httpSecret,
-          },
-          body: JSON.stringify({
-            instance_id: instanceId,
-            claim_nonce: claimNonce,
-          } satisfies OAuthClaimRequest),
-        }, google.hostPolicy);
-
-        if (!claimRes.ok) {
-          const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;
-          errorResponse(res, claimRes.status, (data['error'] as string) ?? 'Failed to claim tokens');
-          return;
-        }
-
-        // Shape owned by the wire contract — the control plane compiles the same
-        // declaration, so a field rename cannot land on one side alone.
-        const tokens = (await claimRes.json()) as OAuthClaimResponse;
-
-        await google.setTokens(tokens);
-        jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errorResponse(res, 500, msg);
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        return;
       }
+      // Counted as a pending grant for as long as the claim is out: one that started
+      // before an erasure is otherwise invisible to it and writes its tokens afterwards.
+      await google.whileGranting(async () => {
+        try {
+          // cpFetch, not googleFetch: this posts to the CONTROL PLANE, not to
+          // Google. Routing it through the Google host set would refuse the CP
+          // host and break the claim on every `guarded` tenant (§3.8).
+          const claimRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-instance-secret': httpSecret,
+            },
+            body: JSON.stringify({
+              instance_id: instanceId,
+              claim_nonce: claimNonce,
+            } satisfies OAuthClaimRequest),
+          }, google.hostPolicy);
+
+          if (!claimRes.ok) {
+            const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;
+            errorResponse(res, claimRes.status, (data['error'] as string) ?? 'Failed to claim tokens');
+            return;
+          }
+
+          // Shape owned by the wire contract — the control plane compiles the same
+          // declaration, so a field rename cannot land on one side alone.
+          const tokens = (await claimRes.json()) as OAuthClaimResponse;
+
+          if (this.erasureInProgress) {
+            jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+            return;
+          }
+          await google.setTokens(tokens);
+          jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errorResponse(res, 500, msg);
+        }
+      });
     });
 
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
@@ -9083,6 +9169,12 @@ export class LynoxHTTPApi {
           }
         }
 
+        // After the connection test, the last await: an account added while the erasure
+        // runs would store its password in the vault the erasure is emptying.
+        if (this.erasureInProgress) {
+          jsonResponse(res, 409, { error: 'An erasure is running; add the account after it has finished', code: 'erasure_in_progress' });
+          return;
+        }
         await ctx!.addAccount({ config: account, credentials: { user, pass } });
         jsonResponse(res, 200, { ok: true, account: ctx!.listAccounts().find(a => a.id === id) });
       } catch (err: unknown) {
@@ -10066,6 +10158,8 @@ export class LynoxHTTPApi {
         const dataDir = getLynoxDir();
         const { AgentMemoryDb } = await import('../core/agent-memory-db.js');
         const SqliteDatabase = (await import('better-sqlite3')).default;
+        // Loaded lazily like every other inbox route, so a boot without the inbox never loads it.
+        const { isBackfillRunning } = await import('../integrations/inbox/api.js');
         for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
@@ -10073,6 +10167,18 @@ export class LynoxHTTPApi {
         }
         if (this.runningSessions.size > 0) {
           jsonResponse(res, 409, { error: 'A running chat did not stop, so nothing was erased; try again', code: 'runs_did_not_stop' });
+          return;
+        }
+
+        // What would write the stores again AFTER they are emptied, or carry mail content to a
+        // model, refuses the erasure instead of being stopped by it: stopping a mail watcher or
+        // draining the classifier queue from here either classified the queue (the content
+        // goes to the model after the request to erase it) or left the inbox dead until a
+        // restart. Only synchronous reads below, and nothing deleted yet — each answer is a
+        // 409 inside this `try`, so `finally` lowers the flag.
+        const busy = this.erasureBlockedBy(engine, isBackfillRunning);
+        if (busy !== null) {
+          jsonResponse(res, 409, { ...busy, error: `${busy.error} Nothing was erased.` });
           return;
         }
 

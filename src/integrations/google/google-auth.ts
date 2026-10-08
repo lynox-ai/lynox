@@ -838,6 +838,30 @@ export class GoogleAuth {
    * reading `this.clientId` in here would look identical and quietly assert a
    * provenance the caller had not established.
    */
+  /**
+   * Grants this process is minting right now: a code exchange or a device-flow poll that
+   * has not returned. Each ends in `_acceptMintedTokens`, which writes the grant to the
+   * vault — so the Art. 17 erasure refuses while one is pending, instead of erasing the
+   * vault and having a sign-in that started before it write a fresh grant afterwards.
+   */
+  private _pendingGrants = 0;
+
+  get grantPending(): boolean { return this._pendingGrants > 0; }
+
+  /** Counts `run` as a pending grant — also for a grant minted elsewhere and handed to `setTokens`. */
+  async whileGranting<T>(run: () => Promise<T>): Promise<T> {
+    return this._countGrant(run);
+  }
+
+  private async _countGrant<T>(run: () => Promise<T>): Promise<T> {
+    this._pendingGrants++;
+    try {
+      return await run();
+    } finally {
+      this._pendingGrants--;
+    }
+  }
+
   private _acceptMintedTokens(json: unknown, mintedBy: string): void {
     this.tokenData = validateTokenResponse(json, mintedBy);
     this._clientMisconfigured = null;
@@ -894,7 +918,7 @@ export class GoogleAuth {
 
     const authUrl = `${AUTH_URL}?${params}`;
 
-    const waitForCode = async (): Promise<void> => {
+    const waitForCode = (): Promise<void> => this._countGrant(async () => {
       try {
         const code = await codePromise;
         // Exchange code for tokens
@@ -920,7 +944,7 @@ export class GoogleAuth {
       } finally {
         close();
       }
-    };
+    });
 
     return { authUrl, waitForCode };
   }
@@ -953,7 +977,11 @@ export class GoogleAuth {
   /**
    * Exchange an authorization code from redirect-based OAuth flow.
    */
-  async exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
+  exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
+    return this._countGrant(() => this._exchangeRedirectCode(code, redirectUri));
+  }
+
+  private async _exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
     const { clientId, clientSecret } = this.requireOwnPair('exchangeRedirectCode');
     const response = await googleFetch(TOKEN_URL, {
       method: 'POST',
@@ -1010,7 +1038,7 @@ export class GoogleAuth {
 
     const pollInterval = Math.max((data.interval ?? 5) * 1000, DEVICE_POLL_INTERVAL_MS);
 
-    const waitForAuth = async (): Promise<void> => {
+    const waitForAuth = (): Promise<void> => this._countGrant(async () => {
       const deadline = Date.now() + DEVICE_TIMEOUT_MS;
 
       while (Date.now() < deadline) {
@@ -1043,7 +1071,7 @@ export class GoogleAuth {
       }
 
       throw new Error('Device auth timed out. Please try again.');
-    };
+    });
 
     return {
       verificationUrl: data.verification_url,
