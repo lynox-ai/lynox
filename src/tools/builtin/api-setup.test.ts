@@ -17,7 +17,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-import { apiSetupTool, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
+import { apiSetupTool, adoptionNote, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
 import { MAX_REQUESTS_PER_SESSION } from './http.js';
 import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
@@ -599,15 +599,54 @@ describe('api_setup tool', () => {
       expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent)).toContain('Deleted');
     });
 
-    it('the owner\'s update of a mandate\'s profile makes it the owner\'s, and says what the mandate had chosen', async () => {
+    it('the owner\'s update of a mandate\'s profile makes it the owner\'s, and names what the save keeps from it', async () => {
+      const store = new ApiStore();
+      const withKey = { ...SAMPLE_PROFILE, auth: { type: 'bearer' as const, vault_keys: ['SETUP_TOKEN'] } };
+      await apiSetupTool.handler({ action: 'create', profile: withKey }, createMockAgent(store, undefined, undefined, mandate));
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store));
+      expect(stored(store).name).toBe('Changed');
+      expect(stored(store).created_by).toBeUndefined();
+      expect(out).toContain('set up in a mandate\'s session; it is now yours. Your save keeps the vault keys SETUP_TOKEN and the host api.openai.com from that setup. Requests now carry what those keys hold');
+    });
+
+    it('the owner\'s save that replaces the mandate\'s keys does not name them as kept', async () => {
       const store = new ApiStore();
       await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type: 'bearer', vault_keys: ['SETUP_TOKEN'] } } }, createMockAgent(store, undefined, undefined, mandate));
       const out = await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
-      expect(stored(store).name).toBe('Changed');
-      expect(stored(store).created_by).toBeUndefined();
-      expect(out).toContain('set up in a mandate\'s session; it is now yours');
-      expect(out).toContain('SETUP_TOKEN');
-      expect(out).toContain('api.openai.com');
+      expect(out).toContain('it is now yours. Your save keeps the host api.openai.com from that setup.');
+      expect(out).not.toContain('SETUP_TOKEN');
+      expect(out).not.toContain('Requests now carry');
+    });
+
+    describe('adoptionNote', () => {
+      const prior: ApiProfile = { ...SAMPLE_PROFILE, base_url: 'https://crm.example.com/v1', auth: { type: 'bearer', vault_keys: ['MANDATE_KEY', 'SHARED_KEY'] } };
+
+      it('names only the keys the saved profile shares with the replaced one', () => {
+        const saved: ApiProfile = { ...prior, auth: { type: 'bearer', vault_keys: ['SHARED_KEY', 'OWNER_KEY'] } };
+        const note = adoptionNote(prior, saved);
+        expect(note).toContain('Your save keeps the vault keys SHARED_KEY and the host crm.example.com from that setup.');
+        expect(note).not.toContain('MANDATE_KEY');
+        expect(note).not.toContain('OWNER_KEY');
+      });
+
+      it('says nothing was kept when keys and host both changed', () => {
+        const saved: ApiProfile = { ...prior, base_url: 'https://other.example.com/v1', auth: { type: 'bearer', vault_keys: ['OWNER_KEY'] } };
+        expect(adoptionNote(prior, saved)).toContain('Your save keeps none of the vault keys or the host that setup named.');
+      });
+
+      it('does not print a host the parser kept unusual characters in', () => {
+        const odd = 'x-y://a"b;c{d}.example/';
+        const raw = new URL(odd).hostname;
+        expect(raw).toContain('"');
+        const note = adoptionNote({ ...prior, base_url: odd }, { ...prior, base_url: odd });
+        expect(note).toContain('the host <unprintable>');
+        expect(note).not.toContain(raw);
+      });
+
+      it('prints a bracketed IPv6 host', () => {
+        const v6 = 'https://[2001:db8::1]/v1';
+        expect(adoptionNote({ ...prior, base_url: v6 }, { ...prior, base_url: v6 })).toContain('the host [2001:db8::1]');
+      });
     });
 
     it('control: the owner\'s update of their own profile says nothing about a mandate', async () => {

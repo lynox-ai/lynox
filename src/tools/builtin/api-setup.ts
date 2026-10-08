@@ -21,7 +21,7 @@ import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGr
 import { accessTokenKey, collectVaultKeys, isMandateAuthored, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
+import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -1335,16 +1335,31 @@ function deletedMeanwhile(
   return `Token exchange completed, but api_profile "${profile.id}" was deleted while it ran.${purgeMessage(purge)}`;
 }
 
+function hostOf(profile: ApiProfile): string | undefined {
+  try { return new URL(profile.base_url).hostname; } catch { return undefined; }
+}
+
 /**
- * What the owner takes over when their save replaces a profile a mandate wrote: the vault
- * names and the host the mandate chose. Shaped like every other profile value this tool echoes.
+ * What the owner takes over when their save replaces a profile a mandate wrote. `update`
+ * replaces a profile whole, so that is what the SAVED profile still shares with the replaced
+ * one — the vault names and the host — not what the replaced one named. Shaped like every
+ * other profile value this tool echoes.
  */
-function adoptionNote(prior: ApiProfile): string {
-  const names = collectVaultKeys(prior).map((k) => shapedForLog(k, DERIVED_NAME_SHAPE, 80));
-  let host = '';
-  // The parser's hostname holds only letters, digits, dots, hyphens and IPv6 brackets.
-  try { host = new URL(prior.base_url).hostname; } catch { /* named as unknown below */ }
-  return `This profile had been set up in a mandate's session; it is now yours. It names ${names.length > 0 ? `the vault keys ${names.join(', ')}` : 'no vault keys'} and the host ${host !== '' ? host : '(unreadable)'}; requests now carry what those keys hold, from the environment too.`;
+export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
+  const priorKeys = new Set(collectVaultKeys(prior));
+  const kept = collectVaultKeys(saved).filter((k) => priorKeys.has(k)).map((k) => shapedForLog(k, DERIVED_NAME_SHAPE, 80));
+  const host = hostOf(saved);
+  const keptHost = host !== undefined && host === hostOf(prior) ? shapedForLog(host, HOSTNAME_SHAPE, 253) : undefined;
+  const lead = 'This profile had been set up in a mandate\'s session; it is now yours.';
+  if (kept.length === 0 && keptHost === undefined) {
+    return `${lead} Your save keeps none of the vault keys or the host that setup named.`;
+  }
+  const what = [
+    ...(kept.length > 0 ? [`the vault keys ${kept.join(', ')}`] : []),
+    ...(keptHost !== undefined ? [`the host ${keptHost}`] : []),
+  ].join(' and ');
+  const carry = kept.length > 0 ? ' Requests now carry what those keys hold, from the environment too.' : '';
+  return `${lead} Your save keeps ${what} from that setup.${carry}`;
 }
 
 /**
@@ -1357,7 +1372,7 @@ function adoptionNote(prior: ApiProfile): string {
 export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | undefined, id: string): string | null {
   if (existing === undefined || isOwnerPrincipal(agent.principal)) return null;
   if (existing.created_by === principalTag(agent.principal)) return null;
-  return `Error: API profile "${id}" was not set up in this session's name, so this session may not change, connect or delete it. Nothing was changed. Ask the owner to make the change.`;
+  return `Error: API profile "${id}" was not set up in this session's name, so this session may not change or delete it. Nothing was changed. Ask the owner to make the change.`;
 }
 
 // ── Tool definition ───────────────────────────────────────────────────────────
@@ -1881,7 +1896,7 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
-      if (adopted !== undefined) parts.push(adoptionNote(adopted));
+      if (adopted !== undefined) parts.push(adoptionNote(adopted, profile));
       if (grantDiscarded) {
         parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
       }
@@ -2230,7 +2245,7 @@ ${draftJson}
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
       }
       // A profile a mandate wrote does not write over what it may not read either: a value
-      // from the environment, or another author's preset account, whose requests would then
+      // from the environment, or any account connected through a preset, whose requests would then
       // carry a token this profile minted (`profile-secret-view.ts`).
       if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName)) {
         return input.output_secret_name === undefined
