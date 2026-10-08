@@ -3155,6 +3155,8 @@ export class RunHistory {
      *  the park uses — `TaskManager.update` is NOT, and must not become, one: it
      *  validates against VALID_STATUSES and rejects `waiting` by design. */
     waitingUntil?: string | null | undefined;
+    /** The model tier the user chose for this trigger's runs; null clears the choice. */
+    modelTier?: ModelTier | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
   }

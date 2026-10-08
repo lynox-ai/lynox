@@ -251,6 +251,54 @@ describe('TriggerStore — what the creating session had taken in', () => {
   });
 });
 
+describe('TriggerStore — the model tier a trigger runs at', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const PAST = '2020-01-01T00:00:00.000Z';
+  const CONFIRMED = '2026-06-01T00:00:00.000Z';
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+  function make(): { store: TriggerStore; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-trgt-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    return { store: new TriggerStore(engine), engine };
+  }
+  const tierOf = (store: TriggerStore, id: string) => store.getDue('2030-01-01T00:00:00.000Z').find((t) => t.id === id)?.model_tier;
+
+  it('a new trigger has no tier; a set tier reads back, and null clears it', () => {
+    const { store } = make();
+    store.insert({ id: 't', title: 'x', source: 'cron', effect: 'run_agent', nextRunAt: PAST, confirmedAt: CONFIRMED });
+    expect(tierOf(store, 't')).toBeUndefined();
+    expect(store.updateFields('t', { modelTier: 'deep' })).toBe(true);
+    expect(tierOf(store, 't')).toBe('deep');
+    expect(store.updateFields('t', { modelTier: null })).toBe(true);
+    expect(tierOf(store, 't')).toBeUndefined();
+  });
+
+  it('a tier change keeps consent, as a schedule change does', () => {
+    const { store } = make();
+    store.insert({ id: 't', title: 'x', source: 'cron', effect: 'run_agent', nextRunAt: PAST, confirmedAt: CONFIRMED });
+    store.updateFields('t', { modelTier: 'fast' });
+    expect(store.get('t')?.confirmedAt).toBe(CONFIRMED);
+  });
+
+  it('a stored value is read through normalizeTier: a legacy alias maps, anything else is no choice', () => {
+    const { store, engine } = make();
+    store.insert({ id: 'a', title: 'x', source: 'cron', effect: 'run_agent', nextRunAt: PAST, confirmedAt: CONFIRMED });
+    store.insert({ id: 'b', title: 'y', source: 'cron', effect: 'run_agent', nextRunAt: PAST, confirmedAt: CONFIRMED });
+    engine.getDb().prepare("UPDATE triggers SET model_tier = 'opus' WHERE id = 'a'").run();
+    engine.getDb().prepare("UPDATE triggers SET model_tier = 'gpt-9' WHERE id = 'b'").run();
+    expect(tierOf(store, 'a')).toBe('deep');
+    expect(tierOf(store, 'b')).toBeUndefined();
+  });
+});
+
 describe('TriggerStore — run_agent consent gate (triggers-consent)', () => {
   const tmpDirs: string[] = [];
   const engines: EngineDb[] = [];

@@ -1945,16 +1945,19 @@ describe('Engine + Session (Orchestrator)', () => {
       };
       afterEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
 
-      async function compare(kind: 'standard' | 'watch', setup: (engine: Engine) => void): Promise<{ admitted: { modelId: string; provider: string }; agentModel: string; row: { modelId: string; provider: string } }> {
+      async function compare(kind: 'standard' | 'watch', setup: (engine: Engine) => void, triggerTier?: 'fast' | 'balanced' | 'deep'): Promise<{ admitted: { modelId: string; provider: string }; agentModel: string; row: { modelId: string; provider: string } }> {
         const engine = new Engine({} as import('../types/index.js').LynoxConfig);
         await engine.init();
         setup(engine);
         try {
-          const admitted = engine.resolveWorkerRunModel(kind);
+          const admitted = engine.resolveWorkerRunModel(kind, triggerTier);
           // The loop's own choice (`workerRunModelOverride`), applied the way the loop
-          // applies it — not a copy of its rule.
-          const pick = engine.workerRunModelOverride(kind);
-          const session = engine.createSession(kind === 'watch' ? { model: 'fast' } : {});
+          // applies it — not a copy of its rule. The session's tier IS a copy of the
+          // loop's (the trigger's tier, else `fast` for a watch and none for a run): that
+          // the loop passes it is asserted in worker-loop.test.ts, not here.
+          const pick = engine.workerRunModelOverride(kind, triggerTier);
+          const tier = triggerTier ?? (kind === 'watch' ? 'fast' : undefined);
+          const session = engine.createSession(tier ? { model: tier } : {});
           vi.mocked(Agent).mockClear();
           if (kind === 'standard') session._recreateAgent({ autonomy: 'autonomous', ...pick });
           else session._recreateAgent(pick);
@@ -1967,6 +1970,7 @@ describe('Engine + Session (Orchestrator)', () => {
           delete engine.getUserConfig().model_profiles;
           delete engine.getUserConfig().worker_profile;
           delete engine.getUserConfig().background_model;
+          delete engine.getUserConfig().max_tier;
         }
       }
 
@@ -2070,6 +2074,43 @@ describe('Engine + Session (Orchestrator)', () => {
         } finally {
           delete engine.getUserConfig().background_model;
         }
+      });
+
+      it('a trigger\'s own tier: that tier\'s model, over the background model and the worker profile', async () => {
+        const opus = resolveTierModel('deep', 'anthropic').modelId;
+        const r = await compare('standard', (engine) => {
+          engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+          engine.getUserConfig().worker_profile = 'worker';
+          engine.getUserConfig().background_model = MISTRAL_SLOT;
+        }, 'deep');
+        expect(opus).not.toBe(resolveTierModel('balanced', 'anthropic').modelId);
+        expect(r.admitted).toEqual({ modelId: opus, provider: 'anthropic' });
+        expect(r.agentModel).toBe(opus);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('a trigger\'s own tier is held to the ceiling', async () => {
+        const sonnet = resolveTierModel('balanced', 'anthropic').modelId;
+        const r = await compare('standard', (engine) => {
+          engine.getUserConfig().max_tier = 'balanced';
+        }, 'deep');
+        expect(r.admitted).toEqual({ modelId: sonnet, provider: 'anthropic' });
+        expect(r.agentModel).toBe(sonnet);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('a watch with its own tier: that tier\'s slot, not the fast one and not the worker profile', async () => {
+        const r = await compare('watch', (engine) => {
+          engine.getUserConfig().model_profiles = { worker: MISTRAL_PROFILE };
+          engine.getUserConfig().worker_profile = 'worker';
+          setTierSetResolver({ routingMode: 'hybrid', tierSet: {
+            fast: { provider: 'fireworks', model_id: 'accounts/fireworks/models/deepseek-v4p1-flash' },
+            balanced: { provider: 'fireworks', model_id: 'accounts/fireworks/models/minimax-m3' },
+          } });
+        }, 'balanced');
+        expect(r.admitted).toEqual({ modelId: 'accounts/fireworks/models/minimax-m3', provider: 'fireworks' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
       });
 
       it('a worker profile: the profile\'s model and wire, though the tier points elsewhere', async () => {

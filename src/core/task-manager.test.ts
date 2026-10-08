@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, TriggerTierUnsupportedError, admittedTriggerTier } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
@@ -33,6 +33,22 @@ describe('deriveSourceEffect (create-path → clean axes; migration-remap twin)'
     expect(deriveSourceEffect({})).toEqual({ source: 'manual', effect: 'run_agent' });
     // an unknown taskType is a plain agent run, source from its firing shape:
     expect(deriveSourceEffect({ taskType: 'zzz' })).toEqual({ source: 'manual', effect: 'run_agent' });
+  });
+});
+
+describe('admittedTriggerTier', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('drops a stored tier on a managed pool tier and keeps it everywhere else', () => {
+    for (const tier of ['managed', 'managed_pro']) {
+      vi.stubEnv('LYNOX_BILLING_TIER', tier);
+      expect(admittedTriggerTier('deep'), tier).toBeUndefined();
+    }
+    vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
+    expect(admittedTriggerTier('deep')).toBe('deep');
+    vi.stubEnv('LYNOX_BILLING_TIER', '');
+    expect(admittedTriggerTier('fast')).toBe('fast');
+    expect(admittedTriggerTier(undefined)).toBeUndefined();
   });
 });
 
@@ -216,6 +232,29 @@ describe('TaskManager', () => {
 
     it('should return undefined for missing task', () => {
       expect(tm.update('nope', { title: 'x' })).toBeUndefined();
+    });
+
+    it('sets, and with an empty value or null clears, a trigger\'s model tier', () => {
+      const trigger = tm.create({ title: 'Nightly', taskType: 'scheduled', scheduleCron: '0 9 * * *' });
+      expect(tm.getTrigger(trigger.id)?.model_tier).toBeUndefined();
+      expect(tm.update(trigger.id, { modelTier: 'deep' })?.model_tier).toBe('deep');
+      expect(tm.update(trigger.id, { modelTier: '' })?.model_tier).toBeUndefined();
+      tm.update(trigger.id, { modelTier: 'fast' });
+      expect(tm.update(trigger.id, { modelTier: null })?.model_tier).toBeUndefined();
+    });
+
+    it('refuses a tier on a trigger whose runs use no agent, and still lets it be cleared', () => {
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      expect(tm.getTrigger(reminder.id)?.effect).toBe('notify');
+      expect(() => tm.update(reminder.id, { modelTier: 'deep' })).toThrow(TriggerTierUnsupportedError);
+      expect(tm.getTrigger(reminder.id)?.model_tier).toBeUndefined();
+      expect(tm.update(reminder.id, { modelTier: null })?.model_tier).toBeUndefined();
+    });
+
+    it('refuses a model tier it does not know, legacy aliases included', () => {
+      const trigger = tm.create({ title: 'Nightly', taskType: 'scheduled', scheduleCron: '0 9 * * *' });
+      expect(() => tm.update(trigger.id, { modelTier: 'opus' as never })).toThrow('Invalid model_tier');
+      expect(tm.getTrigger(trigger.id)?.model_tier).toBeUndefined();
     });
 
     it('should reject invalid status', () => {
