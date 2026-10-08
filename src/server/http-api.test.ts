@@ -10745,6 +10745,17 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
   });
 
   describe('GDPR export + erasure — engine.db coverage (Foundation Rework v2 — S2-pre0)', () => {
+    // This file shares ONE per-IP rate window, and this describe sits after every
+    // other refund block, so its spend lands on the tail with no headroom left.
+    // Measured rather than feared: the cases added for the erasure work tipped
+    // `clears the revocation the new authorization replaced`, four hundred lines
+    // away, into a 429. Same snapshot/restore as the three blocks above.
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
     function swapEngine(overrides: Record<string, unknown>, test: () => Promise<void>): Promise<void> {
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
       const origs: Record<string, unknown> = {};
@@ -11012,6 +11023,27 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // The store key, never the SQLite message — it carries file paths and this
         // body goes to a browser.
         expect(JSON.stringify(body)).not.toContain('disk full');
+      });
+    });
+
+    it('DELETE /api/data clears the legacy verb-def rows', async () => {
+      // An IDENTIFIER witness, and here that is the honest instrument rather than
+      // a lazy one: those rows are dormant trigger and workflow definitions that
+      // `GET /api/export` does not read, so the set property in
+      // `erasure-covers-export.test.ts` structurally cannot see them — a mutation
+      // round confirmed that deleting this call survives every other test in the
+      // repo. The call exists for a resurrection path, not a read path: an
+      // engine.db recreate re-backfills the legacy rows into live reads.
+      const clearLegacyVerbDefs = vi.fn();
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => null,
+        getRunHistory: () => ({ clearLegacyVerbDefs }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        expect(clearLegacyVerbDefs).toHaveBeenCalledTimes(1);
       });
     });
 
