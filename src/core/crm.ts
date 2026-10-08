@@ -177,8 +177,8 @@ export class CRM {
       // justification. (That nobody can observe the latch open DURING this call
       // rests on `ensureSchema` being fully synchronous — an `await` added to it
       // later would reopen the window silently.) Closing it here makes that
-      // sentence unconditional, at a real
-      // price: a failed rebuild leaves the memo claiming collections that are
+      // sentence unconditional, at a real price:
+      // a failed rebuild leaves the memo claiming collections that are
       // missing, so CRM reads — including the one inside `GET /api/export` — throw
       // until a restart. The route reports it (`degraded: ['crm_schema']`) and
       // nobody is told the data survived.

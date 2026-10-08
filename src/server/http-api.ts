@@ -9711,13 +9711,22 @@ export class LynoxHTTPApi {
       // masker's own docblock reserves it for: without it the generic 40+ token
       // rule is dropped, and an opaque 48-character credential matches nothing
       // else.
-      // Each key AT MOST ONCE, and this is a bound rather than tidiness. A loop
-      // that re-lists what it could not delete calls this with the same key every
-      // round: measured on the per-item wrapper below before this line existed,
-      // 10 000 rounds × 200 undeletable rows gave 2 000 000 entries, a 136 MB
-      // response body and 687 MB of RSS — out of ONE locked database. `failed` is
-      // the retry instruction, so a repeated id also destroys the one thing it is
-      // for: saying how many rows actually failed.
+      // Each key AT MOST ONCE, and this is a bound rather than tidiness. A loop that
+      // re-lists what it could not delete calls this with the same key every round:
+      // measured on the per-item wrapper below before any bound existed, 10 000
+      // rounds × 200 undeletable rows gave 2 000 000 entries, a 136 MB response body
+      // and 687 MB of RSS — out of ONE locked database. `failed` is the retry
+      // instruction, so a repeated id also destroys the one thing it is for: saying
+      // how many rows actually failed.
+      //
+      // That exact figure is no longer reachable, because the loop now also stops on
+      // the first fruitless round — what this line still covers is the PARTIAL case,
+      // where some rows delete and a stuck one is visited again on the next pass.
+      //
+      // ⚠ It suppresses the LOG line too, first-wins: a second, different failure of
+      // the same key is never written. If a row fails transiently in one round and
+      // permanently in the next, the operator keeps the transient message, which is
+      // the less diagnostic of the two.
       const noted = new Set<string>();
       const note = (key: string, err: unknown, list: string[] = failed): void => {
         if (noted.has(key)) return;
@@ -9760,14 +9769,21 @@ export class LynoxHTTPApi {
       // abandons the rest of the loop on the first throw, so a single locked row
       // left every later row of that store in place while the answer named only the
       // store. The item is appended to the key so the answer says which.
-      const attemptEach = <T>(key: string, items: readonly T[], fn: (item: T) => void, name: (item: T) => string): void => {
+      // Returns how many items SUCCEEDED, because a caller that loops needs to know
+      // whether it is getting anywhere and only the attempt itself can say. Counting
+      // rows before and against after does not: a listing that caps its page size
+      // reports the same number twice while the wipe is working perfectly.
+      const attemptEach = <T>(key: string, items: readonly T[], fn: (item: T) => void, name: (item: T) => string): number => {
+        let done = 0;
         for (const item of items) {
           try {
             fn(item);
+            done++;
           } catch (err) {
             note(`${key}:${name(item)}`, err);
           }
         }
+        return done;
       };
 
       // Delete all threads + messages.
@@ -9809,28 +9825,29 @@ export class LynoxHTTPApi {
           let entities = db.listEntities({ limit: 200 });
           for (let round = 0; entities.length > 0; round++) {
             if (round >= MAX_ROUNDS) {
-              // Rounds, not progress — with a working delete this is 2 000 000
-              // entities genuinely removed, so "no progress" would state the
-              // opposite of what happened to whoever debugs the 500. This is the
-              // outer backstop; the progress check below is what normally stops it.
+              // Rounds, not progress: a page is at most 200, so reaching this means
+              // two million entities were genuinely removed, and "no progress" would
+              // state the opposite of what happened to whoever debugs the 500.
               throw new Error(`entity wipe did not finish within ${MAX_ROUNDS} rounds`);
             }
             // Per ITEM, and this is the loop where it matters most: one undeletable
             // row used to abort the whole attempt, leaving every other entity in
             // `agent-memory.db` in place while the answer named only the store. It
             // is also the largest table this route touches.
-            attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
-            const remaining = db.listEntities({ limit: 200 });
-            // ⚠ Stop on NO PROGRESS, and this is the half the per-item wrapper took
-            // away: the wrapper does not rethrow, so without it a database that
-            // refuses every delete spun the full 10 000 rounds. The claim is now
-            // measured rather than assumed — a round that removed nothing will not
-            // remove anything on the next pass either, and the message says exactly
-            // that.
-            if (remaining.length >= entities.length) {
-              throw new Error(`entity wipe made no progress — ${String(remaining.length)} entities remain`);
+            //
+            // ⚠ Stop when a round DELETED NOTHING, and read that from the deletes
+            // rather than from the row count. The first version of this check
+            // compared the length of the next listing against the last one, which is
+            // wrong in a way that only shows past one page: `listEntities` clamps its
+            // limit to 200, so a working wipe of 400 rows removes 200, lists 200
+            // again and "no progress" fires over a success — measured on the real
+            // store, 399 rows completed and 400 threw with 300 surviving. A count is
+            // not progress; whether an attempt succeeded is.
+            const removed = attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
+            if (removed === 0) {
+              throw new Error(`entity wipe made no progress — ${String(entities.length)} entities remain`);
             }
-            entities = remaining;
+            entities = db.listEntities({ limit: 200 });
           }
         });
         // Its own attempt: a throw in the entity loop above used to skip this line,
@@ -9925,37 +9942,54 @@ export class LynoxHTTPApi {
       // routes read config from disk, so a failed reload leaves nothing readable.
       await attemptAsync('config_reload', async () => { await engine.reloadUserConfig(); }, degraded);
 
+      // ⚠ `skipped` rides along in EVERY branch, which it did not at first — and the
+      // omission reinstated the false claim these branches exist to remove. A store
+      // this route could not open is the one fact the answer must never drop: with
+      // it missing, `failed` read as the complete list of where to look, and the
+      // degraded branch said "Data erased" over an intact `engine.db`.
+      const extra = {
+        ...(degraded.length > 0 ? { degraded } : {}),
+        ...(skipped.length > 0 ? { skipped } : {}),
+      };
       if (failed.length > 0) {
         // 500, not a 200 with `deleted: false`: a client that reads the status code
         // alone must not conclude the erasure succeeded, and an Art. 17 answer is
         // the last place to be optimistic. `failed` names which stores may still
         // hold data, so a retry (or a human) knows where to look.
-        jsonResponse(res, 500, {
-          deleted: false,
-          failed,
-          ...(degraded.length > 0 ? { degraded } : {}),
-          error: 'Erasure incomplete — some stores may still hold data',
-        });
+        jsonResponse(res, 500, { deleted: false, failed, ...extra, error: 'Erasure incomplete — some stores may still hold data' });
         return;
       }
       if (degraded.length > 0) {
-        // The erasure DID complete, so `deleted` is true and the sentence would be
-        // defensible — but a post-erasure step failed and the caller has to know,
-        // so the status is still 500 and the completeness claim stays out. What
-        // this must not say is that data remains: it does not.
+        // Every wipe that RAN completed, so `deleted` is true — but a post-erasure
+        // step failed and the caller has to know, so the status is 500 and the
+        // completeness claim stays out. The sentence is qualified when a store could
+        // not be opened, because then "data erased" is only true of what was reached.
         jsonResponse(res, 500, {
           deleted: true,
-          degraded,
-          error: 'Data erased, but a post-erasure step failed — this instance may need a restart',
+          ...extra,
+          error: skipped.length > 0
+            ? 'Erased what could be reached, but a store could not be opened and a post-erasure step failed — this instance may need a restart'
+            : 'Data erased, but a post-erasure step failed — this instance may need a restart',
         });
         return;
       }
       if (skipped.length > 0) {
         // 200 and `deleted: true`, because every store this route COULD open was
         // erased and nothing failed — but no completeness sentence, because one it
-        // could not open may hold data. The absence of `message` is the signal, the
-        // same way it is in the two branches above, and `skipped` says where to look.
-        jsonResponse(res, 200, { deleted: true, skipped });
+        // could not open may hold data.
+        //
+        // ⚠ The signal is NOT the same strength as in the two branches above: those
+        // carry a 500 and a positive `error` field, this one carries a 200 and the
+        // ABSENCE of `message`, so a client testing `status === 200 && body.deleted`
+        // reads unqualified success. `skipped` is the only positive marker, hence
+        // the `warning` beside it — a field a careless reader still misses, which is
+        // why the open half of this (is a null handle a fault or a store this
+        // instance does not have?) is registered rather than papered over.
+        jsonResponse(res, 200, {
+          deleted: true,
+          skipped,
+          warning: 'Erased what could be reached — a store could not be opened and may still hold data',
+        });
         return;
       }
       jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });

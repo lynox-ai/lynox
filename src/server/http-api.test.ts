@@ -11137,6 +11137,34 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/data wipes an entity table LARGER than one listing page', async () => {
+      // The case no test drained before, and the one a working wipe fails without
+      // this fix: `listEntities` clamps its limit to 200, so a progress check that
+      // compares the length of two listings sees 200 twice while 200 rows were
+      // genuinely deleted. Measured on the real store: 399 rows completed, 400 threw
+      // after 200 successful deletes and 300 survived — an Art. 17 request on any
+      // instance with a used knowledge graph answering 500.
+      //
+      // The mock caps at 200 exactly as `AgentMemoryDb` does; that clamp IS the
+      // property under test, so a fixture without it would witness nothing.
+      let pool = Array.from({ length: 450 }, (_, i) => ({ id: `big-${i}` }));
+      const listEntities = vi.fn(() => pool.slice(0, 200));
+      const deleteEntity = vi.fn((id: string) => { pool = pool.filter(e => e.id !== id); });
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({ getDb: () => ({ listEntities, deleteEntity, deactivateAllMemories: () => [] }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status, 'a wipe past one page is not a failure').toBe(200);
+        const body = await res.json() as { deleted: boolean; failed?: string[] };
+        expect(body.deleted).toBe(true);
+        expect(body.failed ?? []).toEqual([]);
+        expect(pool, 'every entity must be gone, not just the first page').toEqual([]);
+        expect(deleteEntity).toHaveBeenCalledTimes(450);
+      });
+    });
+
     it('DELETE /api/data names a stuck entity ONCE across rounds', async () => {
       // The case the all-undeletable test cannot reach, and the one the dedupe in
       // `note` is actually for: when SOME rows delete, the loop makes progress and
@@ -11363,11 +11391,16 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     });
 
     it('DELETE /api/data claims completeness only when every store was reachable', async () => {
-      // The other direction, and the reason the one above cannot stand alone: a
+      // A POLARITY CONTROL rather than a witness, and worth having as one: a
       // `skipped` list that is always non-empty would withdraw the sentence from
-      // every erasure, which is the same loss of information in the other
-      // direction. Every accessor the route reads is handed over here, so the
-      // sentence is earned.
+      // every erasure, the same loss of information in the other direction. No
+      // minimal edit to the `skipped` machinery makes this red — deleting it
+      // entirely leaves `message` present and this green — so it kills only
+      // over-reporting mutants.
+      //
+      // The accessors not listed below (`getMemory`, `getSecretStore`) come from the
+      // mock Engine's constructor defaults, not from nowhere; an earlier version of
+      // this comment claimed every one was handed over here, which is false.
       await swapEngine({
         getEngineDb: () => ({ deleteAllData: () => undefined }),
         getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
