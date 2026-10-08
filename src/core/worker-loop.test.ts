@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PromptStore } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
+import { EngineDb } from './engine-db.js';
+import { TaskManager as RealTaskManager } from './task-manager.js';
 
 // Mock the orchestrator runner so the pipeline-path tests can drive
 // status/runId outcomes deterministically without spinning up an LLM.
@@ -3080,5 +3082,97 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const { loop, taskId, answered } = await park();
     expect(loop.resolveTaskInput(taskId, 'Yes')).toBe(true);
     await expect(answered).resolves.toBe('Yes');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A test run by hand, against the real store, with the race FORCED: the run is held
+// inside the agent turn, the stamp state changes underneath it, then the run finishes.
+// "Is this a test?" must be the answer given at dispatch, not one re-derived when the
+// result is written — re-deriving it at write time, from the row or from the context,
+// is what made the two opposite races below.
+// ---------------------------------------------------------------------------
+describe('a test run by hand while the stamp changes underneath it', () => {
+  const M = 'mandate:eva@kanzlei.example';
+  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+  let dir: string;
+  let history: RunHistory;
+  let engineDb: EngineDb;
+  let tm: RealTaskManager;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-wl-handrun-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    engineDb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engineDb);
+    tm = new RealTaskManager(history);
+  });
+  afterEach(() => {
+    try { history.close(); } catch { /* closed */ }
+    try { engineDb.close(); } catch { /* closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A session whose turn waits at a gate the test opens. */
+  function heldSession(result: string | Error): { session: Session; started: Promise<void>; release: () => void } {
+    let markStarted!: () => void;
+    const started = new Promise<void>((r) => { markStarted = r; });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const session = {
+      sessionId: 'held', _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined,
+      run: vi.fn(async () => { markStarted(); await gate; if (result instanceof Error) throw result; return result; }),
+    } as unknown as Session;
+    return { session, started, release };
+  }
+  async function until(check: () => boolean): Promise<void> {
+    for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+    if (!check()) throw new Error('until(): condition never held');
+  }
+  const loopWith = (session: Session, router = makeNotificationRouter(false)): WorkerLoop =>
+    new WorkerLoop(makeEngine({ taskManager: tm as unknown as TaskManager, session }), router, 60_000);
+
+  it('E-1: the owner stamps while the test runs — the proposal still keeps its schedule', async () => {
+    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M }) as TriggerRecord;
+    const { session, started, release } = heldSession('Tested.');
+    const loop = loopWith(session);
+    expect(await loop.runTriggerNow(t.id, loop.claimHandRunMinter()(t.id, EVA))).toEqual({ ok: true });
+    await started;
+    tm.confirmTrigger(t.id, undefined, 'owner');
+    release();
+    await until(() => tm.getTrigger(t.id)?.last_run_status === 'success');
+    const after = tm.getTrigger(t.id)!;
+    expect(after.status).toBe('open');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    loop.stop();
+  });
+
+  it('E-2: a mandate edits a stamped schedule while its ordinary run is under way — the run is recorded as before', async () => {
+    const t = tm.create({
+      title: 'Daily', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z',
+      createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner',
+    }) as TriggerRecord;
+    const { session, started, release } = heldSession('Ran.');
+    const loop = loopWith(session);
+    const run = (loop as unknown as { executeTask: (x: TriggerRecord) => Promise<void> }).executeTask(tm.getTrigger(t.id)!);
+    await started;
+    tm.markEditedBy(t.id, M, true);
+    release();
+    await run;
+    expect(tm.getTrigger(t.id)!.status).toBe('completed');
+    loop.stop();
+  });
+
+  it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
+    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
+    const { session, started, release } = heldSession(new Error('provider down'));
+    const router = makeNotificationRouter(true);
+    const loop = loopWith(session, router);
+    const run = (loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+      .executeTask(tm.getTrigger(t.id)!, null, loop.claimHandRunMinter()(t.id, EVA));
+    await started;
+    release();
+    await run;
+    expect(tm.getTrigger(t.id)!.retry_count ?? 0).toBe(0);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('provider down') }));
   });
 });
