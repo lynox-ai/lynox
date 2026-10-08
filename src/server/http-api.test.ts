@@ -9228,6 +9228,25 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('PUT /api/config refuses background_model in managed-pool mode and writes nothing', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        const { saveUserConfig } = await import('../core/config.js');
+        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ background_model: { provider: 'anthropic', model_id: 'claude-haiku-4-5' } }),
+          });
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { error: string }).error).toContain('background_model');
+          expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       // On managed, api_base_url must be validated for EVERY curated provider,
       // not just openai — an earlier revision left it unchecked when a provider
       // field accompanied it, so a curated provider could carry a non-curated

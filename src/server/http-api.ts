@@ -446,11 +446,10 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // off the curated allowlist (never silent-strip); the loader then hardens the
   // expanded tier_set the same way it does a raw one.
   'tier_preset',
-  // The background-task model. Same exposure as a tier_set slot, and bounded more
-  // tightly: the PUT handler refuses (400) a choice outside the blocklist, the
-  // max_tier ceiling or the managed provider allowlist, and the loader applies
-  // the same check (`admitBackgroundModel`) and the CP key at read time.
-  'background_model',
+  // Not here: `background_model`. On a managed pool tier background runs stay on the
+  // operator's worker routing; the background model is not tenant-writable until the
+  // published description of that routing covers a tenant's own choice. Self-host and
+  // BYOK are not behind this gate and keep it writable.
 ]);
 
 /**
