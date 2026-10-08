@@ -2430,10 +2430,10 @@ ${draftJson}
       // The header http.ts attaches it under: the profile's own `header_name`, raw,
       // or Authorization with `Bearer`. The name is the profile's, so it is checked
       // against HTTP_HEADER_NAME, and a name that fails gets the text below instead.
-      const named = profile.auth?.header_name;
-      const slot = named !== undefined && named.toLowerCase() !== 'authorization'
-        ? (HTTP_HEADER_NAME.test(named) ? named : null)
-        : 'Authorization';
+      const named: unknown = profile.auth?.header_name;
+      const slot = named === undefined || (typeof named === 'string' && named.toLowerCase() === 'authorization')
+        ? 'Authorization'
+        : (typeof named === 'string' && HTTP_HEADER_NAME.test(named) ? named : null);
       // A file-loaded profile is not validated; http.ts refuses to attach under a
       // name that is not a header name, so the text says that instead of naming it.
       if (slot === null) {

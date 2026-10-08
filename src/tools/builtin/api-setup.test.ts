@@ -2852,6 +2852,7 @@ describe('api_setup tool', () => {
       ['keeps Authorization: Bearer when the header_name is authorization', { header_name: 'authorization' }, '`Authorization: Bearer …`', 'raw token'],
       ['keeps Authorization: Bearer when the header_name is Authorization', { header_name: 'Authorization' }, '`Authorization: Bearer …`', 'raw token'],
       ['keeps Authorization: Bearer when the header_name is AUTHORIZATION', { header_name: 'AUTHORIZATION' }, '`Authorization: Bearer …`', 'raw token'],
+      ['says a header_name that is not a string is not usable', { header_name: 123 as unknown as string }, 'not a valid header name', 'raw token'],
       ['says a header_name that is not a header name is not usable', { header_name: 'X Bad' }, 'do NOT reference `secret:SHOPIFY_SEO_ACCESS_TOKEN` manually; fix the profile instead', 'raw token'],
     ])('fetch_token %s', async (_label, extra, says, doesNotSay) => {
       const store = new ApiStore();

@@ -4218,6 +4218,7 @@ describe('httpRequestTool', () => {
     it.each([
       ['carries CRLF', 'X-Key\r\nX-Evil: yes'],
       ['is empty', ''],
+      ['is not a string (a file-loaded profile)', 123],
     ])('SECURITY: a header_name that %s is refused and nothing is sent', async (_label, name) => {
       const { store, tokenKey } = await storeWith({ header_name: name });
       mockDnsPublic();
