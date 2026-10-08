@@ -261,6 +261,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
   it('leaves not one seeded datum behind, and only then says so', async () => {
     await seedEverySurface();
+    const e0 = engineOf();
 
     const beforeRes = await get('/api/export');
     expect(beforeRes.status).toBe(200);
@@ -284,6 +285,20 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const { status, body } = await erase();
     expect(status).toBe(200);
     expect(body['message']).toBe('All user data has been permanently deleted');
+
+    // ⚠ BEFORE anything else reads the CRM, and the position is the assertion.
+    // `roles.ts` admits `contacts_search` to the READ-ONLY tool surface with the
+    // justification that `ensureSchema` is "a latch already closed during boot; the
+    // CRM's DDL is therefore unreachable here". The erasure drops the collections
+    // that memo describes, so a repair that only re-opened the latch would leave
+    // the next `contacts_search` from a read-only spawned agent running
+    // `CREATE TABLE`. `rebuildSchema` re-ensures in the same synchronous call, so
+    // no other caller can observe it open.
+    //
+    // Asserted here rather than at the end of this test because the export below
+    // performs a CRM read, which closes the latch by itself — further down, the
+    // line is satisfied by a repair that did nothing.
+    expect(e0.getCRM()!.initialized, 'the CRM schema latch must be closed again, before any reader').toBe(true);
 
     // ⚠ The STATUS first, and this file's own near-miss is the reason the line is
     // here. The second export used to 500 — the erasure drops the CRM's two
@@ -348,16 +363,6 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       .filter(c => ds2.queryRecords({ collection: c.name, limit: 1 }).rows.length > 0)
       .map(c => c.name);
     expect(populated, 'a collection still holds rows').toEqual([]);
-    // ⚠ The CRM's schema latch must be CLOSED again, and this is a security
-    // assertion rather than a tidiness one. `roles.ts` admits `contacts_search` to
-    // the READ-ONLY tool surface with the justification that `ensureSchema` is "a
-    // latch already closed during boot; the CRM's DDL is therefore unreachable
-    // here". A repair that only re-opened the latch would falsify that sentence for
-    // the rest of the process: the next `contacts_search` from a read-only spawned
-    // agent would run `CREATE TABLE`. `rebuildSchema` re-ensures inside the same
-    // synchronous call so no other caller can observe it open — this line is what
-    // holds that.
-    expect(e.getCRM()!.initialized, 'the CRM schema latch must be closed again').toBe(true);
     expect(e.getDataStore()!.listCollections().map(c => c.name)).not.toContain('marked_rows');
     expect(e.getSecretStore()!.listNames()).not.toContain(MARK.secret_name);
 
@@ -402,21 +407,26 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const firstErase = await erase();
     expect(firstErase.status, 'the fixture reset must itself have succeeded').toBe(200);
     expect(ts.listThreadsForExport({ limit: 500 }), 'fixture guard').toEqual([]);
-    // 250: both routes used to take a single `listThreads({ limit: 200 })`, so the
-    // export returned 200 of these and the erasure deleted 200 of them — and
-    // answered success. The number is deliberately just past one page; nothing is
-    // learned from 10 000 that is not already visible at 250.
-    for (let i = 0; i < 250; i++) {
-      ts.createThread(`bulk-${String(i).padStart(4, '0')}`, { title: `Bulk ${i}` });
-      ts.appendMessages(`bulk-${String(i).padStart(4, '0')}`, [{ role: 'user', content: `m${i}` }], 0, { message_count: 1 });
+    // 600, and the number is load-bearing twice over. It is past the old
+    // `listThreads` cap of 200, which is the defect: the export returned 200 of
+    // these and the erasure deleted 200, both answering success. And it is past the
+    // export route's own page size, which is what makes the route's WALK run at
+    // all — at 250 the first page returned everything, the loop broke immediately,
+    // and a reader that ignored its `after` cursor entirely passed this test. A
+    // refuter's mutant proved it: the file was green with the keyset discarded.
+    const SEEDED = 600;
+    for (let i = 0; i < SEEDED; i++) {
+      const id = `bulk-${String(i).padStart(4, '0')}`;
+      ts.createThread(id, { title: `Bulk ${i}` });
+      ts.appendMessages(id, [{ role: 'user', content: `m${i}` }], 0, { message_count: 1 });
     }
 
     const dumpRes = await get('/api/export');
     expect(dumpRes.status).toBe(200);
     const dump = await dumpRes.json() as { threads: Array<{ id: string }> };
-    expect(dump.threads).toHaveLength(250);
+    expect(dump.threads).toHaveLength(SEEDED);
     // Not just the count: a second page that repeated page one would also be 250.
-    expect(new Set(dump.threads.map(t => t.id)).size).toBe(250);
+    expect(new Set(dump.threads.map(t => t.id)).size, 'a second page that repeated the first would also be long enough').toBe(SEEDED);
 
     const { status, body } = await erase();
     expect(status).toBe(200);
