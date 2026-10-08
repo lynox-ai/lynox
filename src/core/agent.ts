@@ -4198,14 +4198,14 @@ export class Agent implements IAgent {
       };
     } catch (err: unknown) {
       const duration = timer.end();
-      // ⛔ A question nobody can answer ends the RUN, not the call — re-thrown, never turned
-      // into an error result the model would read and work around (`input-required.ts`).
-      // Re-built with the question masked: the message leaves the agent and lands in the
-      // failed run's record and its notification.
-      if (isInputRequired(err)) {
-        throw new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
-      }
-      const cause = err instanceof Error ? err : new Error(String(err));
+      // A question nobody can answer is re-built with the question MASKED before anything
+      // below reads it: its message leaves the agent, into the ledger here and into the
+      // failed run's record and note. The full question is masked and the cap applied
+      // after, so a secret that straddles the cap is still recognised whole.
+      const askedNobody = isInputRequired(err)
+        ? new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question)
+        : undefined;
+      const cause = askedNobody ?? (err instanceof Error ? err : new Error(String(err)));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.
@@ -4241,6 +4241,10 @@ export class Agent implements IAgent {
         // next to a still-streaming response.
         await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, isError: true });
       }
+      // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
+      // result the model would read and work around (`input-required.ts`). AFTER the
+      // bookkeeping above, so the call is in the ledger and the UI's tool block closes.
+      if (askedNobody !== undefined) throw askedNobody;
       return {
         type: 'tool_result',
         tool_use_id: tc.id,

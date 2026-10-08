@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { persistAgentMessages, persistFailedTurnDisplay, persistCompactionMarker , capStopNote } from './eager-persist.js';
 import type { ThreadStore, DisplayNoteInput } from './thread-store.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { InputRequiredError } from './input-required.js';
 
 function makeMockThreadStore(opts?: {
   initialCount?: number;
@@ -227,6 +228,16 @@ describe('persistFailedTurnDisplay (B-full)', () => {
     expect(note._lynox_note.code).toBe('tool_loop_break');
     expect(note._lynox_note.detail).toContain('api_setup');
     expect(note._lynox_note.detail).toContain('view');
+  });
+
+  it('a question nobody could be asked (input_required) names the question in the note detail', () => {
+    const m = makeFailMockStore({ hadUserMessage: true, marked: 1, total: 3 });
+    const err = new InputRequiredError('Which account should I charge?');
+    persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'q', error: err, noteCode: 'input_required' });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { code: string; detail?: string } };
+    expect(note._lynox_note.code).toBe('input_required');
+    expect(note._lynox_note.detail).toBe('Which account should I charge?');
   });
 
   it('a failed INTERNAL (compaction) run flips its footprint but appends NO visible note', () => {

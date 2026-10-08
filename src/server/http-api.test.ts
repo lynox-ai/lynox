@@ -22,6 +22,7 @@ import { mintBulkContract } from '../core/bulk-external.js';
 import { BulkTriggerLockedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
+import { InputRequiredError } from '../core/input-required.js';
 
 // === Mock dependencies ===
 
@@ -4899,6 +4900,23 @@ describe('LynoxHTTPApi', () => {
         if (pending) ps.expirePrompt(pending.id);
         await parked;
       });
+    });
+
+    // With no prompt store there is no way to ask — and nothing is made up. `promptUser` used to
+    // answer 'n' (to a consent dialog a silent deny, to ask_user a fabricated reply) and
+    // `promptTabs` an empty list. Both now end the run as "needs input".
+    it.each(SSE_PROMPT_KINDS.filter(k => k.label !== 'secret_prompt'))('with no prompt store, $label makes nothing up — it throws "needs input"', async ({ raise }) => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      let outcome: unknown;
+      mockSessionRun.mockImplementationOnce(async () => {
+        outcome = await raise(mockSessionInstance).then((v: unknown) => ({ answered: v }), (e: unknown) => e);
+        return 'done';
+      });
+      // The default engine double has no prompt store (`getPromptStore` → null).
+      await (await jsonFetch('/api/sessions/sse-nostore/run', {
+        method: 'POST', body: JSON.stringify({ task: 'run it', protocol: 2 }),
+      })).text();
+      expect(outcome).toBeInstanceOf(InputRequiredError);
     });
 
     it('an aborted asking run withdraws its question: the prompt expires and the wait ends', async () => {

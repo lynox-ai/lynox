@@ -90,6 +90,7 @@ import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/
 import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.js';
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
+import { InputRequiredError } from '../core/input-required.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -3293,7 +3294,11 @@ export class LynoxHTTPApi {
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
       session.promptUser = async (rawQuestion: string | PromptText, options?: string[], meta?: PromptMeta): Promise<string> => {
-        if (!promptStore) return 'n'; // fallback if store unavailable
+        // ⛔ No store, no way to ask — and then nothing is made up. This used to answer 'n',
+        // an answer nobody gave: to `ask_user` a fabricated reply, to a consent dialog a
+        // silent deny the run then worked around. The run ends as "needs input"
+        // (`input-required.ts`), the same outcome `ask_user` gives without a question path.
+        if (!promptStore) throw new InputRequiredError(flattenPrompt(rawQuestion));
         // Both forms go out: `segments` is what a client that understands the
         // frame/value split renders, `question` is the flattened text every
         // older client, the CLI and the logs already expect. They must agree —
@@ -3340,7 +3345,8 @@ export class LynoxHTTPApi {
       // still uses session.promptUser per question.
       if (tabsCapable) {
         session.promptTabs = async (questions, meta?: PromptMeta): Promise<string[]> => {
-          if (!promptStore) return [];
+          // Same rule as `promptUser` above: an empty answer list would be answers nobody gave.
+          if (!promptStore) throw new InputRequiredError(questions.map(q => q.question).join(' / '));
           const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta));
           const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
           hasActivePendingPrompt = true;

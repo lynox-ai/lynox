@@ -161,6 +161,7 @@ import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 import type { WarningPayload } from '../../types/tools.js';
+import { InputRequiredError } from '../../core/input-required.js';
 
 function makeTool(name: string): ToolEntry {
   return {
@@ -1022,6 +1023,30 @@ describe('spawn_agent tool', () => {
         makeAgent({ currentRunId: 'parent-allfail-2' }),
       ),
     ).rejects.toThrow(/- fail1: Error: all fail\n- fail2: Error: all fail/);
+  });
+
+  // A child that asked with no way to reach a person ends the PARENT's run as "needs input"
+  // too: folded into the result or into the all-failed AggregateError, the question came
+  // back to the parent model as text it read and decided past.
+  it('ONE child needs input, the other succeeds: the spawn throws "needs input", not a partial result', async () => {
+    mockSend
+      .mockResolvedValueOnce('success')
+      .mockRejectedValueOnce(new InputRequiredError('Which account should I charge?'));
+    await expect(spawnAgentTool.handler(
+      { agents: [{ name: 'good', task: 'Think' }, { name: 'asker', task: 'Think and ask' }] },
+      makeAgent(),
+    )).rejects.toBeInstanceOf(InputRequiredError);
+  });
+
+  it('EVERY child needs input: the same "needs input", not an AggregateError', async () => {
+    mockSend.mockRejectedValue(new InputRequiredError('Which account should I charge?'));
+    const err = await spawnAgentTool.handler(
+      { agents: [{ name: 'a1', task: 'Think' }, { name: 'a2', task: 'Think too' }] },
+      makeAgent(),
+    ).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect(err).not.toBeInstanceOf(AggregateError);
+    expect((err as InputRequiredError).question).toBe('Which account should I charge?');
   });
 
   // === H-002 regression evidence ===

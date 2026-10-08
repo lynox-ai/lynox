@@ -5628,7 +5628,12 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   it('the run ends — the model gets no second turn to carry on without the answer', async () => {
-    const sibling = makeTool('sibling_tool', vi.fn().mockResolvedValue('sibling done'));
+    // SLOW, so "the run ends after the batch settles" is witnessed: an end on the first
+    // rejection would reject before this resolves.
+    let siblingFinished = false;
+    const sibling = makeTool('sibling_tool', vi.fn(() => new Promise<string>(resolve => {
+      setTimeout(() => { siblingFinished = true; resolve('sibling done'); }, 30);
+    })));
     mockProcess.mockResolvedValueOnce(toolUseResponse([
       { id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } },
       { id: 'tu_sib', name: 'sibling_tool', input: {} },
@@ -5640,6 +5645,7 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect(mockProcess).toHaveBeenCalledTimes(1);
     // The call beside it in the same batch finished rather than being cut off.
     expect(sibling.handler).toHaveBeenCalledTimes(1);
+    expect(siblingFinished, 'the run ended only after its slow sibling settled').toBe(true);
   });
 
   it('the error names the question, masked through the vault before it leaves the agent', async () => {
@@ -5667,6 +5673,25 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect(err).toBeInstanceOf(InputRequiredError);
     expect((err as Error).message).toContain('for the payout?');
     expect((err as Error).message).not.toContain('sk-live-SECRET');
+  });
+
+  it('a secret that straddles the cap is still masked — masked whole, cut after', async () => {
+    // 295 characters of question, then the secret: the 300-character cap falls inside it. Cut
+    // first, the tail is gone and the vault no longer recognises what is left.
+    const question = `${'x'.repeat(295)} sk-live-SECRET?`;
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question } }]));
+    const secretStore = {
+      getMasked: vi.fn().mockReturnValue(null), resolve: vi.fn().mockReturnValue(null),
+      listNames: vi.fn().mockReturnValue([]), containsSecret: vi.fn().mockReturnValue(false),
+      maskSecrets: vi.fn((t: string) => t.replace('sk-live-SECRET', '***CRET')),
+      recordConsent: vi.fn(), hasConsent: vi.fn().mockReturnValue(false), isExpired: vi.fn().mockReturnValue(false),
+      findUnresolvedSecretRefs: vi.fn().mockReturnValue([]), extractSecretNames: vi.fn().mockReturnValue([]),
+      resolveSecretRefs: vi.fn((input: unknown) => input),
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], secretStore });
+    const err = await agent.send('Pay out').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect((err as Error).message).not.toContain('sk-live');
   });
 
   it('with a question path nothing changes: the answer comes back and the run goes on', async () => {

@@ -15,14 +15,14 @@
  * and neither should import the other for it.
  */
 export class InputRequiredError extends Error {
-  /** The question that could not be put to anyone, capped — it is what the reader of the
-   *  failed run needs to see. */
+  /** The question that could not be put to anyone, WHOLE. Only the message is capped: a
+   *  caller that masks it (the agent does) must see a secret in full to recognise it. */
   readonly question: string;
   constructor(question: string) {
     const shown = question.length > QUESTION_CAP ? `${question.slice(0, QUESTION_CAP)}…` : question;
     super(`Needs input: this run asked a question and has no way to reach a person. The question was: ${shown}`);
     this.name = 'InputRequiredError';
-    this.question = shown;
+    this.question = question;
   }
 }
 

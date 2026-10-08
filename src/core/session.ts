@@ -31,6 +31,7 @@ import { resolveRunModel, resolveTierModel, resolveAgentModel, hybridSlotClientC
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
+import { isInputRequired } from './input-required.js';
 import type { SendStop } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
@@ -138,6 +139,23 @@ const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
  *  `compact()` would inject "Budget exceeded." as the AUTHORITATIVE summary and
  *  wipe the thread (data corruption). Throwing lets `compact()` tell a block
  *  apart from a real summary and keep the history intact. */
+/**
+ * How a failed run is shown and whether it is reported. Pure, so the decision is asserted
+ * directly rather than through a run.
+ *
+ * A question with no way to reach a person (`input-required.ts`) is an intended end, not a
+ * defect: its own note, which names the question, and no error report — which would file
+ * every distinct question as its own exception. An abort and the two loop guards keep the
+ * calm notes they had; everything else is a provider error.
+ */
+export function classifyRunFailure(err: unknown): { noteCode: string; report: boolean } {
+  if (isInputRequired(err)) return { noteCode: 'input_required', report: false };
+  if (err instanceof ContinuationLoopError) return { noteCode: 'continuation_loop', report: true };
+  if (err instanceof ToolLoopBreakError) return { noteCode: 'tool_loop_break', report: true };
+  if (err instanceof RunAbortedError) return { noteCode: 'run_interrupted', report: true };
+  return { noteCode: 'provider_error', report: true };
+}
+
 export class InternalRunBlockedError extends Error {
   constructor(reason: string) {
     super(reason);
@@ -1362,16 +1380,12 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
-      // A hard loop break is an abort by the guard, not the user — same calm
-      // rendering, but its OWN note code so the thread says WHY (the tool call
-      // that was repeated past all warnings) instead of a bare "interrupted".
-      const isLoopBreak = err instanceof ToolLoopBreakError;
-      // A continuation loop (truncated responses repeating without progress)
-      // is the same calm family — its own code so the note names the repeated
-      // prefix instead of a bare "interrupted".
-      const isContinuationLoop = err instanceof ContinuationLoopError;
+      // The note code and whether it is reported: a hard loop break and a continuation
+      // loop each get their own calm note naming WHY, a question nobody could be asked
+      // gets one naming the question (`classifyRunFailure`).
+      const failure = classifyRunFailure(err);
       // Bugsink capture — structured error with tags
-      void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
+      if (failure.report) void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
         if (err instanceof LynoxError) {
           captureLynoxError(err);
         } else {
@@ -1524,7 +1538,7 @@ export class Session {
         error: err,
         // An abort renders a calm "interrupted" note; a real error keeps the
         // provider-error banner + sanitized detail.
-        noteCode: isContinuationLoop ? 'continuation_loop' : isLoopBreak ? 'tool_loop_break' : isAbort ? 'run_interrupted' : 'provider_error',
+        noteCode: failure.noteCode,
         // An internal (compaction) run must NOT surface a visible note — the
         // success path skips persisting its messages entirely (_persistMessages +
         // the end-of-run append both no-op for an internal run), so mirror that

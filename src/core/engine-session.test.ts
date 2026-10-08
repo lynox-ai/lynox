@@ -37,6 +37,25 @@ const mockLoadMessages = vi.fn();
 const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
 
+// Pass-through spies for the run-failure wiring: what a failed run is noted as, and whether
+// it is reported. Both forward to the real module, so every other test here is unaffected.
+const failureSpy = vi.hoisted(() => ({ codes: [] as string[], captureError: vi.fn(), captureLynoxError: vi.fn() }));
+vi.mock('./error-reporting.js', async (orig) => ({
+  ...(await orig() as Record<string, unknown>),
+  captureError: failureSpy.captureError,
+  captureLynoxError: failureSpy.captureLynoxError,
+}));
+vi.mock('./eager-persist.js', async (orig) => {
+  const actual = await orig() as typeof import('./eager-persist.js');
+  return {
+    ...actual,
+    persistFailedTurnDisplay: (input: Parameters<typeof actual.persistFailedTurnDisplay>[0]) => {
+      failureSpy.codes.push(input.noteCode ?? '');
+      return actual.persistFailedTurnDisplay(input);
+    },
+  };
+});
+
 vi.mock('./agent.js', () => {
   // Real classes so `err instanceof RunAbortedError` /
   // `err instanceof ToolLoopBreakError` in session.ts (which imports from this
@@ -436,6 +455,7 @@ import { configurePersistentBudget, resetPersistentBudget } from './session-budg
 import { initLLMProvider } from './llm-client.js';
 import { setTierSetResolver, resolveTierModel } from './tier-resolver.js';
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/index.js';
+import { InputRequiredError } from './input-required.js';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -720,6 +740,31 @@ describe('Engine + Session (Orchestrator)', () => {
         expect.any(String),
         expect.objectContaining({ status: 'failed', errorText: expect.stringContaining('rate_limit_error') }),
       );
+    });
+
+    it('a run that asked nobody is noted input_required and NOT reported; a provider error still is', async () => {
+      // Through a real `session.run`: the classifier is asserted on its own
+      // (run-failure-classify.test.ts), this pins that the run actually USES it.
+      const { session } = await createEngineAndSession();
+      failureSpy.codes.length = 0;
+      mockSend.mockRejectedValueOnce(new InputRequiredError('Approve the refund?'));
+      await expect(session.run('go')).rejects.toBeInstanceOf(InputRequiredError);
+      await new Promise(r => setTimeout(r, 20)); // the report is a fire-and-forget import
+      expect(failureSpy.codes.at(-1)).toBe('input_required');
+      // By ARGUMENT, not "never called": an earlier test's fire-and-forget report can land
+      // during this one (measured: the rate-limit case above), and a bare not-called
+      // assertion would then fail on a report that is not this run's.
+      const reported = (fn: { mock: { calls: unknown[][] } }): unknown[] => fn.mock.calls.map(c => c[0]);
+      expect(reported(failureSpy.captureError).some(e => e instanceof InputRequiredError), 'an intended end is not an exception').toBe(false);
+      expect(reported(failureSpy.captureLynoxError).some(e => e instanceof InputRequiredError)).toBe(false);
+
+      // The positive twin on the same machinery: a genuine failure IS reported.
+      mockSend.mockRejectedValueOnce(new Error('upstream 529'));
+      await expect(session.run('again')).rejects.toThrow('upstream 529');
+      await vi.waitFor(() => {
+        expect(reported(failureSpy.captureError).some(e => e instanceof Error && e.message === 'upstream 529')).toBe(true);
+      });
+      expect(failureSpy.codes.at(-1)).toBe('provider_error');
     });
 
     it('an aborted run is recorded status:"aborted" (not "completed"/"failed") and re-throws', async () => {
