@@ -4135,8 +4135,8 @@ describe('httpRequestTool', () => {
       expect(sent()['x-store-access-token']).toBeUndefined();
     });
 
-    it('a header_name that IS Authorization, in any case, keeps the Bearer prefix', async () => {
-      const { store, tokenKey } = await storeWith({ header_name: 'authorization' });
+    it.each(['authorization', 'Authorization', 'AUTHORIZATION'])('a header_name of %s keeps the Bearer prefix', async (name) => {
+      const { store, tokenKey } = await storeWith({ header_name: name });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
@@ -4167,6 +4167,21 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs).toHaveLength(2);
       expect(sent(0)['x-store-access-token']).toBe(TOKEN);
       expect(sent(1)['x-store-access-token']).toBeUndefined();
+    });
+
+    // A grant that succeeds followed by a 401 reads as an expired token, and the
+    // reminder sent the model to mint again, which cannot help when the header is
+    // the problem. Fixed text, so only whether the profile names a header decides it.
+    it.each([
+      ['without header_name points at the header', {}, true],
+      ['with header_name stays as it was', { header_name: HEADER }, false],
+    ])('the 401 reminder %s', async (_label, extra, hints) => {
+      const { store, tokenKey } = await storeWith(extra);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(result).toContain('OAuth2 401 on a managed-OAuth api_profile');
+      expect(result.includes('set `auth.header_name` on this profile')).toBe(hints);
     });
 
     it('SECURITY: an access token carrying CRLF is refused under its own header, not sent', async () => {
