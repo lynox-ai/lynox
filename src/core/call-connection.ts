@@ -70,9 +70,11 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 /**
  * Record a block `wrapUntrustedData` produced while the current call runs. Outside a
  * slot (prompt building between calls, a test calling the wrapper directly) this is a
- * no-op, so nothing recorded here can reach another call's scan. Every recorded block
- * is balanced (a literal opener, a body with every boundary tag neutralized, its
- * closer), so exempting one cannot close a block it sits inside.
+ * no-op, so nothing recorded here can reach another call's scan. A block from
+ * `wrapUntrustedData` is balanced (a literal opener, a body with every boundary tag
+ * neutralized, its closer), so exempting it cannot close a block it sits inside. The
+ * one other caller, `recall_tool_result`, records a stored payload that need not be:
+ * there only its last closer is exempted and any closer inside it stays in the scan.
  */
 export function noteOwnWrapped(block: string): void {
   const slot = slotStorage.getStore();
