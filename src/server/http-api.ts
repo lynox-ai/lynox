@@ -6748,6 +6748,92 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, task);
     }));
 
+    // Stop a RUNNING task on its owner's explicit instruction. Pausing a SCHEDULE is
+    // `PATCH /api/tasks/:id {enabled:false}` and deleting it is `DELETE`; neither
+    // touches a run that is already working, and until this route there was no way to
+    // reach one short of restarting the container.
+    //
+    // ⛔ Why this is a route and not a deadline: the demand is rare and the only
+    // measurement points the other way — see the production reading quoted at
+    // `worker-loop.ts`'s NOTE ON REACH, which is where it lives. An automatic bound
+    // would abort work that completes today; an owner's instruction cannot, because the
+    // owner is the one asking.
+    //
+    // ⚠ Quoted by reference deliberately: this change first restated the numbers here
+    // and in the stop test, which gave ONE reading three copies with no shared source —
+    // the shape in which a figure stays right in one place and goes stale in the others.
+    //
+    // 409 rather than 404 when the task exists but is not running: "there is no such
+    // task" and "that task is not working right now" are different answers, and a
+    // caller that cannot tell them apart will retry the wrong one.
+    //
+    // ⛔ AND IT NEVER ANSWERS `stopped: true`. A stop is requested, not completed: what
+    // ends the run is an abort unwinding somewhere else, so 202 is the true code and
+    // `via` says what the abort reached. FIVE of the seven effects have nothing that
+    // reads an abort — `run_workflow`, `bulk_apply`, `bulk_undo`, `backup`, `notify` —
+    // and for them this route answers 409 and changes nothing. (The number used to read
+    // "four" beside the same five-item list: a count of the test cases, one of which
+    // covers two effects, written where a count of effects belongs.) That is the whole
+    // point: a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets
+    // is fail-open with ceremony, and the owner's reaction to it is to stop watching.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/stop', async (_req, res, params) => {
+      const loop = engine.getWorkerLoop();
+      if (!loop) { errorResponse(res, 409, 'The worker loop is not running, so neither is this task'); return; }
+      // The TRIGGER table, not `getTask` — which reads `tasks` and would always miss,
+      // exactly as the `PATCH` route two screens up documents.
+      //
+      // ⭐ The row is read to NORMALISE the id, not to decide the answer, and the order
+      // is load-bearing in both directions. `getById` matches a short id by PREFIX (the
+      // same read/delete UX as workflows) while `activeTasks` is keyed exactly, so
+      // asking the loop with the caller's raw string told an owner their running task
+      // was not running. And `DELETE /api/tasks/:id` removes the row while leaving the
+      // run alive, so a missing row is not an answer about a run either.
+      const history = engine.getRunHistory();
+      // ⛔ An AMBIGUOUS short id is refused before anything is stopped. `getById` returns
+      // whichever prefix match SQLite reads first, and a stop acting on that would end a
+      // task the owner did not name.
+      if (history?.isAmbiguousTriggerId(params['id']!) === true) {
+        errorResponse(res, 409, 'That id matches more than one task. Use the full id.');
+        return;
+      }
+      const trigger = history?.getTrigger(params['id']!);
+      const id = trigger?.id ?? params['id']!;
+      const outcome = loop.stopTask(id);
+      if (outcome.kind === 'not_running') {
+        // Only here does the row matter — and a store that is DOWN cannot support "no
+        // such task", which is the one answer a caller will not retry.
+        if (!requireService(res, history, 'Run history')) return;
+        if (!trigger) { errorResponse(res, 404, 'Task not found'); return; }
+        errorResponse(res, 409, 'That task is not running right now');
+        return;
+      }
+      if (outcome.kind === 'unstoppable') {
+        // ⚠ "through this route", and the qualifier is load-bearing: the run can still end
+        // other ways (its own end, the schedule paused), so the refusal says what THIS
+        // route cannot do rather than promising the run will finish. The effect is named
+        // because the owner needs to know which run they are being refused; it is not
+        // re-capped here, because `errorResponse` already masks secrets and caps the body.
+        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted through this route (effect '${outcome.effect}'). Pause the schedule with PATCH {enabled:false} so it does not start again.`);
+        return;
+      }
+      jsonResponse(res, 202, {
+        id,
+        requested: true,
+        via: outcome.via,
+        // One sentence per handle, because each reaches something different.
+        //
+        // ⚠ `session` says "requested", not "delivered": that handle reaches a model call
+        // in flight, and between calls there is none, so the run can still finish on its
+        // own. What does persist is the aborted controller, so if it asks a question
+        // next, the question is dismissed and the run is recorded stopped.
+        note: outcome.via === 'wait'
+          ? 'The run was parked on a question; the wait has been ended.'
+          : outcome.via === 'signal'
+            ? 'The read stops before its next target and the bulk run is halted, unless its last target was already being read and it finishes. To continue, resume the bulk run.'
+            : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
+      });
+    }));
+
     // Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
     // unattended execution — stamps `confirmed_at` so it becomes due + dispatches
     // (an unconfirmed run_agent trigger is neither, closing the injection-
@@ -6829,7 +6915,7 @@ export class LynoxHTTPApi {
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
-      mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Mail leaves this instance only once it is confirmed in the chat; change a mail setting at the provider itself.'],
+      mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Mail leaves this instance only once it is confirmed in the chat: send it from the chat, and change a mail setting at the provider itself.'],
       probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],

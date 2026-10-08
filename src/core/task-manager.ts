@@ -713,7 +713,44 @@ export class TaskManager {
   }
 
   /** Record the result of a worker trigger execution. Updates last_run_at, result, status, and optionally next_run_at for recurring triggers. */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout'): void {
+  /**
+   * Record the outcome of a run against its trigger.
+   *
+   * ⭐ `'stopped'` is the owner's deliberate halt, and it is NOT a kind of failure —
+   * which matters twice over:
+   *   · **It must not retry.** The branch below sends `failed` and `timeout` into a
+   *     backoff re-fire. A stop recorded as `failed` would therefore restart exactly
+   *     the run its owner just stopped, which is worse than not having a stop at all.
+   *   · **It must not falsify a RECURRING trigger's status.** The cron branch below
+   *     derives `status` from the latest run so a silently-failing schedule surfaces;
+   *     a stop is not a failing schedule, and writing `failed` there would mark a
+   *     healthy cron broken because one run was halted. So a stop withholds the status
+   *     THERE, exactly as a parked trigger does and for the same reason: `last_run_at`,
+   *     the result and `next_run_at` describe the run that happened and are true
+   *     either way.
+   *
+   * ⛔ A ONE-SHOT is the opposite case, and withholding there shipped a third state
+   * that is neither: `status` stayed `open` while `next_run_at` was cleared, so the row
+   * was never due again and never closed — and `task_list` reads exactly that pair as a
+   * schedule the model should repair, which is the behaviour its own docstring records
+   * (three invented replacement configs). So a stopped one-shot is written `completed`:
+   * the word is the SCHEDULE's lifecycle ("it is finished, nothing will give it another
+   * run"), not a verdict on the run, and `last_run_status = 'stopped'` carries the
+   * outcome — the same division the cron branch already relies on.
+   *
+   * ⛔ WHY NOT A `stopped` STATUS, corrected: NOT because a `CHECK` forbids it. An
+   * earlier version of this paragraph quoted `CHECK(status IN ('open','in_progress',
+   * 'completed','failed'))` — which belongs to the LEGACY `triggers` table in the
+   * history.db ladder, not to the live one. Every trigger write goes through
+   * `TriggerStore` to engine.db, whose `triggers` has NO check on `status`;
+   * `engine-db.ts` says so in as many words and adds that "which of the two a search
+   * shows first depends on the tool". The live proof is `'waiting'`, which that column
+   * already holds and the quoted list does not contain. What a `stopped` status actually
+   * costs is the VOCABULARY and its readers — `TriggerStatus`, `VALID_STATUSES`, the
+   * status filter the agent tool offers, and the UI's status map — which is a wider unit
+   * than this one and is filed as its own. No migration.
+   */
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped'): void {
     const task = this.history.getTrigger(id);
     if (!task) {
       throw new Error(`Trigger not found: ${id}`);
@@ -730,7 +767,9 @@ export class TaskManager {
     // This comparison is also the compile-time consumer §0 G3 names: it is a
     // TS2367 error unless `waiting` is a member of TriggerStatus, so narrowing
     // that union breaks the build here rather than silently disarming the guard.
-    const mayWriteStatus = task.status !== 'waiting';
+    // A stop withholds the status for the reason given above; a parked trigger
+    // withholds it because its wait is still open. Two causes, one mechanism.
+    const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped';
 
     const now = new Date();
     const truncatedResult = result.length > MAX_RUN_RESULT_CHARS
@@ -789,7 +828,19 @@ export class TaskManager {
       // and clear `next_run_at` so the worker leaves it alone, while
       // last_run_status preserves the actual outcome ('failed' vs
       // 'timeout') for the UI.
-      if (mayWriteStatus) this.history.updateTrigger(id, { status: 'failed' });
+      if (mayWriteStatus) {
+        this.history.updateTrigger(id, { status: 'failed' });
+      } else if (status === 'stopped' && task.status !== 'waiting') {
+        // Terminal, for the reason in the docstring: this row has no next run and
+        // nothing will give it one, so leaving it `open` is a lie the model acts on.
+        //
+        // ⚠ The `waiting` carve-out is DEFENSIVE rather than live on the stop path: a
+        // stop's controller abort makes the run's own `finally` un-park the trigger
+        // before it unwinds to here, so this branch sees `waiting` only when that
+        // un-park failed and swallowed its error. It is kept because the unit that
+        // constructs the state directly is cheap and the failure it guards is silent.
+        this.history.updateTrigger(id, { status: 'completed' });
+      }
       // `next_run_at` is cleared regardless: a parked trigger must not become due
       // again on the strength of a run that ended without its answer. What ends
       // its wait is the sweep, not this.

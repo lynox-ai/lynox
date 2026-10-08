@@ -859,6 +859,31 @@ describe('Task Tools', () => {
       expect(out2).toContain('no reason was stored');
     });
 
+    it('a STOPPED run is not labelled a failure, and draws no repair nudge', () => {
+      // ⛔ The blacklist above is right and stays: anything recorded that is not
+      // `success` is a run the reader needs to see. `'stopped'` is a word this change
+      // added, and rendering it as FAILED told the model that a task its owner halted on
+      // purpose was broken. Only the LABEL is chosen; taking the BRANCH away for it
+      // would also have silenced the no-next-run note, whose reason holds for a stopped
+      // one-shot exactly as for a failed one.
+      expect(triggerDetailLine({ last_run_status: 'stopped', last_run_result: 'run aborted by its owner' }))
+        .toContain('last run STOPPED BY ITS OWNER');
+      expect(triggerDetailLine({ last_run_status: 'stopped', last_run_result: 'run aborted by its owner' }))
+        .not.toContain('FAILED');
+      // And the nudge stays away, because a stopped one-shot is written `completed` and
+      // this note excludes that by name. The note exists to make the model REPAIR a
+      // broken schedule — its own docstring records the model inventing three
+      // replacement configs — and a task its owner stopped is not a broken schedule.
+      expect(triggerDetailLine({
+        effect: 'run_agent', last_run_status: 'stopped', last_run_result: 'x', status: 'completed',
+      })).not.toContain('NO NEXT RUN');
+      // The positive control for that last one, or it would pass against a note that
+      // never renders: the same row with a FAILED run does get it.
+      expect(triggerDetailLine({
+        effect: 'run_agent', last_run_status: 'failed', last_run_result: 'x', status: 'open',
+      })).toContain('NO NEXT RUN');
+    });
+
     it('the target workflow is named whenever the schedule has one', () => {
       // The workflow id is what a repair has to PRESERVE — it is how its
       // definition is found. Shown on every schedule that has one, not only on
@@ -878,6 +903,8 @@ describe('Task Tools', () => {
         expect(triggerDetailLine({ last_run_status: st, last_run_result: 'boom' }),
           `${st} must read as a failure`).toContain('last run FAILED');
       }
+      // The one word that is NOT a failure has its own case below, so a mutant that
+      // flips the label is reported under a title that describes it.
       // Never run is not a failure.
       expect(triggerDetailLine({ last_run_result: 'boom' })).toBe('');
       // Both conditions at once read as one line, in a fixed order.

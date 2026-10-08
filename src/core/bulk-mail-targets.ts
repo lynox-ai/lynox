@@ -11,19 +11,32 @@
  * confirmed one by one. A bulk run is the wrong tool for that, so it does not do it.
  *
  * The list names the mail APIs a bulk run refuses: Gmail on every Google host that
- * serves it, the legacy Outlook REST hosts, and the mailbox and calendar resources of
- * Microsoft Graph. Graph also serves files, chats and directories: a name that only means
+ * serves it, the legacy Outlook REST hosts, the mailbox and calendar resources of
+ * Microsoft Graph, and the API hosts of the sending services SendGrid, Mailgun, Postmark,
+ * Resend and Brevo. Graph also serves files, chats and directories: a name that only means
  * a mailbox is refused wherever it stands, a name that also means something else only
  * right after its owner (`me`, `users/{id}`, `groups/{id}`). Other services' calendars,
  * shares and invitations are not in this list. Hosts and paths are
  * compared lower-cased and percent-decoded, so a spelling of a resource is that resource.
  */
 
-/** Hosts whose whole API is mail and calendar. */
+/** Hosts whose whole API is mail and calendar, or a service that sends mail. */
 const MAIL_HOSTS: ReadonlySet<string> = new Set([
   // The legacy Outlook REST API: mail, and calendars whose changes send invitations.
   'outlook.office.com',
   'outlook.office365.com',
+  // Sending services, each host as its provider documents it. Every write on these can make
+  // the service send mail (a message, a campaign, a scheduled batch), so the whole host is
+  // refused; their account and contact endpoints go with it.
+  'api.sendgrid.com',
+  'api.eu.sendgrid.com',
+  'api.mailgun.net',
+  'api.eu.mailgun.net',
+  'api.postmarkapp.com',
+  'api.resend.com',
+  'api.brevo.com',
+  // Brevo's former name; the host still answers, and older examples still use it.
+  'api.sendinblue.com',
 ]);
 
 /** Google hosts are `<label>.googleapis.com`; Gmail answers under these first labels

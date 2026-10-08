@@ -12,8 +12,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
+import { RunAbortedError } from './agent.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
+import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
@@ -194,6 +196,44 @@ export interface WorkerTaskContext {
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
+  /**
+   * The run's effect, so a stop that reaches nothing can say what it was.
+   *
+   * Read as a plain string for the same reason the dispatch switch reads it that way:
+   * the column is TEXT and a value the union does not know is possible at runtime.
+   */
+  readonly effect: string;
+  /**
+   * The run's session, so an owner has something to stop.
+   *
+   * ⛔ WHY THIS FIELD EXISTS, because the obvious alternative is wrong. Aborting
+   * `controller` ends a WAIT and nothing else: its three readers are the bulk-preview
+   * signal, the dismissed-answer check and `waitForSettled`. A task that is COMPUTING
+   * observes none of them, so a stop route built on the controller alone would answer
+   * 200 while the run carried on — which is exactly what the register row prescribed
+   * before it was refuted. Ending a computing run needs `session.abort()`.
+   *
+   * ⚠ `undefined` until the run reaches the point where it creates its session — and
+   * for every effect that never creates one. That list is NOT "bulk, backup, reminder",
+   * which is what this comment said while the measurement two screens down was about
+   * the effect it omitted: `createSession` has exactly two call sites in this file
+   * (`executeStandard`, `executeWatch`), so **`run_workflow` has no session either**.
+   * `executePipeline` hands `runGuardedSavedWorkflow` the engine and two ids — no
+   * session, no signal — so nothing can interrupt a running saved workflow, and it is
+   * the class the production reading at the NOTE ON REACH is about. `stopHandleOf`
+   * reports that rather than leaving the route to claim a stop it cannot deliver.
+   */
+  session?: Session | undefined;
+  /**
+   * Set ONLY by `stopTask` — never by the execution deadline, never by `stop()`.
+   *
+   * ⛔ All three abort the same controller, so `signal.aborted` cannot tell them apart,
+   * and the difference is what the run gets RECORDED as: an owner's stop is not a
+   * failure and must not be retried. Reading the signal instead of this flag would
+   * have made a deadline expiry look like a stop, which is the same conflation in the
+   * other direction.
+   */
+  stopRequested?: boolean | undefined;
   /** Store id of the prompt this task is parked on; undefined while computing. */
   pendingPromptId?: string | undefined;
   /**
@@ -219,10 +259,80 @@ export interface ActiveTask {
    * deploy takes this path.
    */
   tearingDown?: boolean | undefined;
+  /**
+   * This run's handler polls `controller.signal` itself, so for it the controller IS a
+   * stop handle.
+   *
+   * ⛔ Set at the HAND-OVER of the signal, never from a list of effect names. The
+   * property is "something downstream reads this signal"; the effect name is a
+   * correlate of it, and the two already disagree: `bulk_preview` is handed
+   * `controller.signal` and `runBulkPreview` checks it between targets, while
+   * `bulk_apply`/`bulk_undo` — one case clause away, same word in their name — are
+   * handed nothing.
+   */
+  readsSignal?: boolean | undefined;
   /** Stop the execution deadline while parked on a human, and re-arm after.
    *  Human think-time must not consume the task's compute budget. */
   pauseDeadline: () => void;
   resumeDeadline: () => void;
+}
+
+/** What a stop would actually reach in the phase it arrives in. */
+export type StopHandle = 'wait' | 'session' | 'signal';
+
+/**
+ * The answer to a stop. Three cases, because a boolean cannot carry the one that
+ * matters: the run is in flight and nothing in this phase reads an abort.
+ */
+export type StopOutcome =
+  | { kind: 'not_running' }
+  | { kind: 'requested'; via: StopHandle }
+  | { kind: 'unstoppable'; effect: string };
+
+/**
+ * What, if anything, a stop would reach in THIS phase of THIS run.
+ *
+ * ⭐ Exported and pure because it is the route's decision, and the route must not
+ * claim a stop it cannot deliver. `200 {stopped:true}` for a run nothing can interrupt
+ * is fail-open with ceremony — the owner stops watching and the run keeps writing,
+ * which for a `bulk_apply` means it keeps writing its targets. Of the seven effects,
+ * FIVE never have a handle (`run_workflow`, `bulk_apply`, `bulk_undo`, `backup`,
+ * `notify`), one has one only for part of its run (`run_agent`, late on the watch path)
+ * and one has one throughout (`bulk_preview`), so the honest answer is a case rather
+ * than a flag.
+ *
+ * Precedence is MOST CERTAIN first, not most powerful:
+ *  · `wait` — the run is parked on a prompt whose `waitForSettled` awaits this
+ *    controller's signal, so the abort ends the wait. The only certain one.
+ *  · `session` — `Session.abort()` reaches `Agent.send()`'s controller, which exists
+ *    only while a send is in flight (`agent.ts` creates it at the top of `send`, nulls
+ *    it in the `finally`), so before the first send and between sends there is nothing
+ *    to abort. Inside a tool handler there IS — the handler runs within that `try`, so
+ *    the abort lands and the run ends at the next provider call with `RunAbortedError`;
+ *    the handler itself is not cancelled. Either way a REQUEST and not a confirmation,
+ *    which is why the route answers 202.
+ *  · `signal` — the handler polls the signal and stops between units of work.
+ */
+export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
+  if (active.pendingPromptId !== undefined) return 'wait';
+  if (active.session !== undefined) return 'session';
+  if (active.readsSignal === true) return 'signal';
+  return undefined;
+}
+
+/**
+ * Whether a parked run's question must outlive this process: it is being torn down AND
+ * its owner has not stopped it.
+ *
+ * ⛔ The second half is what the two designs need from each other. A teardown keeps the
+ * question so the next process can re-arm the run when the answer lands; an owner's stop
+ * drains it because that run is over. A stop and a teardown can both reach one run before
+ * its wait continues, and then the stop wins: keeping the question would let a later
+ * answer restart the run its owner ended. Exported so the rule can be asserted without
+ * driving a shutdown.
+ */
+export function keepsQuestionForNextProcess(active: ActiveTask | undefined): boolean {
+  return active?.tearingDown === true && active.stopRequested !== true;
 }
 
 /** Access the current worker task context from anywhere in the async call chain. */
@@ -278,6 +388,77 @@ export class WorkerLoop {
     this.timer.unref(); // don't prevent process exit
     // Run immediately on start
     void this.tick();
+  }
+
+  /**
+   * Hand the run's session to its `activeTasks` ENTRY OBJECT, so a stop can reach it.
+   *
+   * ⛔ The entry, never a fresh `activeTasks.get()`. This file already paid for that
+   * distinction once, two screens below: `stop()` CLEARS the map, so a per-call lookup
+   * found `undefined` after a cancellation and skipped the aborted-check — an
+   * unabortable park for the full 24-hour TTL. The entry object outlives its map entry,
+   * which is what makes a cancellation observable at all. Taking the object also makes
+   * the identity question disappear instead of answering it: there is no key to resolve
+   * to a successor's run.
+   */
+  private static attachSession(entry: ActiveTask | undefined, session: Session): void {
+    if (entry === undefined) return;
+    entry.session = session;
+  }
+
+  /**
+   * Stop a RUNNING task on its owner's explicit instruction.
+   *
+   * ⭐ Both aborts, and in this order. `session.abort()` is the one that ends a
+   * computing run; `controller.abort()` is the one that ends a wait. A run can be in
+   * either state and the caller cannot know which, so a stop that did one of them
+   * would work for half the cases — and the half it missed is the motivating one.
+   *
+   * ⚠ The session abort is wrapped: it reaches into the agent, and if it throws, the
+   * controller must still be aborted. Otherwise a throwing session leaves a task that
+   * is neither stopped nor running.
+   *
+   * ⛔ This is NOT the execution deadline. The deadline still ends only a wait, and
+   * wiring it to this method is a decision nobody has taken — see the NOTE ON REACH
+   * in `executeTask`. Do not route the timer here "but disabled".
+   *
+   * ⛔ AND IT DOES NOT PAUSE THE DEADLINE. An earlier version did: `pauseDeadline`
+   * stops the timer AND the budget clock, and `resumeDeadline` has exactly one caller
+   * (the prompt un-park), so a stop that did not land left the run with its budget
+   * clock stopped for good. ⚠ What that costs is bounded — the timer today ends a WAIT,
+   * not a computing run (see the NOTE ON REACH), so the lost bound can only bite at the
+   * run's NEXT park — which is why "it un-bounded a runaway run" was too strong a claim
+   * for it. Pausing is not needed for the recorded word either: the catch prefers the
+   * stop over a timeout.
+   *
+   * ⚠ REACH: this run and the agents its chain created, nothing else. `Session.abort()`
+   * aborts its own agent and the members of that agent's abort scope — children,
+   * workflow steps, grandchildren — and no other session's. An earlier version of this
+   * comment argued against shipping because the abort was process-wide; `session.ts`
+   * scoped it since, which is what this route relies on.
+   */
+  stopTask(taskId: string): StopOutcome {
+    const active = this.activeTasks.get(taskId);
+    if (active === undefined) return { kind: 'not_running' };
+    const via = stopHandleOf(active);
+    // Nothing in this phase reads an abort. Report that, and change NOTHING: setting
+    // `stopRequested` here would stamp the run's own natural end — a success, or a
+    // failure with a cause of its own — as the owner's stop, in the ledger the owner
+    // reads to decide whether to retry. An honest refusal is cheaper than a wrong word.
+    if (via === undefined) return { kind: 'unstoppable', effect: active.effect };
+    active.stopRequested = true;
+    try {
+      active.session?.abort();
+    } catch (err: unknown) {
+      // Swallowed on purpose, and reported. `Session.abort()` reaches into the agent;
+      // a throw there must not cost the controller abort, which is what ends a PARKED
+      // run — propagating it would leave a task neither stopped nor running, and would
+      // answer the owner 500 for a stop that did land on the wait. The write makes the
+      // swallow observable instead of silent.
+      process.stderr.write(`[lynox:worker] session abort threw while stopping "${taskId}": ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+    active.controller.abort();
+    return { kind: 'requested', via };
   }
 
   stop(): void {
@@ -769,7 +950,13 @@ export class WorkerLoop {
       armDeadline();
     };
     armDeadline();
-    this.activeTasks.set(task.id, { controller, pauseDeadline, resumeDeadline });
+    // Captured, never re-looked-up. `stop()` CLEARS the map, and the catch below reads
+    // `stopRequested` to decide whether the run gets retried — through a fresh lookup
+    // that found `undefined` after a shutdown, which recorded the stopped run as
+    // `failed` and re-fired it with a backoff. Same rule, same reason as
+    // `attachSession`: the entry object outlives its map entry.
+    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline };
+    this.activeTasks.set(task.id, entry);
     const heartbeat = setInterval(() => {
       try {
         const until = new Date(Date.now() + this.lease.ttlMs).toISOString();
@@ -851,7 +1038,12 @@ export class WorkerLoop {
             // Deterministic: reads a planned external run's targets into its ledger and
             // writes none of them. Its trigger is armed only by the owner starting or
             // resuming the read; the handler refuses any run that is not planned and unhalted.
-            await this.executeBulkPreview(task, controller.signal);
+            // The one handler that polls the run's signal (`runBulkPreview` checks
+            // `deps.signal` between targets), so for this effect the controller IS the
+            // stop handle. Set HERE, at the hand-over, so the flag and the signal
+            // cannot drift apart — and so no list of effect names has to be kept true.
+            entry.readsSignal = true;
+            await this.executeBulkPreview(task, controller.signal, () => entry.stopRequested === true);
             break;
           default:
             // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
@@ -893,10 +1085,55 @@ export class WorkerLoop {
         ? `Task timed out after ${Math.round(this.taskTimeoutMs / 1000)}s`
         : (err instanceof Error ? err.message : String(err));
       const errorMsg = maskSecretPatterns(rawErrorMsg, { includeGeneric: true });
-      const status = isTimeout ? 'timeout' as const : 'failed' as const;
+      // ⭐ A stop outranks both. The abort that ends the run is indistinguishable from a
+      // deadline expiry at the signal, so the cause comes from the flag the owner's stop
+      // sets — and getting this wrong is not cosmetic: `failed` and `timeout` both enter
+      // the backoff re-fire in `recordTaskRun`, so a stop recorded as either would
+      // RESTART the run its owner just stopped.
+      // The captured ENTRY, not a lookup: by the time a stopped run's error has
+      // unwound (`Session.run`'s own catch awaits an import, a run update, the
+      // after-run hooks and a totals rollup first), a shutdown may have cleared the
+      // map — and a lookup that misses reads as "not stopped", which sends the run its
+      // owner stopped straight into the backoff re-fire.
+      //
+      // ⛔ AND THE ABORT MUST HAVE LANDED. `RunAbortedError` is thrown by `Agent.send`
+      // exactly when its controller was aborted, so the conjunction says "the owner
+      // asked AND that is why this ended". The flag alone was wrong in a way that only
+      // shows up later: `Session.abort()` reaches a null agent controller whenever no
+      // send is in flight, and the flag is never cleared — so a provider error twenty
+      // minutes after a stop that missed was recorded as the owner's stop, told the
+      // model "STOPPED BY ITS OWNER: <provider error>", and lost the retry it was owed.
+      // A stop that missed does not rename a failure with a cause of its own, which is
+      // what the route's 202 promises: a request, never a confirmation. ⚠ It is not
+      // without ANY effect: the controller stays aborted, so a question the run asks
+      // afterwards is dismissed at once and the run is recorded stopped (the 202 note
+      // says so).
+      //
+      // ⛔ The EXACT class, not `instanceof`. `ToolLoopBreakError` and
+      // `ContinuationLoopError` extend `RunAbortedError`, and both are the agent ending
+      // its own run — so a stop that missed, followed by a loop break, was recorded as
+      // the owner's stop and lost its retry, the defect two lines up through a subclass.
+      // `Agent.send` throws the base class itself, and only it, when its controller was
+      // aborted. A subclass added later reads as a failure until someone decides
+      // otherwise, which is the direction that keeps the retry.
+      const wasStopped = entry.stopRequested === true
+        && err instanceof RunAbortedError
+        && Object.getPrototypeOf(err) === RunAbortedError.prototype;
+      const status = wasStopped
+        ? 'stopped' as const
+        : (isTimeout ? 'timeout' as const : 'failed' as const);
 
       // Check if task will be retried BEFORE recording (retry_count not yet incremented)
-      const willRetry = (task.max_retries ?? 0) > 0
+      //
+      // ⛔ Derived from the STATUS, not from the counters alone. `recordTaskRun` sends
+      // only `failed` and `timeout` into the backoff, so after a stop the counters still
+      // read "it will try again" while nothing will — and this value's SECOND job is to
+      // suppress the failure notification. A retriable one-shot that was stopped
+      // therefore ended in silence: no retry, and no word to the owner either. Losing
+      // the retry is intended (the owner's last instruction was stop); losing the
+      // notification with it was not.
+      const willRetry = status !== 'stopped'
+        && (task.max_retries ?? 0) > 0
         && (task.retry_count ?? 0) < (task.max_retries ?? 0);
 
       const taskManager = this.engine.getTaskManager();
@@ -910,29 +1147,38 @@ export class WorkerLoop {
       // which the model cannot tell from an answer. Aborting the controller
       // ends the store wait as `aborted` instead, a state the caller reads as
       // a non-answer.
-      const active = this.activeTasks.get(task.id);
-      if (active) {
-        active.pauseDeadline();
-        active.controller.abort();
-      }
+      entry.pauseDeadline();
+      entry.controller.abort();
 
-      // Only notify on FINAL failure (all retries exhausted)
+      // Only notify on FINAL failure (all retries exhausted) — or on a stop, which does
+      // not retry and so has no later attempt to report. ⚠ NOT "final": a stopped CRON
+      // keeps its schedule and a stopped watch its interval (`recordTaskRun` computes
+      // both), so what ends here is the RUN, not necessarily the trigger. The word and
+      // the follow-ups differ because the reader's next move does: "Explain why this
+      // failed" is the wrong offer for a run that did what it was told.
       if (!willRetry && this.notificationRouter.hasChannels()) {
+        const stopped = status === 'stopped';
         await this.notificationRouter.notify({
-          title: `\u2717 ${task.title}`,
-          body: `Task failed: ${errorMsg}`,
+          title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,
+          body: stopped ? `Stopped on your instruction: ${errorMsg}` : `Task failed: ${errorMsg}`,
           taskId: task.id,
-          priority: 'high',
-          followUps: [
-            { label: 'Retry', task: task.description ?? task.title },
-            { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${errorMsg}` },
-          ],
+          priority: stopped ? 'normal' : 'high',
+          followUps: stopped
+            ? [{ label: 'Run again', task: task.description ?? task.title }]
+            : [
+              { label: 'Retry', task: task.description ?? task.title },
+              { label: 'Explain', task: `Explain why this failed: ${task.title} — Error: ${errorMsg}` },
+            ],
         });
       }
     } finally {
-      // Clear the deadline timer before dropping the entry — `pauseDeadline` is
-      // idempotent and is the only handle on it once the map entry is gone.
-      this.activeTasks.get(task.id)?.pauseDeadline();
+      // Clear the deadline timer before dropping the entry, off the captured ENTRY: a
+      // lookup here is the third instance of the defect this change repaired twice, and
+      // it sat beside a comment calling `pauseDeadline` "the only handle on it once the
+      // map entry is gone" — which is precisely what a lookup through the map cannot
+      // reach. Harmless until now only because `stop()` pauses each deadline before
+      // clearing.
+      entry.pauseDeadline();
       this.activeTasks.delete(task.id);
       // After the result is recorded, so `next_run_at` has moved before the row is free.
       clearInterval(heartbeat);
@@ -984,7 +1230,7 @@ export class WorkerLoop {
    * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
    * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
    */
-  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal): Promise<void> {
+  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
     const ledger = this.engine.getBulkLedger();
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
@@ -1016,6 +1262,29 @@ export class WorkerLoop {
       return;
     }
     if (outcome.status === 'pending') {
+      // ⛔ A `pending` outcome means "come back in 30 seconds" — and `runBulkPreview`
+      // returns exactly that for an ABORTED signal, which it reads as a pause
+      // (`bulk-preview.ts`, the check at the top of its target loop). So a stop bought a
+      // 30-second snooze, recorded as a SUCCESS, and the worker restarted the read the
+      // owner had just stopped: the one effect whose stop route reports `via: 'signal'`
+      // was the one effect where the stop did the opposite of what it said. The outer
+      // catch never runs here, so none of the stop machinery downstream sees it either.
+      //
+      // Halted rather than re-armed: a halt is the state the owner resumes from, and the
+      // resume route re-upserts this trigger. No notification — the owner is the one who
+      // asked, and this path (unlike the catch) is their own action completing.
+      //
+      // ⛔ The OWNER'S flag, not `signal.aborted`. Three things abort this controller —
+      // this stop, `stop()` at shutdown, and the execution deadline — and only the first
+      // is an instruction to end the read. For the other two the `pending` answer is the
+      // designed pause: the read chunks across ticks and survives a deploy. Keyed on the
+      // signal, every deploy during a preview halted it as "stopped by its owner" and left
+      // it for a person to resume.
+      if (signal.aborted && ownerStopped()) {
+        ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.stoppedByOwner);
+        this.engine.getTaskManager()?.recordTaskRun(task.id, 'Bulk preview stopped on your instruction.', 'stopped');
+        return;
+      }
       this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
       this.engine.getRunHistory()?.updateTrigger(task.id, {
         status: 'open',
@@ -1174,6 +1443,9 @@ export class WorkerLoop {
     // for the full 24h TTL. The entry object outlives the map entry, which is
     // exactly what makes the cancellation observable after a `stop()`.
     const active = this.activeTasks.get(task.id);
+    // The owner's stop handle, attached to the SAME captured entry the prompt wiring
+    // below uses — so a stop reaches this run whether it is computing or parked.
+    WorkerLoop.attachSession(active, session);
     session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
       // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
       // null and is assigned during init (engine.ts:1101), and is set back to
@@ -1299,7 +1571,7 @@ export class WorkerLoop {
         // only matters to a NEXT `ask_user` in this process, and "answerable with nobody
         // awaiting it" is not the issue-#77 shape here but the durable wait working as
         // designed — the next process re-arms the run when the answer lands.
-        if (active?.tearingDown === true) {
+        if (keepsQuestionForNextProcess(active)) {
           questionWentUnanswered = true;
           return DISMISSED_ANSWER;
         }
@@ -1376,7 +1648,7 @@ export class WorkerLoop {
         // once, deliberately — it is what a crash does anyway — but it is a change from
         // the old behaviour, where the release took and a graceful shutdown could not
         // duplicate.
-        if (active?.tearingDown !== true) {
+        if (!keepsQuestionForNextProcess(active)) {
           try {
             promptStore.releaseTrigger(promptId);
           } catch (err: unknown) {
@@ -1396,7 +1668,7 @@ export class WorkerLoop {
         // is already closing, and a throw here would turn a clean teardown into a
         // failed tool call. A wait left standing by a failure here is exactly what
         // the sweep exists to collect, so the cost is bounded by `waiting_until`.
-        if (active?.tearingDown !== true) {
+        if (!keepsQuestionForNextProcess(active)) {
           try {
             this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
           } catch (err: unknown) {
@@ -1523,6 +1795,8 @@ export class WorkerLoop {
       ? reported.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : reported;
 
+    // Who ended the run, when an unanswered question is how it ended (see below).
+    const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       // §0 A7. `failed` rather than `timeout`: the run itself did not run out of
@@ -1532,9 +1806,20 @@ export class WorkerLoop {
       // verdicts.
       //
       // The ceiling exit joins it on `failed` and for the same reason: the job did not
-      // finish. No new status value — `recordTaskRun`'s union is being extended by other
-      // work in flight, and a value added from here would collide with it.
-      taskManager.recordTaskRun(task.id, truncatedResult, questionWentUnanswered || budgetCut !== null ? 'failed' : 'success');
+      // finish, and it is not the owner's word either.
+      //
+      // ⛔ …EXCEPT when the owner is why the answer never came. A stop aborts the
+      // controller, `waitForSettled` ends, and the question is dismissed — so this path,
+      // not the catch, is where a stopped PARKED run arrives, and no error is thrown for
+      // the catch to classify. Recorded `failed` it entered the backoff re-fire and
+      // restarted the run its owner had just stopped. The flag is sufficient here
+      // because the controller abort is what produced the dismissal. Declared above the
+      // block because the notification below reads it too.
+      taskManager.recordTaskRun(
+        task.id,
+        truncatedResult,
+        endedByOwner ? 'stopped' : (questionWentUnanswered || budgetCut !== null ? 'failed' : 'success'),
+      );
     }
 
     if (this.notificationRouter.hasChannels()) {
@@ -1542,14 +1827,19 @@ export class WorkerLoop {
         // ⚠ The ceiling exit says so in the title too, because a ✓ beside a result the
         // engine itself cut off is the same false report as the `success` status was.
         //
-        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: the
-        // unanswered-question path above records `failed` and still notifies as a ✓ at
-        // `normal`. That asymmetry is older than this change and no test pins it either
-        // way.
-        title: `${budgetCut === null ? '\u2713' : '\u2717'} ${task.title}`,
-        body: truncatedResult,
+        // ⚠ And the LIMIT of that, stated rather than left to look deliberate: a question
+        // left unanswered by a shutdown or by its expiry records `failed` and still
+        // notifies as a ✓ at `normal`. That asymmetry is older than this change and no
+        // test pins it either way. (Left unanswered because the OWNER stopped the run, it
+        // takes the branch below.)
+        //
+        // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
+        // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
+        // the body; the title answers who ended it.
+        title: `${endedByOwner ? '\u23f9' : (budgetCut === null ? '\u2713' : '\u2717')} ${task.title}`,
+        body: endedByOwner ? `Stopped on your instruction.\n\n${truncatedResult}` : truncatedResult,
         taskId: task.id,
-        priority: budgetCut === null ? 'normal' : 'high',
+        priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
         // result instead of a blank new chat (the service worker routes
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
@@ -1738,6 +2028,22 @@ export class WorkerLoop {
    * Uses Node.js crypto.createHash('sha256') for fast comparison.
    */
   private async executeWatch(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
+    // Captured BEFORE the fetch below, which this method awaits for up to 30 seconds.
+    // A `stop()` during that window clears the map, so the lookup that used to sit at
+    // the attach site returned `undefined`, the analysis session was attached to
+    // nothing, and the run became unstoppable exactly after a shutdown had asked it to
+    // stop. The entry object outlives its map entry — the rule `attachSession`
+    // documents, which this one site did not follow.
+    //
+    // ⛔ AND NO TEST CAN SEE THIS LINE, measured rather than assumed: replacing it with
+    // a fresh lookup at the attach site below SURVIVES the whole suite. The reason is
+    // structural, so do not go looking for the test that is missing — the only reader of
+    // the entry is `stopTask`, which resolves it THROUGH the map, so the two versions
+    // differ exactly when the map has been cleared, and then neither is reachable. It is
+    // kept because it follows the rule this file states and cannot be worse; what it
+    // buys is a second reader being safe, not a defect closed today. The `attachSession`
+    // CALL below is covered (deleting it fails the watch test).
+    const stopEntry = this.activeTasks.get(task.id);
     let config: { url?: string; interval_minutes?: number; selector?: string; last_hash?: string };
     try {
       config = task.watch_config ? JSON.parse(task.watch_config) as typeof config : {};
@@ -1813,6 +2119,15 @@ export class WorkerLoop {
       // not assumed. If this turn ever gains tools, the report has to come with them.
       costGuard: { maxBudgetUSD: capUSD ?? WATCH_ANALYSIS_MAX_USD },
     });
+    // Same stop handle as the standard path. A watch analysis is short, but "short" is
+    // not "uninterruptible".
+    //
+    // ⚠ And it arrives LATE: everything above — the config parse, the 30-second fetch,
+    // the body read, the hash compare — runs with no session to abort, so a stop in
+    // that window reaches nothing and `stopHandleOf` says so. An owner does not have to
+    // know which effect a task is, but they are told when the answer is "not right
+    // now", which is the half of that sentence this comment used to leave out.
+    WorkerLoop.attachSession(stopEntry, analysisSession);
     const workerProfile3 = this.engine.getUserConfig().worker_profile;
     if (workerProfile3) {
       analysisSession._recreateAgent({ profile: workerProfile3 });

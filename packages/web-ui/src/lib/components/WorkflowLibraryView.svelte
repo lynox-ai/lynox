@@ -12,6 +12,9 @@
 	// (a phone, a tablet) they stay visible at any width — otherwise Run is unreachable there.
 	// Keyboard focus reveals them everywhere.
 	const revealOnHover = 'opacity-100 md:[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100';
+	// The same condition sizes them: a fingertip target (44 px) unless there is a mouse at md and
+	// up, where they keep their compact desktop size.
+	const actionSize = 'min-h-11 px-3 text-[12px] md:[@media(hover:hover)]:min-h-0 md:[@media(hover:hover)]:px-2 md:[@media(hover:hover)]:py-0.5 md:[@media(hover:hover)]:text-[10px]';
 
 	// A "saved workflow" — a planned pipeline with manifest_json.template===true.
 	// Surfaced by GET /api/workflows/library (PRD-WORKFLOW-UX D13).
@@ -468,7 +471,7 @@
 									bind:value={editName}
 									onkeydown={(e) => { if (e.key === 'Enter') void saveRename(wf.id); if (e.key === 'Escape') cancelRename(); }}
 									aria-label={t('workflow_library.rename')}
-									class="w-full rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
+									class="w-full min-h-11 md:[@media(hover:hover)]:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 								/>
 							{:else}
 								<p class="text-sm font-medium line-clamp-2 break-words">{wf.name}</p>
@@ -508,13 +511,13 @@
 						</div>
 						<div class="flex flex-wrap items-center gap-2 md:max-w-[50%] lg:max-w-none md:shrink-0 md:justify-end md:mt-0.5">
 							{#if editingId === wf.id}
-								<button onclick={() => void saveRename(wf.id)} class="rounded-[var(--radius-sm)] border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] text-success hover:bg-success/20 transition-colors">{t('workflow_library.save')}</button>
-								<button onclick={cancelRename} class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>
+								<button onclick={() => void saveRename(wf.id)} class="inline-flex items-center rounded-[var(--radius-sm)] border border-success/30 bg-success/10 {actionSize} text-success hover:bg-success/20 transition-colors">{t('workflow_library.save')}</button>
+								<button onclick={cancelRename} class="inline-flex items-center rounded-[var(--radius-sm)] border border-border bg-bg-muted {actionSize} text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>
 							{:else}
 								<button
 									onclick={() => onRunClick(wf)}
 									disabled={runningId !== null}
-									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 								>
 									<Icon name="bolt" size="xs" />
 									{runningId === wf.id ? t('workflow_library.running') : t('workflow_library.run')}
@@ -522,7 +525,7 @@
 								{#if wf.mode === 'autonomous'}
 									<button
 										onclick={() => onScheduleClick(wf)}
-										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity"
+										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity"
 									>
 										<Icon name="clock" size="xs" />
 										{t('workflow_library.schedule')}
@@ -530,16 +533,16 @@
 								{/if}
 								<button
 									onclick={() => onEditInChat(wf)}
-									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity"
+									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity"
 								>
 									<Icon name="chat" size="xs" />
 									{t('workflow_library.edit_in_chat')}
 								</button>
-								<button onclick={() => startRename(wf)} class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-opacity">
+								<button onclick={() => startRename(wf)} class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-border bg-bg-muted {actionSize} text-text-muted hover:bg-bg transition-opacity">
 									<Icon name="pencil" size="xs" />
 									{t('workflow_library.rename')}
 								</button>
-								<button onclick={() => void deleteWorkflow(wf.id)} class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 transition-opacity">
+								<button onclick={() => void deleteWorkflow(wf.id)} class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 {actionSize} text-danger hover:bg-danger/20 transition-opacity">
 									<Icon name="trash" size="xs" />
 									{t('workflow_library.delete')}
 								</button>

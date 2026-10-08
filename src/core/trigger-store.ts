@@ -858,6 +858,20 @@ export class TriggerStore {
   }
 
   /**
+   * Whether a short id names more than one trigger: no row has it exactly, and at least two
+   * start with it. `getById` answers such an id with whichever row SQLite returns first,
+   * which is fine for a read and wrong for an action — a caller acting on it may act on a
+   * task they did not mean. Same rule as `_resolveTargetWorkflowId`: exact wins, a prefix
+   * only when it is unique.
+   */
+  isAmbiguousId(id: string): boolean {
+    if (id === '') return false;
+    if (this.db.prepare('SELECT 1 FROM triggers WHERE id = ? LIMIT 1').get(id) !== undefined) return false;
+    const hits = this.db.prepare("SELECT id FROM triggers WHERE id LIKE ? ESCAPE '\\' LIMIT 2").all(likePrefix(id));
+    return hits.length > 1;
+  }
+
+  /**
    * Filtered trigger list. Truthy-gated `scope_type`/`scope_id`/`status`/`taskType`
    * clauses, `ORDER BY next_run_at ASC NULLS LAST, created_at DESC`, `limit` default
    * 100. Post S3-behaviour-a the legacy conflated `task_type` no longer exists as a

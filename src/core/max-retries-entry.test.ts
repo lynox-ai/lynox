@@ -46,8 +46,12 @@ const MENTIONS: ReadonlyArray<readonly [string, number]> = [
   ["src/core/trigger-store.ts: max_retries: row.max_retries ?? undefined,", 1],
   ["src/core/trigger-store.ts: row.maxRetries ?? null,", 1],
   ["src/core/verb-graph-backfill.ts: max_retries: row.max_retries ?? undefined,", 1],
+  // Both conjuncts now sit on their own continuation line: `willRetry` gained a third,
+  // `status !== 'stopped'`, which names no field and so appears in neither entry. The
+  // decision this list asks for is unchanged — nothing here gives `maxRetries` a value —
+  // but a stop no longer READS as a retry, which is what moved the text.
+  ["src/core/worker-loop.ts: && (task.max_retries ?? 0) > 0", 1],
   ["src/core/worker-loop.ts: && (task.retry_count ?? 0) < (task.max_retries ?? 0);", 1],
-  ["src/core/worker-loop.ts: const willRetry = (task.max_retries ?? 0) > 0", 1],
   ["src/types/pipeline.ts: max_retries?: number | undefined;", 1],
 ];
 

@@ -128,6 +128,20 @@ describe('TriggerStore (Foundation Rework v2 — S3b)', () => {
     expect(store.remove('')).toBe(false);       // empty-id no-op
   });
 
+  it('isAmbiguousId: exact wins, a unique prefix is fine, a shared prefix is ambiguous', () => {
+    const { store } = make();
+    store.upsert(baseRow({ id: 'run-1' }));
+    store.upsert(baseRow({ id: 'run-12' }));
+    store.upsert(baseRow({ id: 'job-7' }));
+    expect(store.isAmbiguousId('run-1'), 'an exact row wins even when it is also a prefix').toBe(false);
+    expect(store.isAmbiguousId('run'), 'two rows start with it').toBe(true);
+    expect(store.isAmbiguousId('job'), 'one row starts with it').toBe(false);
+    expect(store.isAmbiguousId('none'), 'no row at all is not ambiguous, just absent').toBe(false);
+    expect(store.isAmbiguousId('')).toBe(false);
+    // LIKE metacharacters in the id are literal, not wildcards.
+    expect(store.isAmbiguousId('run_')).toBe(false);
+  });
+
   it('list orders most-recently-touched first (updated_at DESC)', () => {
     const { store, engine } = make();
     store.upsert(baseRow({ id: 'a' }));

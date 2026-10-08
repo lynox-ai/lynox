@@ -86,6 +86,35 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget('https://graph.microsoft.com/v1.0/me/%6DailboxSettings/x%ZZ')).toBe(true);
   });
 
+  // One witness per sending-service host, each on the send path its provider documents.
+  it.each([
+    'https://api.sendgrid.com/v3/mail/send',
+    'https://api.eu.sendgrid.com/v3/mail/send',
+    'https://api.mailgun.net/v3/mg.example.com/messages',
+    'https://api.eu.mailgun.net/v3/mg.example.com/messages',
+    'https://api.postmarkapp.com/email',
+    'https://api.resend.com/emails',
+    'https://api.brevo.com/v3/smtp/email',
+    'https://api.sendinblue.com/v3/smtp/email',
+  ])('refuses the sending service at %s', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
+  });
+
+  it('refuses every path on a sending service, in any spelling of its host', () => {
+    expect(isMailProviderTarget('https://api.sendgrid.com/v3/marketing/singlesends/1/schedule')).toBe(true);
+    expect(isMailProviderTarget('https://API.Resend.com./emails/batch')).toBe(true);
+  });
+
+  it.each([
+    'https://sendgrid.com/v3/mail/send',
+    'https://docs.sendgrid.com/v3/mail/send',
+    'https://api.sendgrid.com.example.com/v3/mail/send',
+    'https://mailgun.net/v3/mg.example.com/messages',
+    'https://resend.com/emails',
+  ])('leaves %s alone, which is not a sending service\'s API host', (url) => {
+    expect(isMailProviderTarget(url)).toBe(false);
+  });
+
   it.each([
     shopUrl(0),
     'https://www.googleapis.com/drive/v3/files/1',
