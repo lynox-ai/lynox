@@ -393,8 +393,13 @@ describe('isDangerous', () => {
       expect(isDangerous('bash', { command })).not.toBeNull();
     });
 
-    it('leaves the workspace free however its path is spelled', () => {
-      expect(isDangerous('bash', { command: 'cat ~/.lynox/./workspace/notes.md' }, 'autonomous')).toBeNull();
+    it.each([
+      'cat ~/.lynox/./workspace/notes.md',
+      // Near misses: a name that only starts like a listed one is a different file.
+      'cat ~/.lynox/.history',
+      'cat ~/.lynox/./.envrc',
+    ])('leaves %s free', (command) => {
+      expect(isDangerous('bash', { command }, 'autonomous')).toBeNull();
     });
 
     // The regex matches the PATH, not a read-verb spelling — `$(<file)`, `python3 -c`,
