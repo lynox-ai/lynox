@@ -277,6 +277,12 @@ export interface ActiveTask {
    *  Human think-time must not consume the task's compute budget. */
   pauseDeadline: () => void;
   resumeDeadline: () => void;
+  /**
+   * Whether this run is a test run by hand (hand-run-door.ts), as decided at dispatch. The
+   * tick's sweep and answer re-arm read it: a live test owns its question, and the row's
+   * stamp may have changed since the test began.
+   */
+  handRun: boolean;
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
@@ -711,6 +717,9 @@ export class WorkerLoop {
       // only happens for the winner.
       try {
         for (const parked of taskManager.getWaitingTriggers()) {
+          // A live test run by hand waits for its own answer in this process and records
+          // its end as a test. The row cannot say so: the owner may have stamped it since.
+          if (this.activeTasks.get(parked.id)?.handRun === true) continue;
           const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(parked.id);
           if (!answered) continue;
           if (taskManager.endWait(parked.id, 'open')) {
@@ -740,6 +749,8 @@ export class WorkerLoop {
       // straight past the dispatch loop.
       try {
         for (const parked of taskManager.getExpiredWaitingTriggers()) {
+          // The same for an expired wait: a live test ends its own wait, as a test.
+          if (this.activeTasks.get(parked.id)?.handRun === true) continue;
           try {
             this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
           } catch (err: unknown) {
@@ -1043,7 +1054,7 @@ export class WorkerLoop {
     // that found `undefined` after a shutdown, which recorded the stopped run as
     // `failed` and re-fired it with a backoff. Same rule, same reason as
     // `attachSession`: the entry object outlives its map entry.
-    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline };
+    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline, handRun };
     this.activeTasks.set(task.id, entry);
     const heartbeat = setInterval(() => {
       try {
