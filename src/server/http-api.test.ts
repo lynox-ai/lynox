@@ -11221,6 +11221,27 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     }, 30_000);
 
+    it('DELETE /api/data names an unopened store in the FAILURE answer too', async () => {
+      // `skipped` was dropped from both 500 bodies, and the omission reinstated the
+      // claim those branches exist to remove: `failed` reads as the complete list of
+      // where to look, so a tenant whose engine.db never opened — PII intact on disk
+      // — would have recorded an answer that does not mention it, and learned of it
+      // only from a later retry that happened to succeed everywhere else.
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => null,
+        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { deleted: boolean; failed: string[]; skipped?: string[] };
+        expect(body.failed).toContain('secrets:S1');
+        expect(body.skipped, 'the store that never opened must be in the answer').toContain('engine_db');
+        expect(body.deleted).toBe(false);
+      });
+    });
+
     it('DELETE /api/data does not report `config` when only the RELOAD failed', async () => {
       // The direction nobody checks: a 500 that says "some stores still hold data"
       // about a store that holds nothing. `saveUserConfig({})` can succeed — the
@@ -11347,11 +11368,15 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
         });
         expect(res.status).toBe(200);
-        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string };
+        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string; warning?: string };
         expect(body.deleted, 'what could be reached WAS erased').toBe(true);
         expect(body.skipped, 'the store it could not open must be named').toContain('engine_db');
         expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
         expect(JSON.stringify(body)).not.toContain('permanently deleted');
+        // A positive marker, not only an absence: this branch answers 200 with no
+        // `error`, so a client testing `status === 200 && body.deleted` would read
+        // unqualified success off the two fields it is most likely to read.
+        expect(body.warning, 'the one positive marker on a 200').toContain('could not be opened');
       });
     });
 
@@ -11413,7 +11438,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
-        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string };
+        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string; warning?: string };
         expect(body.skipped, 'nothing was unreachable').toBeUndefined();
         expect(body.message).toBe('All user data has been permanently deleted');
       });
