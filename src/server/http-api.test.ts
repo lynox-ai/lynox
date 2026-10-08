@@ -186,6 +186,7 @@ const mockSessionInstance = {
 const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionGet = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionStoreReset = vi.fn();
+const mockSessionStoreResetAll = vi.fn();
 /** The bulk-run routes read a REAL ledger (a temp engine.db) — null = flag off. */
 const bulkHolder: { ledger: BulkLedger | null } = { ledger: null };
 
@@ -339,6 +340,7 @@ vi.mock('../core/session-store.js', () => ({
     this.getOrCreate = mockGetOrCreate;
     this.get = mockSessionGet;
     this.reset = mockSessionStoreReset;
+    this.resetAll = mockSessionStoreResetAll;
     this.setRunningCheck = vi.fn();
     this.startEviction = vi.fn();
     this.stopEviction = vi.fn();
@@ -1411,6 +1413,15 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('runs', () => {
+    // This file shares ONE per-IP rate window, and the erasure tests in this block add
+    // enough requests to tip a test thousands of lines away into a 429; the block pays
+    // them back (same snapshot/restore as elsewhere in the file).
+    const runsRateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let runsWindowBefore = new Map<string, number>();
+    beforeAll(() => { runsWindowBefore = new Map([...runsRateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of runsRateCounts()) e.count = runsWindowBefore.get(k) ?? 0; });
+
     // Pre-flight key check (added 2026-05-25 to gate Anthropic SDK
     // validateHeaders deep-throws on BYOK demo tenants without a key).
     // Default the resolve to a fake key so the rest of these tests can
@@ -1785,6 +1796,110 @@ describe('LynoxHTTPApi', () => {
         engineRef['getKnowledgeLayer'] = orig.kl;
         engineRef['getKnowledgeStore'] = orig.ks;
         engineRef['getActiveScopes'] = orig.scopes;
+      }
+    });
+
+    // An erasure that starts AND finishes while /run is still awaiting (here: the
+    // stale-run drain, the same kind of await as the upload handling) leaves the
+    // erasure flag false again, and the request holding a Session the erasure dropped.
+    // The run must be refused, and its document must not be ingested into the
+    // knowledge store the erasure just emptied.
+    it('refuses a run, and skips its document ingest, when an erasure ran during the request', async () => {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = { kl: engineRef['getKnowledgeLayer'], scopes: engineRef['getActiveScopes'] };
+      const stored: string[] = [];
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => { stored.push(text); return Promise.resolve({}); },
+      });
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      const internals = api as unknown as {
+        erasureGeneration: number;
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      };
+      const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
+      const upload = (name: string): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'lies das', files: [{ name, type: 'application/pdf', data: pdf }] }),
+      });
+      try {
+        // A dead, stale run on the session: /run takes it over and awaits its drain.
+        // The "erasure" happens inside that await, then the slot drains.
+        internals.runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0,
+          takeover: () => {
+            setTimeout(() => {
+              internals.erasureGeneration++;
+              internals.runningSessions.delete('test');
+            }, 30);
+          },
+        });
+        const refused = await upload('during.pdf');
+        expect(refused.status).toBe(410);
+        expect((await refused.json() as { error: string }).error).toMatch(/erased while this message was being prepared/);
+
+        // Positive control on the same machinery, after: a normal upload ingests.
+        expect((await upload('after.pdf')).status).toBe(200);
+        await vi.waitFor(() => { expect(stored.length).toBeGreaterThan(0); });
+        expect(stored.some(t => t.includes('during.pdf')), 'the refused run ingested its document').toBe(false);
+      } finally {
+        internals.runningSessions.delete('test');
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getActiveScopes'] = orig.scopes;
+      }
+    });
+
+    // The case the counter exists for, driven by a REAL erasure: a /run enters while
+    // the erasure is still in its flat-file step (so the flag is set but the sessions
+    // are not yet dropped), fetches its Session, and is still awaiting when the
+    // erasure has finished and cleared the flag. That Session was dropped and holds
+    // the erased conversation; the run must be refused and must not ingest.
+    it('refuses a run that entered during an erasure and outlasted it', async () => {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = { kl: engineRef['getKnowledgeLayer'], scopes: engineRef['getActiveScopes'], mem: engineRef['getMemory'] };
+      const stored: string[] = [];
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => { stored.push(text); return Promise.resolve({}); },
+      });
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      let openGate: () => void = () => undefined;
+      const gate = new Promise<void>((r) => { openGate = r; });
+      engineRef['getMemory'] = (): unknown => ({ save: async () => { await gate; } });
+      const internals = api as unknown as {
+        erasureInProgress: boolean;
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      };
+      const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
+      try {
+        const erasure = jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        for (let i = 0; i < 200 && !internals.erasureInProgress; i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(internals.erasureInProgress, 'fixture: the erasure is in its flat-file step').toBe(true);
+
+        // A dead, stale run on the session: /run takes it over and awaits its drain.
+        // The drain lets the erasure finish first, then frees the slot.
+        let erasureStatus: number | undefined;
+        internals.runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0,
+          takeover: () => {
+            openGate();
+            void erasure.then((r) => { erasureStatus = r.status; internals.runningSessions.delete('test'); });
+          },
+        });
+        const run = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name: 'during.pdf', type: 'application/pdf', data: pdf }] }),
+        });
+        expect(erasureStatus, 'fixture: the erasure finished while the run was awaiting').toBeDefined();
+        expect(internals.erasureInProgress, 'fixture: the flag is clear again').toBe(false);
+        expect(run.status).toBe(410);
+        expect(stored.some(t => t.includes('during.pdf')), 'the refused run ingested its document').toBe(false);
+      } finally {
+        openGate();
+        internals.runningSessions.delete('test');
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getActiveScopes'] = orig.scopes;
+        engineRef['getMemory'] = orig.mem;
       }
     });
 
@@ -2241,6 +2356,134 @@ describe('LynoxHTTPApi', () => {
         }
       });
     });
+    // DELETE /api/data (Art. 17) used to wipe beside a running chat: the run's next
+    // persist re-created rows in the emptied stores, or failed on a foreign key
+    // inside the run after the route had answered. It now stops every running run
+    // the way the thread delete stops its own, and waits for the slot BEFORE the
+    // first wipe — so the witness is the slot's state at the moment of the wipe.
+    it('DELETE /api/data stops a parked run and waits for its slot before it erases', async () => {
+      await withParkedRun('erase-parked-1', async ({ prompts, slots }) => {
+        const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown; getMemory: () => unknown } }).engine;
+        const origGetThreadStore = engineRef.getThreadStore;
+        const origGetMemory = engineRef.getMemory;
+        let slotHeldAtWipe: boolean | undefined;
+        const order: string[] = [];
+        engineRef.getThreadStore = (): unknown => ({
+          deleteAllThreads: () => { order.push('threads'); slotHeldAtWipe = slots.has('erase-parked-1'); },
+        });
+        // The flat-file step is the only one that awaits, so it runs BEFORE the
+        // first database wipe: from there to the last scrub nothing else runs.
+        // And it is the one window in which another request can arrive: a run asked
+        // for there must be refused, not take a slot beside the erasure.
+        let runDuringErasure: { status: number; error: string } | undefined;
+        mockSessionStoreResetAll.mockImplementation(() => { order.push('resetAll'); });
+        engineRef.getMemory = (): unknown => ({
+          save: async () => {
+            order.push('memory');
+            if (runDuringErasure === undefined) {
+              const r = await jsonFetch('/api/sessions/erase-parked-1b/run', {
+                method: 'POST',
+                body: JSON.stringify({ task: 'during the erasure', protocol: 1 }),
+              });
+              runDuringErasure = { status: r.status, error: (await r.json() as { error: string }).error };
+            }
+          },
+        });
+        try {
+          await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(slotHeldAtWipe, 'fixture: the thread wipe must have run').toBeDefined();
+          expect(slotHeldAtWipe, 'the run still held its slot when the threads were wiped').toBe(false);
+          expect(prompts.getPending('erase-parked-1')).toBeUndefined();
+          expect(order.lastIndexOf('memory'), 'every awaiting step before the first wipe').toBeLessThan(order.indexOf('threads'));
+          // Sessions dropped inside the synchronous stretch: after the last await,
+          // so none created during the flat-file step survives the wipe.
+          expect(order.indexOf('resetAll'), 'the sessions must be dropped').toBeGreaterThan(order.lastIndexOf('memory'));
+          expect(order.indexOf('resetAll')).toBeLessThan(order.indexOf('threads'));
+          expect(runDuringErasure?.status, 'a run asked for during the erasure').toBe(409);
+          expect(runDuringErasure?.error).toMatch(/being erased/);
+        } finally {
+          engineRef.getThreadStore = origGetThreadStore;
+          engineRef.getMemory = origGetMemory;
+          mockSessionStoreResetAll.mockReset();
+        }
+      });
+    });
+
+    // An erasure beside a live run cannot say what it left behind, so a run that
+    // does not release its slot means nothing is erased, and the answer says so.
+    it('DELETE /api/data erases nothing and answers 409 when a run does not stop', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+      const origGetThreadStore = engineRef.getThreadStore;
+      const deleteAllThreads = vi.fn();
+      engineRef.getThreadStore = (): unknown => ({ deleteAllThreads });
+      const takeover = vi.fn(); // a run that ignores the stop: the slot stays
+      const genBefore = (api as unknown as { erasureGeneration: number }).erasureGeneration;
+      slots.set('erase-stuck-1', { streamAlive: true, takeover, lastEventAt: Date.now() });
+      try {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(takeover, 'the route must try to stop it').toHaveBeenCalled();
+        expect(res.status).toBe(409);
+        expect(deleteAllThreads, 'nothing may be erased beside a live run').not.toHaveBeenCalled();
+        expect((api as unknown as { erasureInProgress: boolean }).erasureInProgress, 'the flag must not outlive a refused erasure').toBe(false);
+        // And it does not count as an erasure: nothing was dropped, so a /run that
+        // was waiting meanwhile must not be told its conversation was erased.
+        expect((api as unknown as { erasureGeneration: number }).erasureGeneration, 'a refused erasure counted').toBe(genBefore);
+      } finally {
+        slots.delete('erase-stuck-1');
+        engineRef.getThreadStore = origGetThreadStore;
+      }
+    }, 15_000);
+
+    // No new run may take a slot while the erasure runs: it would write into the
+    // stores being emptied, and it would not be among the runs the erasure stopped.
+    it('POST /run is refused while an erasure is in progress', async () => {
+      const flag = api as unknown as { erasureInProgress: boolean };
+      flag.erasureInProgress = true;
+      try {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/erase-run-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'anything', protocol: 1 }),
+        });
+        expect(res.status).toBe(409);
+        expect((await res.json() as { error: string }).error).toMatch(/being erased/);
+        expect(mockSessionRun).not.toHaveBeenCalled();
+      } finally {
+        flag.erasureInProgress = false;
+      }
+      // And the flag does not outlive the erasure: after a DELETE /api/data the
+      // next run is not refused for it.
+      // And each erasure counts once, which is what lets a /run that was still
+      // awaiting when it ran tell that it did (see the 410 test).
+      const gen = api as unknown as { erasureGeneration: number };
+      const before = gen.erasureGeneration;
+      await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+      expect(flag.erasureInProgress).toBe(false);
+      expect(gen.erasureGeneration).toBe(before + 1);
+    });
+
+    // One erasure at a time: a second one would clear the shared flag in its
+    // `finally` while the first is still wiping, and let a run in beside it.
+    it('DELETE /api/data refuses while another erasure is running', async () => {
+      const flag = api as unknown as { erasureInProgress: boolean };
+      const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+      const origGetThreadStore = engineRef.getThreadStore;
+      const deleteAllThreads = vi.fn();
+      engineRef.getThreadStore = (): unknown => ({ deleteAllThreads });
+      flag.erasureInProgress = true;
+      try {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(409);
+        expect((await res.json() as { error: string }).error).toMatch(/already running/);
+        expect(deleteAllThreads).not.toHaveBeenCalled();
+        expect(flag.erasureInProgress, 'the refusal must not clear the running erasure\'s flag').toBe(true);
+      } finally {
+        flag.erasureInProgress = false;
+        engineRef.getThreadStore = origGetThreadStore;
+      }
+    });
+
     // Two robustness properties of the reclaim, in one target situation: the
     // prompt store fails while the run is parked (closed db, SQLITE_BUSY).
     //   (a) `takeover` unwinds BEFORE it does bookkeeping — `waitForSettled`

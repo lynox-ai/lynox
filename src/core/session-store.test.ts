@@ -191,6 +191,21 @@ describe('SessionStore', () => {
     });
   });
 
+  describe('resetAll', () => {
+    it('drops every session, so the next getOrCreate builds a new one', () => {
+      const store = new SessionStore();
+      const engine = makeMockEngine();
+      const a = store.getOrCreate('a', engine);
+      const b = store.getOrCreate('b', engine);
+      expect(store.size, 'fixture: two sessions held').toBe(2);
+      store.resetAll();
+      expect(store.size).toBe(0);
+      expect(store.get('a')).toBeUndefined();
+      expect(store.getOrCreate('a', engine)).not.toBe(a);
+      expect(store.getOrCreate('b', engine)).not.toBe(b);
+    });
+  });
+
   describe('different session IDs', () => {
     it('get different sessions', () => {
       const store = new SessionStore();

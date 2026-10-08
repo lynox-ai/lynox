@@ -178,6 +178,12 @@ export class SessionStore {
     return s;
   }
 
+  /** Drop every session. Used by the Art. 17 erasure, whose threads they belong to. */
+  resetAll(): void {
+    this.sessions.clear();
+    this.lastAccessed.clear();
+  }
+
   reset(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.lastAccessed.delete(sessionId);
