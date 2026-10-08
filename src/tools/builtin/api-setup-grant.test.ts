@@ -3321,6 +3321,22 @@ describe('mandates and stored credentials', () => {
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
+  it('control: the owner\'s profile may fetch_token into a name a mandate\'s profile could not', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({}, 'client_credentials'));
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'MINTED', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const v = vault(SEED, ['FROM_ENV_TOKEN']);
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'FROM_ENV_TOKEN' }, makeAgent(apiStore, v as never));
+    expect(out).not.toContain('is a credential this profile may not write');
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(true);
+  });
+
   it('a profile a mandate wrote may not fetch_token into the token slot of the owner\'s preset account, and nothing is sent', async () => {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);

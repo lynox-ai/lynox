@@ -184,6 +184,16 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     expect(args.indexOf('-format_whitelist')).toBeLessThan(args.indexOf('-i'));
   });
 
+  // The single-file formats the list was checked with against the image's ffmpeg (see
+  // INPUT_DEMUXERS); dropping one stops media_process reading that format.
+  it('keeps every demuxer the list was checked with', () => {
+    expect([...INPUT_DEMUXERS].sort()).toEqual([
+      '3g2', '3gp', 'aac', 'ac3', 'aiff', 'amr', 'ape', 'asf', 'au', 'avi', 'bmp_pipe', 'caf', 'dv', 'eac3',
+      'flac', 'flv', 'gif', 'h264', 'hevc', 'jpeg_pipe', 'm4a', 'm4v', 'matroska', 'mj2', 'mov', 'mp3',
+      'mp4', 'mpeg', 'mpegts', 'mpegvideo', 'ogg', 'png_pipe', 'tiff_pipe', 'w64', 'wav', 'webm', 'webp_pipe', 'wv',
+    ]);
+  });
+
   // A demuxer that reads a list of further files would open them over `file`, outside the
   // file area too. None of them may be on the list ffmpeg chooses from by content.
   it.each(['hls', 'applehttp', 'dash', 'imf', 'concat', 'image2', 'image2pipe', 'm3u', 'tee', 'lavfi', 'subfile'])(

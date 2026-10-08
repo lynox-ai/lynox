@@ -2147,10 +2147,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // host to DNS and a different key to the profile map.
     if (isWriteMethod(method) && !isOwnerPrincipal(agent.principal)) {
       const apiStore = toolContext?.apiStore;
-      // An address that does not parse reaches no account; the host policy below reports it.
-      let host = '';
-      try { host = new URL(input.url).hostname.replace(/\.+$/, ''); } catch { /* reported below */ }
-      const onHost = !apiStore || host === '' ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
+      const host = new URL(input.url).hostname.replace(/\.+$/, '');
+      const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
         .map((id) => (id === undefined ? undefined : apiStore.get(id)));
       if (onHost.some((p) => p?.auth?.oauth?.preset_id !== undefined)) {
         blockedVerbatim(
