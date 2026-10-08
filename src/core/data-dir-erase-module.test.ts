@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyEntry, parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from './data-dir-erase.js';
@@ -138,11 +138,65 @@ describe('data-dir erasure — on disk', () => {
       const st = lstatSync(p);
       return p.endsWith('/proj/mnt') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: dev + 1 }) : st;
     };
-    const scan = scanDataDir(dir, mountAt);
+    const scan = scanDataDir(dir, { lstat: mountAt });
     expect(scan.linked).toEqual([{ name: 'workspace', reason: expect.stringContaining('proj/mnt') as unknown as string }]);
     const out = removeOwedEntries(scan, [], mountAt);
     expect(out.failures.map(f => f.name)).toEqual(['workspace']);
     expect(readFileSync(join(dir, 'workspace', 'proj', 'mnt', 'disk.txt'), 'utf8')).toBe('ZZ-disk');
+  });
+
+  it('checks an unknown entry for mounts only once it is acknowledged for removal', async () => {
+    mkdirSync(join(dir, 'nas', 'share'), { recursive: true });
+    const { lstatSync } = await import('node:fs');
+    const dev = scanDataDir(dir).dev;
+    const mountAt = (p: string): ReturnType<typeof lstatSync> => {
+      const st = lstatSync(p);
+      return p.endsWith('/nas/share') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: dev + 1 }) : st;
+    };
+    expect(scanDataDir(dir, { lstat: mountAt }).linked).toEqual([]);
+    expect(scanDataDir(dir, { lstat: mountAt, acknowledged: new Set(['nas']) }).linked.map(l => l.name)).toEqual(['nas']);
+  });
+
+  it('fails closed on a directory it cannot read, instead of throwing', () => {
+    seedDir('workspace');
+    const locked = join(dir, 'workspace', 'locked');
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      // Root reads anything; the property is only observable for an ordinary user.
+      if (process.getuid?.() === 0) return;
+      const scan = scanDataDir(dir);
+      expect(scan.linked).toEqual([{ name: 'workspace', reason: expect.stringContaining('could not be checked') as unknown as string }]);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
+  it('does not refuse a SQLite store on another device: its handle empties it in place', async () => {
+    seed('engine.db');
+    const { lstatSync } = await import('node:fs');
+    const dev = scanDataDir(dir).dev;
+    const elsewhere = (p: string): ReturnType<typeof lstatSync> => {
+      const st = lstatSync(p);
+      return p.endsWith('/engine.db') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: dev + 1 }) : st;
+    };
+    expect(scanDataDir(dir, { lstat: elsewhere }).linked).toEqual([]);
+  });
+
+  it('names what it empties in place, apart from what it removes', () => {
+    seed('engine.db');
+    seed('config.json');
+    seedDir('memory');
+    seed('vault.key');
+    expect(scanDataDir(dir).emptiedInPlace).toEqual(['config.json', 'engine.db', 'memory']);
+  });
+
+  it('reports, rather than throws, when the data dir cannot be listed at removal', () => {
+    const scan = scanDataDir(dir);
+    rmSync(dir, { recursive: true, force: true });
+    const out = removeOwedEntries(scan, []);
+    expect(out.failures.map(f => f.name)).toEqual(['.']);
+    mkdirSync(dir);
   });
 
   it('names what it removes without asking, and keeps a temp beside a kept entry', () => {

@@ -125,6 +125,7 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(alsoRemoved).toContain('secrets.json');
     expect(alsoRemoved).not.toContain('vault.key');
     expect(alsoRemoved).not.toContain('engine.db');
+    expect(first.body['also_emptied'] as string[]).toContain('engine.db');
     // Nothing erased: the FIRST destructive step (flat-file memory) did not run, the
     // flag is down, and the erasure counted nothing.
     expect(readFileSync(memPath, 'utf8')).toBe(memMark);

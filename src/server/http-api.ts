@@ -10231,7 +10231,7 @@ export class LynoxHTTPApi {
         // they were shown.
         let scan: ReturnType<typeof scanDataDir>;
         try {
-          scan = scanDataDir(dataDir);
+          scan = scanDataDir(dataDir, { acknowledged: new Set(acknowledged.map(a => a.name)) });
         } catch (err) {
           process.stderr.write(`⚠ /api/data: data dir scan failed: ${err instanceof Error ? err.message : String(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['data_dir#scan'], error: 'Erasure incomplete — the data directory could not be read, so nothing was erased' });
@@ -10243,8 +10243,9 @@ export class LynoxHTTPApi {
           jsonResponse(res, 409, {
             code: 'linked_entries',
             linked: scan.linked,
-            error: 'Some entries in the data directory are links or mount points the erasure does not follow, so nothing was erased. '
-              + 'Erase their content where it lives and remove the link or mount, or move the content back into the data directory, then erase.',
+            error: 'Some entries the erasure would remove or empty are links or mount points it does not follow, or could not be checked, so nothing was erased. '
+              + 'Their content is outside the data directory and would not be erased. '
+              + 'Move each such entry out of the data directory, or replace it with the content it points to, then erase.',
           });
           return;
         }
@@ -10256,9 +10257,10 @@ export class LynoxHTTPApi {
             // Named so the agreement covers them: in a data dir that is also used for other
             // things, a `workspace/` or `backups/` of the user's own is removed under these names.
             also_removed: scan.removedWithoutAsking,
+            also_emptied: scan.emptiedInPlace,
             error: 'The data directory holds entries this instance does not know, so nothing was erased. '
               + 'Move them out of the data directory, or erase again with "remove_unknown" set to the "unknown" list of this answer. '
-              + 'The erasure also removes the entries listed in "also_removed", which this instance keeps its data in.'
+              + 'The erasure also removes the entries listed in "also_removed" and empties those in "also_emptied", which this instance keeps its data in.'
               + (many ? ' That is a lot of entries — check that the data directory is set correctly before removing anything.' : ''),
           });
           return;
@@ -10619,7 +10621,7 @@ export class LynoxHTTPApi {
         // The files the erasure owes, after every store is emptied and scrubbed; `backups`
         // last inside. The acknowledged unknown entries are re-checked against what the
         // caller was shown, here, in the synchronous stretch.
-        const rescan = (() => { try { return scanDataDir(dataDir); } catch { return null; } })();
+        const rescan = (() => { try { return scanDataDir(dataDir, { walk: false }); } catch { return null; } })();
         const ackStillValid = rescan !== null && sameUnknownSet(rescan.unknown, acknowledged);
         if (!ackStillValid && acknowledged.length > 0) note('data_dir#unknown_changed', new Error('the unknown entries changed after they were reported; none was removed'));
         const files = removeOwedEntries(scan, ackStillValid ? acknowledged.map(a => a.name) : []);

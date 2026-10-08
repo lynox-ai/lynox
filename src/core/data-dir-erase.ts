@@ -123,14 +123,23 @@ function foreignDeviceInside(dir: string, dev: number, lstat: (path: string) => 
  * `followsLink`: a declared entry the erasure removes or empties through its path (not
  * a SQLite store, whose open handle writes the target in place) that is a symlink.
  */
-function linkedReason(name: string, cls: EntryClass, st: Stats, dataDirDev: number, path: string, lstat: (path: string) => Stats): string | null {
+function linkedReason(cls: EntryClass, st: Stats, dataDirDev: number, path: string, lstat: (path: string) => Stats, walk: boolean): string | null {
+  // A SQLite store is emptied through the handle the engine holds open, which writes the
+  // file wherever it lives — through a link or on another device alike.
+  if (cls.kind === 'declared' && cls.entry.kind === 'sqlite') return null;
   if (st.isSymbolicLink()) {
-    const followsLink = cls.kind === 'declared' && cls.entry.erase.by !== 'keep' && cls.entry.kind !== 'sqlite';
+    const followsLink = cls.kind === 'declared' && cls.entry.erase.by !== 'keep';
     return followsLink ? 'a symbolic link; its content is at the target, outside the data dir' : null;
   }
   if (st.dev !== dataDirDev) return 'a mount point; its content is on another filesystem';
-  if (st.isDirectory()) {
-    const inside = foreignDeviceInside(path, dataDirDev, lstat);
+  if (walk && st.isDirectory()) {
+    // Fail closed: a directory that cannot be read may hold a mount the removal would empty.
+    let inside: string | null;
+    try {
+      inside = foreignDeviceInside(path, dataDirDev, lstat);
+    } catch (err) {
+      return `could not be checked for mount points inside (${err instanceof Error ? err.message : String(err)})`;
+    }
     if (inside !== null) return `contains a mount point (${inside}); its content is on another filesystem`;
   }
   return null;
@@ -153,37 +162,62 @@ export interface DataDirScan {
   readonly linked: readonly LinkedEntry[];
   /** Entries this instance knows and removes without asking, for the caller to be told. */
   readonly removedWithoutAsking: readonly string[];
+  /** Entries this instance knows and empties in place (`step`), for the caller to be told. */
+  readonly emptiedInPlace: readonly string[];
   /** Litter seen, named for the log only — it neither blocks nor counts. */
   readonly litter: readonly string[];
 }
 
-export function scanDataDir(dataDir: string, lstat: (path: string) => Stats = lstatSync): DataDirScan {
+export interface ScanOptions {
+  /**
+   * Unknown entries the caller acknowledged. Only those are checked for links and mounts:
+   * the erasure owes nothing for an unknown entry until it is acknowledged, and walking a
+   * broad data dir's every directory would cost the request — and fail on the first one it
+   * may not read — for entries it will not touch.
+   */
+  readonly acknowledged?: ReadonlySet<string> | undefined;
+  /** `false` skips the walk into directories (a rescan that only needs `unknown`). */
+  readonly walk?: boolean | undefined;
+  /** Injected only by tests: a mount cannot be created without privileges. */
+  readonly lstat?: ((path: string) => Stats) | undefined;
+}
+
+export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirScan {
+  const lstat = opts.lstat ?? lstatSync;
+  const ack = opts.acknowledged ?? new Set<string>();
+  const walk = opts.walk ?? true;
   const dir = realpathSync(dataDir);
   const dev = statSync(dir).dev;
   const unknown: EntryIdentity[] = [];
   const linked: LinkedEntry[] = [];
   const removedWithoutAsking: string[] = [];
+  const emptiedInPlace: string[] = [];
   const litter: string[] = [];
-  const everyUnknown = { has: () => true };
   for (const name of readdirSync(dir)) {
     const cls = classifyEntry(name);
     if (cls.kind === 'litter') { litter.push(name); continue; }
     const path = join(dir, name);
-    const st = lstat(path);
+    let st: Stats;
+    try {
+      st = lstat(path);
+    } catch {
+      continue;   // gone since the listing
+    }
+    const inPlace = cls.kind === 'declared' && cls.entry.erase.by === 'step';
     if (cls.kind === 'unknown') unknown.push(identityOf(name, st));
-    else if (owedBy(cls, everyUnknown, name)) removedWithoutAsking.push(name);
-    // Asked of everything the erasure could touch through a path: what it removes, what it
-    // empties in place (a `step` directory or file), and every unknown entry, which it
-    // removes once acknowledged.
-    const touched = cls.kind === 'unknown' || owedBy(cls, everyUnknown, name) || (cls.kind === 'declared' && cls.entry.erase.by === 'step');
-    if (!touched) continue;
-    const reason = linkedReason(name, cls, st, dev, path, lstat);
+    else if (owedBy(cls, ack, name)) removedWithoutAsking.push(name);
+    else if (inPlace) emptiedInPlace.push(name);
+    // Asked of everything the erasure touches through a path: what it removes, what it
+    // empties in place, and the unknown entries acknowledged for removal.
+    if (!owedBy(cls, ack, name) && !inPlace) continue;
+    const reason = linkedReason(cls, st, dev, path, lstat, walk);
     if (reason !== null) linked.push({ name, reason });
   }
   unknown.sort((a, b) => a.name.localeCompare(b.name));
   linked.sort((a, b) => a.name.localeCompare(b.name));
   removedWithoutAsking.sort((a, b) => a.localeCompare(b));
-  return { dir, dev, unknown, linked, removedWithoutAsking, litter };
+  emptiedInPlace.sort((a, b) => a.localeCompare(b));
+  return { dir, dev, unknown, linked, removedWithoutAsking, emptiedInPlace, litter };
 }
 
 /**
@@ -225,8 +259,9 @@ export interface RemoveOutcome {
 
 /**
  * Removes every top-level entry that is `remove` in the inventory (with its sidecars), the
- * atomic-write temp a crash left beside ANY declared entry (a `config.json` temp holds the
- * whole config), the engine's own residue, and the acknowledged unknown entries. The
+ * atomic-write temp a crash left beside a declared entry that is not kept (a `config.json`
+ * temp holds the whole config), the engine's own residue, and the acknowledged unknown
+ * entries. A link or mount found here after all is reported, not removed. The
  * sidecars of a `step` store stay: they belong to the connection the route empties through.
  * `backups` goes LAST: a backup started while the route awaited copies stores that are
  * still full, and must not outlive the erasure.
@@ -264,12 +299,7 @@ export function removeOwedEntries(
       continue;   // gone since the listing
     }
     // The scan refused these already; asked again because the stretch runs after an await.
-    let reason: string | null;
-    try {
-      reason = linkedReason(name, cls, st, scan.dev, path, lstat);
-    } catch (err) {
-      reason = `could not be checked for links and mounts: ${err instanceof Error ? err.message : String(err)}`;
-    }
+    const reason = linkedReason(cls, st, scan.dev, path, lstat, true);
     if (reason !== null) {
       failures.push({ name, reason: `${reason}; not removed` });
       continue;
