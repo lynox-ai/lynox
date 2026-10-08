@@ -197,3 +197,34 @@ export function removeOwedEntries(
   }
   return { removed, failures };
 }
+
+/** `backup.ts` names each backup `<ISO without : and .>Z`, a collision suffix, and `.tmp` while it is written. */
+const BACKUP_NAME = /^\d{4}-\d{2}-\d{2}T\d{8}Z(-\d+)?(\.tmp)?$/;
+
+/**
+ * A configured `backup_dir` outside the data dir holds full copies of the stores the
+ * erasure just emptied. Only entries with the name `backup.ts` gives a backup are
+ * removed — the directory is the user's choice and may hold other things — and, as
+ * everywhere here, a symlink is unlinked, never followed.
+ */
+export function removeBackupsOutside(backupDir: string, dataDir: string): RemoveOutcome {
+  const removed: string[] = [];
+  const failures: Array<{ name: string; reason: string }> = [];
+  let dir: string;
+  try {
+    dir = realpathSync(backupDir);
+  } catch {
+    return { removed, failures };   // no such directory: nothing was backed up there
+  }
+  if (dir === join(realpathSync(dataDir), 'backups')) return { removed, failures };   // the data dir's own, removed with it
+  for (const name of readdirSync(dir)) {
+    if (!BACKUP_NAME.test(name)) continue;
+    try {
+      rmSync(join(dir, name), { recursive: true, force: true });
+      removed.push(name);
+    } catch (err) {
+      failures.push({ name, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { removed, failures };
+}

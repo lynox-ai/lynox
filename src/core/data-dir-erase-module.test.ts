@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyEntry, parseAcknowledged, removeOwedEntries, sameUnknownSet, scanDataDir } from './data-dir-erase.js';
+import { classifyEntry, parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from './data-dir-erase.js';
 import { ERASE_BY_REMOVE, ERASE_KEPT } from './data-dir-inventory.js';
 
 describe('data-dir erasure — classification', () => {
@@ -122,6 +122,17 @@ describe('data-dir erasure — on disk', () => {
     });
     expect(out.failures.map(f => f.name)).toEqual(['workspace']);
     expect(readFileSync(join(dir, 'workspace', 'inside.txt'), 'utf8')).toBe('ZZ-workspace');
+  });
+
+  it('removes only backup-named entries from a backup_dir outside the data dir', () => {
+    for (const n of ['2026-10-08T19301234Z', '2026-10-08T19301234Z-1', '2026-10-08T19301234Z.tmp']) {
+      mkdirSync(join(outside, n));
+      writeFileSync(join(outside, n, 'engine.db'), 'ZZ-copy');
+    }
+    writeFileSync(join(outside, 'my-notes.txt'), 'ZZ-mine');
+    const out = removeBackupsOutside(outside, dir);
+    expect(out.removed.sort()).toEqual(['2026-10-08T19301234Z', '2026-10-08T19301234Z-1', '2026-10-08T19301234Z.tmp']);
+    expect(readdirSync(outside)).toEqual(['my-notes.txt']);
   });
 
   it('compares against the data dir as resolved, so a data dir that is a symlink still works', () => {

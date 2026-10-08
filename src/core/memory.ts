@@ -6,6 +6,7 @@ import { resolveTierModel } from './tier-resolver.js';
 import { channels } from './observability.js';
 import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
+import { mkdirSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { scopeToDir } from './scope-resolver.js';
 import { trimMemoryContent } from './memory-file.js';
@@ -371,6 +372,19 @@ export class Memory implements IMemory {
     } catch {
       // Best-effort pruning
     }
+  }
+
+  /**
+   * GDPR Art. 17: remove every flat-file scope (not only the default one) and forget what
+   * this instance has cached. Synchronous on purpose, so the erasure can run it inside
+   * its synchronous stretch. Without the `cache.clear()` the next run would render the
+   * erased memory into its prompt from this process, and the next append would write it
+   * back to disk.
+   */
+  eraseAll(): void {
+    rmSync(this.baseDir, { recursive: true, force: true });
+    mkdirSync(this.baseDir, { recursive: true });
+    this.cache.clear();
   }
 
   // === Scope-aware methods ===

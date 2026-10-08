@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import webPush from 'web-push';
 import Database from 'better-sqlite3';
+import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
 import type {
   NotificationChannel,
   NotificationMessage,
@@ -78,6 +79,7 @@ class PushSubscriptionStore {
 
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    zeroDeletedContent(this.db);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS push_subscriptions (
         endpoint     TEXT PRIMARY KEY,
@@ -122,6 +124,15 @@ class PushSubscriptionStore {
       .all() as PushSubscriptionRow[];
   }
 
+  /** GDPR Art. 17: every subscription (each names a browser endpoint of the user). */
+  deleteAll(): void {
+    this.db.prepare('DELETE FROM push_subscriptions').run();
+  }
+
+  scrubFreedPages(): void {
+    scrubFreedPages(this.db);
+  }
+
   count(): number {
     const row = this.db
       .prepare(`SELECT COUNT(*) as cnt FROM push_subscriptions`)
@@ -138,6 +149,15 @@ export class WebPushNotificationChannel implements NotificationChannel {
   readonly name = 'web-push';
   private readonly store: PushSubscriptionStore;
   private readonly vapidKeys: VapidKeys;
+
+  /** GDPR Art. 17: delete every subscription and scrub the file. */
+  eraseSubscriptions(): void {
+    this.store.deleteAll();
+  }
+
+  scrubFreedPages(): void {
+    this.store.scrubFreedPages();
+  }
 
   constructor(dataDir: string) {
     this.vapidKeys = loadOrGenerateVapidKeys(dataDir);

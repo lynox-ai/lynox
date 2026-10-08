@@ -68,6 +68,16 @@ export class ArtifactStore {
     this.loadIndex();
   }
 
+  /**
+   * GDPR Art. 17: forget every artifact this instance has indexed. The erasure removes the
+   * directory; without this the gallery keeps listing the erased titles from memory, and
+   * the next save writes them back into `index.json`.
+   */
+  forgetAll(): void {
+    this.index = [];
+    mkdirSync(this.dir, { recursive: true });
+  }
+
   private loadIndex(): void {
     try {
       if (existsSync(this.indexPath)) {

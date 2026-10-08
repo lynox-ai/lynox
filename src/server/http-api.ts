@@ -94,6 +94,7 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
+import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from '../core/data-dir-erase.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -1257,6 +1258,8 @@ const ERASED_DURING_REQUEST = 'All data was erased while this message was being 
  * answers 409 and erases nothing, and the caller tries again.
  */
 const ERASURE_RUN_DRAIN_MS = 5_000;
+/** Past this many unknown entries the erasure asks whether the data dir is set correctly. */
+const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
@@ -10047,7 +10050,13 @@ export class LynoxHTTPApi {
       // One erasure at a time: the flag is a boolean, so a second one's `finally`
       // would clear it while the first is still wiping.
       if (this.erasureInProgress) {
-        errorResponse(res, 409, 'An erasure is already running');
+        jsonResponse(res, 409, { error: 'An erasure is already running', code: 'erasure_in_progress' });
+        return;
+      }
+      // Checked before the flag, so a malformed list is a plain 400 and changes nothing.
+      const acknowledged = parseAcknowledged(b?.['remove_unknown']);
+      if (acknowledged === null) {
+        errorResponse(res, 400, '"remove_unknown" must be the list of entries this route reported, echoed unchanged');
         return;
       }
       this.erasureInProgress = true;
@@ -10063,7 +10072,33 @@ export class LynoxHTTPApi {
           await new Promise<void>((r) => setTimeout(r, 25));
         }
         if (this.runningSessions.size > 0) {
-          errorResponse(res, 409, 'A running chat did not stop, so nothing was erased; try again');
+          jsonResponse(res, 409, { error: 'A running chat did not stop, so nothing was erased; try again', code: 'runs_did_not_stop' });
+          return;
+        }
+
+        // The data dir is scanned BEFORE anything is deleted. It is configurable and can be
+        // a broad directory (`--data-dir .`, `LYNOX_DATA_DIR=$HOME`); an entry the inventory
+        // does not know stops the erasure here, with nothing touched, instead of being
+        // removed or silently left under the completeness sentence. The caller may name the
+        // reported entries back — with the identity reported, so what is removed is what
+        // they were shown.
+        let scan: ReturnType<typeof scanDataDir>;
+        try {
+          scan = scanDataDir(dataDir);
+        } catch (err) {
+          process.stderr.write(`⚠ /api/data: data dir scan failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          jsonResponse(res, 500, { deleted: false, failed: ['data_dir#scan'], error: 'Erasure incomplete — the data directory could not be read, so nothing was erased' });
+          return;
+        }
+        if (!sameUnknownSet(scan.unknown, acknowledged)) {
+          const many = scan.unknown.length > ERASURE_MANY_UNKNOWN;
+          jsonResponse(res, 409, {
+            code: 'unknown_entries',
+            unknown: scan.unknown,
+            error: 'The data directory holds entries this instance does not know, so nothing was erased. '
+              + 'Move them out of the data directory, or erase again with "remove_unknown" set to the "unknown" list of this answer.'
+              + (many ? ' That is a lot of entries — check that the data directory is set correctly before removing anything.' : ''),
+          });
           return;
         }
 
@@ -10376,6 +10411,17 @@ export class LynoxHTTPApi {
         // some items failed: the items that WERE dropped are in its freelist and WAL,
         // and what the VACUUM copies is just the items left.
         // history.db carries the threads too (`ThreadStore` shares the connection).
+        // mail-state.db and push-subscriptions.db are held open for the life of the
+        // process, so they are emptied through their handles, like the stores above;
+        // removing the files would leave the rows readable in-process.
+        const mailState = reach('mail_state', engine.getMailStateDb(), 'mail-state.db');
+        if (mailState) attempt('mail_state', () => { mailState.deleteAllData(); });
+        const push = reach('push_subscriptions', this.pushChannel, 'push-subscriptions.db');
+        if (push) attempt('push_subscriptions', () => { push.eraseSubscriptions(); });
+        // Every flat-file scope, not only the default one, and the cache in front of them.
+        if (memory) attempt('memory#tree', () => { memory.eraseAll(); });
+        engine.forgetProjectManifest();
+
         const scrub = (key: string, fn: () => void): void => {
           if (failed.some(k => k === key || k.startsWith(`${key}#`))) {
             note(`${key}#scrub`, new Error('not run: the wipe of this store failed'));
@@ -10390,6 +10436,8 @@ export class LynoxHTTPApi {
         if (engineDb) scrub('engine_db', () => { engineDb.scrubFreedPages(); });
         if (ds) scrub('datastore', () => { ds.scrubFreedPages(); });
         if (secretStore) scrub('secrets', () => { secretStore.scrubFreedPages(); });
+        if (mailState) scrub('mail_state', () => { mailState.scrubFreedPages(); });
+        if (push) scrub('push_subscriptions', () => { push.scrubFreedPages(); });
         // The vault file is counted after its deletes AND after its scrub: whatever
         // wrote a row between the list and here, or whatever the list missed, leaves
         // the answer short of "all". After the scrub on purpose: `scrub` skips any
@@ -10406,6 +10454,23 @@ export class LynoxHTTPApi {
         // attempts on purpose: a failed reload leaves no customer data behind, so
         // reporting it as `config` would tell the caller that a store still holds
         // their data when the file on disk is already `{}`.
+        // The files the erasure owes, after every store is emptied and scrubbed; `backups`
+        // last inside. The acknowledged unknown entries are re-checked against what the
+        // caller was shown, here, in the synchronous stretch.
+        const rescan = (() => { try { return scanDataDir(dataDir); } catch { return null; } })();
+        const ackStillValid = rescan !== null && sameUnknownSet(rescan.unknown, acknowledged);
+        if (!ackStillValid && acknowledged.length > 0) note('data_dir#unknown_changed', new Error('the unknown entries changed after they were reported; none was removed'));
+        const files = removeOwedEntries(scan, ackStillValid ? acknowledged.map(a => a.name) : []);
+        for (const f of files.failures) note(`data_dir:${f.name}`, new Error(f.reason));
+        engine.getArtifactStore()?.forgetAll();
+        // A `backup_dir` outside the data dir holds full copies too. Read before the config
+        // reset below, which erases the only pointer to it.
+        const backupDir = engine.getUserConfig().backup_dir;
+        if (typeof backupDir === 'string' && backupDir !== '') {
+          const outside = removeBackupsOutside(backupDir, dataDir);
+          for (const f of outside.failures) note(`backups:${f.name}`, new Error(f.reason));
+        }
+
         await attemptAsync('config', async () => {
           const { saveUserConfig } = await import('../core/config.js');
           saveUserConfig({});

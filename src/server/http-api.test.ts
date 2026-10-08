@@ -197,7 +197,10 @@ vi.mock('../core/engine.js', () => ({
     this.getWorkerLoop = vi.fn().mockReturnValue(null);
     this.shutdown = vi.fn().mockResolvedValue(undefined);
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
+    this.getMailStateDb = vi.fn().mockReturnValue(null);
+    this.forgetProjectManifest = vi.fn();
     this.getMemory = vi.fn().mockReturnValue({
+      eraseAll: vi.fn(),
       load: mockMemoryLoad,
       save: mockMemorySave,
       append: mockMemoryAppend,
@@ -314,6 +317,7 @@ vi.mock('../core/engine.js', () => ({
     this.getRunBufferManager = vi.fn().mockReturnValue(null);
     this.getRunExecutor = vi.fn().mockReturnValue(null);
     this.getArtifactStore = vi.fn().mockReturnValue({
+      forgetAll: vi.fn(),
       save: vi.fn((opts: { title: string; content: string; type?: string }) => ({
         id: 'a1b2c3d4', title: opts.title, content: opts.content,
         type: opts.type ?? 'markdown', description: '',
@@ -385,7 +389,7 @@ vi.mock('../core/config.js', async (importOriginal) => ({
 // Keep _initPushChannel a deterministic no-op — with getLynoxDir now mocked
 // it would otherwise generate VAPID keys on disk during init().
 vi.mock('../integrations/push/web-push-channel.js', () => ({
-  WebPushNotificationChannel: class { /* test no-op */ subscribe(): void { /* accepted */ } },
+  WebPushNotificationChannel: class { /* test no-op */ subscribe(): void { /* accepted */ } eraseSubscriptions(): void { /* nothing stored */ } scrubFreedPages(): void { /* nothing stored */ } },
 }));
 
 // POST /api/workflows/:id/run dynamically imports the pipeline tool module.
@@ -1900,7 +1904,7 @@ describe('LynoxHTTPApi', () => {
       engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
       let openGate: () => void = () => undefined;
       const gate = new Promise<void>((r) => { openGate = r; });
-      engineRef['getMemory'] = (): unknown => ({ save: async () => { await gate; } });
+      engineRef['getMemory'] = (): unknown => ({ save: async () => { await gate; }, eraseAll: () => undefined });
       const internals = api as unknown as {
         erasureInProgress: boolean;
         runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
@@ -2414,6 +2418,7 @@ describe('LynoxHTTPApi', () => {
         let runDuringErasure: { status: number; error: string } | undefined;
         mockSessionStoreResetAll.mockImplementation(() => { order.push('resetAll'); });
         engineRef.getMemory = (): unknown => ({
+          eraseAll: () => undefined,
           save: async () => {
             order.push('memory');
             if (runDuringErasure === undefined) {
