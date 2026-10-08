@@ -34,6 +34,9 @@ export const BASH_OBSERVE_EVENT = 'bash_autonomy_observe';
 /** Longer commands are not proven. Keeps the proof bounded and the window question moot. */
 export const MAX_PROVEN_LENGTH = 4096;
 
+/** More commands than this in one call are not proven: each is a process. */
+export const MAX_PROVEN_COMMANDS = 16;
+
 export type ProofReason =
   | 'ok'
   | 'length'
@@ -84,6 +87,8 @@ interface ProgramSpec {
   operands: OperandKind;
   /** Upper bound on operands, where the program reads a later operand as an output. */
   maxOperands?: number;
+  /** The program reads an operand starting with `+` as an option. */
+  plusIsOption?: true;
 }
 
 const flags = (letters: string): Record<string, null> =>
@@ -97,7 +102,7 @@ const longFlags = (names: string): Record<string, null> =>
  * `find` (`-exec`, `-fprint`), `rg` (`--pre`), `jq` (`env`, `input`), `git`
  * (config and environment start programs), `du` (always recurses), `file`
  * (decompressors, `-C` writes), `sort` (temporary files under `$TMPDIR`, which the
- * tool does not pin yet). For the ones listed, the same reasoning removed `tail
+ * tool does not pin yet), `df` (reports every mount, and waits on one that hangs). For the ones listed, the same reasoning removed `tail
  * -f`, `grep -r`/`-f`/`--include`, `ls -R`, `stat --printf`, `date -s`, `uniq`'s
  * output operand and every option not named here.
  */
@@ -116,6 +121,8 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = {
     short: { ...flags('qvz'), c: 'number', n: 'number' },
     long: { ...longFlags('quiet silent verbose zero-terminated'), bytes: 'number', lines: 'number' },
     operands: 'paths',
+    // GNU tail still reads `+NUM[bcl][f]` as an obsolete option, `f` included.
+    plusIsOption: true,
   },
   wc: {
     short: flags('cmlwL'),
@@ -153,11 +160,6 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = {
   },
   pwd: { short: flags('LP'), long: {}, operands: 'none' },
   stat: { short: flags('Lt'), long: longFlags('dereference terse'), operands: 'paths' },
-  df: {
-    short: flags('hHkTPlai'),
-    long: longFlags('human-readable si print-type portability local all inodes total'),
-    operands: 'paths',
-  },
   date: { short: flags('u'), long: longFlags('utc universal'), operands: 'date' },
   // `echo` is handled on its own: dash's echo knows only `-n`, and any other word is text.
   echo: { short: {}, long: {}, operands: 'text' },
@@ -302,13 +304,24 @@ function provePath(word: Word, env: ProofEnv, roots: Roots): void {
     if (!roots.home) throw new NotProven('no-home');
     text = roots.home + text.slice(1);
   }
+  // No `..` at all. Path text drops `l/..` as a pair, the kernel resolves it as the parent
+  // of whatever `l` points to, so behind a symlink the two disagree. Without `..`, the text
+  // and the kernel only differ by `.` and repeated slashes, which mean the same to both.
+  if (text.split('/').includes('..')) throw new NotProven('path-outside');
+  const lexical = resolve(roots.cwd, text);
+  // Outside already as text: refused without touching the file system, so a path the
+  // model names cannot make the engine wait on a slow mount just to be told no.
+  if (!within(lexical, roots.cwd) && !roots.read.some((r) => within(lexical, r))) {
+    throw new NotProven('path-outside');
+  }
   let real: string;
   try {
-    real = realPathOf(resolve(env.cwd, text));
+    real = realPathOf(lexical);
   } catch (err) {
     if (err instanceof NotProven) throw err;
     throw new NotProven('path-unresolvable');
   }
+  // Again on the real path: a symlink inside the directory may point anywhere.
   if (!within(real, roots.cwd) && !roots.read.some((r) => within(real, r))) {
     throw new NotProven('path-outside');
   }
@@ -399,6 +412,7 @@ function proveSegment(seg: Segment, env: ProofEnv, roots: Roots): void {
   }
 
   if (spec.maxOperands !== undefined && operands.length > spec.maxOperands) throw new NotProven('operand');
+  if (spec.plusIsOption && operands.some((w) => w.text.startsWith('+'))) throw new NotProven('operand');
   switch (spec.operands) {
     case 'none':
       if (operands.length > 0) throw new NotProven('operand');
@@ -442,6 +456,7 @@ export function proveBashCommand(command: string, env: ProofEnv): BashProof {
   try {
     if (command.length > MAX_PROVEN_LENGTH) throw new NotProven('length');
     const segments = lex(command);
+    if (segments.length > MAX_PROVEN_COMMANDS) throw new NotProven('length');
     const cwd = realOrNull(env.cwd);
     if (!cwd) throw new NotProven('root');
     const home = env.home ? (realOrNull(env.home) ?? env.home) : undefined;

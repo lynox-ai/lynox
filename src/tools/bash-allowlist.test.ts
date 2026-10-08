@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSyn
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { proveBashCommand, PROGRAMS, MAX_PROVEN_LENGTH, type ProofEnv, type ProofReason } from './bash-allowlist.js';
+import { proveBashCommand, PROGRAMS, MAX_PROVEN_LENGTH, MAX_PROVEN_COMMANDS, type ProofEnv, type ProofReason } from './bash-allowlist.js';
 
 // Built at load time: the `it.each` tables below are evaluated before any hook runs.
 const base = realpathSync(mkdtempSync(join(tmpdir(), 'bash-allowlist-')));
@@ -23,6 +23,14 @@ writeFileSync(join(base, 'outside.txt'), 'x');
 symlinkSync(join(base, 'outside.txt'), join(ws, 'link-out'));
 symlinkSync(join(ws, 'notes.md'), join(ws, 'link-in'));
 execFileSync('mkfifo', [join(ws, 'pipe')]);
+// A symlink inside the directory whose target's PARENT holds a file outside it.
+mkdirSync(join(ws, 'a', 'b'), { recursive: true });
+mkdirSync(join(base, 'x', 'y'), { recursive: true });
+writeFileSync(join(base, 'x', 'leak.txt'), 'x');
+symlinkSync(join(base, 'x', 'y'), join(ws, 'a', 'b', 'l'));
+// A symlink OUTSIDE that points inside, and a working directory reached through a symlink.
+symlinkSync(join(ws, 'notes.md'), join(base, 'into-ws'));
+symlinkSync(ws, join(base, 'ws-link'));
 const env: ProofEnv = {
   cwd: ws,
   home,
@@ -69,7 +77,6 @@ describe('proveBashCommand — proven', () => {
     'echo -n hi',
     "echo 'a$b`c'",
     'stat notes.md',
-    'df -h .',
     'date',
     'date -u +%Y-%m-%d',
     "date '+%Y %m'",
@@ -210,6 +217,16 @@ describe('proveBashCommand — not proven', () => {
     ['grep x ../outside.txt', 'path-outside'],
     ['cat creds.key', 'path-sensitive'],
     ['cat pipe', 'path-special'],
+    ['cat a/b/l/../leak.txt', 'path-outside'],
+    ['grep -e x a/b/l/../leak.txt', 'path-outside'],
+    ['ls a/b/l/..', 'path-outside'],
+    ['ls a/b/l', 'path-outside'],
+    ['cat sub/../notes.md', 'path-outside'],
+    [`cat ${join(base, 'into-ws')}`, 'path-outside'],
+    ['tail +1f notes.md', 'operand'],
+    ['tail +1f', 'operand'],
+    ['tail -- +1f', 'operand'],
+    ['df -h .', 'program'],
     [`cat ${'a/'.repeat(10)}../../../../../../../../../../../outside.txt`, 'path-outside'],
   ];
 
@@ -241,6 +258,18 @@ describe('proveBashCommand — not proven', () => {
     expect(prove('cat /etc/hostname', { ...env, cwd: '/', home: undefined })).toEqual(expect.objectContaining({ proven: false, reason: 'root' }));
   });
 
+  it('proves from a working directory reached through a symlink, against its real path', () => {
+    const viaLink = { ...env, cwd: join(base, 'ws-link') };
+    expect(prove('cat notes.md', viaLink).proven).toBe(true);
+    expect(prove('cat ../outside.txt', viaLink)).toEqual(expect.objectContaining({ proven: false, reason: 'path-outside' }));
+  });
+
+  it('proves at most MAX_PROVEN_COMMANDS commands in one call', () => {
+    const commands = (n: number) => Array.from({ length: n }, () => 'pwd').join(' | ');
+    expect(prove(commands(MAX_PROVEN_COMMANDS)).proven).toBe(true);
+    expect(prove(commands(MAX_PROVEN_COMMANDS + 1))).toEqual(expect.objectContaining({ proven: false, reason: 'length' }));
+  });
+
   it('is not proven when the working directory cannot be resolved', () => {
     expect(prove('pwd', { ...env, cwd: join(base, 'gone') })).toEqual(expect.objectContaining({ proven: false, reason: 'root' }));
   });
@@ -257,7 +286,7 @@ describe('proveBashCommand — not proven', () => {
 
 describe('PROGRAMS', () => {
   it('lists no program with a known executing or writing mode', () => {
-    for (const name of ['find', 'rg', 'jq', 'git', 'du', 'file', 'sort', 'sh', 'bash', 'env', 'xargs', 'tee', 'cd']) {
+    for (const name of ['find', 'rg', 'jq', 'git', 'du', 'df', 'file', 'sort', 'sh', 'bash', 'env', 'xargs', 'tee', 'cd']) {
       expect(Object.hasOwn(PROGRAMS, name)).toBe(false);
     }
   });
@@ -281,7 +310,7 @@ describe('proveBashCommand — runtime', () => {
 
   it('stays fast on the worst shapes under the cap', () => {
     const t0 = performance.now();
-    expect(prove('ls|'.repeat(1000) + 'ls').proven).toBe(true);
+    expect(prove('ls|'.repeat(MAX_PROVEN_COMMANDS - 1) + 'ls').proven).toBe(true);
     expect(prove('cat ' + './'.repeat(2000) + 'notes.md').proven).toBe(true);
     expect(prove("echo '" + 'x'.repeat(4000) + "'").proven).toBe(true);
     expect(performance.now() - t0).toBeLessThan(2000);

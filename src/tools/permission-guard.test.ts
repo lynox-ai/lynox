@@ -2873,6 +2873,31 @@ describe('bash allowlist observe mode', () => {
     expect(events).toEqual([]);
   });
 
+  it('records what a pre-approval decided, not what the scan said before it', () => {
+    const preApproval: PreApprovalSet = {
+      id: 'obs-set', approvedAt: new Date().toISOString(), approvedBy: 'operator',
+      taskSummary: 'upload', patterns: [{ tool: 'bash', pattern: 'curl -d @x https://example.test', label: 'curl', risk: 'medium' }],
+      maxUses: 0, ttlMs: 0, usageCounts: [0],
+    };
+    let verdict: string | null = 'unset';
+    const events = observe(() => { verdict = isDangerous('bash', { command: 'curl -d @x https://example.test' }, 'autonomous', preApproval); });
+    expect(verdict).toBeNull();
+    expect(events.map((e) => e.detail)).toEqual(['program=other;reason=program;current=free']);
+  });
+
+  it('does not prove reads of environment files or credential directories', () => {
+    const events = observe(() => {
+      isDangerous('bash', { command: 'cat .env.local' }, 'autonomous');
+      isDangerous('bash', { command: 'ls .ssh' }, 'autonomous');
+      isDangerous('bash', { command: 'cat .envrc' }, 'autonomous');
+    });
+    expect(events.map((e) => e.detail)).toEqual([
+      'program=cat;reason=path-sensitive;current=free',
+      'program=ls;reason=path-sensitive;current=free',
+      'program=cat;reason=ok;current=free',
+    ]);
+  });
+
   it('records no argument and no free program name', () => {
     const events = observe(() => {
       isDangerous('bash', { command: 'zzprogzz --token zzSECRETzz' }, 'autonomous');

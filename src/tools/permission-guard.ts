@@ -459,8 +459,15 @@ function extractDangerPayload(toolName: string, input: unknown, autonomy: Autono
  * when `payload.downgradeTo` is set.
  */
 export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
+  const signal = _decideDanger(toolName, input, autonomy, preApproval, audit, entry, runId, contract);
+  // Observed against the FINAL decision: a call a pre-approval or a contract lets
+  // through runs without a question, and is recorded as one that does.
+  observeBashProof(toolName, input, autonomy, signal?.warning ?? null, runId);
+  return signal;
+}
+
+function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, preApproval: PreApprovalSet | undefined, audit: PreApproveAuditLike | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined): DangerSignal | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
-  observeBashProof(toolName, input, autonomy, warning, runId);
   if (!warning) return null;
 
   // Pre-approval + capability-contract can override NON-critical dangers only.
@@ -498,6 +505,16 @@ export function isDangerousDetailed(toolName: string, input: unknown, autonomy?:
 }
 
 /**
+ * Names the deny list leaves to its neighbours but a PROOF may not pass: a proven read is a
+ * stronger claim than a missed one. Environment files with a suffix (`.env.local`), and the
+ * credential directories themselves, not only paths below them.
+ */
+const PROOF_SENSITIVE: RegExp[] = [
+  /(^|\/)\.env(\.[^/]*)?$/,
+  /(^|\/)\.(ssh|gnupg|aws|config|docker|kube|npm)$/,
+];
+
+/**
  * Observe mode of the bash allowlist: for every unattended bash call, record whether
  * the positive grammar in `bash-allowlist.ts` proves it, next to what the guard decided.
  * Nothing is enforced. The record names the program only when it is on the fixed
@@ -515,7 +532,7 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
     cwd: getWorkspaceCwd(),
     home: process.env['HOME'],
     readRoots: READ_ONLY_ROOTS,
-    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
+    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)) || PROOF_SENSITIVE.some((re) => re.test(realPath)),
   });
   const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
   channels.securityFlagged.publish({
