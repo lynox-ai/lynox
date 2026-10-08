@@ -1401,8 +1401,7 @@ async function executeThinker(
     // engine's DataStore / RunHistory / ApiStore / KnowledgeLayer / network
     // policy refs (sub-agents need these to use tools). Shallow copy =
     // distinct object, shared refs — so the child INHERITS the parent's
-    // `networkPolicy`/`allowedHosts` and cannot escape to broader egress than
-    // its parent (the safe direction). Child-side TIGHTENING (a child more
+    // `networkPolicy`/`allowedHosts` as they stand at spawn time. Child-side TIGHTENING (a child more
     // restricted than its parent, via `childIsolation → networkPolicy`) is
     // still explicitly post-launch (PRD §6); T2-X1 does NOT claim to close
     // child network isolation, only that a child never widens egress.
