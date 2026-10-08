@@ -65,6 +65,7 @@ import { compose, detectInjectionAttempt, containsUntrustedMarker, renderFence }
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
 import { isToolSoftFailure } from './tool-soft-failure.js';
+import { InputRequiredError, isInputRequired } from './input-required.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
@@ -3640,6 +3641,11 @@ export class Agent implements IAgent {
     );
     this._taintBeforeBatch = undefined;
 
+    // A call that needs a person and cannot reach one ends the run — after the batch has
+    // settled, so the calls beside it finish rather than being cut off mid-flight.
+    const needsInput = settled.find(o => o.status === 'rejected' && isInputRequired(o.reason));
+    if (needsInput !== undefined && needsInput.status === 'rejected') throw needsInput.reason;
+
     const results: BetaToolResultBlockParam[] = settled.map((outcome, i) => {
       if (outcome.status === 'fulfilled') return outcome.value;
       const tc = toExecute[i];
@@ -4192,6 +4198,13 @@ export class Agent implements IAgent {
       };
     } catch (err: unknown) {
       const duration = timer.end();
+      // ⛔ A question nobody can answer ends the RUN, not the call — re-thrown, never turned
+      // into an error result the model would read and work around (`input-required.ts`).
+      // Re-built with the question masked: the message leaves the agent and lands in the
+      // failed run's record and its notification.
+      if (isInputRequired(err)) {
+        throw new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
+      }
       const cause = err instanceof Error ? err : new Error(String(err));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);

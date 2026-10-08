@@ -1,5 +1,6 @@
 import type { ToolEntry, IAgent, TabQuestion, StepHint } from '../../types/index.js';
 import { promptValue } from '../../core/prompt-value.js';
+import { InputRequiredError } from '../../core/input-required.js';
 
 /** An option can be a plain string or an object with an optional StepHint. */
 type AskUserOption = string | { label: string; hint?: StepHint | undefined };
@@ -132,7 +133,11 @@ export const askUserTool: ToolEntry<AskUserInput> = {
   },
   handler: async (input: AskUserInput, agent: IAgent): Promise<string> => {
     if (!agent.promptUser) {
-      return 'Interactive input not available in this context.';
+      // ⛔ Thrown, not returned. A returned sentence is a tool RESULT: the model reads it and
+      // carries on without the decision it just said it needed. The agent re-throws this
+      // error and the run ends as "needs input" (`input-required.ts`).
+      const asked = input.question ?? (input.questions ?? []).map(q => q.question).join(' / ');
+      throw new InputRequiredError(asked);
     }
 
     assertOptionsArray(input.options, 'options');

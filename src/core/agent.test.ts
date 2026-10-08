@@ -60,6 +60,8 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { InputRequiredError } from './input-required.js';
+import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
 import type { PromptText } from '../types/index.js';
@@ -5617,3 +5619,64 @@ describe('a secret reference in a tool whose destination cannot be read', () => 
     expect(JSON.stringify(handler.mock.calls[0]![0])).toContain('resolved-value');
   });
 });
+
+/**
+ * A run with no way to ask a person, whose model asks anyway. The real `ask_user` tool, the
+ * real agent loop: the chain the fail-open ran through.
+ */
+describe('ask_user with no question path ends the run as "needs input"', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('the run ends — the model gets no second turn to carry on without the answer', async () => {
+    const sibling = makeTool('sibling_tool', vi.fn().mockResolvedValue('sibling done'));
+    mockProcess.mockResolvedValueOnce(toolUseResponse([
+      { id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } },
+      { id: 'tu_sib', name: 'sibling_tool', input: {} },
+    ]));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool, sibling] });
+
+    await expect(agent.send('Process the refunds')).rejects.toThrow(InputRequiredError);
+    // ⛔ The fail-open had a second turn here: the model read "not available" and decided.
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    // The call beside it in the same batch finished rather than being cut off.
+    expect(sibling.handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('the error names the question, masked through the vault before it leaves the agent', async () => {
+    mockProcess.mockResolvedValueOnce(toolUseResponse([
+      { id: 'tu_ask', name: 'ask_user', input: { question: 'Use key sk-live-SECRET for the payout?' } },
+    ]));
+    // The full shape the agent reads (the nested `makeSecretStore` above is out of scope here);
+    // only `maskSecrets` does anything.
+    const secretStore = {
+      getMasked: vi.fn().mockReturnValue(null),
+      resolve: vi.fn().mockReturnValue(null),
+      listNames: vi.fn().mockReturnValue([]),
+      containsSecret: vi.fn().mockReturnValue(false),
+      maskSecrets: vi.fn((t: string) => t.replace('sk-live-SECRET', '***CRET')),
+      recordConsent: vi.fn(),
+      hasConsent: vi.fn().mockReturnValue(false),
+      isExpired: vi.fn().mockReturnValue(false),
+      findUnresolvedSecretRefs: vi.fn().mockReturnValue([]),
+      extractSecretNames: vi.fn().mockReturnValue([]),
+      resolveSecretRefs: vi.fn((input: unknown) => input),
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], secretStore });
+
+    const err = await agent.send('Pay out').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect((err as Error).message).toContain('for the payout?');
+    expect((err as Error).message).not.toContain('sk-live-SECRET');
+  });
+
+  it('with a question path nothing changes: the answer comes back and the run goes on', async () => {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve?' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Approved and done'));
+    const promptUser = vi.fn().mockResolvedValue('yes');
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], promptUser });
+    await expect(agent.send('Process')).resolves.toBe('Approved and done');
+    expect(promptUser).toHaveBeenCalledTimes(1);
+  });
+});
+
