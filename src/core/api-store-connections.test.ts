@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -269,6 +269,28 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     expect(w.importFromDirectoryIfNeeded(dir, failing)).toBe(0);
     // sentinel UNwritten → the import will retry on the next boot (no silent loss).
     expect(existsSync(join(dir, '.imported-to-connections'))).toBe(false);
+  });
+
+  it('loadFromConnections counts what it registered, not the rows it read', () => {
+    const { cs } = makeCs();
+    // Two writers, so each half of the pair is admitted where it is written and
+    // both rows reach the table. `x-y` and `x_y` derive one vault slot, so the
+    // boot admits the first and refuses the second.
+    for (const id of ['x-y', 'x_y']) {
+      const w = new ApiStore();
+      w.setConnectionStore(cs);
+      expect(w.save(richProfile({ id, base_url: `https://${id.replace(/[_-]/g, '')}.example.com` })).ok).toBe(true);
+    }
+    expect(cs.count('api')).toBe(2);
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const r = new ApiStore();
+    const loaded = r.loadFromConnections(cs);
+
+    // A count of 2 would report a profile the store does not hold.
+    expect(['x-y', 'x_y'].filter((id) => r.get(id) !== undefined)).toHaveLength(1);
+    expect(loaded).toBe(1);
+    warn.mockRestore();
   });
 
   it('loadFromConnections skips a row whose config_json is malformed (parse throws)', () => {
