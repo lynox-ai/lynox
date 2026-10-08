@@ -43,17 +43,28 @@ export function buildStepContext(
  * Resolve `{{step_id.result}}` / `{{params.<name>}}` template syntax in task
  * strings. Replaces template expressions with values from context. Missing
  * paths are left as-is (e.g. `{{unknown.path}}` stays unchanged).
+ *
+ * `isAccepted` is passed only by a run that carries a reviewed grant: a parameter value it
+ * confirms is exactly the one a person accepted in the grant dialog, so it is not foreign data
+ * and is inserted without the boundary. Anything else at a `params` path keeps the boundary.
  */
-export function resolveTaskTemplate(task: string, context: Record<string, unknown>): string {
+export function resolveTaskTemplate(
+  task: string,
+  context: Record<string, unknown>,
+  isAccepted?: (path: string, value: unknown) => boolean,
+): string {
   return task.replace(/\{\{([^}]+)\}\}/g, (_match: string, rawPath: string) => {
     const path = rawPath.trim();
     const value = getByPath(context, path);
-    if (value === undefined) return `{{${path}}}`;
+    // A function is not a value: `getByPath` walks the prototype, so `{{params.toString}}`
+    // finds one, and `JSON.stringify` of it is `undefined`, which the boundary cannot wrap.
+    if (value === undefined || typeof value === 'function') return `{{${path}}}`;
     const str = typeof value === 'string' ? value : JSON.stringify(value);
     // Workflow parameter values are caller/external-supplied (untrusted) → ALWAYS
     // wrap them in the data boundary, not just when an injection pattern matches.
     // Pipeline step results keep the detect-based heuristic.
     if (path === 'params' || path.startsWith('params.')) {
+      if (isAccepted?.(path, value) === true) return str;
       return wrapUntrustedData(str, `workflow_param:${path}`);
     }
     return detectInjectionAttempt(str).detected

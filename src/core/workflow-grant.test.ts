@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import { buildReviewedContract, reviewedContractShapeError, validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import { contractGrants } from '../tools/permission-guard.js';
-import { decideRunGrant, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
+import { decideRunGrant, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
 import { liftsAfterUntrusted } from '../types/capability-contract.js';
 import type { CapabilityContract, ReviewedGrantStamp } from '../types/capability-contract.js';
@@ -395,5 +395,93 @@ describe('what the owner\'s run record collects', () => {
     expect(first!.length).toBeLessThanOrEqual(300);
     const many = collect(Array.from({ length: 15 }, (_, i) => `Permission denied (non-interactive): http_request\nNot granted for an unattended run: POST https://a.example/${String(i)}.`));
     expect(many).toHaveLength(10);
+  });
+});
+
+describe('values a grant can be accepted with', () => {
+  it('refuses every character that renders as nothing, each one, and grantName removes it', () => {
+    // Written out here, not read from the constant: a shortened set must fail this test.
+    const ranges: Array<[number, number]> = [
+      [0x034f, 0x034f], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x2800, 0x2800],
+      [0x3164, 0x3164], [0xffa0, 0xffa0], [0xfe00, 0xfe0f], [0xe0100, 0xe01ef],
+    ];
+    for (const [from, to] of ranges) {
+      for (let cp = from; cp <= to; cp++) {
+        const ch = String.fromCodePoint(cp);
+        expect(hiddenInBoundValues({ week: `Q${ch}3` }), cp.toString(16)).not.toBeNull();
+        expect(grantName(`Q${ch}3`), cp.toString(16)).toBe('Q3');
+      }
+    }
+  });
+
+  // The dialog shows each value as text and the step model reads it as written, so a value
+  // has to read the way it is. One witness per kind of character that does not show.
+  it.each([
+    ['a tag character', 'Q\u{E0041}3'],
+    ['a variation selector (an emoji-smuggling carrier)', 'Q3\ufe0f'],
+    ['a supplementary variation selector', 'Q3\u{e0100}'],
+    ['a Hangul filler', 'Q\u31643'],
+    ['the braille blank', 'Q\u28003'],
+    ['the grapheme joiner', 'Q\u034f3'],
+    ['a zero-width space', 'Q\u200b3'],
+    ['a bidi override', 'Q\u202e3'],
+    ['a C1 control', 'Q\u00903'],
+    ['a carriage return', 'Q\r3'],
+  ])('refuses a value holding %s', (_label, value) => {
+    expect(hiddenInBoundValues({ month: value })).toMatch(/parameter "month" holds a character that does not show/);
+  });
+
+  it('refuses a parameter NAME holding such a character, without echoing it', () => {
+    const why = hiddenInBoundValues({ ['mo\u{E0041}nth']: 'Q3' });
+    expect(why).toMatch(/A parameter name holds a character/);
+    expect(why).not.toContain('\u{E0041}');
+  });
+
+  it('refuses a line break or a tab in a parameter NAME, which the dialog shows on one line', () => {
+    expect(hiddenInBoundValues({ ['client\nbudget']: 'Q3' })).toMatch(/A parameter name holds a character/);
+    expect(hiddenInBoundValues({ ['client\tbudget']: 'Q3' })).toMatch(/A parameter name holds a character/);
+    expect(hiddenInBoundValues({ ['client budget']: 'Q3' })).toBeNull();
+  });
+
+  it('admits letters with accents, punctuation, spaces, line breaks, tabs, numbers', () => {
+    expect(hiddenInBoundValues({ a: 'Zürich, Q3 — “final”', b: 'line one\nline two\tend', c: 40, d: 1e21 })).toBeNull();
+  });
+
+  it('checks a value that is not text as the text it is shown as', () => {
+    expect(hiddenInBoundValues({ a: { note: 'x\u200by' } })).toMatch(/parameter "a"/);
+  });
+
+  it('prepareWorkflowGrant refuses before anything is computed', () => {
+    const p = prepareWorkflowGrant(planned(), { ...ENTRY, params: { month: '2026\u{E0041}-09' }, cron: '0 9 * * 1', afterUntrusted: false }, hasher(true));
+    expect(p.ok).toBe(false);
+    if (!p.ok) expect(p.error).toMatch(/parameter "month" holds a character that does not show/);
+  });
+});
+
+describe('whether a template value is the one the person accepted', () => {
+  const m = acceptedValueMatcher({ month: '2026-09', limit: 10 });
+
+  it('confirms the accepted value at its path, and the whole set at `params`', () => {
+    expect(m('params.month', '2026-09')).toBe(true);
+    expect(m('params.limit', 10)).toBe(true);
+    expect(m('params', { limit: 10, month: '2026-09' })).toBe(true);
+  });
+
+  it('refuses another value, another type, an unknown path, a path outside params', () => {
+    expect(m('params.month', '2026-10')).toBe(false);
+    expect(m('params.limit', '10')).toBe(false);
+    expect(m('params.other', '2026-09')).toBe(false);
+    expect(m('step.result', '2026-09')).toBe(false);
+    // The root is checked, not implied by the caller: the same name and value outside `params`.
+    expect(m('other.month', '2026-09')).toBe(false);
+  });
+
+  it('never walks the prototype, and does not throw on a function', () => {
+    expect(m('params.toString', Object.prototype.toString)).toBe(false);
+    expect(m('params.constructor', Object)).toBe(false);
+    // An inherited property that is not a function: `__proto__` resolves to Object.prototype
+    // on both sides, and both serialise as `{}`. Only the own-property walk says no.
+    expect(m('params.__proto__', Object.prototype)).toBe(false);
+    expect(m('params.__proto__', {})).toBe(false);
   });
 });

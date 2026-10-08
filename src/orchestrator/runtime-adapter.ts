@@ -1256,6 +1256,8 @@ export async function spawnPipeline(
    * part that holds.
    */
   abortScope?: AbortScope | undefined,
+  /** See `RunManifestOptions.isAcceptedParam`. Last, for the reason given above. */
+  isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1339,6 +1341,11 @@ export async function spawnPipeline(
     // through nesting. The capability-contract seam rides along for Slice B.
     autonomy,
     capabilityContract,
+    // Rides with the contract: the nested steps' `{{params…}}` are confirmed against the
+    // same accepted values, and a value changed on the way still is not confirmed. A saved
+    // workflow builds inline steps only (`buildManifest`), so no granted run reaches here
+    // today; the line keeps a nested step's answer the same as its parent's if one does.
+    isAcceptedParam,
     // A2: thread RunHistory so the nested sub-pipeline's steps record their own
     // `pipeline_step` rows (under the sub-pipeline's run id) — observability at
     // every nesting depth, not just the top level.
