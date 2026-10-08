@@ -18,6 +18,7 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
+  NetworkPolicy,
 } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -51,13 +52,15 @@ import { compose, engineText, renderFence, type Part } from './data-boundary.js'
 // ── History + Budget + Subscriptions ────────────────────────────
 
 /**
- * Apply the boot-time cost, rate and egress settings to the ToolContext.
+ * Apply the cost, rate and egress settings to the ToolContext at boot.
  *
  * The HTTP/mail rate limits and the daily/monthly caps count against
  * RunHistory, so they need it. The session cap and the egress settings
  * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
  * applied whether or not RunHistory opened: an engine that boots without its
- * history must still enforce the limits it was configured with.
+ * history must still enforce the limits it was configured with. Of these, only
+ * the egress settings are applied again when the config is reloaded
+ * (`applyEgressSettings`).
  */
 export function configureBudgetAndRateLimits(
   runHistory: RunHistory | null,
@@ -111,6 +114,29 @@ function configureHistoryBackedLimits(
 }
 
 function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolContext): void {
+  const resolvedPolicy = applyEgressSettings(userConfig, toolContext);
+  // Boot-log the active egress posture. The `guarded-capable build` marker is
+  // present on every W1+ image regardless of the active value — the rollout-order
+  // gate (Pro CP) greps the fleet boot logs for it to confirm an image can honour
+  // `guarded` BEFORE emitting LYNOX_NETWORK_POLICY=guarded (a pre-W1 image would
+  // silently drop the unknown value to allow-all). See PRD-EGRESS-POSTURE §3.4.
+  // The line is BUILT from the wire contract (`src/contract/marker.ts`), which
+  // is also where the matching pattern comes from — rewording it here is a
+  // contract change, not a log tweak.
+  process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
+}
+
+/**
+ * Write the egress settings of `userConfig` onto `toolContext`: `enforce_https`,
+ * `network_policy` and the operator host floor. Returns the policy it applied.
+ *
+ * Called at boot and again by `Engine.reloadUserConfig` and
+ * `Engine.reloadCredentials`, so a policy changed at runtime is the policy the
+ * tools read, in both directions. Sessions share the
+ * engine's ToolContext and see the change on their next call. A sub-agent copies
+ * the context when it is spawned and keeps the values it started with.
+ */
+export function applyEgressSettings(userConfig: LynoxUserConfig, toolContext: ToolContext): NetworkPolicy {
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
   // Outbound egress policy. Default 'allow-all' = unchanged behaviour.
   // 'allow-list'/'deny-all'/'guarded' are opt-in operator/CP controls enforced
@@ -133,15 +159,7 @@ function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolCon
     resolvedPolicy,
     userConfig.network_allowed_hosts,
   );
-  // Boot-log the active egress posture. The `guarded-capable build` marker is
-  // present on every W1+ image regardless of the active value — the rollout-order
-  // gate (Pro CP) greps the fleet boot logs for it to confirm an image can honour
-  // `guarded` BEFORE emitting LYNOX_NETWORK_POLICY=guarded (a pre-W1 image would
-  // silently drop the unknown value to allow-all). See PRD-EGRESS-POSTURE §3.4.
-  // The line is BUILT from the wire contract (`src/contract/marker.ts`), which
-  // is also where the matching pattern comes from — rewording it here is a
-  // contract change, not a log tweak.
-  process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
+  return resolvedPolicy;
 }
 
 /**

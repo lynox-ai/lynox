@@ -95,6 +95,7 @@ import type { ToolContext } from './tool-context.js';
 import { hostPolicyOf, createToolContext } from './tool-context.js';
 import {
   configureBudgetAndRateLimits,
+  applyEgressSettings,
   generateInitBriefing,
   initSecrets,
   ensureVaultKey,
@@ -492,6 +493,10 @@ export class Engine {
       this.userConfig = prevConfig;
       throw e;
     }
+    // The egress settings live on the ToolContext, which boot fills once. Without this a
+    // `network_policy`, host floor or `enforce_https` changed at runtime is stored and
+    // reported back while the tools keep enforcing the boot value until a restart.
+    applyEgressSettings(this.userConfig, this._toolContext);
     const newProvider = this.userConfig.provider;
     // Re-sync the provider resolvers (openai tier-map + the hybrid tier_set) on
     // EVERY reload — a routing_mode/tier_set-only change carries no credential
@@ -554,6 +559,9 @@ export class Engine {
       this.userConfig = prevConfig;
       throw e;
     }
+    // This path installs a freshly loaded config as well, so the tools must read its egress
+    // settings too (see `reloadUserConfig`).
+    applyEgressSettings(this.userConfig, this._toolContext);
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }
