@@ -4172,7 +4172,8 @@ describe('httpRequestTool', () => {
     it('SECURITY: an access token carrying CRLF is refused under its own header, not sent', async () => {
       const { store, tokenKey } = await storeWith({ header_name: HEADER });
       mockDnsPublic();
-      vi.stubGlobal('fetch', vi.fn());
+      // Answers 200, so a mutant that sends shows up at the asserts, not as a crash.
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: 'tok\r\nX-Evil: yes' }));
       expect(result).toContain('access token containing CRLF/null');
       expect(lastPinnedInputs).toHaveLength(0);
@@ -4184,7 +4185,7 @@ describe('httpRequestTool', () => {
     ])('SECURITY: a header_name that %s is refused and nothing is sent', async (_label, name) => {
       const { store, tokenKey } = await storeWith({ header_name: name });
       mockDnsPublic();
-      vi.stubGlobal('fetch', vi.fn());
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
       expect(result).toContain('not a valid header name');
       expect(lastPinnedInputs).toHaveLength(0);
