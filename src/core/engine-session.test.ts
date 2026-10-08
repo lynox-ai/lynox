@@ -1952,8 +1952,9 @@ describe('Engine + Session (Orchestrator)', () => {
         try {
           const admitted = engine.resolveWorkerRunModel(kind, triggerTier);
           // The loop's own choice (`workerRunModelOverride`), applied the way the loop
-          // applies it — not a copy of its rule. The session's tier is the loop's too:
-          // the trigger's tier when it has one, else `fast` for a watch and none for a run.
+          // applies it — not a copy of its rule. The session's tier IS a copy of the
+          // loop's (the trigger's tier, else `fast` for a watch and none for a run): that
+          // the loop passes it is asserted in worker-loop.test.ts, not here.
           const pick = engine.workerRunModelOverride(kind, triggerTier);
           const tier = triggerTier ?? (kind === 'watch' ? 'fast' : undefined);
           const session = engine.createSession(tier ? { model: tier } : {});

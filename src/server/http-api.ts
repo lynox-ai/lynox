@@ -86,7 +86,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { BulkTriggerLockedError, isTriggerModelTierUpdate, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -6945,6 +6945,18 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Invalid modelTier: use fast, balanced or deep, or null to clear it.');
         return;
       }
+      // On a managed pool tier background runs stay on the operator's worker routing: a
+      // trigger tier is not tenant-writable there until the published description of
+      // that routing covers a tenant's own choice. Clearing one stays allowed.
+      if (b['modelTier'] && requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        errorResponse(res, 403, 'modelTier cannot be set on this plan.');
+        return;
+      }
+      // The enabled switch below answers on its own and would drop the tier unseen.
+      if (typeof b['enabled'] === 'boolean' && 'modelTier' in b) {
+        errorResponse(res, 400, 'Send enabled and modelTier in separate requests.');
+        return;
+      }
       if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
@@ -6968,6 +6980,7 @@ export class LynoxHTTPApi {
         task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
       } catch (err: unknown) {
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
+        if (err instanceof TriggerTierUnsupportedError) { errorResponse(res, 400, err.message); return; }
         throw err;
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }

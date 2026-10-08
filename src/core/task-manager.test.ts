@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, TriggerTierUnsupportedError } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
@@ -225,6 +225,14 @@ describe('TaskManager', () => {
       expect(tm.update(trigger.id, { modelTier: '' })?.model_tier).toBeUndefined();
       tm.update(trigger.id, { modelTier: 'fast' });
       expect(tm.update(trigger.id, { modelTier: null })?.model_tier).toBeUndefined();
+    });
+
+    it('refuses a tier on a trigger whose runs use no agent, and still lets it be cleared', () => {
+      const reminder = tm.create({ title: 'Ping', taskType: 'reminder', scheduleCron: '0 9 * * *' });
+      expect(tm.getTrigger(reminder.id)?.effect).toBe('notify');
+      expect(() => tm.update(reminder.id, { modelTier: 'deep' })).toThrow(TriggerTierUnsupportedError);
+      expect(tm.getTrigger(reminder.id)?.model_tier).toBeUndefined();
+      expect(tm.update(reminder.id, { modelTier: null })?.model_tier).toBeUndefined();
     });
 
     it('refuses a model tier it does not know, legacy aliases included', () => {

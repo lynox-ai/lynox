@@ -21,7 +21,7 @@ import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody 
 import { EngineDb } from '../core/engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
-import { BulkTriggerLockedError } from '../core/task-manager.js';
+import { BulkTriggerLockedError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
@@ -6578,6 +6578,36 @@ describe('LynoxHTTPApi', () => {
         expect(res.status, JSON.stringify(modelTier)).toBe(400);
       }
       expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+
+    it('PATCH refuses a tier in managed-pool mode without touching the trigger, and still lets one be cleared', async () => {
+      vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      mockTaskUpdate.mockClear();
+      try {
+        const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'fast' }) });
+        expect(res.status).toBe(403);
+        expect(mockTaskUpdate).not.toHaveBeenCalled();
+        const clear = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: null }) });
+        expect(clear.status).toBe(200);
+        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }));
+      } finally {
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      }
+    });
+
+    it('PATCH answers 400 for a tier the trigger cannot use, and for a tier sent with the enabled switch', async () => {
+      mockTaskUpdate.mockImplementationOnce(() => { throw new TriggerTierUnsupportedError('notify'); });
+      const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe(new TriggerTierUnsupportedError('notify').message);
+      mockTaskSetEnabled.mockClear();
+      const both = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ enabled: false, modelTier: 'fast' }) });
+      expect(both.status).toBe(400);
+      expect(mockTaskSetEnabled).not.toHaveBeenCalled();
+      // The switch alone still answers as before.
+      expect((await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ enabled: false }) })).status).toBe(200);
     });
 
     it('PATCH returns 404 for unknown task', async () => {

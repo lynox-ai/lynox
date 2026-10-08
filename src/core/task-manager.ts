@@ -39,6 +39,16 @@ export class BulkTriggerLockedError extends Error {
   }
 }
 
+/** Thrown when a model tier is set on a trigger whose runs have no model to choose:
+ *  only a `run_agent` trigger (a standard run or a watch analysis) starts an agent
+ *  session; a workflow runs its own steps, and backup and notify run no model. */
+export class TriggerTierUnsupportedError extends Error {
+  constructor(effect: string) {
+    super(`A model tier applies only to agent tasks and watches; this trigger's runs (${effect}) do not use it.`);
+    this.name = 'TriggerTierUnsupportedError';
+  }
+}
+
 function refuseBulkTrigger(trigger: TriggerRecord): void {
   if (Object.hasOwn(BULK_EFFECTS, trigger.effect)) throw new BulkTriggerLockedError();
 }
@@ -130,7 +140,8 @@ export interface TaskUpdateParams {
    *  Empty string clears the schedule. Mutually exclusive with nextRunAt. */
   scheduleCron?: string | undefined;
   /** The model tier a trigger's runs ask for: `fast`, `balanced` or `deep`. Empty
-   *  string or null clears the choice. A TODO has no runs, so it ignores this. */
+   *  string or null clears the choice. Only a `run_agent` trigger takes one (see
+   *  {@link TriggerTierUnsupportedError}); a TODO has no runs, so it ignores this. */
   modelTier?: ModelTier | '' | null | undefined;
 }
 
@@ -380,7 +391,11 @@ export class TaskManager {
         modelTier?: ModelTier | null | undefined;
       } = {};
       if (params.title !== undefined) triggerUpdate.title = params.title;
-      if (params.modelTier !== undefined) triggerUpdate.modelTier = params.modelTier || null;
+      if (params.modelTier !== undefined) {
+        // Clearing is allowed on any trigger; setting only where a run would read it.
+        if (params.modelTier && trigger.effect !== 'run_agent') throw new TriggerTierUnsupportedError(trigger.effect);
+        triggerUpdate.modelTier = params.modelTier || null;
+      }
       if (params.description !== undefined) triggerUpdate.description = params.description;
       if (params.status !== undefined) triggerUpdate.status = params.status;
       if (params.assignee !== undefined) triggerUpdate.assignee = params.assignee;
