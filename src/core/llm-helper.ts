@@ -248,22 +248,35 @@ const MAX_SCHEMA_DEPTH = 32;
  */
 export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path = '', depth = 0): void {
   if (depth > MAX_SCHEMA_DEPTH) {
-    throw new Error(`Schema recursion depth exceeded ${String(MAX_SCHEMA_DEPTH)} at "${path || '<root>'}"`);
+    throw new ExtractShapeError(`Schema recursion depth exceeded ${String(MAX_SCHEMA_DEPTH)} at "${path || '<root>'}"`);
   }
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-    throw new Error(`Expected object at "${path || '<root>'}", got ${data === null ? 'null' : typeof data}`);
+    throw new ExtractShapeError(`Expected object at "${path || '<root>'}", got ${data === null ? 'null' : typeof data}`);
   }
   const obj = data as Record<string, unknown>;
   if (schema.required) {
     for (const key of schema.required) {
       if (!(key in obj)) {
-        throw new Error(`Missing required field "${path ? `${path}.${key}` : key}"`);
+        throw new ExtractShapeError(`Missing required field "${path ? `${path}.${key}` : key}"`);
       }
     }
   }
   for (const [key, prop] of Object.entries(schema.properties)) {
     if (!(key in obj)) continue;
     validateProperty(obj[key], prop, path ? `${path}.${key}` : key, depth + 1);
+  }
+}
+
+/**
+ * An extraction that failed on its shape, with a message built only from the schema, from
+ * `typeof`, and from finite numbers — never from a string the model returned. A caller may
+ * hand this message to a model as it is. `SchemaValueError` is deliberately NOT a subclass:
+ * its message carries the refused string.
+ */
+export class ExtractShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExtractShapeError';
   }
 }
 
@@ -290,7 +303,7 @@ const shownValue = (value: string): string => `${JSON.stringify(value.slice(0, 4
 function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: string, depth: number): void {
   switch (prop.type) {
     case 'string':
-      if (typeof value !== 'string') throw new Error(`Expected string at "${path}", got ${typeof value}`);
+      if (typeof value !== 'string') throw new ExtractShapeError(`Expected string at "${path}", got ${typeof value}`);
       if (prop.enum && !prop.enum.includes(value)) {
         const rule = `not in enum [${prop.enum.join(', ')}]`;
         throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
@@ -303,25 +316,25 @@ function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: str
     case 'number':
     case 'integer':
       if (typeof value !== 'number' || !Number.isFinite(value)) {
-        throw new Error(`Expected ${prop.type} at "${path}", got ${typeof value}`);
+        throw new ExtractShapeError(`Expected ${prop.type} at "${path}", got ${typeof value}`);
       }
       if (prop.type === 'integer' && !Number.isInteger(value)) {
-        throw new Error(`Expected integer at "${path}", got ${String(value)}`);
+        throw new ExtractShapeError(`Expected integer at "${path}", got ${String(value)}`);
       }
       if (prop.minimum !== undefined && value < prop.minimum) {
-        throw new Error(`Value ${String(value)} at "${path}" below minimum ${String(prop.minimum)}`);
+        throw new ExtractShapeError(`Value ${String(value)} at "${path}" below minimum ${String(prop.minimum)}`);
       }
       if (prop.maximum !== undefined && value > prop.maximum) {
-        throw new Error(`Value ${String(value)} at "${path}" above maximum ${String(prop.maximum)}`);
+        throw new ExtractShapeError(`Value ${String(value)} at "${path}" above maximum ${String(prop.maximum)}`);
       }
       break;
     case 'boolean':
-      if (typeof value !== 'boolean') throw new Error(`Expected boolean at "${path}", got ${typeof value}`);
+      if (typeof value !== 'boolean') throw new ExtractShapeError(`Expected boolean at "${path}", got ${typeof value}`);
       break;
     case 'array':
-      if (!Array.isArray(value)) throw new Error(`Expected array at "${path}", got ${typeof value}`);
+      if (!Array.isArray(value)) throw new ExtractShapeError(`Expected array at "${path}", got ${typeof value}`);
       if (prop.maxItems !== undefined && value.length > prop.maxItems) {
-        throw new Error(`Array at "${path}" has ${String(value.length)} items, max ${String(prop.maxItems)}`);
+        throw new ExtractShapeError(`Array at "${path}" has ${String(value.length)} items, max ${String(prop.maxItems)}`);
       }
       value.forEach((item, i) => { validateProperty(item, prop.items, `${path}[${String(i)}]`, depth + 1); });
       break;
@@ -425,7 +438,7 @@ export async function callForStructuredJson<T = unknown>(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'extract',
   );
   if (!toolUseBlock) {
-    throw new Error(
+    throw new ExtractShapeError(
       `Model did not call the extract tool. Got content types: [${response.content.map(b => b.type).join(', ')}]`,
     );
   }
