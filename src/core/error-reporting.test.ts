@@ -512,6 +512,12 @@ describe('error-reporting scrubbing', () => {
     expect(req['url']).toBe('https://x/login?url=https://c/d?access_token=***&q=hello');
   });
 
+  it('masks a sensitive value whole, even when it carries a query of its own', async () => {
+    const { beforeSend } = await hooks();
+    const out = beforeSend({ request: { query_string: 'code=a?state=b&q=1' } });
+    expect((out as { request: Record<string, string> }).request['query_string']).toBe('code=***&q=1');
+  });
+
   it('masks a token in a URL fragment', async () => {
     const { beforeSend } = await hooks();
     const out = beforeSend(eventWith('redirect landed at https://x/cb#access_token=t9&token_type=bearer'));
