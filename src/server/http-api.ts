@@ -6827,7 +6827,7 @@ export class LynoxHTTPApi {
         note: outcome.via === 'wait'
           ? 'The run was parked on a question; the wait has been ended.'
           : outcome.via === 'signal'
-            ? 'The run stops before its next unit of work and is halted; resume it to continue.'
+            ? 'The read stops before its next target and the bulk run is halted, unless its last target was already being read and it finishes. To continue, resume the bulk run.'
             : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
       });
     }));
