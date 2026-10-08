@@ -11298,6 +11298,41 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/data masks an opaque credential in its stderr line', async () => {
+      // The masker's own docblock reserves `includeGeneric` for a machine-read sink
+      // rather than something a person reads, and a log line collected by the host's
+      // log driver is one. Without the flag the generic 40+ token rule is dropped,
+      // and an opaque credential — no vendor prefix — matches nothing else, so it
+      // would ship verbatim. Asserted on the stream because that is where it goes;
+      // nothing about this is visible in the response body.
+      const written: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      });
+      const OPAQUE = 'Zq7Z'.repeat(12); // 48 chars, no vendor prefix
+      try {
+        await swapEngine({
+          getEngineDb: () => ({ deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
+          getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
+          getThreadStore: () => ({ deleteAllThreads: () => 0 }),
+          getKnowledgeLayer: () => ({
+            getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          }),
+          getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+          getCRM: () => ({ rebuildSchema: () => undefined }),
+        }, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(500);
+        });
+      } finally {
+        spy.mockRestore();
+      }
+      const ours = written.filter(l => l.includes('/api/data'));
+      expect(ours.length, 'the route must have logged its failure').toBeGreaterThan(0);
+      expect(ours.join('\n'), 'an opaque credential reached the log in clear').not.toContain(OPAQUE);
+    });
+
     it('DELETE /api/data claims completeness only when every store was reachable', async () => {
       // The other direction, and the reason the one above cannot stand alone: a
       // `skipped` list that is always non-empty would withdraw the sentence from
