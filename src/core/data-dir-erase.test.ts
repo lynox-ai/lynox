@@ -28,7 +28,28 @@ const KEPT_BY_DECISION = new Set([
   'wire-sink-raw-on',
 ]);
 
+/**
+ * The entries emptied IN PLACE, through the handle the engine holds open, pinned the same
+ * way. A `remove` entry flipped to `step` is no longer removed from disk, and nothing but
+ * this list would notice: no route step reads the table's `step` rows.
+ */
+const EMPTIED_BY_STEP = new Set([
+  'agent-memory.db',
+  'config.json',
+  'datastore.db',
+  'engine.db',
+  'history.db',
+  'mail-state.db',
+  'memory',
+  'push-subscriptions.db',
+  'vault.db',
+]);
+
 describe('data-dir erasure decisions', () => {
+  it('empties exactly these entries in place', () => {
+    expect(new Set(ERASE_BY_STEP)).toEqual(EMPTIED_BY_STEP);
+  });
+
   it('keeps exactly the entries decided here, and erases every other one', () => {
     expect(new Set(ERASE_KEPT)).toEqual(KEPT_BY_DECISION);
     const erased = new Set([...ERASE_BY_STEP, ...ERASE_BY_REMOVE]);

@@ -832,6 +832,24 @@ describe('GoogleAuth', () => {
       expect(auth.grantPending).toBe(false);
     });
 
+    it('across instances: a grant on an instance a reload replaced still counts', async () => {
+      const replaced = auth;
+      const current = new GoogleAuth({ clientId: 'pending-client', clientSecret: 's' });
+      const d = deferred();
+      mockFetch.mockReturnValueOnce(d.promise);
+      const run = replaced.exchangeRedirectCode('code', 'https://example.test/cb');
+      expect(current.grantPending).toBe(true);
+      d.resolve(tokenResponse());
+      await run;
+      expect(current.grantPending).toBe(false);
+    });
+
+    it('a service account is authenticated but holds no user grant', () => {
+      const sa = new GoogleAuth({ serviceAccountKeyPath: '/tmp/key.json' });
+      expect(sa.isAuthenticated()).toBe(true);
+      expect(sa.holdsGrant).toBe(false);
+    });
+
     it('startDeviceFlow, for the whole poll', async () => {
       mockFetch.mockResolvedValueOnce(new Response(
         JSON.stringify({ device_code: 'dc', user_code: 'uc', verification_url: 'https://example.test/d', expires_in: 300, interval: 1 }),

@@ -19,6 +19,9 @@ describe('data-dir erasure — classification', () => {
     expect(classifyEntry('my.engine.db.corrupt-1').kind).toBe('unknown');
     expect(classifyEntry('notes.txt.123.deadbeef.tmp').kind).toBe('unknown');
     expect(classifyEntry('ads-optimizer.db').kind).toBe('unknown');
+    // Only a SQLite store has sidecars; `workspace-journal` is a user's name, not ours.
+    expect(classifyEntry('workspace-journal').kind).toBe('unknown');
+    expect(classifyEntry('backups-wal').kind).toBe('unknown');
   });
 
   it('rejects a malformed or path-shaped acknowledgement', () => {
@@ -103,13 +106,56 @@ describe('data-dir erasure — on disk', () => {
     expect(sameUnknownSet(scan.unknown, [...scan.unknown, { ...scan.unknown[0]!, name: 'b.db' }])).toBe(false);
   });
 
-  it('unlinks a symlinked `remove` entry and never empties its target', () => {
+  it('reports a symlinked `remove` or `step` entry, and neither follows nor unlinks it', () => {
     writeFileSync(join(outside, 'precious.txt'), 'ZZ-outside');
     symlinkSync(outside, join(dir, 'workspace'));
-    const out = removeOwedEntries(scanDataDir(dir), []);
-    expect(out.failures).toEqual([]);
-    expect(existsSync(join(dir, 'workspace'))).toBe(false);
+    symlinkSync(outside, join(dir, 'memory'));
+    const scan = scanDataDir(dir);
+    expect(scan.linked.map(l => l.name)).toEqual(['memory', 'workspace']);
+    // The stretch asks again, and reports rather than unlinking: an unlinked link would
+    // read as erased while its content stays at the target.
+    const out = removeOwedEntries(scan, []);
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(existsSync(join(dir, 'workspace'))).toBe(true);
     expect(readFileSync(join(outside, 'precious.txt'), 'utf8')).toBe('ZZ-outside');
+  });
+
+  it('does not report a symlinked kept entry or an unknown link, whose removal only unlinks', () => {
+    symlinkSync(outside, join(dir, 'plugins'));
+    symlinkSync(outside, join(dir, 'zz-link'));
+    const scan = scanDataDir(dir);
+    expect(scan.linked).toEqual([]);
+    expect(scan.unknown.map(u => u.name)).toEqual(['zz-link']);
+  });
+
+  it('reports a mount point nested inside an entry it would remove, and leaves it', async () => {
+    seedDir('workspace');
+    mkdirSync(join(dir, 'workspace', 'proj', 'mnt'), { recursive: true });
+    writeFileSync(join(dir, 'workspace', 'proj', 'mnt', 'disk.txt'), 'ZZ-disk');
+    const { lstatSync } = await import('node:fs');
+    const dev = scanDataDir(dir).dev;
+    const mountAt = (p: string): ReturnType<typeof lstatSync> => {
+      const st = lstatSync(p);
+      return p.endsWith('/proj/mnt') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: dev + 1 }) : st;
+    };
+    const scan = scanDataDir(dir, mountAt);
+    expect(scan.linked).toEqual([{ name: 'workspace', reason: expect.stringContaining('proj/mnt') as unknown as string }]);
+    const out = removeOwedEntries(scan, [], mountAt);
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(readFileSync(join(dir, 'workspace', 'proj', 'mnt', 'disk.txt'), 'utf8')).toBe('ZZ-disk');
+  });
+
+  it('names what it removes without asking, and keeps a temp beside a kept entry', () => {
+    seedDir('workspace');
+    seed('secrets.json');
+    seed('vault.key');
+    seed('vault.key.4242.deadbeef.tmp');
+    seed('config.json.4242.deadbeef.tmp');
+    const scan = scanDataDir(dir);
+    expect(scan.removedWithoutAsking).toEqual(['config.json.4242.deadbeef.tmp', 'secrets.json', 'workspace']);
+    removeOwedEntries(scan, []);
+    expect(existsSync(join(dir, 'vault.key.4242.deadbeef.tmp'))).toBe(true);
+    expect(existsSync(join(dir, 'config.json.4242.deadbeef.tmp'))).toBe(false);
   });
 
   it('refuses to empty an entry that sits on another device (a mount)', async () => {
@@ -133,6 +179,13 @@ describe('data-dir erasure — on disk', () => {
     const out = removeBackupsOutside(outside, dir);
     expect(out.removed.sort()).toEqual(['2026-10-08T19301234Z', '2026-10-08T19301234Z-1', '2026-10-08T19301234Z.tmp']);
     expect(readdirSync(outside)).toEqual(['my-notes.txt']);
+  });
+
+  it('reports, rather than throws, when the backup_dir cannot be read', () => {
+    writeFileSync(join(outside, 'not-a-dir'), 'x');
+    const out = removeBackupsOutside(join(outside, 'not-a-dir'), dir);
+    expect(out.removed).toEqual([]);
+    expect(out.failures.length).toBe(1);
   });
 
   it('compares against the data dir as resolved, so a data dir that is a symlink still works', () => {

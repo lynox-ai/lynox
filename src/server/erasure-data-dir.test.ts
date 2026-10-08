@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,9 @@ import type { Memory } from '../core/memory.js';
 import type { ArtifactStore } from '../core/artifact-store.js';
 import type { MailStateDb } from '../integrations/mail/state.js';
 import type { WebPushNotificationChannel } from '../integrations/push/web-push-channel.js';
+import type { ApiStore } from '../core/api-store.js';
+import type { BatchIndex } from '../core/batch-index.js';
+import type { BackupManager } from '../core/backup.js';
 
 /**
  * `DELETE /api/data` erases what the data-dir inventory says it erases — measured on a
@@ -43,6 +46,9 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     getMemory: () => Memory | null;
     getArtifactStore: () => ArtifactStore | null;
     getMailStateDb: () => MailStateDb | null;
+    getApiStore: () => ApiStore | null;
+    getBatchIndex: () => BatchIndex;
+    getBackupManager: () => BackupManager | null;
   }
   const engineOf = (): EngineView => (api as unknown as { engine: EngineView }).engine;
   const pushOf = (): WebPushNotificationChannel => {
@@ -105,6 +111,7 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     mkdirSync(join(memPath, '..'), { recursive: true });
     writeFileSync(memPath, memMark);
     writeFileSync(join(dir, 'zz-unknown.db'), mark('unknown'));
+    writeFileSync(join(dir, 'secrets.json'), mark('secrets'));
     const genBefore = internals().erasureGeneration;
 
     const first = await erase();
@@ -112,6 +119,12 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(first.body['code']).toBe('unknown_entries');
     const unknown = first.body['unknown'] as Array<{ name: string }>;
     expect(unknown.map(u => u.name)).toEqual(['zz-unknown.db']);
+    // What is removed under a known name is named too, so the agreement covers it; what is
+    // kept or emptied in place is not.
+    const alsoRemoved = first.body['also_removed'] as string[];
+    expect(alsoRemoved).toContain('secrets.json');
+    expect(alsoRemoved).not.toContain('vault.key');
+    expect(alsoRemoved).not.toContain('engine.db');
     // Nothing erased: the FIRST destructive step (flat-file memory) did not run, the
     // flag is down, and the erasure counted nothing.
     expect(readFileSync(memPath, 'utf8')).toBe(memMark);
@@ -171,6 +184,19 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     if (artifacts === null) throw new Error('fixture: no artifact store');
     artifacts.save({ title: mark('artifact-title'), content: 'x' });
     expect(artifacts.list().length).toBe(1);
+    const apiStore = e.getApiStore();
+    if (apiStore === null) throw new Error('fixture: no API store');
+    apiStore.register({ id: 'zz-api', name: 'ZZ', base_url: 'https://api.example.test/v1', description: 'zz', auth: { type: 'bearer' } }, 'load');
+    expect(apiStore.getAll().map(p => p.id)).toContain('zz-api');
+    await e.getBatchIndex().save('zz-batch', { submitted_at: '2026-01-01T00:00:00Z', request_count: 1, label: mark('batch') });
+    // The directory the backup manager writes to, which a config change can leave apart
+    // from the configured `backup_dir`.
+    const bm = e.getBackupManager();
+    if (bm === null) throw new Error('fixture: no backup manager');
+    const managerDir = mkdtempSync(join(tmpdir(), 'lynox-erasure-bk-'));
+    (bm as unknown as { backupDir: string }).backupDir = managerDir;
+    mkdirSync(join(managerDir, '2026-10-08T19301234Z'));
+    writeFileSync(join(managerDir, '2026-10-08T19301234Z', 'engine.db'), mark('backup-copy'));
 
     const res = await erase();
     expect(res.body['failed'] ?? []).toEqual([]);
@@ -194,5 +220,36 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(existsSync(join(userDir, 'knowledge.txt'))).toBe(false);
     expect(await memory.loadScoped('knowledge', USER)).toBeNull();
     expect(artifacts.list()).toEqual([]);
+    expect(apiStore.getAll()).toEqual([]);
+    expect(await e.getBatchIndex().get('zz-batch')).toBeNull();
+    expect(readdirSync(managerDir)).toEqual([]);
+    rmSync(managerDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('refuses with 409 and erases nothing while an entry it owes is a link it would have to follow', async () => {
+    const memory = engineOf().getMemory();
+    if (memory === null) throw new Error('fixture: no flat-file memory');
+    const memPath = join(dir, 'memory', scopeToDir(memory.currentScope()), 'knowledge.txt');
+    const memMark = mark('memory');
+    mkdirSync(join(memPath, '..'), { recursive: true });
+    writeFileSync(memPath, memMark);
+    const target = mkdtempSync(join(tmpdir(), 'lynox-erasure-link-'));
+    writeFileSync(join(target, 'copy.txt'), mark('target'));
+    rmSync(join(dir, 'backups'), { recursive: true, force: true });
+    symlinkSync(target, join(dir, 'backups'));
+    const genBefore = internals().erasureGeneration;
+    try {
+      const res = await erase();
+      expect(res.status).toBe(409);
+      expect(res.body['code']).toBe('linked_entries');
+      expect((res.body['linked'] as Array<{ name: string }>).map(l => l.name)).toEqual(['backups']);
+      expect(readFileSync(memPath, 'utf8')).toBe(memMark);
+      expect(readdirSync(target)).toEqual(['copy.txt']);
+      expect(internals().erasureInProgress).toBe(false);
+      expect(internals().erasureGeneration).toBe(genBefore);
+    } finally {
+      unlinkSync(join(dir, 'backups'));
+      rmSync(target, { recursive: true, force: true });
+    }
   }, 60_000);
 });

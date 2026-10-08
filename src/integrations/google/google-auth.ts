@@ -824,6 +824,41 @@ export class GoogleAuth {
   }
 
   /**
+   * Grants being minted right now: a code exchange, a device-flow poll or a managed claim
+   * that has not returned. Each ends in a vault write — so the Art. 17 erasure refuses
+   * while one is pending, instead of emptying the vault and having a sign-in that started
+   * before it write a fresh grant afterwards.
+   *
+   * STATIC, counted across every instance: `reloadGoogle()` replaces the engine's instance,
+   * and the one it replaced keeps polling and still writes the shared vault when its grant
+   * arrives. A per-instance count would lose that grant the moment the instance is swapped.
+   */
+  private static _pendingGrants = 0;
+
+  get grantPending(): boolean { return GoogleAuth._pendingGrants > 0; }
+
+  /**
+   * Whether this instance holds a user grant — the thing a refresh writes back to the vault.
+   * Not `isAuthenticated()`: that is also true for a service account, which holds no user
+   * grant, writes nothing to the vault, and cannot be disconnected.
+   */
+  get holdsGrant(): boolean { return this.tokenData !== null; }
+
+  /** Counts `run` as a pending grant — also for a grant minted elsewhere and handed to `setTokens`. */
+  async whileGranting<T>(run: () => Promise<T>): Promise<T> {
+    return this._countGrant(run);
+  }
+
+  private async _countGrant<T>(run: () => Promise<T>): Promise<T> {
+    GoogleAuth._pendingGrants++;
+    try {
+      return await run();
+    } finally {
+      GoogleAuth._pendingGrants--;
+    }
+  }
+
+  /**
    * Accept tokens this process just minted itself, from any of the three OAuth
    * entry points.
    *
@@ -838,30 +873,6 @@ export class GoogleAuth {
    * reading `this.clientId` in here would look identical and quietly assert a
    * provenance the caller had not established.
    */
-  /**
-   * Grants this process is minting right now: a code exchange or a device-flow poll that
-   * has not returned. Each ends in `_acceptMintedTokens`, which writes the grant to the
-   * vault — so the Art. 17 erasure refuses while one is pending, instead of erasing the
-   * vault and having a sign-in that started before it write a fresh grant afterwards.
-   */
-  private _pendingGrants = 0;
-
-  get grantPending(): boolean { return this._pendingGrants > 0; }
-
-  /** Counts `run` as a pending grant — also for a grant minted elsewhere and handed to `setTokens`. */
-  async whileGranting<T>(run: () => Promise<T>): Promise<T> {
-    return this._countGrant(run);
-  }
-
-  private async _countGrant<T>(run: () => Promise<T>): Promise<T> {
-    this._pendingGrants++;
-    try {
-      return await run();
-    } finally {
-      this._pendingGrants--;
-    }
-  }
-
   private _acceptMintedTokens(json: unknown, mintedBy: string): void {
     this.tokenData = validateTokenResponse(json, mintedBy);
     this._clientMisconfigured = null;

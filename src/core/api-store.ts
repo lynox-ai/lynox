@@ -1231,6 +1231,15 @@ export class ApiStore {
     return false;
   }
 
+  /**
+   * Drop every profile from memory, touching no file and no store. For the Art. 17 erasure,
+   * which removes `apis/` and empties engine.db itself: without this the erased profiles
+   * kept listing in the API and went on reaching the model's system prompt.
+   */
+  forgetAll(): void {
+    for (const id of [...this.profiles.keys()]) this.unregister(id);
+  }
+
   /** Get all registered profiles. */
   getAll(): ApiProfile[] {
     return [...this.profiles.values()];

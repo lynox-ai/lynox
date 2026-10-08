@@ -1293,6 +1293,13 @@ export class LynoxHTTPApi {
    * flight, the inbox classifier at work, a backup or restore. The way out is named in
    * each answer: disconnect, or wait. A restart clears every in-process one of them.
    */
+  /**
+   * API-profile OAuth callbacks between their token exchange and the vault write. Counted
+   * for the same reason as Google's pending grants: one that started before an erasure
+   * would store a live third-party token after it.
+   */
+  private profileGrantsPending = 0;
+
   private erasureBlockedBy(engine: Engine, isBackfillRunning: () => boolean): { code: string; error: string } | null {
     const mail = engine.getMailContext();
     const google = [engine.getGoogleAuth(), mail?.googleAuth ?? null].filter((g): g is NonNullable<typeof g> => g !== null);
@@ -1309,10 +1316,17 @@ export class LynoxHTTPApi {
         error: 'A Google sign-in is in progress. Wait until it finishes or expires (at most 5 minutes), then erase.' + restart,
       };
     }
-    if (google.some(g => g.isAuthenticated())) {
+    if (google.some(g => g.holdsGrant)) {
       return {
         code: 'google_connected',
-        error: 'Google is connected. Disconnect it first (POST /api/google/revoke, then DELETE /api/mail/accounts/<id> for a connected Gmail account), then erase.',
+        error: 'Google is connected. Disconnect it first (POST /api/google/revoke, then DELETE /api/mail/accounts/<id> for a connected Gmail account), then erase.'
+          + ' If it still answers this after the revoke, an older connection is held in memory: restarting the instance clears it.',
+      };
+    }
+    if (this.profileGrantsPending > 0) {
+      return {
+        code: 'api_grant_pending',
+        error: 'An API connection is completing its sign-in. Wait until it has finished, then erase.' + restart,
       };
     }
     const inbox = engine.getInboxRuntime();
@@ -8721,7 +8735,16 @@ export class LynoxHTTPApi {
     //                  "NO mechanism here" while the module two imports away
     //                  explained that PKCE is exactly that — the table
     //                  contradicted its own diff.
-    this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res) => {
+    // Counted as a pending grant for the whole request: it writes a third-party token to
+    // the vault and the profile under `apis/`, with an await between the two, so an erasure
+    // that starts anywhere in it would otherwise run past a write still to come.
+    const profileOAuthCallback: RouteHandler = async (req, res) => {
+      // A consent finished while the erasure runs must not store its tokens.
+      if (this.erasureInProgress) {
+        LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
+        sendOAuthHtml(res, 409, 'Your data is being erased right now. Connect this API again after it has finished. Nothing was stored.');
+        return;
+      }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const providerError = url.searchParams.get('error');
       if (providerError !== null) {
@@ -9022,6 +9045,14 @@ export class LynoxHTTPApi {
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
+    };
+    this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res, params, body) => {
+      this.profileGrantsPending++;
+      try {
+        await profileOAuthCallback(req, res, params, body);
+      } finally {
+        this.profileGrantsPending--;
+      }
     });
 
     // ── Knowledge Graph ──────────────────────────────────────────
@@ -9761,6 +9792,11 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/backups', async (_req, res) => {
       const bm = engine.getBackupManager();
       if (!requireService(res, bm, 'Backup manager')) return;
+      // A backup taken while an erasure runs copies stores it is about to empty.
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; back up after it has finished', code: 'erasure_in_progress' });
+        return;
+      }
       try {
         const result = await bm.createBackup();
         jsonResponse(res, 200, result);
@@ -9775,6 +9811,11 @@ export class LynoxHTTPApi {
       if (!requireService(res, bm, 'Backup manager')) return;
       const backupPath = bm.getBackupPath(params['id']!);
       if (!backupPath) { errorResponse(res, 404, 'Backup not found'); return; }
+      // A restore while an erasure runs puts the erased data back, and its restart keeps it.
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; restore after it has finished', code: 'erasure_in_progress' });
+        return;
+      }
       try {
         const result = await bm.restoreBackup(backupPath);
         jsonResponse(res, result.success ? 200 : 500, result);
@@ -10196,13 +10237,28 @@ export class LynoxHTTPApi {
           jsonResponse(res, 500, { deleted: false, failed: ['data_dir#scan'], error: 'Erasure incomplete — the data directory could not be read, so nothing was erased' });
           return;
         }
+        // A link or a mount the erasure would have to follow to empty: its content is outside
+        // the data dir, and removing only the link would answer "all deleted" over it.
+        if (scan.linked.length > 0) {
+          jsonResponse(res, 409, {
+            code: 'linked_entries',
+            linked: scan.linked,
+            error: 'Some entries in the data directory are links or mount points the erasure does not follow, so nothing was erased. '
+              + 'Erase their content where it lives and remove the link or mount, or move the content back into the data directory, then erase.',
+          });
+          return;
+        }
         if (!sameUnknownSet(scan.unknown, acknowledged)) {
           const many = scan.unknown.length > ERASURE_MANY_UNKNOWN;
           jsonResponse(res, 409, {
             code: 'unknown_entries',
             unknown: scan.unknown,
+            // Named so the agreement covers them: in a data dir that is also used for other
+            // things, a `workspace/` or `backups/` of the user's own is removed under these names.
+            also_removed: scan.removedWithoutAsking,
             error: 'The data directory holds entries this instance does not know, so nothing was erased. '
-              + 'Move them out of the data directory, or erase again with "remove_unknown" set to the "unknown" list of this answer.'
+              + 'Move them out of the data directory, or erase again with "remove_unknown" set to the "unknown" list of this answer. '
+              + 'The erasure also removes the entries listed in "also_removed", which this instance keeps its data in.'
               + (many ? ' That is a lot of entries — check that the data directory is set correctly before removing anything.' : ''),
           });
           return;
@@ -10568,11 +10624,19 @@ export class LynoxHTTPApi {
         if (!ackStillValid && acknowledged.length > 0) note('data_dir#unknown_changed', new Error('the unknown entries changed after they were reported; none was removed'));
         const files = removeOwedEntries(scan, ackStillValid ? acknowledged.map(a => a.name) : []);
         for (const f of files.failures) note(`data_dir:${f.name}`, new Error(f.reason));
+        // What the engine still holds in memory of the files just removed: the artifact
+        // index, the API profiles (listed by the API and sent to the model), the batch index.
         engine.getArtifactStore()?.forgetAll();
-        // A `backup_dir` outside the data dir holds full copies too. Read before the config
-        // reset below, which erases the only pointer to it.
-        const backupDir = engine.getUserConfig().backup_dir;
-        if (typeof backupDir === 'string' && backupDir !== '') {
+        engine.getApiStore()?.forgetAll();
+        engine.getBatchIndex().forgetAll();
+        // A `backup_dir` outside the data dir holds full copies too. BOTH the directory the
+        // backup manager writes to — fixed when it was built — and the configured one, which
+        // a config change since then may have moved; read before the config reset below,
+        // which erases the configured pointer.
+        const configured = engine.getUserConfig().backup_dir;
+        const backupDirs = new Set([engine.getBackupManager()?.getBackupDir(), configured]
+          .filter((d): d is string => typeof d === 'string' && d !== ''));
+        for (const backupDir of backupDirs) {
           const outside = removeBackupsOutside(backupDir, dataDir);
           for (const f of outside.failures) note(`backups:${f.name}`, new Error(f.reason));
         }

@@ -15,16 +15,19 @@
  *    Removing "everything this table does not keep" would wipe it. So the route scans
  *    first, and an entry this table does not know stops the erasure before anything is
  *    deleted — unless the caller names it back, with the identity the scan reported.
- *  · NOTHING IS FOLLOWED. Every entry is `lstat`ed: a symlink is unlinked, never
- *    descended into (a `workspace` linked to a directory elsewhere must not empty that
- *    directory), and an entry on another device than the data dir (a bind mount) is
- *    refused rather than emptied.
+ *  · NOTHING IS FOLLOWED, AND NOTHING FOLLOWED IS CLAIMED. A declared entry the erasure
+ *    owes that is a symlink (`backups -> /mnt/disk`) holds its content at the target; an
+ *    entry that is, or contains, a mount point holds it on another filesystem. Emptying
+ *    either would reach outside the data dir, and unlinking the link would answer "all
+ *    deleted" over data that is still there. So the scan reports them and the route
+ *    refuses before anything is deleted. A mount is recognised by its device number; a
+ *    bind mount from the SAME filesystem has the same one and is not recognised.
  */
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
 
-/** SQLite sidecars that belong to the file they extend. */
+/** SQLite sidecars that belong to the database they extend — only a `sqlite` entry has them. */
 const SIDECAR = /^(.+?)(-wal|-shm|-journal)$/;
 /** `atomic-write.ts`: `${filePath}.${pid}.${uuid8}.tmp`, left behind by a crash between write and rename. */
 const ATOMIC_TEMP = /^(.+)\.\d+\.[0-9a-f]{8}\.tmp$/;
@@ -61,7 +64,7 @@ export function classifyEntry(name: string): EntryClass {
   const side = SIDECAR.exec(name);
   if (side) {
     const base = side[1]!;
-    if (BY_NAME.has(base)) return { kind: 'sidecar', of: base };
+    if (BY_NAME.get(base)?.kind === 'sqlite') return { kind: 'sidecar', of: base };
     if (isResidue(base)) return { kind: 'residue' };
   }
   const temp = ATOMIC_TEMP.exec(name);
@@ -81,27 +84,106 @@ export interface EntryIdentity {
 const identityOf = (name: string, st: Stats): EntryIdentity =>
   ({ name, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs });
 
+/** Whether the erasure removes this entry (an unknown one only once acknowledged). */
+function owedBy(cls: EntryClass, ack: { has(name: string): boolean }, name: string): boolean {
+  switch (cls.kind) {
+    case 'declared': return cls.entry.erase.by === 'remove';
+    case 'sidecar': return BY_NAME.get(cls.of)?.erase.by === 'remove';
+    // A crash-left temp of a kept entry is kept with it: it may be another process's write
+    // in flight (a CLI and a server sharing the data dir), and it holds what `keep` keeps.
+    case 'temp': return BY_NAME.get(cls.of)?.erase.by !== 'keep';
+    case 'residue': return true;
+    case 'unknown': return ack.has(name);
+    case 'litter': return false;
+  }
+}
+
+/**
+ * The first path inside `dir` (relative) that sits on another device than `dev`, or
+ * `null`. Walks with `lstat`, so a symlink inside is not followed — removing it only
+ * removes the link.
+ */
+function foreignDeviceInside(dir: string, dev: number, lstat: (path: string) => Stats): string | null {
+  const stack = [''];
+  while (stack.length > 0) {
+    const rel = stack.pop()!;
+    for (const child of readdirSync(join(dir, rel))) {
+      const childRel = rel === '' ? child : join(rel, child);
+      const st = lstat(join(dir, childRel));
+      if (st.isSymbolicLink()) continue;
+      if (st.dev !== dev) return childRel;
+      if (st.isDirectory()) stack.push(childRel);
+    }
+  }
+  return null;
+}
+
+/**
+ * Why removing or emptying this entry would reach outside the data dir, or `null`.
+ * `followsLink`: a declared entry the erasure removes or empties through its path (not
+ * a SQLite store, whose open handle writes the target in place) that is a symlink.
+ */
+function linkedReason(name: string, cls: EntryClass, st: Stats, dataDirDev: number, path: string, lstat: (path: string) => Stats): string | null {
+  if (st.isSymbolicLink()) {
+    const followsLink = cls.kind === 'declared' && cls.entry.erase.by !== 'keep' && cls.entry.kind !== 'sqlite';
+    return followsLink ? 'a symbolic link; its content is at the target, outside the data dir' : null;
+  }
+  if (st.dev !== dataDirDev) return 'a mount point; its content is on another filesystem';
+  if (st.isDirectory()) {
+    const inside = foreignDeviceInside(path, dataDirDev, lstat);
+    if (inside !== null) return `contains a mount point (${inside}); its content is on another filesystem`;
+  }
+  return null;
+}
+
+export interface LinkedEntry {
+  readonly name: string;
+  readonly reason: string;
+}
+
 export interface DataDirScan {
   /** The data dir as resolved on disk, so a data dir that is itself a symlink compares correctly. */
   readonly dir: string;
   readonly dev: number;
   readonly unknown: readonly EntryIdentity[];
+  /**
+   * Entries the erasure would remove or empty — or would remove once acknowledged — that
+   * reach outside the data dir. The route refuses while there is one.
+   */
+  readonly linked: readonly LinkedEntry[];
+  /** Entries this instance knows and removes without asking, for the caller to be told. */
+  readonly removedWithoutAsking: readonly string[];
   /** Litter seen, named for the log only — it neither blocks nor counts. */
   readonly litter: readonly string[];
 }
 
-export function scanDataDir(dataDir: string): DataDirScan {
+export function scanDataDir(dataDir: string, lstat: (path: string) => Stats = lstatSync): DataDirScan {
   const dir = realpathSync(dataDir);
   const dev = statSync(dir).dev;
   const unknown: EntryIdentity[] = [];
+  const linked: LinkedEntry[] = [];
+  const removedWithoutAsking: string[] = [];
   const litter: string[] = [];
+  const everyUnknown = { has: () => true };
   for (const name of readdirSync(dir)) {
     const cls = classifyEntry(name);
-    if (cls.kind === 'litter') litter.push(name);
-    else if (cls.kind === 'unknown') unknown.push(identityOf(name, lstatSync(join(dir, name))));
+    if (cls.kind === 'litter') { litter.push(name); continue; }
+    const path = join(dir, name);
+    const st = lstat(path);
+    if (cls.kind === 'unknown') unknown.push(identityOf(name, st));
+    else if (owedBy(cls, everyUnknown, name)) removedWithoutAsking.push(name);
+    // Asked of everything the erasure could touch through a path: what it removes, what it
+    // empties in place (a `step` directory or file), and every unknown entry, which it
+    // removes once acknowledged.
+    const touched = cls.kind === 'unknown' || owedBy(cls, everyUnknown, name) || (cls.kind === 'declared' && cls.entry.erase.by === 'step');
+    if (!touched) continue;
+    const reason = linkedReason(name, cls, st, dev, path, lstat);
+    if (reason !== null) linked.push({ name, reason });
   }
   unknown.sort((a, b) => a.name.localeCompare(b.name));
-  return { dir, dev, unknown, litter };
+  linked.sort((a, b) => a.name.localeCompare(b.name));
+  removedWithoutAsking.sort((a, b) => a.localeCompare(b));
+  return { dir, dev, unknown, linked, removedWithoutAsking, litter };
 }
 
 /**
@@ -161,19 +243,19 @@ export function removeOwedEntries(
   const removed: string[] = [];
   const failures: Array<{ name: string; reason: string }> = [];
   const ack = new Set(acknowledgedUnknown);
-  const owed: string[] = [];
-  for (const name of readdirSync(scan.dir)) {
-    const cls = classifyEntry(name);
-    const owedHere =
-      (cls.kind === 'declared' && cls.entry.erase.by === 'remove')
-      || (cls.kind === 'sidecar' && BY_NAME.get(cls.of)?.erase.by === 'remove')
-      || cls.kind === 'temp'
-      || cls.kind === 'residue'
-      || (cls.kind === 'unknown' && ack.has(name));
-    if (owedHere) owed.push(name);
+  const owed: Array<{ name: string; cls: EntryClass }> = [];
+  let names: string[];
+  try {
+    names = readdirSync(scan.dir);
+  } catch (err) {
+    return { removed, failures: [{ name: '.', reason: err instanceof Error ? err.message : String(err) }] };
   }
-  owed.sort((a, b) => Number(a === 'backups') - Number(b === 'backups'));
-  for (const name of owed) {
+  for (const name of names) {
+    const cls = classifyEntry(name);
+    if (owedBy(cls, ack, name)) owed.push({ name, cls });
+  }
+  owed.sort((a, b) => Number(a.name === 'backups') - Number(b.name === 'backups'));
+  for (const { name, cls } of owed) {
     const path = join(scan.dir, name);
     let st: Stats;
     try {
@@ -181,8 +263,15 @@ export function removeOwedEntries(
     } catch {
       continue;   // gone since the listing
     }
-    if (!st.isSymbolicLink() && st.dev !== scan.dev) {
-      failures.push({ name, reason: 'on another device than the data dir (a mount); not emptied' });
+    // The scan refused these already; asked again because the stretch runs after an await.
+    let reason: string | null;
+    try {
+      reason = linkedReason(name, cls, st, scan.dev, path, lstat);
+    } catch (err) {
+      reason = `could not be checked for links and mounts: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (reason !== null) {
+      failures.push({ name, reason: `${reason}; not removed` });
       continue;
     }
     try {
@@ -216,8 +305,16 @@ export function removeBackupsOutside(backupDir: string, dataDir: string): Remove
   } catch {
     return { removed, failures };   // no such directory: nothing was backed up there
   }
-  if (dir === join(realpathSync(dataDir), 'backups')) return { removed, failures };   // the data dir's own, removed with it
-  for (const name of readdirSync(dir)) {
+  let names: string[];
+  try {
+    if (dir === join(realpathSync(dataDir), 'backups')) return { removed, failures };   // the data dir's own, removed with it
+    names = readdirSync(dir);
+  } catch (err) {
+    // Runs after every store was emptied: a throw here would skip the config reset and
+    // drop the structured answer, so it is reported as a failure like any other.
+    return { removed, failures: [{ name: '.', reason: err instanceof Error ? err.message : String(err) }] };
+  }
+  for (const name of names) {
     if (!BACKUP_NAME.test(name)) continue;
     try {
       rmSync(join(dir, name), { recursive: true, force: true });

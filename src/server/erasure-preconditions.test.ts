@@ -8,6 +8,7 @@ import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { handleRunBackfillMetadata, type InboxApiDeps } from '../integrations/inbox/api.js';
 import type { Engine } from '../core/engine.js';
+import { GoogleAuth } from '../integrations/google/google-auth.js';
 import { scopeToDir } from '../core/scope-resolver.js';
 import type { SecretVault } from '../core/secret-vault.js';
 import type { BackfillMetadataReport } from '../integrations/inbox/backfill-metadata.js';
@@ -261,6 +262,38 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
       for (const k of MANAGED) delete process.env[k];
     }
 
+    // A claim that arrives while an erasure runs never reaches the control plane.
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'zz-inst';
+    const callsBefore = cpFetchMock.mock.calls.length;
+    internals().erasureInProgress = true;
+    try {
+      const early = await call('POST', '/api/google/claim-managed', { claim_nonce: 'zz' });
+      expect(early.status).toBe(409);
+      expect(early.body['code']).toBe('erasure_in_progress');
+      expect(cpFetchMock.mock.calls.length).toBe(callsBefore);
+    } finally {
+      internals().erasureInProgress = false;
+      for (const k of MANAGED) delete process.env[k];
+    }
+
+    // The mail context keeps the instance it was built with; after a reload that is no
+    // longer the engine's, and a grant it still holds is what a refresh writes back.
+    const ctx = mail() as unknown as { googleAuth: GoogleAuth | null };
+    const bootInstance = ctx.googleAuth;
+    const store = new Map<string, string>();
+    const older = new GoogleAuth({
+      clientId: 'older', clientSecret: 's',
+      vault: { get: (k: string) => store.get(k) ?? null, set: (k: string, v: string) => { store.set(k, v); }, delete: (k: string) => store.delete(k) } as unknown as SecretVault,
+    });
+    await older.setTokens(tokens());
+    ctx.googleAuth = older;
+    try {
+      await expectRefused('google_connected');
+    } finally {
+      ctx.googleAuth = bootInstance;
+    }
+
     let release!: () => void;
     const pending = google().whileGranting(() => new Promise<void>((r) => { release = r; }));
     try {
@@ -319,6 +352,57 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
     }
   }, 60_000);
 
+  it('refuses while an API connection completes its sign-in, and that callback refuses during an erasure', async () => {
+    const counter = api as unknown as { profileGrantsPending: number };
+    counter.profileGrantsPending++;
+    try {
+      await expectRefused('api_grant_pending');
+    } finally {
+      counter.profileGrantsPending--;
+    }
+
+    // The callback counts itself for the whole request: observed from inside it.
+    let seen: number | undefined;
+    const spy = vi.spyOn(LynoxHTTPApi as unknown as { _readProfileOAuthCookie: () => string | null }, '_readProfileOAuthCookie')
+      .mockImplementation(() => { seen = counter.profileGrantsPending; return null; });
+    try {
+      await fetch(`${baseUrl}/api/oauth/callback?code=x&state=y`, { headers: { Authorization: `Bearer ${SECRET}` } });
+      expect(seen).toBe(1);
+      expect(counter.profileGrantsPending).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+
+    internals().erasureInProgress = true;
+    try {
+      const during = await fetch(`${baseUrl}/api/oauth/callback?code=x&state=y`, { headers: { Authorization: `Bearer ${SECRET}` } });
+      expect(during.status).toBe(409);
+    } finally {
+      internals().erasureInProgress = false;
+    }
+  }, 60_000);
+
+  it('refuses a backup or a restore requested while an erasure runs', async () => {
+    const bm = engineOf().getBackupManager();
+    if (bm === null) throw new Error('fixture: no backup manager');
+    const made = await bm.createBackup();
+    expect(made.success).toBe(true);
+    const id = made.path.split('/').pop()!;
+    const countBefore = bm.listBackups().length;
+    internals().erasureInProgress = true;
+    try {
+      const backup = await call('POST', '/api/backups');
+      expect(backup.status).toBe(409);
+      expect(backup.body['code']).toBe('erasure_in_progress');
+      expect(bm.listBackups().length).toBe(countBefore);
+      const restore = await call('POST', `/api/backups/${id}/restore`);
+      expect(restore.status).toBe(409);
+      expect(restore.body['code']).toBe('erasure_in_progress');
+    } finally {
+      internals().erasureInProgress = false;
+    }
+  }, 60_000);
+
   it('refuses while a backup runs', async () => {
     const bm = engineOf().getBackupManager();
     if (bm === null) throw new Error('fixture: no backup manager');
@@ -337,8 +421,12 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
     expect(mail().googleAuth?.isAuthenticated() ?? false).toBe(false);
     expect(vaultOf().has('GOOGLE_OAUTH_TOKENS')).toBe(false);
 
+    // A service account counts as authenticated and holds no user grant; it writes nothing
+    // to the vault and cannot be disconnected, so it must not refuse the erasure.
+    const sa = vi.spyOn(google(), 'isAuthenticated').mockReturnValue(true);
     seedNothingErased();
     const res = await erase();
+    sa.mockRestore();
     expect(res.body['failed'] ?? []).toEqual([]);
     expect(res.status).toBe(200);
     expect(res.body['message']).toBe('All user data has been permanently deleted');

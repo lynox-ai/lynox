@@ -199,6 +199,12 @@ vi.mock('../core/engine.js', () => ({
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
     this.getMailStateDb = vi.fn().mockReturnValue(null);
     this.forgetProjectManifest = vi.fn();
+    // Read by the erasure's precondition; null/false = nothing live that would refuse it.
+    this.getMailContext = vi.fn().mockReturnValue(null);
+    this.getInboxRuntime = vi.fn().mockReturnValue(null);
+    this.isInboxRebootstrapping = vi.fn().mockReturnValue(false);
+    this.getBackupManager = vi.fn().mockReturnValue(null);
+    this.getBatchIndex = vi.fn().mockReturnValue({ forgetAll: vi.fn() });
     this.getMemory = vi.fn().mockReturnValue({
       eraseAll: vi.fn(),
       load: mockMemoryLoad,
@@ -1904,7 +1910,8 @@ describe('LynoxHTTPApi', () => {
       engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
       let openGate: () => void = () => undefined;
       const gate = new Promise<void>((r) => { openGate = r; });
-      engineRef['getMemory'] = (): unknown => ({ save: async () => { await gate; }, eraseAll: () => undefined });
+      let inFlatFile = false;
+      engineRef['getMemory'] = (): unknown => ({ save: async () => { inFlatFile = true; await gate; }, eraseAll: () => undefined });
       const internals = api as unknown as {
         erasureInProgress: boolean;
         runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
@@ -1912,8 +1919,11 @@ describe('LynoxHTTPApi', () => {
       const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
       try {
         const erasure = jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
-        for (let i = 0; i < 200 && !internals.erasureInProgress; i++) await new Promise<void>((r) => setTimeout(r, 5));
-        expect(internals.erasureInProgress, 'fixture: the erasure is in its flat-file step').toBe(true);
+        // Waited on the step itself, not on the flag: the flag goes up before the imports and
+        // the run drain, and a run registered then is one the drain stops, not one that outlasts.
+        for (let i = 0; i < 400 && !inFlatFile; i++) await new Promise<void>((r) => setTimeout(r, 5));
+        expect(inFlatFile, 'fixture: the erasure is in its flat-file step').toBe(true);
+        expect(internals.erasureInProgress).toBe(true);
 
         // A dead, stale run on the session: /run takes it over and awaits its drain.
         // The drain lets the erasure finish first, then frees the slot.
