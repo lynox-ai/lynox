@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -145,6 +145,38 @@ describe('BackupManager', () => {
 
   afterEach(() => {
     rmSync(lynoxDir, { recursive: true, force: true });
+  });
+
+  // The Art. 17 erasure refuses while `busy`: a backup or restore that is still running
+  // when the stores are emptied writes their old content back afterwards.
+  it('is busy while a backup or a restore runs, and not after either settles', async () => {
+    expect(manager.busy).toBe(false);
+    const backup = manager.createBackup();
+    expect(manager.busy).toBe(true);
+    const made = await backup;
+    expect(manager.busy).toBe(false);
+
+    const restore = manager.restoreBackup(made.path);
+    expect(manager.busy).toBe(true);
+    await restore;
+    expect(manager.busy).toBe(false);
+
+    await manager.restoreBackup(join(lynoxDir, 'no-such-backup'));
+    expect(manager.busy).toBe(false);
+  });
+
+  it('counts a restore by itself, not only through the safety backup it takes', async () => {
+    const made = await manager.createBackup();
+    // The safety backup is the restore's one await; stubbed so it does not count, the
+    // restore's own counter is all that can make `busy` true while it runs.
+    let seen: boolean | undefined;
+    vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+      seen = manager.busy;
+      return { success: false, path: '', manifest: made.manifest, duration_ms: 0, error: 'stub' };
+    });
+    await manager.restoreBackup(made.path);
+    expect(seen).toBe(true);
+    expect(manager.busy).toBe(false);
   });
 
   it('createBackup produces a valid backup', async () => {

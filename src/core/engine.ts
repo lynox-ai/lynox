@@ -2485,7 +2485,13 @@ export class Engine {
 
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
+  /** The mail-state.db handle, for the Art. 17 erasure; `null` when mail never initialised. */
+  getMailStateDb(): import('../integrations/mail/state.js').MailStateDb | null { return this._mailStateDb; }
+  /** Art. 17: drop the in-memory project manifest so shutdown does not write it back. */
+  forgetProjectManifest(): void { this.currentManifest = null; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
+  /** Whether a provider switch is rebuilding the inbox runtime right now (it re-classifies on the way). */
+  isInboxRebootstrapping(): boolean { return this._inboxRebootstrapInflight !== null; }
 
   /**
    * Slice B3 — the reusable **Agent→User escalation primitive**: open (or BUMP)

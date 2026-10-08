@@ -756,14 +756,16 @@ export class OAuthGmailProvider implements MailProvider {
     // until it falls out of the overlap. TTL-evicted on each tick to bound
     // memory on long-running watchers.
     const recentlyEmitted = new Map<string, number>();
+    let stopped = false;
 
     const tick = async (): Promise<void> => {
-      if (this.closed) return;
+      if (stopped || this.closed) return;
       const since = new Date(lastTick.getTime() - WATCH_SINCE_OVERLAP_MS);
       lastTick = new Date();
       try {
         const fresh = await this.list({ folder: opts.folder, since, limit: maxPerTick });
-        if (this.closed) return;
+        // A tick already listing when the account was removed must not hand its mail on.
+        if (stopped || this.closed) return;
 
         const now = Date.now();
         for (const [id, t] of recentlyEmitted) {
@@ -799,6 +801,7 @@ export class OAuthGmailProvider implements MailProvider {
 
     return {
       stop: async () => {
+        stopped = true;
         clearInterval(timer);
         this.watchers.delete(timer);
       },

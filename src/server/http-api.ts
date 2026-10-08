@@ -94,6 +94,7 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
+import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from '../core/data-dir-erase.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -1256,6 +1257,8 @@ const ERASED_DURING_REQUEST = 'All data was erased while this message was being 
  * answers 409 and erases nothing, and the caller tries again.
  */
 const ERASURE_RUN_DRAIN_MS = 5_000;
+/** Past this many unknown entries the erasure asks whether the data dir is set correctly. */
+const ERASURE_MANY_UNKNOWN = 20;
 
 // ── Server Class ─────────────────────────────────────────────────────────────
 
@@ -1281,6 +1284,77 @@ export class LynoxHTTPApi {
    * `/run` compares it with the value it saw when it fetched its Session.
    */
   private erasureInProgress = false;
+
+  /**
+   * The first reason the erasure has to wait, or `null`. Each reason is something that
+   * holds user data in this process and writes it back — or hands it on — on its own: a
+   * mail account (its watcher), a Google grant (refreshes write the vault), a sign-in in
+   * flight, the inbox classifier at work, a backup or restore. The way out is named in
+   * each answer: disconnect, or wait. A restart clears every in-process one of them.
+   */
+  /**
+   * API-profile OAuth callbacks between their token exchange and the vault write. Counted
+   * for the same reason as Google's pending grants: one that started before an erasure
+   * would store a live third-party token after it.
+   */
+  private profileGrantsPending = 0;
+
+  private erasureBlockedBy(engine: Engine, isBackfillRunning: () => boolean): { code: string; error: string } | null {
+    const mail = engine.getMailContext();
+    const google = [engine.getGoogleAuth(), mail?.googleAuth ?? null].filter((g): g is NonNullable<typeof g> => g !== null);
+    const restart = ' Restarting the instance also clears it.';
+    if (mail !== null && mail.registry.list().length > 0) {
+      return {
+        code: 'mail_accounts_registered',
+        error: 'Mail accounts are connected. Remove each one first (DELETE /api/mail/accounts/<id>), then erase.',
+      };
+    }
+    if (google.some(g => g.grantPending)) {
+      return {
+        code: 'google_grant_pending',
+        error: 'A Google sign-in is in progress. Wait until it finishes or expires (at most 5 minutes), then erase.' + restart,
+      };
+    }
+    if (google.some(g => g.holdsGrant)) {
+      return {
+        code: 'google_connected',
+        error: 'Google is connected. Disconnect it first (POST /api/google/revoke, then DELETE /api/mail/accounts/<id> for a connected Gmail account), then erase.'
+          + ' If it still answers this after the revoke, an older connection is held in memory: restarting the instance clears it.',
+      };
+    }
+    if (this.profileGrantsPending > 0) {
+      return {
+        code: 'api_grant_pending',
+        error: 'An API connection is completing its sign-in. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    const inbox = engine.getInboxRuntime();
+    if (engine.isInboxRebootstrapping() || (inbox !== null && inbox.queue.depth > 0)) {
+      return {
+        code: 'inbox_queue_busy',
+        error: 'The inbox is still classifying mail. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    if (inbox !== null && inbox.coldStartTracker.getSnapshot().active.length > 0) {
+      return {
+        code: 'inbox_cold_start_running',
+        error: 'The inbox is reading in a mail account. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    if (isBackfillRunning()) {
+      return {
+        code: 'inbox_backfill_running',
+        error: 'An inbox backfill is running. Wait until it has finished, then erase.' + restart,
+      };
+    }
+    if (engine.getBackupManager()?.busy === true) {
+      return {
+        code: 'backup_running',
+        error: 'A backup or restore is running. Wait until it has finished, then erase.',
+      };
+    }
+    return null;
+  }
   private erasureGeneration = 0;
 
   /**
@@ -8250,6 +8324,11 @@ export class LynoxHTTPApi {
     });
 
     this.addStatic('user', 'POST /api/google/auth', async (_req, res, _params, body) => {
+      // A grant started now would land after the erasure emptied the vault.
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        return;
+      }
       // A brokered tenant has no client pair to run a consent with, so there is
       // nothing this route can do for it — it connects through the control
       // plane instead. Refused on the CONJUNCTION (provisioned AND no pair):
@@ -8300,6 +8379,11 @@ export class LynoxHTTPApi {
       // Fallback: device flow (self-hosted / headless)
       try {
         const flow = await google.startDeviceFlow(scopes);
+        // Asked again after the await: the poll below is what writes the grant.
+        if (this.erasureInProgress) {
+          jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+          return;
+        }
         jsonResponse(res, 200, {
           verificationUrl: flow.verificationUrl,
           userCode: flow.userCode,
@@ -8314,6 +8398,13 @@ export class LynoxHTTPApi {
 
     // Google OAuth callback — handles redirect from Google after user consent
     this.addStatic('user', 'GET /api/google/callback', async (req, res) => {
+      // Before the state cookie is read: a consent the user finishes while the erasure
+      // runs must not exchange its code into the vault the erasure is emptying.
+      if (this.erasureInProgress) {
+        res.writeHead(409, { 'Content-Type': 'text/html' });
+        res.end('<html><body><h1>Not connected</h1><p>Your data is being erased right now. Connect Google again after it has finished.</p></body></html>');
+        return;
+      }
       const google = engine.getGoogleAuth();
       if (!google) {
         res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -8481,38 +8572,50 @@ export class LynoxHTTPApi {
         return;
       }
 
-      try {
-        // cpFetch, not googleFetch: this posts to the CONTROL PLANE, not to
-        // Google. Routing it through the Google host set would refuse the CP
-        // host and break the claim on every `guarded` tenant (§3.8).
-        const claimRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-instance-secret': httpSecret,
-          },
-          body: JSON.stringify({
-            instance_id: instanceId,
-            claim_nonce: claimNonce,
-          } satisfies OAuthClaimRequest),
-        }, google.hostPolicy);
-
-        if (!claimRes.ok) {
-          const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;
-          errorResponse(res, claimRes.status, (data['error'] as string) ?? 'Failed to claim tokens');
-          return;
-        }
-
-        // Shape owned by the wire contract — the control plane compiles the same
-        // declaration, so a field rename cannot land on one side alone.
-        const tokens = (await claimRes.json()) as OAuthClaimResponse;
-
-        await google.setTokens(tokens);
-        jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errorResponse(res, 500, msg);
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+        return;
       }
+      // Counted as a pending grant for as long as the claim is out: one that started
+      // before an erasure is otherwise invisible to it and writes its tokens afterwards.
+      await google.whileGranting(async () => {
+        try {
+          // cpFetch, not googleFetch: this posts to the CONTROL PLANE, not to
+          // Google. Routing it through the Google host set would refuse the CP
+          // host and break the claim on every `guarded` tenant (§3.8).
+          const claimRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-instance-secret': httpSecret,
+            },
+            body: JSON.stringify({
+              instance_id: instanceId,
+              claim_nonce: claimNonce,
+            } satisfies OAuthClaimRequest),
+          }, google.hostPolicy);
+
+          if (!claimRes.ok) {
+            const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;
+            errorResponse(res, claimRes.status, (data['error'] as string) ?? 'Failed to claim tokens');
+            return;
+          }
+
+          // Shape owned by the wire contract — the control plane compiles the same
+          // declaration, so a field rename cannot land on one side alone.
+          const tokens = (await claimRes.json()) as OAuthClaimResponse;
+
+          if (this.erasureInProgress) {
+            jsonResponse(res, 409, { error: 'An erasure is running; connect Google after it has finished', code: 'erasure_in_progress' });
+            return;
+          }
+          await google.setTokens(tokens);
+          jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errorResponse(res, 500, msg);
+        }
+      });
     });
 
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
@@ -8631,7 +8734,16 @@ export class LynoxHTTPApi {
     //                  "NO mechanism here" while the module two imports away
     //                  explained that PKCE is exactly that — the table
     //                  contradicted its own diff.
-    this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res) => {
+    // Counted as a pending grant for the whole request: it writes a third-party token to
+    // the vault and the profile under `apis/`, with an await between the two, so an erasure
+    // that starts anywhere in it would otherwise run past a write still to come.
+    const profileOAuthCallback: RouteHandler = async (req, res) => {
+      // A consent finished while the erasure runs must not store its tokens.
+      if (this.erasureInProgress) {
+        LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._clearProfileOAuthCookie());
+        sendOAuthHtml(res, 409, 'Your data is being erased right now. Connect this API again after it has finished. Nothing was stored.');
+        return;
+      }
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const providerError = url.searchParams.get('error');
       if (providerError !== null) {
@@ -8932,6 +9044,14 @@ export class LynoxHTTPApi {
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');
+    };
+    this.addStatic('user', `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, async (req, res, params, body) => {
+      this.profileGrantsPending++;
+      try {
+        await profileOAuthCallback(req, res, params, body);
+      } finally {
+        this.profileGrantsPending--;
+      }
     });
 
     // ── Knowledge Graph ──────────────────────────────────────────
@@ -9079,6 +9199,12 @@ export class LynoxHTTPApi {
           }
         }
 
+        // After the connection test, the last await: an account added while the erasure
+        // runs would store its password in the vault the erasure is emptying.
+        if (this.erasureInProgress) {
+          jsonResponse(res, 409, { error: 'An erasure is running; add the account after it has finished', code: 'erasure_in_progress' });
+          return;
+        }
         await ctx!.addAccount({ config: account, credentials: { user, pass } });
         jsonResponse(res, 200, { ok: true, account: ctx!.listAccounts().find(a => a.id === id) });
       } catch (err: unknown) {
@@ -9665,6 +9791,11 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/backups', async (_req, res) => {
       const bm = engine.getBackupManager();
       if (!requireService(res, bm, 'Backup manager')) return;
+      // A backup taken while an erasure runs copies stores it is about to empty.
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; back up after it has finished', code: 'erasure_in_progress' });
+        return;
+      }
       try {
         const result = await bm.createBackup();
         jsonResponse(res, 200, result);
@@ -9679,6 +9810,11 @@ export class LynoxHTTPApi {
       if (!requireService(res, bm, 'Backup manager')) return;
       const backupPath = bm.getBackupPath(params['id']!);
       if (!backupPath) { errorResponse(res, 404, 'Backup not found'); return; }
+      // A restore while an erasure runs puts the erased data back, and its restart keeps it.
+      if (this.erasureInProgress) {
+        jsonResponse(res, 409, { error: 'An erasure is running; restore after it has finished', code: 'erasure_in_progress' });
+        return;
+      }
       try {
         const result = await bm.restoreBackup(backupPath);
         jsonResponse(res, result.success ? 200 : 500, result);
@@ -10046,7 +10182,13 @@ export class LynoxHTTPApi {
       // One erasure at a time: the flag is a boolean, so a second one's `finally`
       // would clear it while the first is still wiping.
       if (this.erasureInProgress) {
-        errorResponse(res, 409, 'An erasure is already running');
+        jsonResponse(res, 409, { error: 'An erasure is already running', code: 'erasure_in_progress' });
+        return;
+      }
+      // Checked before the flag, so a malformed list is a plain 400 and changes nothing.
+      const acknowledged = parseAcknowledged(b?.['remove_unknown']);
+      if (acknowledged === null) {
+        errorResponse(res, 400, '"remove_unknown" must be the list of entries this route reported, echoed unchanged');
         return;
       }
       this.erasureInProgress = true;
@@ -10056,13 +10198,69 @@ export class LynoxHTTPApi {
         const dataDir = getLynoxDir();
         const { AgentMemoryDb } = await import('../core/agent-memory-db.js');
         const SqliteDatabase = (await import('better-sqlite3')).default;
+        // Loaded lazily like every other inbox route, so a boot without the inbox never loads it.
+        const { isBackfillRunning } = await import('../integrations/inbox/api.js');
         for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
           await new Promise<void>((r) => setTimeout(r, 25));
         }
         if (this.runningSessions.size > 0) {
-          errorResponse(res, 409, 'A running chat did not stop, so nothing was erased; try again');
+          jsonResponse(res, 409, { error: 'A running chat did not stop, so nothing was erased; try again', code: 'runs_did_not_stop' });
+          return;
+        }
+
+        // What would write the stores again AFTER they are emptied, or carry mail content to a
+        // model, refuses the erasure instead of being stopped by it: stopping a mail watcher or
+        // draining the classifier queue from here either classified the queue (the content
+        // goes to the model after the request to erase it) or left the inbox dead until a
+        // restart. Only synchronous reads below, and nothing deleted yet — each answer is a
+        // 409 inside this `try`, so `finally` lowers the flag.
+        const busy = this.erasureBlockedBy(engine, isBackfillRunning);
+        if (busy !== null) {
+          jsonResponse(res, 409, { ...busy, error: `${busy.error} Nothing was erased.` });
+          return;
+        }
+
+        // The data dir is scanned BEFORE anything is deleted. It is configurable and can be
+        // a broad directory (`--data-dir .`, `LYNOX_DATA_DIR=$HOME`); an entry the inventory
+        // does not know stops the erasure here, with nothing touched, instead of being
+        // removed or silently left under the completeness sentence. The caller may name the
+        // reported entries back — with the identity reported, so what is removed is what
+        // they were shown.
+        let scan: ReturnType<typeof scanDataDir>;
+        try {
+          scan = scanDataDir(dataDir, { acknowledged: new Set(acknowledged.map(a => a.name)) });
+        } catch (err) {
+          process.stderr.write(`⚠ /api/data: data dir scan failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          jsonResponse(res, 500, { deleted: false, failed: ['data_dir#scan'], error: 'Erasure incomplete — the data directory could not be read, so nothing was erased' });
+          return;
+        }
+        // A link or a mount the erasure would have to follow to empty: its content is outside
+        // the data dir, and removing only the link would answer "all deleted" over it.
+        if (scan.linked.length > 0) {
+          jsonResponse(res, 409, {
+            code: 'linked_entries',
+            linked: scan.linked,
+            error: 'Some entries in the data directory cannot be erased safely, so nothing was erased. '
+              + 'Each one in "linked" says why and what to do about it.',
+          });
+          return;
+        }
+        if (!sameUnknownSet(scan.unknown, acknowledged)) {
+          const many = scan.unknown.length > ERASURE_MANY_UNKNOWN;
+          jsonResponse(res, 409, {
+            code: 'unknown_entries',
+            unknown: scan.unknown,
+            // Named so the agreement covers them: in a data dir that is also used for other
+            // things, a `workspace/` or `backups/` of the user's own is removed under these names.
+            also_removed: scan.removedWithoutAsking,
+            also_emptied: scan.emptiedInPlace,
+            error: 'The data directory holds entries this instance does not know, so nothing was erased. '
+              + 'Move them out of the data directory, or erase again with "remove_unknown" set to the "unknown" list of this answer. '
+              + 'The erasure also removes the entries listed in "also_removed" and empties those in "also_emptied", which this instance keeps its data in.'
+              + (many ? ' That is a lot of entries — check that the data directory is set correctly before removing anything.' : ''),
+          });
           return;
         }
 
@@ -10375,6 +10573,17 @@ export class LynoxHTTPApi {
         // some items failed: the items that WERE dropped are in its freelist and WAL,
         // and what the VACUUM copies is just the items left.
         // history.db carries the threads too (`ThreadStore` shares the connection).
+        // mail-state.db and push-subscriptions.db are held open for the life of the
+        // process, so they are emptied through their handles, like the stores above;
+        // removing the files would leave the rows readable in-process.
+        const mailState = reach('mail_state', engine.getMailStateDb(), 'mail-state.db');
+        if (mailState) attempt('mail_state', () => { mailState.deleteAllData(); });
+        const push = reach('push_subscriptions', this.pushChannel, 'push-subscriptions.db');
+        if (push) attempt('push_subscriptions', () => { push.eraseSubscriptions(); });
+        // Every flat-file scope, not only the default one, and the cache in front of them.
+        if (memory) attempt('memory#tree', () => { memory.eraseAll(); });
+        engine.forgetProjectManifest();
+
         const scrub = (key: string, fn: () => void): void => {
           if (failed.some(k => k === key || k.startsWith(`${key}#`))) {
             note(`${key}#scrub`, new Error('not run: the wipe of this store failed'));
@@ -10389,6 +10598,8 @@ export class LynoxHTTPApi {
         if (engineDb) scrub('engine_db', () => { engineDb.scrubFreedPages(); });
         if (ds) scrub('datastore', () => { ds.scrubFreedPages(); });
         if (secretStore) scrub('secrets', () => { secretStore.scrubFreedPages(); });
+        if (mailState) scrub('mail_state', () => { mailState.scrubFreedPages(); });
+        if (push) scrub('push_subscriptions', () => { push.scrubFreedPages(); });
         // The vault file is counted after its deletes AND after its scrub: whatever
         // wrote a row between the list and here, or whatever the list missed, leaves
         // the answer short of "all". After the scrub on purpose: `scrub` skips any
@@ -10405,6 +10616,31 @@ export class LynoxHTTPApi {
         // attempts on purpose: a failed reload leaves no customer data behind, so
         // reporting it as `config` would tell the caller that a store still holds
         // their data when the file on disk is already `{}`.
+        // The files the erasure owes, after every store is emptied and scrubbed; `backups`
+        // last inside. The acknowledged unknown entries are re-checked against what the
+        // caller was shown, here, in the synchronous stretch.
+        const rescan = (() => { try { return scanDataDir(dataDir, { walk: false }); } catch { return null; } })();
+        const ackStillValid = rescan !== null && sameUnknownSet(rescan.unknown, acknowledged);
+        if (!ackStillValid && acknowledged.length > 0) note('data_dir#unknown_changed', new Error('the unknown entries changed after they were reported; none was removed'));
+        const files = removeOwedEntries(scan, ackStillValid ? acknowledged.map(a => a.name) : []);
+        for (const f of files.failures) note(`data_dir:${f.name}`, new Error(f.reason));
+        // What the engine still holds in memory of the files just removed: the artifact
+        // index, the API profiles (listed by the API and sent to the model), the batch index.
+        engine.getArtifactStore()?.forgetAll();
+        engine.getApiStore()?.forgetAll();
+        engine.getBatchIndex().forgetAll();
+        // A `backup_dir` outside the data dir holds full copies too. BOTH the directory the
+        // backup manager writes to — fixed when it was built — and the configured one, which
+        // a config change since then may have moved; read before the config reset below,
+        // which erases the configured pointer.
+        const configured = engine.getUserConfig().backup_dir;
+        const backupDirs = new Set([engine.getBackupManager()?.getBackupDir(), configured]
+          .filter((d): d is string => typeof d === 'string' && d !== ''));
+        for (const backupDir of backupDirs) {
+          const outside = removeBackupsOutside(backupDir, dataDir);
+          for (const f of outside.failures) note(`backups:${f.name}`, new Error(f.reason));
+        }
+
         await attemptAsync('config', async () => {
           const { saveUserConfig } = await import('../core/config.js');
           saveUserConfig({});

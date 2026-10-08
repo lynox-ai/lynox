@@ -39,6 +39,15 @@ export class BatchIndex {
     return { ...this.data };
   }
 
+  /**
+   * Forget every entry in memory. For the Art. 17 erasure, which removes the file: the next
+   * `save` writes the whole map back, so a cached map would restore every erased entry.
+   */
+  forgetAll(): void {
+    this.data = {};
+    this.loaded = true;
+  }
+
   async save(id: string, entry: BatchEntry): Promise<void> {
     await this.load();
     this.data[id] = entry;

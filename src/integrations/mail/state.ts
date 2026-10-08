@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { getLynoxDir } from '../../core/config.js';
 import { ensureDirSync } from '../../core/atomic-write.js';
+import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
 import type { MailAccountConfig, MailAccountType, MailAuthType, MailAddress, MailEnvelope, MailPresetSlug } from './provider.js';
 import { isValidAccountType, isValidAuthType } from './provider.js';
 
@@ -856,7 +857,30 @@ export class MailStateDb {
     // tables (mail_accounts, mail_followups) declare no FK constraints, so
     // enabling the pragma is a no-op for them.
     this.db.pragma('foreign_keys = ON');
+    zeroDeletedContent(this.db);
     this._migrate();
+  }
+
+  /**
+   * GDPR Art. 17: delete every row in mail-state.db (accounts, inbox items and bodies,
+   * drafts, the sent log, follow-ups, …), keeping only `schema_version` so the file is
+   * not re-migrated. Tables come from `sqlite_master`, so a table added later is wiped
+   * without anyone remembering this method; `defer_foreign_keys` makes the order of the
+   * deletes irrelevant to the CASCADE chains.
+   */
+  deleteAllData(): void {
+    const tables = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name <> 'schema_version' AND name NOT LIKE 'sqlite_%'")
+      .all() as Array<{ name: string }>;
+    this.db.transaction(() => {
+      this.db.pragma('defer_foreign_keys = ON');
+      for (const { name } of tables) this.db.prepare(`DELETE FROM "${name}"`).run();
+    })();
+  }
+
+  /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */
+  scrubFreedPages(): void {
+    scrubFreedPages(this.db);
   }
 
   /** True if (accountId, messageId) is already in the table. */

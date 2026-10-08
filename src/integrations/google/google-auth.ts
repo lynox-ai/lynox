@@ -824,6 +824,41 @@ export class GoogleAuth {
   }
 
   /**
+   * Grants being minted right now: a code exchange, a device-flow poll or a managed claim
+   * that has not returned. Each ends in a vault write — so the Art. 17 erasure refuses
+   * while one is pending, instead of emptying the vault and having a sign-in that started
+   * before it write a fresh grant afterwards.
+   *
+   * STATIC, counted across every instance: `reloadGoogle()` replaces the engine's instance,
+   * and the one it replaced keeps polling and still writes the shared vault when its grant
+   * arrives. A per-instance count would lose that grant the moment the instance is swapped.
+   */
+  private static _pendingGrants = 0;
+
+  get grantPending(): boolean { return GoogleAuth._pendingGrants > 0; }
+
+  /**
+   * Whether this instance holds a user grant — the thing a refresh writes back to the vault.
+   * Not `isAuthenticated()`: that is also true for a service account, which holds no user
+   * grant, writes nothing to the vault, and cannot be disconnected.
+   */
+  get holdsGrant(): boolean { return this.tokenData !== null; }
+
+  /** Counts `run` as a pending grant — also for a grant minted elsewhere and handed to `setTokens`. */
+  async whileGranting<T>(run: () => Promise<T>): Promise<T> {
+    return this._countGrant(run);
+  }
+
+  private async _countGrant<T>(run: () => Promise<T>): Promise<T> {
+    GoogleAuth._pendingGrants++;
+    try {
+      return await run();
+    } finally {
+      GoogleAuth._pendingGrants--;
+    }
+  }
+
+  /**
    * Accept tokens this process just minted itself, from any of the three OAuth
    * entry points.
    *
@@ -894,7 +929,7 @@ export class GoogleAuth {
 
     const authUrl = `${AUTH_URL}?${params}`;
 
-    const waitForCode = async (): Promise<void> => {
+    const waitForCode = (): Promise<void> => this._countGrant(async () => {
       try {
         const code = await codePromise;
         // Exchange code for tokens
@@ -920,7 +955,7 @@ export class GoogleAuth {
       } finally {
         close();
       }
-    };
+    });
 
     return { authUrl, waitForCode };
   }
@@ -953,7 +988,11 @@ export class GoogleAuth {
   /**
    * Exchange an authorization code from redirect-based OAuth flow.
    */
-  async exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
+  exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
+    return this._countGrant(() => this._exchangeRedirectCode(code, redirectUri));
+  }
+
+  private async _exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
     const { clientId, clientSecret } = this.requireOwnPair('exchangeRedirectCode');
     const response = await googleFetch(TOKEN_URL, {
       method: 'POST',
@@ -1010,7 +1049,7 @@ export class GoogleAuth {
 
     const pollInterval = Math.max((data.interval ?? 5) * 1000, DEVICE_POLL_INTERVAL_MS);
 
-    const waitForAuth = async (): Promise<void> => {
+    const waitForAuth = (): Promise<void> => this._countGrant(async () => {
       const deadline = Date.now() + DEVICE_TIMEOUT_MS;
 
       while (Date.now() < deadline) {
@@ -1043,7 +1082,7 @@ export class GoogleAuth {
       }
 
       throw new Error('Device auth timed out. Please try again.');
-    };
+    });
 
     return {
       verificationUrl: data.verification_url,

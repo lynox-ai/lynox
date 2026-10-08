@@ -901,6 +901,8 @@ export class ImapSmtpProvider implements MailProvider {
         const since = new Date(lastPolledAt.getTime() - 60_000); // 1-minute overlap to ride IMAP date granularity
         lastPolledAt = new Date();
         const envelopes = await this.list({ folder, since, limit: maxPerTick });
+        // A tick already listing when the account was removed must not hand its mail on.
+        if (stopped || this.closed) return;
         const event: MailWatchEvent = envelopes.length === 0 ? { type: 'ok' } : { type: 'new', envelopes };
         await handler(event);
       } catch (err) {

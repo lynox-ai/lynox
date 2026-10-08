@@ -774,6 +774,99 @@ describe('GoogleAuth', () => {
     });
   });
 
+  // The Art. 17 erasure refuses while `grantPending`: a grant that is still being minted
+  // when the vault is emptied would write itself back afterwards.
+  describe('a grant being minted counts as pending until it settles, either way', () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    let auth: GoogleAuth;
+    beforeEach(() => {
+      const store = new Map<string, string>();
+      const vault = {
+        get: (k: string) => store.get(k) ?? null,
+        set: (k: string, v: string) => { store.set(k, v); },
+        delete: (k: string) => store.delete(k),
+      };
+      auth = new GoogleAuth({
+        clientId: 'pending-client',
+        clientSecret: 's',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+    });
+
+    const deferred = (): { promise: Promise<Response>; resolve: (r: Response) => void } => {
+      let resolve!: (r: Response) => void;
+      const promise = new Promise<Response>((r) => { resolve = r; });
+      return { promise, resolve };
+    };
+    const tokenResponse = (): Response => new Response(
+      JSON.stringify({ access_token: 'pending-token-aaaaaaaa', refresh_token: 'pending-refresh-bbbbbbbb', expires_in: 3600, scope: 'https://www.googleapis.com/auth/gmail.readonly' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+
+    it('exchangeRedirectCode', async () => {
+      const d = deferred();
+      mockFetch.mockReturnValueOnce(d.promise);
+      const run = auth.exchangeRedirectCode('code', 'https://example.test/cb');
+      expect(auth.grantPending).toBe(true);
+      d.resolve(tokenResponse());
+      await run;
+      expect(auth.grantPending).toBe(false);
+
+      mockFetch.mockResolvedValueOnce(new Response('denied', { status: 400 }));
+      await expect(auth.exchangeRedirectCode('code', 'https://example.test/cb')).rejects.toThrow(/Token exchange failed/);
+      expect(auth.grantPending).toBe(false);
+    });
+
+    it('startLocalAuth, from the wait on', async () => {
+      const { authUrl, waitForCode } = await auth.startLocalAuth();
+      expect(auth.grantPending).toBe(false);
+      const d = deferred();
+      mockFetch.mockReturnValueOnce(d.promise);
+      const run = waitForCode();
+      expect(auth.grantPending).toBe(true);
+      const handler = (mockServerInstance as Record<string, unknown>)['_handler'] as (req: unknown, res: unknown) => void;
+      handler({ url: `/?code=c&state=${new URL(authUrl).searchParams.get('state')}` }, { writeHead: vi.fn(), end: vi.fn() });
+      d.resolve(tokenResponse());
+      await run;
+      expect(auth.grantPending).toBe(false);
+    });
+
+    it('across instances: a grant on an instance a reload replaced still counts', async () => {
+      const replaced = auth;
+      const current = new GoogleAuth({ clientId: 'pending-client', clientSecret: 's' });
+      const d = deferred();
+      mockFetch.mockReturnValueOnce(d.promise);
+      const run = replaced.exchangeRedirectCode('code', 'https://example.test/cb');
+      expect(current.grantPending).toBe(true);
+      d.resolve(tokenResponse());
+      await run;
+      expect(current.grantPending).toBe(false);
+    });
+
+    it('a service account is authenticated but holds no user grant', () => {
+      const sa = new GoogleAuth({ serviceAccountKeyPath: '/tmp/key.json' });
+      expect(sa.isAuthenticated()).toBe(true);
+      expect(sa.holdsGrant).toBe(false);
+    });
+
+    it('startDeviceFlow, for the whole poll', async () => {
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({ device_code: 'dc', user_code: 'uc', verification_url: 'https://example.test/d', expires_in: 300, interval: 1 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const { waitForAuth } = await auth.startDeviceFlow();
+      expect(auth.grantPending).toBe(false);
+      mockFetch.mockResolvedValueOnce(tokenResponse());
+      vi.useFakeTimers();
+      const run = waitForAuth();
+      expect(auth.grantPending).toBe(true);
+      await vi.advanceTimersByTimeAsync(6_000);
+      await run;
+      expect(auth.grantPending).toBe(false);
+    });
+  });
+
   describe('getAccountInfo', () => {
     it('returns empty info when not authenticated', () => {
       const info = auth.getAccountInfo();
