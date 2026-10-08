@@ -224,13 +224,22 @@ export function prepareWorkflowGrant(planned: PlannedPipeline, req: WorkflowGran
   return { ok: true, contract: built.contract, boundParams: bound.params, afterUntrusted, checksum, binding, tuples };
 }
 
-/** A name typed into the dialog, as stored: trimmed, control, line-separator, bidi and
- *  zero-width characters out (a displayed name must read as what it is), capped. */
+/**
+ * A name typed into the dialog, as stored: what a person can read and nothing that hides.
+ * Control and line-separator characters become spaces; what stays is letters (with their
+ * combining marks, which some scripts need), digits, punctuation, symbols and spaces. Every
+ * other character goes: format characters (bidi, zero-width, the tag block), private use,
+ * unassigned. Fillers that render as nothing although Unicode files them under letters or
+ * marks (the Hangul fillers, the grapheme joiner, variation selectors) go too, so a displayed
+ * name reads as what it is. Trimmed, collapsed, capped.
+ */
 export function grantName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const cleaned = raw
-    .replace(/[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .normalize('NFC')
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/[\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '')
+    .replace(/[^\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]/gu, '')
     .replace(/\s+/g, ' ').trim().slice(0, 120);
   return cleaned === '' ? undefined : cleaned;
 }

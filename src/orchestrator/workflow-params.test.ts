@@ -42,10 +42,12 @@ describe('bindWorkflowParameters', () => {
     expect(bindWorkflowParameters([param({ name: 'n', type: 'number' })], { n: '-3.14' })).toEqual({ ok: true, params: { n: -3.14 } });
     expect(bindWorkflowParameters([param({ name: 'n', type: 'number' })], { n: 7 })).toEqual({ ok: true, params: { n: 7 } });
     // Number() would silently coerce these — bindWorkflowParameters must reject them.
-    for (const bad of ['not-a-number', '', '   ', '0x1f', '0b101']) {
+    for (const bad of ['not-a-number', '', '   ', '0x1f', '0b101', '1e999', '-1e999']) {
       const r = bindWorkflowParameters([param({ name: 'n', type: 'number' })], { n: bad });
       expect(r.ok, `"${bad}" should be rejected`).toBe(false);
     }
+    // An exponent is fine as long as the number stays finite.
+    expect(bindWorkflowParameters([param({ name: 'n', type: 'number' })], { n: '1e3' })).toEqual({ ok: true, params: { n: 1000 } });
   });
 
   it('requires an ISO date and rejects lax/junk dates', () => {

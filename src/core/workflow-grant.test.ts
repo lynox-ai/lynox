@@ -296,6 +296,29 @@ describe('accepting a grant', () => {
     expect(grantName('   ')).toBeUndefined();
   });
 
+  it('keeps only what reads as text: no tag characters, invisible fillers or variation selectors', () => {
+    const tag = (c: string): string => String.fromCodePoint(0xe0000 + c.charCodeAt(0));
+    expect(grantName(`Ada${tag('X')}${tag('Y')} L.`), 'tag characters').toBe('Ada L.');
+    expect(grantName('A\u3164da \u115fL\u1160.\uffa0'), 'Hangul fillers').toBe('Ada L.');
+    expect(grantName('A\ufe0fda\u034f L.\u{e0100}'), 'variation selectors, grapheme joiner').toBe('Ada L.');
+    expect(grantName('A\ue000da L.'), 'private use').toBe('Ada L.');
+  });
+
+  it('keeps letters with their marks, in any script, and composes them', () => {
+    expect(grantName('Mu\u0308ller'), 'a decomposed umlaut, composed').toBe('Müller');
+    expect(grantName('दीपक शर्मा'), 'Devanagari vowel signs are marks').toBe('दीपक शर्मा');
+    expect(grantName('Ada & Co. ®')).toBe('Ada & Co. ®');
+  });
+
+  it('refuses a number default that is not finite, already in the preview', () => {
+    const p = prepareWorkflowGrant(
+      planned({ parameters: [{ name: 'month', description: '', type: 'number', source: 'user_input', defaultValue: '1e999' }] }),
+      { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false },
+      H,
+    );
+    expect(p).toMatchObject({ ok: false });
+  });
+
   it('deletes the schedule again when the grant cannot be written', () => {
     const p = prepareWorkflowGrant(planned(), { ...ENTRY, params: { month: '2026-09' }, cron: CRON, afterUntrusted: false }, H);
     if (!p.ok) throw new Error(p.error);
