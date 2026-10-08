@@ -248,6 +248,9 @@ describe('wrapUntrustedData boundary escape prevention', () => {
   it('neutralizes an entity-encoded and a case-changed opener, and one split by a format character', () => {
     expect(wrapUntrustedData('a &lt;untrusted_data source="s"> b', 't')).toContain('a &amp;lt;untrusted_data source="s"> b');
     expect(wrapUntrustedData('a <UNTRUSTED_DATA> b', 't')).toContain('a &lt;UNTRUSTED_DATA> b');
+    // Whitespace or a control character after the delimiter, as the closer allows.
+    expect(wrapUntrustedData('a < untrusted_data> b', 't')).toContain('a &lt; untrusted_data> b');
+    expect(wrapUntrustedData('a <\x01untrusted_data> b', 't')).toContain('a &lt;\x01untrusted_data> b');
     const split = wrapUntrustedData('a <​untrusted_data> b', 't');
     expect(openers(split.replace(/​/g, ''))).toBe(1);
   });
