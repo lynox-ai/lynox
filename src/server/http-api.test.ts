@@ -10777,9 +10777,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       const deleteThread = vi.fn();
       await swapEngine({
         getThreadStore: () => ({ listThreads, deleteAllThreads, deleteThread, getMessages: () => [] }),
-        // The mock Engine class defines no `getDataStore`/`getEngineDb` at all, so
-        // every erasure test has to hand them over — the route calls the accessor
-        // before it can guard on the result.
+        // Redundant since the mock Engine gained both accessors (see its
+        // constructor); kept explicit here because this case is about what the
+        // thread store is asked, and pinning the rest to null keeps that the only
+        // moving part.
         getEngineDb: () => null,
         getDataStore: () => null,
       }, async () => {
@@ -11140,9 +11141,14 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
-        const body = await res.json() as { failed: string[] };
-        expect(body.failed).toContain('config_reload');
-        expect(body.failed, 'the config FILE was reset — saying otherwise is a false alarm').not.toContain('config');
+        const body = await res.json() as { failed?: string[]; degraded: string[]; deleted: boolean };
+        // `degraded`, not `failed`, and that is the whole point of the case: the
+        // file on disk IS `{}` and both GDPR routes read config from disk, so no
+        // customer config is readable. Putting it in `failed` would answer "some
+        // stores may still hold data" about a store that holds none.
+        expect(body.degraded).toContain('config_reload');
+        expect(body.failed ?? [], 'a post-erasure step is not a store that still holds data').toEqual([]);
+        expect(body.deleted, 'the data IS gone — saying otherwise is the same false alarm').toBe(true);
       });
     });
 
@@ -11166,11 +11172,15 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
-        const body = await res.json() as { failed: string[] };
+        const body = await res.json() as { failed: string[]; degraded?: string[] };
         // Named per ITEM: one locked collection used to abandon the rest of the
         // loop and report only the store.
         expect(body.failed).toContain('datastore:boom');
         expect(rebuildSchema, 'the repair must run on the failing path, not only the happy one').toHaveBeenCalledTimes(1);
+        // The repair itself is not a wipe: when IT fails the drops have already
+        // happened, so it belongs in `degraded`. Here it succeeds, so neither list
+        // carries it.
+        expect(body.degraded ?? []).toEqual([]);
       });
     });
 

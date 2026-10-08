@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import BetterSqlite3 from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -350,20 +351,35 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     expect(e.getKnowledgeStore()!.getBlock('profile')?.content ?? '').not.toContain(MARK.memory_block);
     expect(e.getCRM()!.listContacts(undefined, 500)).toEqual([]);
     expect(e.getCRM()!.getAllDeals(undefined, 500)).toEqual([]);
-    // Not "no collections": the erasure re-creates the CRM's three EMPTY tables on
-    // purpose (that is what `rebuildSchema` is for). The property is that nothing
-    // holds a record — a collection with a schema and no rows discloses nothing.
+    // ⚠ Read from the FILE, with our own connection, and this is not belt-and-
+    // braces — it is the one assertion here that does not go through the same store
+    // method the export route goes through.
     //
-    // Counted by READING each collection, not from `recordCount`: that field is the
-    // denormalised `ds_collections.record_count` column, so it is a correlate of
-    // "holds a record" rather than the property, and a stale counter would make
-    // this line pass over a populated table.
-    const ds2 = e.getDataStore()!;
-    const populated = ds2.listCollections()
-      .filter(c => ds2.queryRecords({ collection: c.name, limit: 1 }).rows.length > 0)
-      .map(c => c.name);
-    expect(populated, 'a collection still holds rows').toEqual([]);
-    expect(e.getDataStore()!.listCollections().map(c => c.name)).not.toContain('marked_rows');
+    // What the `listCollections()` version missed, measured end to end by a
+    // refuter: an erasure that removes a collection's `ds_collections` META row and
+    // leaves its `ds_<name>` data table on disk. Every check pointed the reassuring
+    // way — `survivors` was empty (the dump no longer lists the collection),
+    // "no collection holds rows" was empty (it iterates the same listing), and
+    // `not.toContain('marked_rows')` was *satisfied by the defect*. The marker row
+    // was still there after a 200 "All user data has been permanently deleted".
+    //
+    // `datastore.db` is also its own file, so `engineDb.deleteAllData()`'s
+    // `sqlite_master` sweep — the thing that makes the DK coverage transitive — does
+    // not reach it at all.
+    const dsDb = new BetterSqlite3(join(dir, 'datastore.db'), { readonly: true });
+    try {
+      const tables = (dsDb.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ds_%' AND name != 'ds_collections'",
+      ).all() as Array<{ name: string }>).map(t => t.name);
+      const populated = tables.filter(t =>
+        (dsDb.prepare(`SELECT COUNT(*) c FROM "${t}"`).get() as { c: number }).c > 0).map(t => t.name);
+      expect(populated, 'a DataStore table still holds rows on disk').toEqual([]);
+      // And the fixture's own table is gone as a TABLE, not merely absent from the
+      // catalogue — the distinction the old assertion could not make.
+      expect(tables, 'the seeded data table survived as a table').not.toContain('ds_marked_rows');
+    } finally {
+      dsDb.close();
+    }
     expect(e.getSecretStore()!.listNames()).not.toContain(MARK.secret_name);
 
     // ⚠ The discriminator, and without it this test's central assertion has a
@@ -376,6 +392,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // re-exporting is what tells the two apart — a section that is still wired
     // shows the new datum, a silently-quiet one does not.
     const RESEED = 'ZZMARKER-after-erasure-7f3a';
+    // `datastore` is in the re-seed list below, and its absence was the gap: the
+    // comment above names it as one of the three sections that substitute an empty
+    // block on a caught error, and then the loop did not check it.
     const ts2 = e.getThreadStore()!;
     ts2.createThread('t-reseed', { title: RESEED });
     ts2.appendMessages('t-reseed', [{ role: 'user', content: 'reseeded' }], 0, { message_count: 1 });
@@ -384,11 +403,14 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     e.getCRM()!.upsertContact({ name: RESEED, email: 'reseed@example.invalid' });
     e.getSecretStore()!.set('ZZMARKER_RESEED_7F3A', 'v');
     e.getKnowledgeLayer()!.getDb().createEntity({ canonicalName: RESEED, entityType: 'person', scopeType: 'global', scopeId: '' });
+    const dsAfter = e.getDataStore()!;
+    dsAfter.createCollection({ name: 'reseeded_rows', scope: { type: 'global', id: '' }, columns: [{ name: 'note', type: 'string' }] });
+    dsAfter.insertRecords({ collection: 'reseeded_rows', records: [{ note: RESEED }] });
 
     const reRes = await get('/api/export');
     expect(reRes.status).toBe(200);
     const reText = await reRes.text();
-    for (const section of ['threads', 'memory', 'durable_knowledge', 'contacts', 'knowledge_graph'] as const) {
+    for (const section of ['threads', 'memory', 'durable_knowledge', 'contacts', 'knowledge_graph', 'datastore'] as const) {
       expect(
         (JSON.stringify((JSON.parse(reText) as Record<string, unknown>)[section])).includes(RESEED),
         `${section} stopped being read — an empty section is not an emptied store`,

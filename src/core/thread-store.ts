@@ -144,6 +144,15 @@ export class ThreadStore {
    *    INSERTED mid-walk may or may not appear — unavoidable without a snapshot,
    *    and not a loss.
    *
+   * ⚠ One caveat on that last guarantee, because it was stated unconditionally and
+   * is not: SQLite permits NULL in a non-INTEGER `PRIMARY KEY`, and two NULL ids
+   * can coexist. `ORDER BY id ASC` puts them first, and `WHERE id > NULL` matches
+   * nothing, so a page ending on a NULL id would break the walk and silently drop
+   * every remaining thread. Not reachable from this codebase — `createThread` takes
+   * a `string` and is the only insert path — but it IS reachable through a foreign
+   * or restored `history.db`, so the property belongs to our writes rather than to
+   * the primary key.
+   *
    * Pass the previous page's last `id` as `after`; omit it for the first page.
    */
   listThreadsForExport(opts: { after?: string | undefined; limit: number }): ThreadRecord[] {

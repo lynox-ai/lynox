@@ -157,7 +157,22 @@ export class CRM {
    */
   rebuildSchema(): void {
     this._initialized = false;
-    this.ensureSchema();
+    try {
+      this.ensureSchema();
+    } finally {
+      // In a `finally`, and the trade it makes is deliberate. `ensureSchema` sets
+      // the flag as its LAST statement, so anything before it — `listCollections`
+      // on a locked database, a `createCollection` that hits SQLITE_BUSY — used to
+      // leave the latch OPEN for the life of the process, and `roles.ts` admits
+      // `contacts_search` to the read-only tool surface on the strength of that
+      // latch being closed. Closing it here means a failed rebuild leaves the memo
+      // claiming collections that are missing, so CRM reads throw until a restart —
+      // the bug this method exists to fix, back on its own failure path. That is
+      // the lesser harm: the route reports the failure (`degraded: ['crm_schema']`)
+      // and nobody is told the data survived, whereas a read-only agent running
+      // `CREATE TABLE` is a property nothing else enforces.
+      this._initialized = true;
+    }
   }
 
   /** Ensure CRM tables exist. Idempotent — safe to call multiple times. */

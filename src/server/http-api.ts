@@ -9470,7 +9470,10 @@ export class LynoxHTTPApi {
           if (threads.length >= THREAD_CAP) { threadsTruncated = true; break; }
         }
         if (threadsTruncated) {
-          process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_CAP}-row cap — dump is incomplete\n`);
+          // `may be`, like the payload key: at exactly `THREAD_CAP` rows the dump is
+          // complete and the flag over-reports, which is the safe direction but not
+          // a licence to assert it in a log.
+          process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_CAP}-row cap — dump may be incomplete\n`);
         }
         const threadsWithMessages = threads.map(t => ({
           ...t,
@@ -9662,21 +9665,41 @@ export class LynoxHTTPApi {
       // "All user data has been permanently deleted" with HTTP 200 — the one case
       // in which that sentence is a lie.
       //
-      // Store keys only, never the error text: a SQLite message carries file paths,
-      // and this body goes to a browser. The stderr line is masked for the same
-      // reason the client-bound strings in this file are — it is the one place here
-      // where an unmasked store message would land in a log.
+      // TWO lists, because they mean different things to the person reading the
+      // answer. `failed` is a wipe that did not complete — their data may still be
+      // there. `degraded` is a step AFTER a wipe that did complete: the data is
+      // gone and something else broke. Reporting the second kind as the first tells
+      // a tenant to go looking for data that no longer exists, which is the exact
+      // mislabel that splitting the config reset from the config reload was meant
+      // to prevent — and `crm_schema` reproduced it two statements later.
       const failed: string[] = [];
-      const note = (key: string, err: unknown): void => {
-        failed.push(key);
+      const degraded: string[] = [];
+      // Store keys only in the body, never the error text: a SQLite message carries
+      // file paths, and this body goes to a browser.
+      //
+      // ⚠ The stderr line masks CREDENTIAL SHAPES (`sk-…`, `AKIA…`), which is what
+      // `maskSecretPatterns` does — it does NOT remove file paths, so do not read
+      // this as handling the path disclosure. The key is masked too, because an
+      // `attemptEach` key carries a collection or secret NAME, and a secret stored
+      // under a credential-shaped name would otherwise reach the log in clear.
+      const note = (key: string, err: unknown, list: string[] = failed): void => {
+        list.push(key);
         const detail = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`⚠ /api/data: ${key} wipe failed: ${maskSecretPatterns(detail)}\n`);
+        process.stderr.write(`⚠ /api/data: ${maskSecretPatterns(key)} failed: ${maskSecretPatterns(detail)}\n`);
       };
       const attempt = (key: string, fn: () => void): void => {
         try {
           fn();
         } catch (err) {
           note(key, err);
+        }
+      };
+      /** A step that runs AFTER a wipe: its failure leaves no customer data behind. */
+      const attemptRepair = (key: string, fn: () => void): void => {
+        try {
+          fn();
+        } catch (err) {
+          note(key, err, degraded);
         }
       };
       // ⚠ A separate helper, not an overload, and the reason is a typing hole rather
@@ -9686,11 +9709,11 @@ export class LynoxHTTPApi {
       // empty — and the route would answer 200 with the completeness sentence over
       // a store it did not wipe. Exactly the lie this block exists to stop. Every
       // callback below is synchronous today; this is what keeps the next one honest.
-      const attemptAsync = async (key: string, fn: () => Promise<void>): Promise<void> => {
+      const attemptAsync = async (key: string, fn: () => Promise<void>, list: string[] = failed): Promise<void> => {
         try {
           await fn();
         } catch (err) {
-          note(key, err);
+          note(key, err, list);
         }
       };
       // Per ITEM, inside a store's own attempt: one wrapper around a whole loop
@@ -9746,11 +9769,19 @@ export class LynoxHTTPApi {
           let entities = db.listEntities({ limit: 200 });
           for (let round = 0; entities.length > 0; round++) {
             if (round >= MAX_ROUNDS) {
-              throw new Error(`entity wipe made no progress after ${MAX_ROUNDS} rounds`);
+              // It counts ROUNDS, not progress — with a working delete this is
+              // 2 000 000 entities genuinely removed, so a message claiming "no
+              // progress" would state the opposite of what happened to whoever
+              // debugs the 500.
+              throw new Error(`entity wipe did not finish within ${MAX_ROUNDS} rounds`);
             }
-            for (const entity of entities) {
-              db.deleteEntity(entity.id);
-            }
+            // Per ITEM here too, and this is the loop where it matters most: one
+            // undeletable row used to abort the whole attempt, leaving every other
+            // entity in `agent-memory.db` in place while the answer named only the
+            // store. It is also the largest table this route touches. Termination
+            // still holds — an undeletable row keeps coming back in the listing, so
+            // `MAX_ROUNDS` is the backstop rather than being unreachable.
+            attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
             entities = db.listEntities({ limit: 200 });
           }
         });
@@ -9818,7 +9849,10 @@ export class LynoxHTTPApi {
           // export their data to verify the erasure. Running the repair after the
           // drop loop inside the same try skipped it on exactly the path where a
           // partial drop had already broken the memo.
-          attempt('crm_schema', () => { engine.getCRM()?.rebuildSchema(); });
+          // `attemptRepair`, not `attempt`: the collections ARE dropped by the time
+          // this runs, so a failure here means the tenant's data is gone and the
+          // CRM's schema is not back — not that a store still holds their data.
+          attemptRepair('crm_schema', () => { engine.getCRM()?.rebuildSchema(); });
         }
       }
 
@@ -9839,17 +9873,32 @@ export class LynoxHTTPApi {
         const { saveUserConfig } = await import('../core/config.js');
         saveUserConfig({});
       });
-      await attemptAsync('config_reload', async () => { await engine.reloadUserConfig(); });
+      // Same class as `crm_schema`: the file on disk is already `{}` and both GDPR
+      // routes read config from disk, so a failed reload leaves nothing readable.
+      await attemptAsync('config_reload', async () => { await engine.reloadUserConfig(); }, degraded);
 
       if (failed.length > 0) {
         // 500, not a 200 with `deleted: false`: a client that reads the status code
         // alone must not conclude the erasure succeeded, and an Art. 17 answer is
-        // the last place to be optimistic. `failed` names which stores still hold
-        // data, so a retry (or a human) knows where to look.
+        // the last place to be optimistic. `failed` names which stores may still
+        // hold data, so a retry (or a human) knows where to look.
         jsonResponse(res, 500, {
           deleted: false,
           failed,
-          error: 'Erasure incomplete — some stores still hold data',
+          ...(degraded.length > 0 ? { degraded } : {}),
+          error: 'Erasure incomplete — some stores may still hold data',
+        });
+        return;
+      }
+      if (degraded.length > 0) {
+        // The erasure DID complete, so `deleted` is true and the sentence would be
+        // defensible — but a post-erasure step failed and the caller has to know,
+        // so the status is still 500 and the completeness claim stays out. What
+        // this must not say is that data remains: it does not.
+        jsonResponse(res, 500, {
+          deleted: true,
+          degraded,
+          error: 'Data erased, but a post-erasure step failed',
         });
         return;
       }
