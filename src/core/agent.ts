@@ -4205,7 +4205,7 @@ export class Agent implements IAgent {
       if (tc.name === 'ask_user') {
         masked = maskSecretPatterns(masked);
       }
-      const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name);
+      const scanned = Agent.INTERNAL_TOOLS.has(tc.name) ? masked : scanToolResult(masked, tc.name, callSlot.wrapped?.map(b => this.secretStore ? this.secretStore.maskSecrets(b) : b));
 
       // Wave 1.2: seat the per-run untrusted signal here — on the PRESENCE of the
       // wrapped-untrusted-data marker in the tool result (a content signal), not a

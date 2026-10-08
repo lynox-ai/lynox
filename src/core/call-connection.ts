@@ -51,6 +51,12 @@ export interface CallConnection {
 /** One call's slot. `connection` stays undefined when nothing was resolved. */
 export interface CallSlot {
   connection?: CallConnection | undefined;
+  /** Every `<untrusted_data>` block `wrapUntrustedData` produced while this call ran,
+   *  byte for byte: in the handler and in anything it awaited in the same async context
+   *  (a sub-agent's prompt building included; a sub-agent's own tool calls run in their
+   *  own slot). The result scan takes the closer of exactly these blocks as the engine's
+   *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
+  wrapped?: string[] | undefined;
 }
 
 const slotStorage = new AsyncLocalStorage<CallSlot>();
@@ -59,6 +65,20 @@ const slotStorage = new AsyncLocalStorage<CallSlot>();
  *  it adds no microtask between the caller and `fn`. */
 export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
   return slotStorage.run(slot, fn);
+}
+
+/**
+ * Record a block `wrapUntrustedData` produced while the current call runs. Outside a
+ * slot (prompt building between calls, a test calling the wrapper directly) this is a
+ * no-op, so nothing recorded here can reach another call's scan. A block from
+ * `wrapUntrustedData` is balanced (a literal opener, a body with every boundary tag
+ * neutralized, its closer), so exempting it cannot close a block it sits inside. The
+ * one other caller, `recall_tool_result`, records a stored payload that need not be:
+ * there only its last closer is exempted and any closer inside it stays in the scan.
+ */
+export function noteOwnWrapped(block: string): void {
+  const slot = slotStorage.getStore();
+  if (slot) (slot.wrapped ??= []).push(block);
 }
 
 /**

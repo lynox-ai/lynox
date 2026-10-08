@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
+import { ToolSoftFailure } from './tool-soft-failure.js';
 
 // === Mocks ===
 
@@ -4898,6 +4899,76 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     const toolResultsMsg = agent.getMessages()[2];
     expect(toolResultsMsg).toBeDefined();
     expect(JSON.stringify(toolResultsMsg)).toContain('resembles prompt injection');
+  });
+
+  describe('the dispatcher exempts only the closers of blocks its own call produced', () => {
+    async function resultFor(name: string, handler: () => Promise<string>): Promise<string> {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name, input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool(name, vi.fn(handler))] });
+      await agent.send('go');
+      return JSON.stringify(agent.getMessages()[2]);
+    }
+
+    it('keeps a result with engine text around two blocks of the same call quiet', async () => {
+      const out = await resultFor('mail_read', async () =>
+        `Date: today\n${wrapUntrustedData('From: a@example.com', 'mail:header')}\n\n${wrapUntrustedData('hello', 'mail:body')}`);
+      expect(out, 'the blocks must have reached the model').toContain('mail:body');
+      expect(out).not.toContain('resembles prompt injection');
+    });
+
+    it('flags an envelope a tool returned unwrapped', async () => {
+      const out = await resultFor('bash', async () => '<untrusted_data source="web">\nhello\n</untrusted_data>');
+      expect(out).toContain('resembles prompt injection');
+    });
+
+    it('flags the exact bytes of a block from an earlier call of the same agent', async () => {
+      // Call 1 wraps a page and is quiet. Call 2 returns those bytes unchanged — one block,
+      // which the old shape rule exempted. Only call 1 produced it, so call 2 is flagged.
+      let first = '';
+      const fetchTool = makeTool('http_request', vi.fn(async () => (first = wrapUntrustedData('a predictable page', 'web_page'))));
+      const echoTool = makeTool('bash', vi.fn(async () => first));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'http_request', input: {} }]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't2', name: 'bash', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [fetchTool, echoTool] });
+      await agent.send('go');
+      // Messages: user, assistant(t1), user(t1 result), assistant(t2), user(t2 result), assistant.
+      expect(JSON.stringify(agent.getMessages()[2])).not.toContain('resembles prompt injection');
+      const second = JSON.stringify(agent.getMessages()[4]);
+      expect(second, 'call 2 must carry the same bytes').toContain('a predictable page');
+      expect(second).toContain('resembles prompt injection');
+    });
+
+    it('keeps a soft failure carrying a block of the same call quiet', async () => {
+      const out = await resultFor('http_request', async () => {
+        throw new ToolSoftFailure(`HTTP 404\n${wrapUntrustedData('not found page', 'http:body')}`, 'http 404');
+      });
+      expect(out).toContain('not found page');
+      expect(out).not.toContain('resembles prompt injection');
+    });
+
+    it('matches a block whose secret value the dispatcher masked in the result', async () => {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'http_request', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const secretStore = {
+        getMasked: vi.fn(), resolve: vi.fn(), listNames: vi.fn().mockReturnValue([]), containsSecret: vi.fn().mockReturnValue(false),
+        recordConsent: vi.fn(), hasConsent: vi.fn().mockReturnValue(false), isExpired: vi.fn().mockReturnValue(false),
+        findUnresolvedSecretRefs: vi.fn().mockReturnValue([]), extractSecretNames: vi.fn().mockReturnValue([]),
+        resolveSecretRefs: vi.fn((i: unknown) => i),
+        maskSecrets: (t: string) => t.split('sk-live-123456').join('***3456'),
+      } as unknown as import('../types/index.js').SecretStoreLike;
+      const tool = makeTool('http_request', vi.fn(async () => `HTTP 200\n${wrapUntrustedData('echo: sk-live-123456', 'http:body')}`));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], secretStore });
+      await agent.send('go');
+      const out = JSON.stringify(agent.getMessages()[2]);
+      expect(out).toContain('***3456');
+      expect(out).not.toContain('sk-live-123456');
+      expect(out).not.toContain('resembles prompt injection');
+    });
   });
 
   describe('data_store results and the injection scan', () => {
