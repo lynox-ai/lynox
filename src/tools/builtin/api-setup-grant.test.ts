@@ -3264,6 +3264,7 @@ describe('mandates and stored credentials', () => {
   it.each([
     ['the host as the profile names it', 'https://api.crm.example/v1/contacts'],
     ['the host with a trailing root dot', 'https://api.crm.example./v1/contacts'],
+    ['the host with two trailing dots', 'https://api.crm.example../v1/contacts'],
   ])('a mandate\'s write to a preset account (%s) is refused before the credential is attached: no renewal, nothing sent', async (_label, url) => {
     const { calls, out } = await send([presetProfile()], vault(SEED), { url, method: 'POST', body: '{}' }, mandate);
     expect(out).toContain('writes to an account the owner connected');
@@ -3312,6 +3313,36 @@ describe('mandates and stored credentials', () => {
     });
     await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'from-env' }, ['CRM_CLIENT_SECRET']) as never));
     expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
+  });
+
+  it('a preset connection a mandate made itself keeps its own credentials', async () => {
+    const own: ApiProfile = { ...presetProfile(), created_by: M };
+    const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
+  });
+
+  it('a profile a mandate wrote may not fetch_token into the token slot of the owner\'s preset account, and nothing is sent', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    // The owner's account keeps its own client keys, so only the token slot is shared.
+    const shop: ApiProfile = {
+      ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1',
+      custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] },
+      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET' } },
+    };
+    apiStore.register(shop);
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'MINTED', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const v = vault({ ...SEED, SHOP_API_ACCESS_TOKEN: 'owner-token' });
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'SHOP_API_ACCESS_TOKEN' }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
+    expect(out).toContain('is a credential this profile may not write');
+    expect(calls).toEqual([]);
+    expect(v.peek('SHOP_API_ACCESS_TOKEN')).toBe('owner-token');
   });
 
   it('a profile a mandate wrote does not get the token of a preset account', async () => {

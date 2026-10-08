@@ -33,7 +33,7 @@ import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '..
 import { pv } from '../../core/prompt-value.js';
 import { isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { secretsForProfile } from '../../core/profile-secret-view.js';
+import { hiddenFromProfile, secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -1607,12 +1607,16 @@ ${draftJson}
         return `Validation error: ${error}`;
       }
       // `create` overwrites an existing id as well, so both ask. The author is the engine's
-      // to record, never the input's: the owner's save makes the profile the owner's, and a
-      // mandate's save records the mandate.
+      // to record, never the input's: a mandate's save records the mandate.
       const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
       if (foreignSave) return foreignSave;
       delete profile.created_by;
+      const priorAuthor = agent.toolContext?.apiStore?.get(profile.id)?.created_by;
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
+      // The owner's save of a mandate's profile keeps the mandate as author. Clearing it would
+      // put every name and host the mandate chose behind the owner's name with no question
+      // asked; a profile the owner wants as their own is one they create.
+      else if (priorAuthor !== undefined) profile.created_by = priorAuthor;
 
       // Wave 5d BYOK liability gate: a profile pointed at a host outside
       // lynox's vetted sub-processor list cannot be saved without explicit
@@ -2202,6 +2206,12 @@ ${draftJson}
       // their own provider key.
       if (isProtectedSecretWrite(outputName)) {
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
+      // A profile a mandate wrote does not write over what it may not read either: a value
+      // from the environment, or another author's preset account, whose requests would then
+      // carry a token this profile minted (`profile-secret-view.ts`).
+      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName)) {
+        return `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       // Never a slot the refresh token lives in: the access token would be written
       // over it, and the grant would go with it. Both slots, because a profile can

@@ -45,13 +45,15 @@ import { MAX_BUFFER_BYTES } from '../../core/constants.js';
  * protocol the input itself needs, so a crafted input in the file area could make ffmpeg read
  * paths outside it. Only single-file containers and codecs are named here. Checked against the
  * image's ffmpeg (5.1): each of mp4, mov, m4a, mkv, webm, avi, ts, mpg, flv, gif, mp3, wav,
- * ogg, opus, flac, aac, wma, aiff, png and jpg decodes with this list, and an HLS or DASH
- * manifest is refused ("Format not on whitelist").
+ * ogg, opus, flac, aac, wma, aiff, au, wv, ac3, eac3, dv, raw h264, hevc, m2v and m4v, png,
+ * jpg, bmp and tiff decodes with this list, detected by content; an HLS, DASH or ffconcat
+ * input is refused.
  */
 export const INPUT_DEMUXERS: readonly string[] = Object.freeze([
   'mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2', 'matroska', 'webm', 'avi', 'mpegts', 'mpeg', 'flv',
   'asf', 'gif', 'mp3', 'wav', 'w64', 'ogg', 'flac', 'aac', 'amr', 'aiff', 'caf',
-  'png_pipe', 'jpeg_pipe', 'webp_pipe',
+  'png_pipe', 'jpeg_pipe', 'webp_pipe', 'bmp_pipe', 'tiff_pipe',
+  'ac3', 'eac3', 'wv', 'ape', 'au', 'dv', 'h264', 'hevc', 'mpegvideo', 'm4v',
 ]);
 
 // ── Resource bounds (safe-by-construction ceilings) ──────────────────────────

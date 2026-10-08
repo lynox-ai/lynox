@@ -103,7 +103,7 @@ import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
 import { runInCallSlot } from './call-connection.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 
@@ -4052,7 +4052,8 @@ export class Agent implements IAgent {
           // (`http_request`), so it does not get the token to write with.
           const store = this.secretStore;
           const apiStore = this.toolContext?.apiStore;
-          const preset = apiStore ? presetCredentialNames(apiStore) : new Set<string>();
+          // A connection the mandate made itself stays its own to use.
+          const preset = apiStore ? presetCredentialNames(apiStore, { author: principalTag(this.principal) }) : new Set<string>();
           const held = secretNames.filter(n => isProtectedSecretWrite(n) || (store.isEnvironmentSecret?.(n) ?? true) || preset.has(n));
           if (held.length > 0) {
             return {

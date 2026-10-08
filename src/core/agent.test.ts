@@ -2119,12 +2119,15 @@ describe('Agent', () => {
     it.each([
       ['a mandate\'s turn does not resolve', { kind: 'mandate', email: 'setup@example.org' } as const, false],
       ['control: the owner\'s turn resolves', { kind: 'owner' } as const, true],
-    ])('%s the token of a preset account', async (_label, principal, runs) => {
+      ['a mandate\'s turn resolves, for a connection it made itself,', { kind: 'mandate', email: 'setup@example.org' } as const, true, 'mandate:setup@example.org'],
+      ['a mandate\'s turn does not resolve, for another mandate\'s connection,', { kind: 'mandate', email: 'setup@example.org' } as const, false, 'mandate:other@example.org'],
+    ])('%s the token of a preset account', async (_label, principal, runs, author?: string) => {
       const { ApiStore } = await import('./api-store.js');
       const apiStore = new ApiStore();
       apiStore.register({
         id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'd',
         auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'SHOP_CLIENT_ID' } },
+        ...(author === undefined ? {} : { created_by: author }),
       });
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));

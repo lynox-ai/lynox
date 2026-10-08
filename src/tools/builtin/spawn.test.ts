@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import type { IAgent, ToolEntry, StreamHandler, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import type { SecretStoreLike } from '../../types/security.js';
 import { scopeSecretStore } from '../../core/secret-scope.js';
@@ -200,6 +201,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
     makeTool('spawn_agent'),
   ];
   return {
+    principal: OWNER_PRINCIPAL,
     name: 'parent',
     model: 'claude-sonnet-4-6',
     memory: null,

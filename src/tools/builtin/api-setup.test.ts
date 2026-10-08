@@ -600,11 +600,12 @@ describe('api_setup tool', () => {
       expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent)).toContain('Deleted');
     });
 
-    it('control: the owner\'s update of a mandate\'s profile makes it the owner\'s', async () => {
+    it('the owner\'s update of a mandate\'s profile keeps the mandate as author, so what it chose stays under its rules', async () => {
       const store = new ApiStore();
       await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store, undefined, undefined, mandate));
       await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
-      expect(stored(store).created_by).toBeUndefined();
+      expect(stored(store).name).toBe('Changed');
+      expect(stored(store).created_by).toBe('mandate:setup@example.org');
     });
 
     it('a mandate\'s fetch_token on the owner\'s profile without a name of its own is not refused here (a read renews the same way)', async () => {

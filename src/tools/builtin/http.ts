@@ -2143,12 +2143,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // rest of the session. The write goes to the owner as a proposal instead. Checked before
     // the credential is attached (so a refused write renews no token) and before the
     // contract (so no grant opens it). Every profile on the host counts, a host two profiles
-    // share included, and the host is read without a trailing root dot, which names the same
+    // share included, and the host is read without trailing root dots, which name the same
     // host to DNS and a different key to the profile map.
     if (isWriteMethod(method) && !isOwnerPrincipal(agent.principal)) {
       const apiStore = toolContext?.apiStore;
-      const host = new URL(input.url).hostname.replace(/\.$/, '');
-      const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
+      // An address that does not parse reaches no account; the host policy below reports it.
+      let host = '';
+      try { host = new URL(input.url).hostname.replace(/\.+$/, ''); } catch { /* reported below */ }
+      const onHost = !apiStore || host === '' ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
         .map((id) => (id === undefined ? undefined : apiStore.get(id)));
       if (onHost.some((p) => p?.auth?.oauth?.preset_id !== undefined)) {
         blockedVerbatim(

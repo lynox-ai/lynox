@@ -16,16 +16,31 @@ import type { SecretStoreLike } from '../types/index.js';
 import { isMandateAuthored, presetCredentialNames } from './api-store.js';
 import type { ApiProfile, ApiStore } from './api-store.js';
 
+/**
+ * Whether the view below hides `name` from `profile`: always false for a profile the owner
+ * wrote. For one a mandate wrote: a value from the environment (a store that cannot say counts
+ * as one), or a credential of a preset account written by someone else — the profile's own
+ * connection, and its author's other ones, stay usable. Read at each call, not once: the owner
+ * can connect a preset after the mandate's profile already names its token.
+ */
+export function hiddenFromProfile(
+  store: SecretStoreLike,
+  profile: ApiProfile,
+  apiStore: Pick<ApiStore, 'getAll'>,
+  name: string,
+): boolean {
+  if (!isMandateAuthored(profile)) return false;
+  return (store.isEnvironmentSecret?.(name) ?? true)
+    || presetCredentialNames(apiStore, { author: profile.created_by }).has(name);
+}
+
 export function secretsForProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
   apiStore: Pick<ApiStore, 'getAll'>,
 ): SecretStoreLike {
   if (!isMandateAuthored(profile)) return store;
-  // Read at each lookup, not once: the owner can connect a preset after the mandate's
-  // profile already names its token.
-  const hidden = (name: string): boolean =>
-    (store.isEnvironmentSecret?.(name) ?? true) || presetCredentialNames(apiStore).has(name);
+  const hidden = (name: string): boolean => hiddenFromProfile(store, profile, apiStore, name);
   return new Proxy(store, {
     get(target, prop, receiver) {
       if (prop === 'resolve') {

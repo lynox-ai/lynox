@@ -77,6 +77,7 @@ const mockSecretResolve = vi.fn().mockReturnValue(null);
 const mockSetApiKey = vi.fn();
 // No API store by default; the api-profiles route tests swap a real one in.
 const mockGetApiStore = vi.fn().mockReturnValue(null);
+const mockSecretIsEnvironment = vi.fn().mockReturnValue(false);
 
 // Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
 // records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
@@ -229,6 +230,7 @@ vi.mock('../core/engine.js', () => ({
       scrubFreedPages: vi.fn(),
       hasVault: true,
       resolve: mockSecretResolve,
+      isEnvironmentSecret: mockSecretIsEnvironment,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
       maskAll: mockSecretMask,
@@ -3261,6 +3263,46 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const body = await res.json() as { deleted: boolean };
       expect(body.deleted).toBe(true);
+    });
+  });
+
+  // PRD customer-granted-operator-access §3.13 (H2): the link a connection starts with reads
+  // the vault through the profile's view, so a profile a mandate wrote does not put a value
+  // from the environment into it. The owner's profile is the control.
+  describe('GET /api/oauth/connect/:id reads the client id through the profile', () => {
+    it.each([
+      ['a profile a mandate wrote does not send', 'mandate:setup@example.org', false],
+      ['control: the owner\'s profile sends', undefined, true],
+    ])('%s a client id from the environment to the provider', async (_label, author, sent) => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: 'openid offline_access' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-from-env' : null));
+      mockSecretIsEnvironment.mockImplementation((n: string) => n === 'BOOKS_CLIENT_ID');
+      const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+      mockDerivePresetEndpoints.mockImplementation((id: string, params: Record<string, unknown> | undefined) => presets.derivePresetEndpoints(id, params));
+      try {
+        const res = await fetch(`${baseUrl}/api/oauth/connect/books`, {
+          redirect: 'manual',
+          headers: { ...authHeaders(), 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' },
+        });
+        const location = res.headers.get('location') ?? '';
+        expect(location.includes('client-id-from-env')).toBe(sent);
+        expect(res.status).toBe(sent ? 302 : 409);
+      } finally {
+        mockSecretIsEnvironment.mockReset();
+        mockSecretIsEnvironment.mockReturnValue(false);
+        mockDerivePresetEndpoints.mockReset();
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
     });
   });
 
@@ -12809,6 +12851,27 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(await res.text()).toContain('Connected');
     expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0]))
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
+  });
+
+  // PRD §3.13 (H2): the exchange reads the client credentials through the profile's view of
+  // the vault, so a profile a mandate wrote does not send an environment value to its token
+  // endpoint. The owner's profile is the control.
+  it.each([
+    ['a profile a mandate wrote does not send', 'mandate:setup@example.org', false],
+    ['control: the owner\'s profile sends', undefined, true],
+  ])('%s a client secret from the environment to the token endpoint', async (_label, author, exchanged) => {
+    const { cookie, store } = await arrange();
+    if (author !== undefined) store.register({ ...store.get(PROFILE)!, created_by: author });
+    mockSecretIsEnvironment.mockImplementation((n: string) => n === 'CRM_CLIENT_SECRET');
+    mockExchangeToken.mockClear();
+    try {
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(exchanged ? 200 : 409);
+      expect(mockExchangeToken).toHaveBeenCalledTimes(exchanged ? 1 : 0);
+    } finally {
+      mockSecretIsEnvironment.mockReset();
+      mockSecretIsEnvironment.mockReturnValue(false);
+    }
   });
 
   it('never writes a token for a profile whose derived slot belongs to the instance', async () => {
