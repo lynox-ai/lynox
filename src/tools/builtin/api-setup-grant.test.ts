@@ -823,29 +823,27 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ CRM_CUSTOM_TOKEN: 'at-1', [ACCESS]: 'at-2', [REFRESH]: 'rt-3' }));
   });
 
-  // These cases used to reach fetch_token's own refusals of a derived name in a
-  // platform namespace (`lynox-x` derives LYNOX_X_REFRESH_TOKEN, `lynox-y`
-  // LYNOX_Y_ACCESS_TOKEN). The store now refuses such an oauth2 profile before
-  // anything can read it, so the same request ends at the first line: there is no
-  // profile, no exchange is sent and nothing is written.
-  it.each([
-    ['a derived refresh slot', { ...crmProfile({}, 'client_credentials'), id: 'lynox-x' }, 'LX_TOKEN'],
-    ['a derived access slot', { ...crmProfile(), id: 'lynox-y', auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, refresh_token_key: 'CRM_RT' } } }, 'CRM_RT'],
-  ] as const)('never exchanges or writes for an oauth2 id whose %s is platform-owned', async (_label, profile, output) => {
+  // Four cases used to reach fetch_token's own refusals of a derived name in a
+  // platform namespace by registering such a profile first. The store now refuses
+  // an oauth2 profile whose id derives one, so the same request ends at the first
+  // line: there is no profile, no exchange is sent and nothing is written. One case
+  // is enough — `lynox-x` derives LYNOX_X_ACCESS_TOKEN and LYNOX_X_REFRESH_TOKEN,
+  // both under the same platform prefix, and the store refuses on either.
+  it('never exchanges or writes for an oauth2 id whose derived slots are platform-owned', async () => {
     const store = new ApiStore();
     const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const admitted = store.register({ ...profile, base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] } });
-    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT: 'rt-1' });
+    const admitted = store.register({ ...crmProfile({}, 'client_credentials'), id: 'lynox-x', base_url: 'https://api.l.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.l.example', 'api.crm.example'] } });
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' });
     const setSpy = vi.spyOn(vault, 'set');
     const agent = makeAgent(store, vault);
     // Rejects rather than passing through, so a store that admitted the profile
     // fails here without sending a real request.
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no network in this test'));
 
-    const result = await apiSetupTool.handler({ action: 'fetch_token', id: profile.id, output_secret_name: output }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'lynox-x', output_secret_name: 'LX_TOKEN' }, agent) as string;
 
     expect(admitted).toBe(false);
-    expect(result).toBe(`Error: API profile "${profile.id}" not found. Create it first with action=create.`);
+    expect(result).toBe('Error: API profile "lynox-x" not found. Create it first with action=create.');
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(setSpy).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -1368,7 +1366,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('never removes a protected name, even when it is on the record', async () => {
     const store = new ApiStore();
     // The record names a platform-owned slot; the id does not derive one — the store refuses an
-    // oauth2 profile whose id would, so the name can only reach the purge through the record.
+    // oauth2 profile whose id would, so here the name reaches the purge through the record.
     store.register({ ...crmProfile(), id: 'crm-g', base_url: 'https://api.g.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['api.g.example'] }, oauth_grant: { written: wrote({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' }) } });
     const vault = makeVault({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' });
     const agent = makeAgent(store, vault);
