@@ -17,14 +17,14 @@ import type { RequestHandler } from './$types.js';
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import {
-	createSessionToken,
+	loginSession,
 	verifySessionToken,
 	isRateLimited,
 	recordFailedLogin,
 	clearRateLimit,
 	isHttpsRequest,
-	SESSION_MAX_AGE_S,
 } from '$lib/server/auth.js';
+import type { MandateLoginPrincipal } from '$lib/contract/http.js';
 import { decideMagicLinkOutcome, type MagicLinkOutcome } from '$lib/server/magic-link.js';
 
 function getManagedConfig(): { instanceId: string; controlPlaneUrl: string } | null {
@@ -44,9 +44,11 @@ function setSessionCookie(
 	cookies: Parameters<RequestHandler>[0]['cookies'],
 	secret: string,
 	isSecure: boolean,
-) {
-	const session = createSessionToken(secret);
-	cookies.set('lynox_session', session, {
+	login: MandateLoginPrincipal | null,
+): boolean {
+	const session = loginSession(secret, login);
+	if (session === null) return false;
+	cookies.set('lynox_session', session.token, {
 		path: '/',
 		httpOnly: true,
 		secure: isSecure,
@@ -54,8 +56,9 @@ function setSessionCookie(
 		// Mail.app must allow the cookie to land. State-changing POSTs still
 		// need same-site origin so CSRF is unaffected.
 		sameSite: 'lax',
-		maxAge: SESSION_MAX_AGE_S,
+		maxAge: session.maxAge,
 	});
+	return true;
 }
 
 export const GET: RequestHandler = async ({ url, request, cookies, getClientAddress }) => {
@@ -81,8 +84,11 @@ export const GET: RequestHandler = async ({ url, request, cookies, getClientAddr
 		case 'already_logged_in':
 			redirect(303, '/app');
 		case 'success':
+			// A mandate that ended between the CP's check and here gets no session.
+			if (!setSessionCookie(cookies, secret, isHttpsRequest(url, request), outcome.principal)) {
+				redirect(303, '/login?error=magic_expired');
+			}
 			clearRateLimit(ip);
-			setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 			redirect(303, '/app');
 		case 'redirect_login':
 			redirect(303, `/login?error=magic_${outcome.reason}`);

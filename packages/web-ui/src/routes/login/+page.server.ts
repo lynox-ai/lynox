@@ -5,7 +5,8 @@ import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-	createSessionToken,
+	loginSessionFromBody,
+	ownerSession,
 	verifySessionToken,
 	secretEquals,
 	consumeLinkCode,
@@ -13,8 +14,12 @@ import {
 	recordFailedLogin,
 	clearRateLimit,
 	isHttpsRequest,
-	SESSION_MAX_AGE_S,
 } from '$lib/server/auth.js';
+import {
+	LOGIN_PRINCIPAL_VERSION,
+	type AuthCodeRequest,
+	type AuthCodeVerifyRequest,
+} from '$lib/contract/http.js';
 
 // ── Managed mode detection ─────────────────────────────────────────
 
@@ -48,9 +53,16 @@ function consumeOnboardingToken(): void {
 
 // ── Session cookie helper ──────────────────────────────────────────
 
-function setSessionCookie(cookies: Parameters<PageServerLoad>[0]['cookies'], secret: string, isSecure: boolean) {
-	const session = createSessionToken(secret);
-	cookies.set('lynox_session', session, {
+/**
+ * Set the session cookie for a verified login. Every path here is the owner
+ * (`ownerSession`) except a code login the CP verified as a mandate recipient.
+ */
+function setSessionCookie(
+	cookies: Parameters<PageServerLoad>[0]['cookies'],
+	session: { token: string; maxAge: number },
+	isSecure: boolean,
+): void {
+	cookies.set('lynox_session', session.token, {
 		path: '/',
 		httpOnly: true,
 		secure: isSecure,
@@ -67,7 +79,7 @@ function setSessionCookie(cookies: Parameters<PageServerLoad>[0]['cookies'], sec
 		// expected. State-changing POSTs (e.g. /api/run) still need same-site
 		// origin under Lax, so CSRF is still blocked. Pilot tenant 2026-05-19.
 		sameSite: 'lax',
-		maxAge: SESSION_MAX_AGE_S,
+		maxAge: session.maxAge,
 	});
 }
 
@@ -94,7 +106,7 @@ export const load: PageServerLoad = async ({ cookies, url, request, getClientAdd
 			return { isManaged: false };
 		}
 		clearRateLimit(ip);
-		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
+		setSessionCookie(cookies, ownerSession(secret), isHttpsRequest(url, request));
 		redirect(303, '/app');
 	}
 
@@ -110,7 +122,7 @@ export const load: PageServerLoad = async ({ cookies, url, request, getClientAdd
 		}
 		clearRateLimit(ip);
 		consumeOnboardingToken();
-		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
+		setSessionCookie(cookies, ownerSession(secret), isHttpsRequest(url, request));
 		redirect(303, '/app');
 	}
 
@@ -178,7 +190,7 @@ export const actions: Actions = {
 		}
 
 		clearRateLimit(ip);
-		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
+		setSessionCookie(cookies, ownerSession(secret), isHttpsRequest(url, request));
 		redirect(303, '/app');
 	},
 
@@ -223,7 +235,11 @@ export const actions: Actions = {
 					'Content-Type': 'application/json',
 					'x-instance-secret': secret,
 				},
-				body: JSON.stringify({ email, instanceId: managed.instanceId }),
+				body: JSON.stringify({
+					email,
+					instanceId: managed.instanceId,
+					principal_version: LOGIN_PRINCIPAL_VERSION,
+				} satisfies AuthCodeRequest),
 			});
 
 			if (!res.ok) {
@@ -284,7 +300,12 @@ export const actions: Actions = {
 					'x-login-user-agent': userAgent,
 					'x-login-ip': ip,
 				},
-				body: JSON.stringify({ email, code, instanceId: managed.instanceId }),
+				body: JSON.stringify({
+					email,
+					code,
+					instanceId: managed.instanceId,
+					principal_version: LOGIN_PRINCIPAL_VERSION,
+				} satisfies AuthCodeVerifyRequest),
 			});
 
 			if (!res.ok) {
@@ -293,9 +314,15 @@ export const actions: Actions = {
 				return fail(res.status, { error: body.error ?? 'Invalid code.' });
 			}
 
-			// OTP valid — create local session
+			// OTP valid — create local session, the owner's or the mandate the CP
+			// verified. A principal this reader does not know is refused.
+			const session = loginSessionFromBody(secret, await res.json().catch(() => null));
+			if (session === 'unknown_principal') {
+				return fail(502, { error: 'Could not reach the control plane. Please try again.' });
+			}
+			if (session === 'ended') return fail(403, { error: 'This access has ended.' });
+			setSessionCookie(cookies, session, isHttpsRequest(url, request));
 			clearRateLimit(ip);
-			setSessionCookie(cookies, secret, isHttpsRequest(url, request));
 			redirect(303, '/app');
 		} catch (err: unknown) {
 			if (isRedirect(err)) throw err;
@@ -353,7 +380,7 @@ export const actions: Actions = {
 		}
 
 		clearRateLimit(ip);
-		setSessionCookie(cookies, secret, isHttpsRequest(url, request));
+		setSessionCookie(cookies, ownerSession(secret), isHttpsRequest(url, request));
 		redirect(303, '/app');
 	},
 };

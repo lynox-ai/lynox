@@ -1,0 +1,10 @@
+{
+  "valid": true,
+  "principal": {
+    "kind": "mandate",
+    "email": "recipient@example.invalid",
+    "display": "TEST-DISPLAY",
+    "mandate_id": "TEST-MANDATE-1",
+    "mandate_expires_at": "2100-01-01T00:00:00.000Z"
+  }
+}

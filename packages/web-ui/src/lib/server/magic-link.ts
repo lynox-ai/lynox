@@ -10,7 +10,10 @@
  * not from local re-declarations.
  */
 import {
+	LOGIN_PRINCIPAL_VERSION,
 	isMagicLinkErrorCode,
+	readLoginPrincipal,
+	type MandateLoginPrincipal,
 	type MagicLinkErrorCode,
 	type MagicLinkVerifyRequest,
 	type AuthErrorBody,
@@ -38,7 +41,8 @@ export type MagicLinkReason =
 
 export type MagicLinkOutcome =
 	| { type: 'already_logged_in' }
-	| { type: 'success' }
+	/** `principal` null is the owner; a mandate login carries the one the CP verified. */
+	| { type: 'success'; principal: MandateLoginPrincipal | null }
 	| { type: 'redirect_login'; reason: MagicLinkReason };
 
 export interface MagicLinkDeps {
@@ -93,6 +97,7 @@ export async function decideMagicLinkOutcome(deps: MagicLinkDeps): Promise<Magic
 			body: JSON.stringify({
 				token,
 				instanceId: deps.managed.instanceId,
+				principal_version: LOGIN_PRINCIPAL_VERSION,
 			} satisfies MagicLinkVerifyRequest),
 			signal: AbortSignal.timeout(CP_FETCH_TIMEOUT_MS),
 		});
@@ -100,7 +105,14 @@ export async function decideMagicLinkOutcome(deps: MagicLinkDeps): Promise<Magic
 		return { type: 'redirect_login', reason: 'cp_unreachable' };
 	}
 
-	if (res.ok) return { type: 'success' };
+	if (res.ok) {
+		// A principal this reader does not know is refused, never read as the
+		// owner. It means a control plane this engine does not understand, the
+		// same reading as an unknown error code below.
+		const principal = readLoginPrincipal(await res.json().catch(() => null));
+		if (principal === 'invalid') return { type: 'redirect_login', reason: 'cp_unreachable' };
+		return { type: 'success', principal };
+	}
 
 	deps.onFailedLogin();
 
