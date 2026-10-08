@@ -1388,7 +1388,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   detailedGuidance:
     'connect: pass `id`. Returns a link; SHOW it to the user and let them click it. The engine builds the link and stores what comes back — never ask the user to paste a token for a profile that can connect, and never assemble the link yourself.\n' +
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled. If the API documents its own header for the access token instead of `Authorization: Bearer` (Shopify\'s Admin API wants `X-Shopify-Access-Token`), set `auth.header_name` to it on the oauth2 profile: the engine then sends the raw token under that name.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
     ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
@@ -2419,7 +2419,20 @@ ${draftJson}
       // would sit in the vault with nothing left to remove them.
       if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
-      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
+      // The header http.ts attaches it under: the profile's own `header_name`, raw,
+      // or Authorization with `Bearer`. The name is the profile's, so it is checked
+      // against HTTP_HEADER_NAME, and a name that fails gets the text below instead.
+      const named: unknown = profile.auth?.header_name;
+      const slot = named === undefined || (typeof named === 'string' && named.toLowerCase() === 'authorization')
+        ? 'Authorization'
+        : (typeof named === 'string' && HTTP_HEADER_NAME.test(named) ? named : null);
+      // A file-loaded profile is not validated; http.ts refuses to attach under a
+      // name that is not a header name, so the text says that instead of naming it.
+      if (slot === null) {
+        return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown'}), but api_profile "${input.id}" has an auth.header_name that is not a valid header name, so http_request will not attach the token until it is fixed with api_setup action="update". Do NOT set the token in a header yourself and do NOT reference \`secret:${outputName}\` manually; fix the profile instead. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
+      }
+      const attachedAs = slot === 'Authorization' ? '`Authorization: Bearer …`' : `the raw token in the \`${slot}\` header`;
+      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as ${attachedAs} for any http_request that maps to api_profile "${input.id}" — do NOT pass the ${slot} header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
     }
 
     return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", or "fetch_token".';

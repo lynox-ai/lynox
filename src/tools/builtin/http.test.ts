@@ -56,6 +56,20 @@ async function visible(...args: Parameters<typeof handler>): Promise<string> {
   }
 }
 
+/**
+ * The 401 reminder from its header to the END of the result. It is appended
+ * outside the untrusted-data wrap and last, so comparing this slice with `toBe`
+ * pins every byte after the header too; a prefix check let a sentence be
+ * appended unseen. Exactly one header, or the slice would mean nothing.
+ */
+function reminderToEnd(result: string): string {
+  const head = '**[Agent reminder — OAuth2 401';
+  const at = result.indexOf(head);
+  expect(at, 'no 401 reminder in the result').toBeGreaterThanOrEqual(0);
+  expect(result.indexOf(head, at + 1), 'more than one 401 reminder').toBe(-1);
+  return result.slice(at);
+}
+
 // Each test gets a fresh ToolContext + a fresh SessionCounters object via
 // beforeEach. The handler reads network policy / rate-limits from
 // `agent.toolContext` and the per-session http counter from
@@ -2686,7 +2700,9 @@ describe('httpRequestTool', () => {
      * exactly the guard a review beat by writing the instruction in this repo's
      * `api_setup({ action: "update", … })` form. The reminder is FIXED text whose
      * only interpolation is the `_admit`-pinned profile id, so every byte of it
-     * can simply be stated. A sentence added inside it fails here.
+     * can simply be stated. The assert runs from the reminder's header to the end
+     * of the result, so a sentence added inside it or after it fails here (a
+     * prefix check let one be appended unseen).
      *
      * The phrase bans below stay. The lesson of the round that produced this test
      * is that a restructure replaced two working line-level assertions and opened
@@ -2731,7 +2747,12 @@ describe('httpRequestTool', () => {
         + 'access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the '
         + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
         + 'it to the person who owns it. The engine has written the details to its log.';
-      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(REMINDER);
+      // This profile names no header, so the token went out as Bearer and the
+      // reminder carries the header sentence too.
+      const HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
+        + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
+        + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+      expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why').toBe(REMINDER + HINT);
     });
 
     /**
@@ -3956,6 +3977,15 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
+    it('a header_name that is not a string (a file-loaded profile) is refused, not thrown on', async () => {
+      const store = await storeWith({ type: 'header', header_name: 123, vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      expect(result).toContain('not a valid header name');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
     it('SECURITY: a custom auth header is dropped on a cross-origin redirect', async () => {
       // CROSS_ORIGIN_DROP_HEADERS is a fixed set and cannot know the slot a `header`
       // profile names. The engine fills that slot from the vault on every request and
@@ -4075,6 +4105,189 @@ describe('httpRequestTool', () => {
       );
       expect(result).not.toContain('Blocked');
       expect(sentHeader('authorization')).toBe(`Basic ${Buffer.from(`u:${VAULT_JWT}`, 'utf-8').toString('base64')}`);
+    });
+  });
+
+  // Some APIs take an OAuth access token in a header of their own and answer
+  // `Authorization: Bearer` with 401 — the client-credentials grant then succeeds
+  // and every request after it fails. `auth.header_name` names that header for an
+  // oauth2 profile the way it does for a `header` profile.
+  describe('oauth2 access token under the header the profile names', () => {
+    const ACK = { accepted: true, hosts: ['store.example.com'], accepted_at: '2026-10-08T10:00:00.000Z' };
+    // Secret-shaped on purpose: the engine's slot is scan-exempt, and only a value
+    // the scanner would object to shows whether the exemption follows the slot.
+    const TOKEN = ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9', 'eyJzdWIiOiJzdG9yZSJ9', 'c3RvcmVfc2ln'].join('.');
+    const HEADER = 'X-Store-Access-Token';
+
+    async function storeWith(extra: Record<string, unknown>): Promise<{ store: unknown; tokenKey: string }> {
+      const { ApiStore, accessTokenKey } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'store-api', name: 'Store API', base_url: 'https://store.example.com/admin', description: 'store',
+        auth: {
+          type: 'oauth2', vault_keys: ['STORE_CLIENT_ID'],
+          oauth: { token_url: 'https://store.example.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'STORE_CLIENT_ID', client_secret_key: 'STORE_CLIENT_SECRET' },
+          ...extra,
+        } as never,
+        custom_endpoint_ack: ACK as never,
+      });
+      return { store, tokenKey: accessTokenKey('store-api') };
+    }
+
+    function agentWith(store: unknown, secrets: Record<string, string>): never {
+      return {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => secrets[k] ?? null },
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    function sent(hop = 0): Record<string, string> {
+      return Object.fromEntries(Object.entries(lastPinnedInputs[hop]?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v as string]));
+    }
+
+    it('sends the raw token under header_name, and no Authorization at all', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
+      const result = await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(result).toContain('HTTP 200');
+      expect(sent()['x-store-access-token']).toBe(TOKEN);
+      expect(sent()['authorization']).toBeUndefined();
+    });
+
+    it('without header_name keeps Authorization: Bearer', async () => {
+      const { store, tokenKey } = await storeWith({});
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(sent()['authorization']).toBe(`Bearer ${TOKEN}`);
+      expect(sent()['x-store-access-token']).toBeUndefined();
+    });
+
+    it.each(['authorization', 'Authorization', 'AUTHORIZATION'])('a header_name of %s keeps the Bearer prefix', async (name) => {
+      const { store, tokenKey } = await storeWith({ header_name: name });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(sent()['authorization']).toBe(`Bearer ${TOKEN}`);
+    });
+
+    it('replaces a model-set header of the same name in another case, once', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://store.example.com/admin/products.json', headers: { 'x-STORE-access-token': 'model-wrote-this' } },
+        agentWith(store, { [tokenKey]: TOKEN }),
+      );
+      expect(result).toContain('HTTP 200');
+      const names = Object.keys(lastPinnedInputs[0]!.headers).filter((k) => k.toLowerCase() === 'x-store-access-token');
+      expect(names).toHaveLength(1);
+      expect(sent()['x-store-access-token']).toBe(TOKEN);
+    });
+
+    it('SECURITY: the named header is dropped on a cross-origin redirect', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://evil.example.com/collect' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(lastPinnedInputs).toHaveLength(2);
+      expect(sent(0)['x-store-access-token']).toBe(TOKEN);
+      expect(sent(1)['x-store-access-token']).toBeUndefined();
+    });
+
+    // A grant that succeeds followed by a 401 reads as an expired token, and the
+    // reminder sent the model to mint again, which cannot help when the header is
+    // the problem. Fixed text, so only whether the profile names a header decides it.
+    // Byte for byte, both states: this block is appended outside the untrusted-data
+    // wrap, and the only check on the managed branch used to be a substring, so a
+    // sentence added inside it (one interpolating a profile field among them) went
+    // unseen. The delegated-access branch has its own literals, further up and below.
+    const MANAGED_401 = '**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\n'
+      + 'This URL maps to api_profile "store-api" (auth.type=oauth2 with token_url configured). '
+      + "The vault's access_token is almost certainly expired. Recover with:\n"
+      + '  api_setup({ action: "fetch_token", id: "store-api" })\n'
+      + 'That uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. '
+      + 'Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) '
+      + "don't expose long-lived tokens there anymore.";
+    const HEADER_HINT = '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: '
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
+      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Check the API's docs and set `auth.header_name` on this profile.";
+
+    it.each([
+      ['without header_name points at the header', {}, true],
+      ['with header_name Authorization still points at the header', { header_name: 'Authorization' }, true],
+      ['with its own header_name stays as it was', { header_name: HEADER }, false],
+    ])('the 401 reminder %s, byte for byte', async (_label, extra, hints) => {
+      const { store, tokenKey } = await storeWith(extra);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why')
+        .toBe(hints ? MANAGED_401 + HEADER_HINT : MANAGED_401);
+    });
+
+    // The delegated-access branch (a connection the user authorized) says fetch_token is the
+    // wrong move; when the token went out as Bearer it also names the header, with its own
+    // fixed sentence. Byte for byte, both states.
+    const DELEGATED_401 = '**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\n'
+      + 'This URL maps to api_profile "store-api". An exchange for it would replace a token '
+      + 'somebody is relying on with an app-level one that can see different data, and the old '
+      + 'access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the '
+      + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
+      + 'it to the person who owns it. The engine has written the details to its log.';
+    const DELEGATED_HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
+      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+
+    it.each([
+      ['without header_name points at the header', undefined, true],
+      ['with header_name Authorization still points at the header', 'Authorization', true],
+      ['with its own header_name stays as it was', HEADER, false],
+    ])('the delegated 401 reminder %s, byte for byte', async (_label, headerName, hints) => {
+      const { ApiStore, accessTokenKey } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'store-api', name: 'Store API', base_url: 'https://store.example.com/admin', description: 'store',
+        auth: {
+          type: 'oauth2', vault_keys: ['STORE_CLIENT_ID'],
+          oauth: { token_url: 'https://store.example.com/oauth/token', client_id_key: 'STORE_CLIENT_ID', client_secret_key: 'STORE_CLIENT_SECRET' },
+          ...(headerName === undefined ? {} : { header_name: headerName }),
+        } as never,
+        custom_endpoint_ack: ACK as never,
+        oauth_grant: { origin: 'callback', state: 'no-refresh' },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [accessTokenKey('store-api')]: TOKEN }));
+      expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why')
+        .toBe(hints ? DELEGATED_401 + DELEGATED_HINT : DELEGATED_401);
+    });
+
+    it('SECURITY: an access token carrying CRLF is refused under its own header, not sent', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      // Answers 200, so a mutant that sends shows up at the asserts, not as a crash.
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: 'tok\r\nX-Evil: yes' }));
+      expect(result).toContain('access token containing CRLF/null');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it.each([
+      ['carries CRLF', 'X-Key\r\nX-Evil: yes'],
+      ['is empty', ''],
+      ['is not a string (a file-loaded profile)', 123],
+    ])('SECURITY: a header_name that %s is refused and nothing is sent', async (_label, name) => {
+      const { store, tokenKey } = await storeWith({ header_name: name });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(result).toContain('not a valid header name');
+      expect(lastPinnedInputs).toHaveLength(0);
     });
   });
 

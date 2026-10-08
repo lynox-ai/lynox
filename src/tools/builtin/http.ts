@@ -1591,7 +1591,27 @@ async function attachEngineManagedAuth(
     if (!resolved) {
       return { refusal: `Error: api_profile "${profile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${profile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.` };
     }
-    return put('Authorization', `Bearer ${resolved}`);
+    // Some APIs take the access token in a header of their own and answer
+    // `Authorization: Bearer` with 401, so the grant succeeds and every request
+    // after it fails. `header_name` names that header, and the token goes in raw,
+    // as for a `header` profile. Unset, or set to Authorization itself, it stays
+    // `Bearer`, which is what every profile saved before this sent.
+    // Same name check as the `header` branch below: the name comes from the profile.
+    // `typeof` first: a file-loaded profile is unvalidated, `.test(123)` passes on "123",
+    // and `.toLowerCase()` below would then throw instead of refusing.
+    if (auth.header_name !== undefined && (typeof auth.header_name !== 'string' || !HTTP_HEADER_NAME.test(auth.header_name))) {
+      return { refusal: `Error: api_profile "${profile.id}" has an auth.header_name that is not a valid header name, so the access token was not attached. Fix it with api_setup action="update" (for example "X-Api-Key").` };
+    }
+    const ownHeader = auth.header_name !== undefined && auth.header_name.toLowerCase() !== 'authorization'
+      ? auth.header_name
+      : undefined;
+    const oauthSlot = ownHeader ?? 'Authorization';
+    const oauthValue = ownHeader !== undefined ? resolved : `Bearer ${resolved}`;
+    // The vault value came back from a token endpoint; it enters a header here.
+    if (/[\r\n\0]/.test(oauthValue)) {
+      return { refusal: `Error: api_profile "${profile.id}" holds an access token containing CRLF/null — refusing to send it. Mint a new one with api_setup({ action: "fetch_token", id: "${profile.id}" }).` };
+    }
+    return put(oauthSlot, oauthValue);
   }
 
   if (auth.type === 'basic' && auth.basic_format === 'user_pass_split') {
@@ -1684,7 +1704,7 @@ async function attachEngineManagedAuth(
     // A stored header_name that is not a header name (an empty string among them, which `??`
     // does not catch) is refused here rather than sent: the request would otherwise fail in
     // the HTTP layer with a message that does not name the profile.
-    if (auth.type !== 'bearer' && auth.header_name !== undefined && !HTTP_HEADER_NAME.test(auth.header_name)) {
+    if (auth.type !== 'bearer' && auth.header_name !== undefined && (typeof auth.header_name !== 'string' || !HTTP_HEADER_NAME.test(auth.header_name))) {
       return { refusal: `Error: api_profile "${profile.id}" has an auth.header_name that is not a valid header name, so the credential was not attached. Fix it with api_setup action="update" (for example "X-Api-Key").` };
     }
     const slot = auth.type === 'bearer' ? 'Authorization' : (auth.header_name ?? 'X-Api-Key');
@@ -2678,12 +2698,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             //
             // The id is the one value that is safe to name: `_admit` pins it to
             // `/^[a-z0-9][a-z0-9_-]{0,63}$/`. Everything the model needs is in
-            // the two sentences below; everything the OPERATOR needs is in the
+            // the fixed sentences below; everything the OPERATOR needs is in the
             // stderr diagnosis, where free text is a log-hygiene problem and not
             // an instruction channel.
+            //
+            // Both branches also SWITCH on `auth.header_name` (whether the token
+            // went out as Bearer) to pick a second fixed sentence each. That is a
+            // choice between constants, not an interpolation: no part of the
+            // field's value reaches the text. Keep it that way.
             wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null)
-              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.`
-              : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.`;
+              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own (Shopify\'s Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
+              : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own (Shopify\'s Admin API: `X-Shopify-Access-Token`). Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
           }
         } catch {
           // Bad URL fell through earlier; nothing to do.

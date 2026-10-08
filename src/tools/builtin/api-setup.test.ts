@@ -2843,6 +2843,41 @@ describe('api_setup tool', () => {
       fetchSpy.mockRestore();
     });
 
+    // The success text tells the model which header carries the token. It used to
+    // say `Authorization: Bearer` whatever the profile named, so a model reading a
+    // 401 after it had no reason to suspect the header.
+    it.each([
+      ['names the header_name the token goes in', { header_name: 'X-Shopify-Access-Token' }, 'the raw token in the `X-Shopify-Access-Token` header', 'Authorization: Bearer'],
+      ['keeps Authorization: Bearer without one', {}, '`Authorization: Bearer …`', 'raw token'],
+      ['keeps Authorization: Bearer when the header_name is authorization', { header_name: 'authorization' }, '`Authorization: Bearer …`', 'raw token'],
+      ['keeps Authorization: Bearer when the header_name is Authorization', { header_name: 'Authorization' }, '`Authorization: Bearer …`', 'raw token'],
+      ['keeps Authorization: Bearer when the header_name is AUTHORIZATION', { header_name: 'AUTHORIZATION' }, '`Authorization: Bearer …`', 'raw token'],
+      ['says a header_name that is not a string is not usable', { header_name: 123 as unknown as string }, 'not a valid header name', 'raw token'],
+      ['says a header_name that is not a header name is not usable', { header_name: 'X Bad' }, 'do NOT reference `secret:SHOPIFY_SEO_ACCESS_TOKEN` manually; fix the profile instead', 'raw token'],
+    ])('fetch_token %s', async (_label, extra, says, doesNotSay) => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'client-id-xyz', SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz' });
+      const agent = createMockAgent(store, vaultMock);
+      store.register({
+        ...SHOPIFY_PROFILE,
+        auth: { ...SHOPIFY_PROFILE.auth, ...extra },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 86399 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      );
+      try {
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+        expect(result).toContain('Token exchange OK');
+        expect(result).toContain(says);
+        expect(result).not.toContain(doesNotSay);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     // `expires_in` comes from the token endpoint. `1e308 * 1000` is Infinity,
     // which JSON.stringify writes as `null` into both backing stores — a null in
     // a `number | undefined` field that a scheduler would read as "expired".

@@ -177,7 +177,9 @@ export interface ApiAuth {
   password_key?: string | undefined;
   /** Header name for 'header' type. Default: 'X-Api-Key' — matches what the profile
    *  description shows the model and what `api_setup bootstrap` writes. The engine
-   *  fills this slot from `vault_keys[0]`; see the attach in `http.ts`. */
+   *  fills this slot from `vault_keys[0]`; see the attach in `http.ts`.
+   *  For 'oauth2' it names the header the access token goes in, raw, for an API that
+   *  rejects `Authorization: Bearer`. Unset (or `Authorization`), it stays Bearer. */
   header_name?: string | undefined;
   /** Query parameter name for 'query' type. */
   query_param?: string | undefined;
@@ -1503,7 +1505,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     lines.push(trust(p.description, 'description'));
     lines.push(`Base URL: ${p.base_url}`);
     if (p.auth) {
-      if (p.auth.type === 'header' && p.auth.header_name) lines.push(`Auth header name: ${p.auth.header_name}`);
+      if ((p.auth.type === 'header' || p.auth.type === 'oauth2') && p.auth.header_name) lines.push(`Auth header name: ${p.auth.header_name}`);
       if (p.auth.type === 'query' && p.auth.query_param) lines.push(`Auth query parameter: ${p.auth.query_param}`);
       if (p.auth.vault_keys?.length) {
         lines.push(`Auth vault keys: ${p.auth.vault_keys.join(', ')}`);
