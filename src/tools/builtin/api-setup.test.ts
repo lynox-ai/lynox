@@ -1971,6 +1971,50 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('reports a failed extraction call by class and status, never by the provider body', async () => {
+      const sentinel = 'RAW-TOOL-ARGS-FROM-REMOTE';
+      const adapterError = new Error(`OpenAI-compatible API error 400: error parsing tool call: raw='{"description":"${sentinel}"}'`);
+      const sdkError = Object.assign(new Error(`400 ${sentinel}`), { name: 'BadRequestError', status: 400 });
+      const plainError = new Error(`socket hang up ${sentinel}`);
+      const results: string[] = [];
+      for (const err of [adapterError, sdkError, plainError]) {
+        const fetchSpy = mockFetchOk('<html>some docs</html>');
+        mockedExtract.mockRejectedValueOnce(err);
+        try {
+          results.push(await apiSetupTool.handler(
+            { action: 'bootstrap', docs_url: 'https://docs.example.com' },
+            createMockAgent(new ApiStore()),
+          ));
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      }
+      expect(results).toEqual([
+        'Error: docs extraction failed — the extraction call failed (Error HTTP 400)',
+        'Error: docs extraction failed — the extraction call failed (BadRequestError HTTP 400)',
+        'Error: docs extraction failed — the extraction call failed (Error)',
+      ]);
+      for (const r of results) expect(r).not.toContain(sentinel);
+    });
+
+    it('still shows a shape failure of the extraction, whose message comes from the schema', async () => {
+      const fetchSpy = mockFetchOk('<html>some docs</html>');
+      let refused: unknown;
+      try {
+        llmHelper.validateAgainstSchema({}, { type: 'object', properties: { auth: { type: 'object', properties: {} } }, required: ['auth'] } as never);
+      } catch (err) { refused = err; }
+      mockedExtract.mockRejectedValueOnce(refused);
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toBe('Error: docs extraction failed — Missing required field "auth"');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('requires docs_url OR openapi_url for the bootstrap action', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler({ action: 'bootstrap' }, agent);

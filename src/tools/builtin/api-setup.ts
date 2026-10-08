@@ -26,7 +26,7 @@ import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PR
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
-import { callForStructuredJson, BudgetError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
+import { callForStructuredJson, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
@@ -532,6 +532,20 @@ function fetchFailureForModel(err: unknown): string {
   const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
   const name = err instanceof Error ? err.name : 'error';
   return `the request failed (${/^[A-Za-z]{1,40}$/.test(name) ? name : 'Error'}${typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? ` ${code}` : ''})`;
+}
+
+/**
+ * A failed extraction call as the model may read it: the error class and, when there is
+ * one, the HTTP status — from the SDK's numeric `status`, or from the fixed prefix the
+ * OpenAI-compatible adapter writes. Only the three digits are taken from the message.
+ */
+function extractionFailureForModel(err: unknown): string {
+  if (err instanceof Error && err.name === 'AbortError') return 'the extraction call timed out';
+  const name = err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : 'Error';
+  const raw = err instanceof Error ? (err as Error & { status?: unknown }).status : undefined;
+  const fromPrefix = err instanceof Error ? /^OpenAI-compatible API error (\d{3}):/.exec(err.message)?.[1] : undefined;
+  const status = typeof raw === 'number' && Number.isInteger(raw) && raw >= 100 && raw <= 599 ? String(raw) : fromPrefix;
+  return `the extraction call failed (${name}${status ? ` HTTP ${status}` : ''})`;
 }
 
 /** An OpenAPI version field as it is printed back: digits and dots, an optional pre-release tag. */
@@ -1086,8 +1100,13 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     if (err instanceof SchemaValueError) {
       return `Error: docs extraction failed — the extracted value at "${err.path}" ${err.rule}`;
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    return `Error: docs extraction failed — ${msg}`;
+    if (err instanceof ExtractShapeError) {
+      return `Error: docs extraction failed — ${err.message}`;
+    }
+    // Anything else is the provider call itself, and its message can carry the provider's
+    // response body unbounded (the OpenAI-compatible adapter appends it whole), which some
+    // servers fill with the model's own output. Class and HTTP status are enough to act on.
+    return `Error: docs extraction failed — ${extractionFailureForModel(err)}`;
   }
 
   emitBootstrapProgress(agent, 'finalizing');
