@@ -3249,9 +3249,15 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const b = await startParked(true);
     const row = b.store.getPending(`ask-${b.t.id}`)!;
     expect(b.store.answerUser(row.id, 'A')).toBe(true);
+    const before = Date.now();
     const tick = b.loop.tick();
+    // Read in the same synchronous turn: the re-arm has run, the run's own continuation
+    // (which records the run and would move next_run_at too) has not.
+    const rearmed = tm.getTrigger(b.t.id)!.next_run_at;
     await tick;
-    expect(tm.getTrigger(b.t.id)!.next_run_at).not.toBe('2030-01-01T00:00:00.000Z');
+    expect(rearmed).not.toBeNull();
+    expect(Date.parse(rearmed!)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(rearmed!)).toBeLessThan(Date.parse('2030-01-01T00:00:00.000Z'));
     b.loop.stop();
   });
 
