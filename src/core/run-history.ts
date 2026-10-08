@@ -3039,9 +3039,15 @@ export class RunHistory {
   /** Triggers-consent: stamp/clear the human first-run-confirm on a trigger (the
    *  consent surface's write). Pass an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, null to un-confirm. */
-  setTriggerConfirmedAt(id: string, confirmedAt: string | null): boolean {
-    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt);
+  setTriggerConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
+    return this._requireTriggerStore().setConfirmedAt(id, confirmedAt, confirmedBy);
   }
+  /** Record a request's change to a trigger, dropping its stamp when the request was not
+   *  the owner's (TriggerStore.markEditedBy). Call BEFORE the change. */
+  markTriggerEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+    return this._requireTriggerStore().markEditedBy(id, editedBy, clearStamp);
+  }
+
 
   /** Delete a planned pipeline. Returns false if no row matched. */
   deletePlannedPipeline(id: string): boolean {
@@ -3098,6 +3104,10 @@ export class RunHistory {
     confirmedAt?: string | undefined;
     /** The creating session's untrusted-content cause; absent when it had taken in none. */
     createdUntrusted?: string | undefined;
+    /** Principal tag of the creating request (request-principal.ts). */
+    createdBy?: string | undefined;
+    /** Principal tag of whoever supplied `confirmedAt`. */
+    confirmedBy?: string | undefined;
   }): void {
     this._requireTriggerStore().insert(params);
   }

@@ -343,3 +343,124 @@ describe('TriggerStore — run_agent consent gate (triggers-consent)', () => {
     expect(store.get('e2')?.confirmedAt).toBeNull();
   });
 });
+
+describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §3.12, §3.13)', () => {
+  const tmpDirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const PAST = '2020-01-01T00:00:00.000Z';
+  const STAMP = '2026-10-08T00:00:00.000Z';
+  const MANDATE = 'mandate:eva@kanzlei.example';
+
+  function make(): { store: TriggerStore; engine: EngineDb } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-trgm-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    engines.push(engine);
+    engine.getDb().prepare("INSERT INTO workflows (id, name, definition_json) VALUES ('wf', 'W', '{}')").run();
+    return { store: new TriggerStore(engine), engine };
+  }
+
+  /** A run_workflow schedule already due — the effect whose stamp lived on the workflow. */
+  function insertWorkflowSchedule(store: TriggerStore, id: string, over: { createdBy?: string; confirmedAt?: string; confirmedBy?: string } = {}): void {
+    store.insert({ id, title: 'x', source: 'cron', effect: 'run_workflow', scheduleCron: '0 9 * * *', nextRunAt: PAST, pipelineId: 'wf', ...over });
+  }
+
+  const dueIds = (store: TriggerStore): string[] => store.getDue().map(t => t.id);
+
+  afterEach(() => {
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    engines.length = 0;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('a workflow schedule a mandate created is not due until the owner stamps it', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'm', { createdBy: MANDATE });
+    expect(dueIds(store)).not.toContain('m');
+    expect(store.setConfirmedAt('m', STAMP, 'owner')).toBe(true);
+    expect(dueIds(store)).toContain('m');
+  });
+
+  it('the owner path is unchanged: an owner-created and an untagged workflow schedule are due without a schedule stamp', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'own', { createdBy: 'owner' });
+    insertWorkflowSchedule(store, 'legacy'); // no tag: rows from before v20, or the agent tool
+    expect(dueIds(store)).toEqual(expect.arrayContaining(['own', 'legacy']));
+  });
+
+  it('the gate covers every effect, not only run_workflow', () => {
+    const { store } = make();
+    for (const effect of ['notify', 'backup'] as const) {
+      store.insert({ id: `m-${effect}`, title: 'x', source: 'cron', effect, scheduleCron: '0 9 * * *', nextRunAt: PAST, createdBy: MANDATE });
+    }
+    expect(dueIds(store)).not.toContain('m-notify');
+    expect(dueIds(store)).not.toContain('m-backup');
+  });
+
+  it('a mandate change to an owner schedule clears its stamp and holds it until the owner stamps again', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'own', { createdBy: 'owner', confirmedAt: STAMP, confirmedBy: 'owner' });
+    expect(dueIds(store)).toContain('own');
+    expect(store.markEditedBy('own', MANDATE, true)).toBe(true);
+    const row = store.getById('own')!;
+    expect(row.edited_by).toBe(MANDATE);
+    expect(row.confirmed_at).toBeUndefined();
+    expect(row.confirmed_by).toBeUndefined();
+    expect(dueIds(store)).not.toContain('own');
+    store.setConfirmedAt('own', STAMP, 'owner');
+    expect(dueIds(store)).toContain('own');
+  });
+
+  it('records who stamped, and drops it with the stamp', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'w', { createdBy: MANDATE });
+    store.setConfirmedAt('w', STAMP, 'owner');
+    expect(store.getById('w')!.confirmed_by).toBe('owner');
+    store.setConfirmedAt('w', null, 'owner');
+    expect(store.getById('w')!.confirmed_by).toBeUndefined();
+  });
+
+  it('never replaces the creator when the row is written again', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 'c', { createdBy: MANDATE });
+    // A re-projection of the same row, as the S3d backfill writes it, with no creator.
+    const rec = store.getById('c')!;
+    store.upsert({ ...triggerRecordToRow({ ...rec, created_by: undefined }) });
+    expect(store.getById('c')!.created_by).toBe(MANDATE);
+    // …and with a different creator.
+    store.upsert({ ...triggerRecordToRow({ ...rec, created_by: 'owner' }) });
+    expect(store.getById('c')!.created_by).toBe(MANDATE);
+    expect(dueIds(store)).not.toContain('c');
+  });
+
+  it('the owner\'s stamp takes a mandate\'s schedule over: the owner\'s later rename does not hold it again', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 't', { createdBy: MANDATE });
+    store.setConfirmedAt('t', STAMP, 'owner');
+    expect(store.getById('t')!.edited_by).toBe('owner');
+    // The owner renames it: the instruction changed, so the stamp goes (as before v20)…
+    store.updateFields('t', { title: 'Renamed by the owner' });
+    const row = store.getById('t')!;
+    expect(row.confirmed_at).toBeUndefined();
+    expect(row.confirmed_by).toBeUndefined();
+    // …and a run_workflow schedule the owner changed stays due, as it did before v20.
+    expect(dueIds(store)).toContain('t');
+    // A mandate's change after that holds it again.
+    store.markEditedBy('t', MANDATE, true);
+    expect(dueIds(store)).not.toContain('t');
+  });
+
+  it('a re-write keeps the stamper with the stamp and drops it when the stamp goes', () => {
+    const { store } = make();
+    insertWorkflowSchedule(store, 's', { createdBy: MANDATE, confirmedAt: STAMP, confirmedBy: 'owner' });
+    const rec = store.getById('s')!;
+    // Written again with the stamp but no stamper: the recorded stamper stays.
+    store.upsert({ ...triggerRecordToRow({ ...rec, confirmed_by: undefined }) });
+    expect(store.getById('s')!.confirmed_by).toBe('owner');
+    // Written again without the stamp: a stamper with no stamp would name a confirmation that is gone.
+    store.upsert({ ...triggerRecordToRow({ ...rec, confirmed_at: undefined }) });
+    expect(store.getById('s')!.confirmed_at).toBeUndefined();
+    expect(store.getById('s')!.confirmed_by).toBeUndefined();
+  });
+});

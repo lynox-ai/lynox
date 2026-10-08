@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
@@ -124,6 +125,7 @@ const mockTaskUpdate = vi.fn().mockReturnValue({ id: 'task-1', title: 'Updated' 
 const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'completed' });
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
+const mockTaskMarkEditedBy = vi.fn().mockReturnValue(true);
 const mockConfirmTrigger = vi.fn().mockReturnValue({ id: 'task-1', confirmed_at: '2026-06-01T00:00:00.000Z' });
 const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
 const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
@@ -240,6 +242,7 @@ vi.mock('../core/engine.js', () => ({
       createPipelineTask: mockTaskCreatePipeline,
       setEnabled: mockTaskSetEnabled,
       confirmTrigger: mockConfirmTrigger,
+      markEditedBy: mockTaskMarkEditedBy,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     this.getApiStore = mockGetApiStore;
@@ -12018,3 +12021,161 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(grant?.revoked_at).toBeUndefined();
   });
 });
+
+// PRD customer-granted-operator-access §3.12, §3.13 (piece H1a). Until the recipient's
+// login exists, every request is the owner; the test seam feeds a mandate so the
+// mandate branch is exercised now, and the owner witnesses pin that nothing changed for him.
+describe('operator stamp rules — who may stamp, and what a mandate leaves behind', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@kanzlei.example' };
+  const TAG = 'mandate:eva@kanzlei.example';
+  const asMandate = (): void => api.setPrincipalResolverForTesting(() => MANDATE);
+  // This file shares ONE per-IP rate window; every test here pays its requests back, so this
+  // block neither runs into a 429 itself nor tips a test after it into one.
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  afterEach(() => {
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+  });
+
+  function storeWf(): void {
+    mockGetPipeline.mockReturnValue({
+      id: 'wf-sched', name: 'Report', goal: 'g', steps: [{ id: 's', task: 'do' }], reasoning: 'r', estimatedCost: 0,
+      createdAt: '2026-01-01T00:00:00.000Z', executed: false, executionMode: 'orchestrated', template: true,
+      mode: 'autonomous', parameters: [],
+    });
+  }
+
+  describe('as a mandate', () => {
+    beforeEach(() => {
+      asMandate();
+      mockTaskCreate.mockClear(); mockTaskCreatePipeline.mockClear(); mockSetWorkflowConfirmedAt.mockClear();
+      mockConfirmTrigger.mockClear(); mockTaskMarkEditedBy.mockClear(); mockTaskUpdate.mockClear(); mockGetPipeline.mockReset();
+    });
+
+    it('creates an agent trigger unstamped and records the mandate as creator', async () => {
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 't', runAt: '2030-01-01T00:00:00.000Z' }) });
+      expect(res.status).toBe(201);
+      const arg = mockTaskCreate.mock.calls[0]![0] as Record<string, unknown>;
+      expect(arg['createdBy']).toBe(TAG);
+      expect(arg['confirmedAt']).toBeUndefined();
+      expect(arg['confirmedBy']).toBeUndefined();
+    });
+
+    it('schedules a workflow without stamping it, and records the mandate as creator', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+      expect(res.status).toBe(201);
+      expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+      expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ pipelineId: 'wf-sched', createdBy: TAG }));
+    });
+
+    it('may not grant a workflow unattended writes', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', grant: {} }) });
+      expect(res.status).toBe(403);
+      // The feature switch is off here and would 403 too: the owner rule must be the one that answered.
+      expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+    });
+
+    it('may not confirm a schedule', async () => {
+      const res = await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+      expect(mockConfirmTrigger).not.toHaveBeenCalled();
+    });
+
+    it.each(['approve', 'resume', 'confirm-probe', 'undo'])('may not %s a bulk run', async (verb) => {
+      const res = await jsonFetch(`/api/bulk/runs/run-1/${verb}`, { method: 'POST', body: '{}' });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+    });
+
+    it('may not promote onboarding knowledge', async () => {
+      const res = await jsonFetch('/api/onboarding/knowledge/promote', { method: 'POST', body: '{}' });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+    });
+
+    it('marks a trigger it changes and drops the stamp BEFORE the change is written', async () => {
+      const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
+      expect(res.status).toBe(200);
+      expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
+      expect(mockTaskMarkEditedBy.mock.invocationCallOrder[0]!).toBeLessThan(mockTaskUpdate.mock.invocationCallOrder[0]!);
+    });
+
+    it('marks a trigger before switching it on or off, and before completing it', async () => {
+      await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ enabled: true }) });
+      expect(mockTaskMarkEditedBy).toHaveBeenCalledTimes(1);
+      await jsonFetch('/api/tasks/task-1/complete', { method: 'POST' });
+      expect(mockTaskMarkEditedBy).toHaveBeenCalledTimes(2);
+    });
+
+    it('may not start a schedule by hand, nor run a workflow, until the test-run door and the tool lock exist', async () => {
+      const run = vi.fn();
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow: run });
+      try {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+      } finally { engineRef['getWorkerLoop'] = orig; }
+      expect(run).not.toHaveBeenCalled();
+      const wf = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      expect(wf.status).toBe(403);
+      expect(((await wf.json()) as { error: string }).error).toContain('Only the owner');
+    });
+  });
+
+  describe('as the owner (unchanged)', () => {
+    beforeEach(() => {
+      mockTaskCreate.mockClear(); mockTaskCreatePipeline.mockClear(); mockSetWorkflowConfirmedAt.mockClear();
+      mockConfirmTrigger.mockClear(); mockTaskMarkEditedBy.mockClear(); mockGetPipeline.mockReset();
+    });
+
+    it('stamps the agent trigger it creates, as before, and records itself', async () => {
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 't', runAt: '2030-01-01T00:00:00.000Z' }) });
+      expect(res.status).toBe(201);
+      const arg = mockTaskCreate.mock.calls[0]![0] as Record<string, unknown>;
+      expect(typeof arg['confirmedAt']).toBe('string');
+      expect(arg['confirmedBy']).toBe('owner');
+      expect(arg['createdBy']).toBe('owner');
+    });
+
+    it('stamps the workflow it schedules, as before', async () => {
+      storeWf();
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }) });
+      expect(res.status).toBe(201);
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+    });
+
+    it('confirms a schedule, recorded as the owner, and its changes leave no mark', async () => {
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect(mockConfirmTrigger).toHaveBeenCalledWith('task-1', undefined, 'owner');
+      await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'new' }) });
+      expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
+    });
+
+    it('confirming a workflow schedule never stamps the workflow, which every schedule naming it shares', async () => {
+      mockConfirmTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'run_workflow', pipeline_id: 'wf-sched', confirmed_at: '2026-10-08T00:00:00.000Z' });
+      storeWf(); // an unstamped workflow
+      expect((await jsonFetch('/api/tasks/task-1/confirm', { method: 'POST' })).status).toBe(200);
+      expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+    });
+
+    it('pressing "Run now" on a proposal answers with a code and starts nothing', async () => {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow: () => Promise.resolve({ ok: false, reason: 'awaits_owner_stamp' }) });
+      try {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { code?: string }).code).toBe('awaits_owner_stamp');
+      } finally { engineRef['getWorkerLoop'] = orig; }
+    });
+  });
+});
+

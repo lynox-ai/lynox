@@ -307,6 +307,9 @@ describe('VerbGraphBackfill — workflows + triggers (B1 self-heal)', () => {
     // Deterministic effects aren't gated → not grandfathered (confirmed_at stays null).
     expect(ts.get('g-backup')?.confirmedAt).toBeNull();
     expect(ts.get('g-reminder')?.confirmedAt).toBeNull();
+    // The stamper goes with the stamp, as engine.db v20 records it for rows already there.
+    expect(ts.getById('g-manual')?.confirmed_by).toBe('owner');
+    expect(ts.getById('g-backup')?.confirmed_by).toBeUndefined();
   });
 
   it('derives source/effect from the legacy task_type (the #850 remap twin)', () => {
