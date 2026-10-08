@@ -11526,10 +11526,12 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expiresAt?: number; tokenBody?: string;
     grant?: import('../core/api-store.js').OAuthGrantRecord;
     oauthExtra?: Record<string, unknown>;
+    profileId?: string;
   } = {}): Promise<{
     cookie: string; store: Awaited<ReturnType<typeof makeStore>>;
   }> {
-    const store = await makeStore(opts.expiresAt, opts.grant, opts.oauthExtra);
+    const profileId = opts.profileId ?? PROFILE;
+    const store = await makeStore(opts.expiresAt, opts.grant, opts.oauthExtra, profileId);
     const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
     mockGetApiStore.mockReturnValue(store);
     mockSecretResolve.mockImplementation((n: string) => (n === 'CRM_CLIENT_ID' ? 'id-1' : 'sec-1'));
@@ -11543,7 +11545,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
     });
     const signed = signProfileOAuthState(
-      { state: STATE, profileId: PROFILE, verifier: VERIFIER },
+      { state: STATE, profileId, verifier: VERIFIER },
       TEST_SECRET, Math.floor(Date.now() / 1000),
     );
     if (signed === null) throw new Error('fixture could not be signed');
@@ -11554,13 +11556,14 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expiresAt?: number,
     grant?: import('../core/api-store.js').OAuthGrantRecord,
     oauthExtra?: Record<string, unknown>,
+    profileId: string = PROFILE,
   ): Promise<InstanceType<
     Awaited<typeof import('../core/api-store.js')>['ApiStore']
   >> {
     const { ApiStore } = await import('../core/api-store.js');
     const store = new ApiStore();
     store.register({
-      id: PROFILE, name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
+      id: profileId, name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM',
       ...(grant === undefined ? {} : { oauth_grant: grant }),
       auth: {
         type: 'oauth2',
@@ -11617,6 +11620,25 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(await res.text()).toContain('Connected');
     expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0]))
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
+  });
+
+  it('never writes a token for a profile whose derived slot belongs to the instance', async () => {
+    // `mail-account-crm` derives MAIL_ACCOUNT_CRM_ACCESS_TOKEN, a name in the
+    // mail store's namespace. The callback writes the derived pair without
+    // asking whose it is; what keeps it out is that the store never admits the
+    // profile. Everything else is arranged as on the ordinary path above, so a
+    // store that admitted it would answer 200 and write both slots.
+    const { cookie, store } = await arrange({ profileId: 'mail-account-crm' });
+    expect(store.get('mail-account-crm')).toBeUndefined();
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+
+    expect(res.status).toBe(409);
+    // This route answers 409 from three branches; the sentence names the first.
+    expect(await res.text()).toContain('no longer exists');
+    expect(mockSecretSet).not.toHaveBeenCalled();
   });
 
   it('answers the page, not the catch-all, when the SECOND write throws', async () => {
