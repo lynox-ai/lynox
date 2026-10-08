@@ -508,8 +508,24 @@ export function renderProvenanceFact(opts: {
 }
 
 /**
+ * Either half of the element's tag, in every encoding of the opener: the closer
+ * (`BOUNDARY_CLOSE_TAIL`) or the name itself. `\b` after the name keeps
+ * `<untrusted_database` untouched.
+ */
+const BOUNDARY_TAG_ANY = new RegExp(
+  `(${BOUNDARY_OPEN_ANY})(?:${BOUNDARY_CLOSE_TAIL}|${BOUNDARY_SEP}untrusted_data\\b)`,
+  'gi',
+);
+
+/**
  * Neutralize boundary-breaking tags in content to prevent wrapper escape.
  * Handles literal tags, HTML entity encoded tags, and numeric entity encoded tags.
+ *
+ * Both halves of the tag. A closer in the content would end the block early; an
+ * opener would start what reads as a second block with a `source` the sender
+ * wrote, inside the real one. After this, a block's content holds no literal
+ * opener or closer of the element; text outside the block (whatever a tool puts
+ * around it) is not this function's to change.
  */
 function neutralizeBoundaryTags(text: string): string {
   return (
@@ -557,7 +573,7 @@ function neutralizeBoundaryTags(text: string): string {
     // here claimed that outcome while the code did the opposite, and the claim
     // is why the defect stood through four review rounds: it was read as the
     // measurement.
-    deadenMatches(text, new RegExp(`(${BOUNDARY_OPEN_ANY})${BOUNDARY_CLOSE_TAIL}`, 'gi'))
+    deadenMatches(text, BOUNDARY_TAG_ANY)
   );
 }
 
