@@ -11015,6 +11015,53 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/data answers rather than hanging when the entity wipe makes no progress', async () => {
+      // `attempt` catches a THROW; it cannot catch a non-termination, and the
+      // entity wipe is the one loop here that re-lists after deleting. A refuter
+      // stubbed `deleteEntity` to a no-op and the request never answered at all —
+      // the event loop held by synchronous SQLite calls, the caller left with a
+      // timeout instead of `failed: ['knowledge_graph']`. That is reachable from a
+      // scope filter added on one side of the pair only, or a delete that starts
+      // silently no-opping.
+      const entity = { id: 'e1' };
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({
+          getDb: () => ({
+            listEntities: () => [entity],
+            deleteEntity: () => undefined,
+            deactivateAllMemories: () => [],
+          }),
+        }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        expect(body.failed).toContain('knowledge_graph');
+      });
+    }, 30_000);
+
+    it('DELETE /api/data does not report `config` when only the RELOAD failed', async () => {
+      // The direction nobody checks: a 500 that says "some stores still hold data"
+      // about a store that holds nothing. `saveUserConfig({})` can succeed — the
+      // file on disk IS reset — and `reloadUserConfig()` then throw on a refused
+      // endpoint. Reporting that as `config` sends the tenant looking for data that
+      // is already gone, so the two are separate attempts with separate keys.
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => null,
+        reloadUserConfig: () => Promise.reject(new Error('endpoint refused')),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        expect(body.failed).toContain('config_reload');
+        expect(body.failed, 'the config FILE was reset — saying otherwise is a false alarm').not.toContain('config');
+      });
+    });
+
     it('DELETE /api/data repairs the CRM schema even when a drop throws mid-loop', async () => {
       // The POSITION of the repair, which is the whole fix: it used to be the last
       // statement of the datastore callback, so a `dropCollection` that threw
