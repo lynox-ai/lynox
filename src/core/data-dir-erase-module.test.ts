@@ -258,9 +258,11 @@ describe('data-dir erasure — on disk', () => {
       writeFileSync(join(outside, n, 'engine.db'), 'ZZ-copy');
     }
     writeFileSync(join(outside, 'my-notes.txt'), 'ZZ-mine');
+    // Starts like a backup name and is not one: the pattern is anchored at both ends.
+    writeFileSync(join(outside, '2026-10-08T1930-notes.txt'), 'ZZ-mine');
     const out = removeBackupsOutside(outside, dir);
     expect(out.removed.sort()).toEqual(['2026-10-08T19301234Z', '2026-10-08T19301234Z-1', '2026-10-08T19301234Z.tmp']);
-    expect(readdirSync(outside)).toEqual(['my-notes.txt']);
+    expect(readdirSync(outside).sort()).toEqual(['2026-10-08T1930-notes.txt', 'my-notes.txt']);
   });
 
   it('reports, rather than throws, when the backup_dir cannot be read', () => {
