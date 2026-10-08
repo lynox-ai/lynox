@@ -472,8 +472,9 @@ export function proveBashCommand(command: string, env: ProofEnv): BashProof {
     if (!cwd) throw new NotProven('root');
     const home = env.home ? (realOrNull(env.home) ?? env.home) : undefined;
     // A working directory that is the file system root, or that contains HOME, would
-    // prove reads of the whole home; nothing with a path is proven from there.
-    const tooWide = dirname(cwd) === cwd || (home !== undefined && within(home, cwd));
+    // prove reads of the whole home; one that is itself hidden (`~/.ssh`) would prove a
+    // listing of it. Nothing with a path is proven from either.
+    const tooWide = dirname(cwd) === cwd || (home !== undefined && within(home, cwd)) || basename(cwd).startsWith('.');
     const roots: Roots = {
       cwd,
       logicalCwd: resolve(env.cwd),

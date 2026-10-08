@@ -31,6 +31,17 @@ symlinkSync(join(base, 'x', 'y'), join(ws, 'a', 'b', 'l'));
 // A symlink OUTSIDE that points inside, and a working directory reached through a symlink.
 symlinkSync(join(ws, 'notes.md'), join(base, 'into-ws'));
 symlinkSync(ws, join(base, 'ws-link'));
+// A working directory and a read root that sit BELOW a hidden directory, as the managed
+// workspace does (`~/.lynox/workspace/<ctx>`): only components below the root count.
+const deepWs = join(base, '.lynox', 'workspace', 'ctx');
+mkdirSync(join(deepWs, '.inner'), { recursive: true });
+writeFileSync(join(deepWs, 'f.txt'), 'x');
+writeFileSync(join(deepWs, '.inner', 'f.txt'), 'x');
+const dotRoot = join(base, '.ro');
+mkdirSync(join(dotRoot, 'x'), { recursive: true });
+writeFileSync(join(dotRoot, 'x', 'f'), 'x');
+// A working directory that is itself hidden.
+const hiddenWs = join(base, 'home', '.ssh');
 // A plain name inside the directory that points at a hidden file inside it.
 writeFileSync(join(ws, '.hidden'), 'x');
 symlinkSync(join(ws, '.hidden'), join(ws, 'link-to-hidden'));
@@ -277,6 +288,21 @@ describe('proveBashCommand — not proven', () => {
     const commands = (n: number) => Array.from({ length: n }, () => 'pwd').join(' | ');
     expect(prove(commands(MAX_PROVEN_COMMANDS)).proven).toBe(true);
     expect(prove(commands(MAX_PROVEN_COMMANDS + 1))).toEqual(expect.objectContaining({ proven: false, reason: 'length' }));
+  });
+
+  it('counts hidden components only below the root, for the working directory and a read root', () => {
+    const deep = { ...env, cwd: deepWs, readRoots: [dotRoot] };
+    expect(prove('cat f.txt', deep).proven).toBe(true);
+    expect(prove('ls', deep).proven).toBe(true);
+    expect(prove(`cat ${join(dotRoot, 'x', 'f')}`, deep).proven).toBe(true);
+    expect(prove('cat .inner/f.txt', deep)).toEqual(expect.objectContaining({ proven: false, reason: 'path-hidden' }));
+  });
+
+  it('proves no path from a working directory that is itself hidden', () => {
+    const inside = { ...env, cwd: hiddenWs };
+    expect(prove('ls', inside)).toEqual(expect.objectContaining({ proven: false, reason: 'root' }));
+    expect(prove('ls -la .', inside)).toEqual(expect.objectContaining({ proven: false, reason: 'root' }));
+    expect(prove('pwd', inside).proven).toBe(true);
   });
 
   it('is not proven when the working directory cannot be resolved', () => {
