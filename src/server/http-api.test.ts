@@ -930,7 +930,8 @@ describe('LynoxHTTPApi', () => {
     it('ends a mandate session at its signed exp', async () => {
       const nowS = Math.floor(Date.now() / 1000);
       const live = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS + 60));
-      const ended = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS - 1));
+      // exp = now: the session has ended at exp itself, not one second after.
+      const ended = mintPrincipalToken(TEST_SECRET, nowS - 60, mandatePrincipal(nowS));
       expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${live}` } })).status).toBe(200);
       expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${ended}` } })).status).toBe(401);
     });

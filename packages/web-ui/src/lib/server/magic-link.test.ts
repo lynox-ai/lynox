@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { decideMagicLinkOutcome, type MagicLinkDeps, type MagicLinkReason } from './magic-link.js';
 import { MAGIC_LINK_ERROR_CODES } from '../contract/http.js';
 import { readFileSync } from 'node:fs';
+import { readSessionToken, MANDATE_SESSION_MAX_S, SESSION_MAX_AGE_S } from './auth.js';
 import { fileURLToPath } from 'node:url';
 
 // The golden body the control plane sends for a mandate login (core src/contract/fixtures).
@@ -65,15 +66,27 @@ describe('decideMagicLinkOutcome — CP fetch outcomes', () => {
 	it('returns success on a CP 200 response', async () => {
 		const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ valid: true }), { status: 200 }));
 		const outcome = await decideMagicLinkOutcome(mkDeps({ fetchImpl }));
-		// No principal in the body is the owner.
-		expect(outcome).toEqual({ type: 'success', principal: null });
+		expect(outcome.type).toBe('success');
+		if (outcome.type !== 'success') return;
+		// No principal in the body is the owner: the principal-less 30-day session.
+		expect(readSessionToken(outcome.session.token, 'engine-secret')?.principal).toBeNull();
+		expect(outcome.session.maxAge).toBe(SESSION_MAX_AGE_S);
 	});
 
-	it('carries the mandate principal the CP verified', async () => {
-		const body = JSON.parse(readFileSync(MANDATE_FIXTURE, 'utf8')) as { principal: unknown };
+	it('gives the mandate session for the mandate the CP verified', async () => {
+		const body = JSON.parse(readFileSync(MANDATE_FIXTURE, 'utf8')) as { principal: { mandate_id: string } };
 		const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
 		const outcome = await decideMagicLinkOutcome(mkDeps({ fetchImpl }));
-		expect(outcome).toEqual({ type: 'success', principal: body.principal });
+		if (outcome.type !== 'success') throw new Error(outcome.type);
+		expect(readSessionToken(outcome.session.token, 'engine-secret')?.principal?.mandate_id).toBe(body.principal.mandate_id);
+		expect(outcome.session.maxAge).toBe(MANDATE_SESSION_MAX_S);
+	});
+
+	it('gives no session when the mandate the CP names has already ended', async () => {
+		const body = JSON.parse(readFileSync(MANDATE_FIXTURE, 'utf8')) as { principal: Record<string, unknown> };
+		body.principal['mandate_expires_at'] = '2000-01-01T00:00:00.000Z';
+		const fetchImpl = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }));
+		expect(await decideMagicLinkOutcome(mkDeps({ fetchImpl }))).toEqual({ type: 'redirect_login', reason: 'expired' });
 	});
 
 	it('refuses a principal it does not know instead of reading it as the owner', async () => {

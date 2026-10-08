@@ -288,6 +288,7 @@ describe('session tokens with a principal', () => {
 		const tok = createSessionToken(SECRET, mandateAt(nowS));
 		vi.setSystemTime(t0 + (MANDATE_SESSION_MAX_S - 1) * 1000);
 		expect(verifySessionToken(tok, SECRET)).toBe(true);
+		// At exp itself the session has ended.
 		vi.setSystemTime(t0 + MANDATE_SESSION_MAX_S * 1000);
 		expect(verifySessionToken(tok, SECRET)).toBe(false);
 	});

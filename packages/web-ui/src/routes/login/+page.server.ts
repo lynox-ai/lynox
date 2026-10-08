@@ -5,7 +5,6 @@ import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-	loginSessionFromBody,
 	ownerSession,
 	verifySessionToken,
 	secretEquals,
@@ -15,11 +14,8 @@ import {
 	clearRateLimit,
 	isHttpsRequest,
 } from '$lib/server/auth.js';
-import {
-	LOGIN_PRINCIPAL_VERSION,
-	type AuthCodeRequest,
-	type AuthCodeVerifyRequest,
-} from '$lib/contract/http.js';
+import { LOGIN_PRINCIPAL_VERSION, type AuthCodeRequest } from '$lib/contract/http.js';
+import { verifyCodeLogin } from '$lib/server/code-login.js';
 
 // ── Managed mode detection ─────────────────────────────────────────
 
@@ -290,44 +286,23 @@ export const actions: Actions = {
 			return fail(400, { error: 'Email and code are required.' });
 		}
 
-		try {
-			const userAgent = request.headers.get('user-agent') ?? '';
-			const res = await fetch(`${managed.controlPlaneUrl}/internal/auth/verify`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'x-instance-secret': secret,
-					'x-login-user-agent': userAgent,
-					'x-login-ip': ip,
-				},
-				body: JSON.stringify({
-					email,
-					code,
-					instanceId: managed.instanceId,
-					principal_version: LOGIN_PRINCIPAL_VERSION,
-				} satisfies AuthCodeVerifyRequest),
-			});
-
-			if (!res.ok) {
-				const body = await res.json().catch(() => ({ error: 'Verification failed' })) as { error?: string };
-				recordFailedLogin(ip);
-				return fail(res.status, { error: body.error ?? 'Invalid code.' });
-			}
-
-			// OTP valid — create local session, the owner's or the mandate the CP
-			// verified. A principal this reader does not know is refused.
-			const session = loginSessionFromBody(secret, await res.json().catch(() => null));
-			if (session === 'unknown_principal') {
-				return fail(502, { error: 'Could not reach the control plane. Please try again.' });
-			}
-			if (session === 'ended') return fail(403, { error: 'This access has ended.' });
-			setSessionCookie(cookies, session, isHttpsRequest(url, request));
-			clearRateLimit(ip);
-			redirect(303, '/app');
-		} catch (err: unknown) {
-			if (isRedirect(err)) throw err;
-			return fail(502, { error: 'Could not reach the control plane. Please try again.' });
+		const outcome = await verifyCodeLogin({
+			controlPlaneUrl: managed.controlPlaneUrl,
+			instanceId: managed.instanceId,
+			secret,
+			email,
+			code,
+			clientIp: ip,
+			userAgent: request.headers.get('user-agent') ?? '',
+			fetchImpl: fetch,
+		});
+		if (outcome.type === 'fail') {
+			if (outcome.failedLogin) recordFailedLogin(ip);
+			return fail(outcome.status, { error: outcome.error });
 		}
+		setSessionCookie(cookies, outcome.session, isHttpsRequest(url, request));
+		clearRateLimit(ip);
+		redirect(303, '/app');
 	},
 
 	/** Managed: complete passkey authentication, create local session. */

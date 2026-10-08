@@ -210,9 +210,11 @@ export interface MagicLinkVerifyRequest {
  * A login can now be the owner's or a mandate recipient's: a person the owner
  * let in for a bounded time. Only a caller that reads the principal in the
  * success body can tell them apart. A caller that predates the field reads
- * any success as the owner. So the control plane admits a mandate recipient
- * only when the request carries this version, and a caller without it can
- * never turn a mandate login into an owner session. Sent on all three auth
+ * any success as the owner, so the control plane admits a mandate recipient
+ * only when the request carries a version it accepts. The version names
+ * everything the caller does with a principal, not only that it reads one:
+ * it is raised whenever that grows, and the control plane admits recipients
+ * only to callers of a version that does all of it. Sent on all three auth
  * requests: the code request too, so that no code is mailed for a login the
  * caller could not carry.
  */

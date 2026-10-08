@@ -17,14 +17,12 @@ import type { RequestHandler } from './$types.js';
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import {
-	loginSession,
 	verifySessionToken,
 	isRateLimited,
 	recordFailedLogin,
 	clearRateLimit,
 	isHttpsRequest,
 } from '$lib/server/auth.js';
-import type { MandateLoginPrincipal } from '$lib/contract/http.js';
 import { decideMagicLinkOutcome, type MagicLinkOutcome } from '$lib/server/magic-link.js';
 
 function getManagedConfig(): { instanceId: string; controlPlaneUrl: string } | null {
@@ -42,12 +40,9 @@ function getSecret(): string | null {
 
 function setSessionCookie(
 	cookies: Parameters<RequestHandler>[0]['cookies'],
-	secret: string,
+	session: { token: string; maxAge: number },
 	isSecure: boolean,
-	login: MandateLoginPrincipal | null,
-): boolean {
-	const session = loginSession(secret, login);
-	if (session === null) return false;
+): void {
 	cookies.set('lynox_session', session.token, {
 		path: '/',
 		httpOnly: true,
@@ -58,7 +53,6 @@ function setSessionCookie(
 		sameSite: 'lax',
 		maxAge: session.maxAge,
 	});
-	return true;
 }
 
 export const GET: RequestHandler = async ({ url, request, cookies, getClientAddress }) => {
@@ -84,10 +78,7 @@ export const GET: RequestHandler = async ({ url, request, cookies, getClientAddr
 		case 'already_logged_in':
 			redirect(303, '/app');
 		case 'success':
-			// A mandate that ended between the CP's check and here gets no session.
-			if (!setSessionCookie(cookies, secret, isHttpsRequest(url, request), outcome.principal)) {
-				redirect(303, '/login?error=magic_expired');
-			}
+			setSessionCookie(cookies, outcome.session, isHttpsRequest(url, request));
 			clearRateLimit(ip);
 			redirect(303, '/app');
 		case 'redirect_login':
