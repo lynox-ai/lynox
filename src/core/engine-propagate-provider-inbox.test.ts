@@ -92,6 +92,9 @@ vi.mock('../tools/builtin/index.js', () => ({
 
 vi.mock('./tool-context.js', () => ({
   createToolContext: vi.fn().mockReturnValue({}),
+  // A reload re-applies the egress settings onto the ToolContext.
+  applyEnforceHttps: vi.fn(),
+  applyNetworkPolicy: vi.fn(),
 }));
 
 // Inbox bootstrap mock — every call returns a fresh sentinel runtime
