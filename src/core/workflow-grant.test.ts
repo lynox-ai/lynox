@@ -303,6 +303,7 @@ describe('accepting a grant', () => {
     expect(grantName('A\ufe0fda\u034f L.\u{e0100}'), 'variation selectors, grapheme joiner').toBe('Ada L.');
     expect(grantName('A\ue000da L.'), 'private use').toBe('Ada L.');
     expect(grantName('A\u2800da\u180b L.\u17b4'), 'braille blank, Mongolian and Khmer invisibles').toBe('Ada L.');
+    expect(grantName('A\u180fda L.\u17b5'), 'the far end of each range').toBe('Ada L.');
   });
 
   it('refuses a name with no letter or digit left, and keeps words apart where a control char stood', () => {
@@ -316,6 +317,7 @@ describe('accepting a grant', () => {
     const name = grantName(`${'a'.repeat(119)}\u{1F600}x`);
     expect([...name!]).toHaveLength(120);
     expect(name!.isWellFormed(), 'no lone surrogate').toBe(true);
+    expect(grantName(`${'a'.repeat(119)} b`), 'no space left at the cut').toBe('a'.repeat(119));
   });
 
   it('keeps letters with their marks, in any script, and composes them', () => {
