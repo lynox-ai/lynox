@@ -635,7 +635,7 @@ export function refreshTokenKey(id: string): string {
  * pattern is a prefix, which the two names share, and no provider slot ends in
  * `_ACCESS_TOKEN` or `_REFRESH_TOKEN`. That is a fact about the current set, not
  * a rule — a protected name with either suffix would split them, and dropping
- * the refresh half would then go unnoticed by every test here.
+ * the refresh half would then go unnoticed by the tests that pin this gate.
  *
  * Kept pure and exported so the question can be asserted on its own; the
  * refusal lives in `_admit`, behind both {@link ApiStore.register} and save — the one gate every profile
