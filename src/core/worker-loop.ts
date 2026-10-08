@@ -21,7 +21,6 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
-import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -1721,7 +1720,7 @@ export class WorkerLoop {
     // And the run is that mandate's from here on: it may stop it, and it is not retried.
     const running = this.#runSlotOf(task.id);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
-    const triggerTier = admittedTriggerTier(task.model_tier);
+    const triggerTier = task.model_tier;
     const session = this.engine.createSession({
       autonomy: 'autonomous',
       // Same thread, so the run's own history shows the exchange it continues.
@@ -2543,7 +2542,7 @@ export class WorkerLoop {
     }
 
     // Content changed (or first run) — run analysis via agent
-    const watchTier = admittedTriggerTier(task.model_tier);
+    const watchTier = task.model_tier;
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
       // A run without tools, but built for its starter all the same: the lock must not

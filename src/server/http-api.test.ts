@@ -6906,14 +6906,14 @@ describe('LynoxHTTPApi', () => {
       expect(mockTaskUpdate).not.toHaveBeenCalled();
     });
 
-    it('PATCH refuses a tier in managed-pool mode without touching the trigger, and still lets one be cleared', async () => {
+    it('PATCH sets and clears a tier in managed-pool mode', async () => {
       vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
       mockTaskUpdate.mockClear();
       try {
         const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'fast' }) });
-        expect(res.status).toBe(403);
-        expect(mockTaskUpdate).not.toHaveBeenCalled();
+        expect(res.status).toBe(200);
+        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'fast' }));
         const clear = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: null }) });
         expect(clear.status).toBe(200);
         expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }), undefined, OWNER_PRINCIPAL);
@@ -9601,7 +9601,7 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it('PUT /api/config refuses background_model in managed-pool mode and writes nothing', async () => {
+      it('PUT /api/config accepts and persists background_model in managed-pool mode', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
         const { saveUserConfig } = await import('../core/config.js');
@@ -9611,9 +9611,10 @@ describe('LynoxHTTPApi', () => {
             method: 'PUT',
             body: JSON.stringify({ background_model: { provider: 'anthropic', model_id: 'claude-haiku-4-5' } }),
           });
-          expect(res.status).toBe(403);
-          expect(((await res.json()) as { error: string }).error).toContain('background_model');
-          expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+          expect(res.status).toBe(200);
+          const calls = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls;
+          expect(calls.length).toBe(saves + 1);
+          expect(calls.at(-1)![0]['background_model']).toEqual({ provider: 'anthropic', model_id: 'claude-haiku-4-5' });
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);

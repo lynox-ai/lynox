@@ -750,8 +750,7 @@ export interface LynoxUserConfig {
   worker_profile?: string | undefined;
   /**
    * The user's choice of model for background tasks (WorkerLoop standard runs and
-   * watch analyses), written through `PUT /api/config` (not on a managed pool tier, whose
-   * config gate refuses it). It beats `worker_profile`, which stays the
+   * watch analyses), written through `PUT /api/config`. It beats `worker_profile`, which stays the
    * operator's default (managed: the control plane's Mistral worker). Unlike that
    * default it is held to the same bounds as any user model choice: the blocklist,
    * the `max_tier` ceiling and, on managed, the provider allowlist with the
