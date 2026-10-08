@@ -282,15 +282,19 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
       expect(w.save(richProfile({ id, base_url: `https://${id.replace(/[_-]/g, '')}.example.com` })).ok).toBe(true);
     }
     expect(cs.count('api')).toBe(2);
+    // Restored in `finally`: this file's afterEach restores no mocks, so a failed
+    // assert would otherwise leave stderr silenced for every later test.
     const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const r = new ApiStore();
+      const loaded = r.loadFromConnections(cs);
 
-    const r = new ApiStore();
-    const loaded = r.loadFromConnections(cs);
-
-    // A count of 2 would report a profile the store does not hold.
-    expect(['x-y', 'x_y'].filter((id) => r.get(id) !== undefined)).toHaveLength(1);
-    expect(loaded).toBe(1);
-    warn.mockRestore();
+      // A count of 2 would report a profile the store does not hold.
+      expect(['x-y', 'x_y'].filter((id) => r.get(id) !== undefined)).toHaveLength(1);
+      expect(loaded).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('loadFromConnections skips a row whose config_json is malformed (parse throws)', () => {
