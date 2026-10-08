@@ -223,8 +223,9 @@ function lex(cmd: string): Segment[] {
       continue;
     }
     if (code < 0x20 || code > 0x7e) throw new NotProven('byte');
+    // `||`, `;;` and `|&` need no rule of their own: the second character ends an
+    // empty command, or is a lone `&`, and both are refused.
     if (c === '|') {
-      if (cmd[i + 1] === '|' || cmd[i + 1] === '&') throw new NotProven('separator');
       endSegment();
       continue;
     }
@@ -235,17 +236,15 @@ function lex(cmd: string): Segment[] {
       continue;
     }
     if (c === ';') {
-      if (cmd[i + 1] === ';') throw new NotProven('separator');
       endSegment();
       continue;
     }
     if (c === '>') {
-      // Only `2>/dev/null` as a word of its own, and only as the last word of a command.
+      // Only `2>/dev/null` as a word of its own, and only as the last word of a command:
+      // anything that follows it in the same command starts a word, which is refused.
       const w = word as Word | null;
       const rest = cmd.slice(i + 1, i + 1 + REDIRECT.length - 2);
-      const after = cmd[i + REDIRECT.length - 1];
-      const bounded = after === undefined || after === ' ' || after === '\t' || after === '|' || after === '&' || after === ';';
-      if (w && w.text === '2' && !w.quoted && !w.tilde && rest === '/dev/null' && bounded && !redirected) {
+      if (w && w.text === '2' && !w.quoted && !w.tilde && rest === '/dev/null' && !redirected) {
         word = null;
         redirected = true;
         i += REDIRECT.length - 2;
@@ -297,7 +296,7 @@ interface Roots {
 
 function provePath(word: Word, env: ProofEnv, roots: Roots): void {
   let text = word.text;
-  if (text === '-' && !word.quoted) return; // stdin
+  if (text === '-') return; // stdin (the shell removes quotes, so `'-'` is stdin too)
   if (!roots.pathsAllowed) throw new NotProven('root');
   if (word.tilde) {
     if (!roots.home) throw new NotProven('no-home');

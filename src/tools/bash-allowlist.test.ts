@@ -48,6 +48,7 @@ describe('proveBashCommand — proven', () => {
     'cat ./notes.md',
     'cat link-in',
     'cat -',
+    "cat '-'",
     'head -n 5 notes.md',
     'head -n5 notes.md',
     'head --lines=5 notes.md',
@@ -236,6 +237,8 @@ describe('proveBashCommand — not proven', () => {
     expect(prove('cat -', containsHome).proven).toBe(true);
     expect(prove('echo hi', containsHome).proven).toBe(true);
     expect(prove('cat /etc/hostname', { ...env, cwd: '/' })).toEqual(expect.objectContaining({ proven: false, reason: 'root' }));
+    // The root is too wide on its own, also when no HOME tells it so.
+    expect(prove('cat /etc/hostname', { ...env, cwd: '/', home: undefined })).toEqual(expect.objectContaining({ proven: false, reason: 'root' }));
   });
 
   it('is not proven when the working directory cannot be resolved', () => {

@@ -2868,6 +2868,7 @@ describe('bash allowlist observe mode', () => {
       isDangerous('bash', { command: 'cat package.json' }, 'guided');
       isDangerous('bash', { command: 'cat package.json' });
       isDangerous('read_file', { path: 'package.json' }, 'autonomous');
+      isDangerous('run_script', { command: 'cat package.json' }, 'autonomous');
     });
     expect(events).toEqual([]);
   });
