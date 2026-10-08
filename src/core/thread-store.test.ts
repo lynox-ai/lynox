@@ -373,11 +373,17 @@ describe('ThreadStore — reading and erasing ALL threads (GDPR Art. 15/17)', ()
     db.close();
   });
 
-  it('listThreads paging is stable when every thread shares a timestamp', () => {
-    // Ties are the normal case for imported or scripted data, and SQLite is free
-    // to order them differently per query. Without the `id` tiebreak the two pages
-    // can overlap — the shape of the bug is a GDPR export that contains thread A
-    // twice and never mentions thread B.
+  it('listThreads pages a set in which EVERY row ties on the sort key', () => {
+    // The degenerate input for a paging query: 40 rows, one timestamp, so the sort
+    // key cannot order any of them. The property asserted is that paging still
+    // walks the set exactly once.
+    //
+    // ⚠ What this does NOT witness, stated because the name used to claim it: it
+    // does not kill the `, id ASC` tiebreak in `listThreads`. Removing it leaves
+    // this test green — SQLite sorts the scan stably and re-runs the same plan per
+    // page, so the undefined order is the same every time. The tiebreak guards a
+    // future plan change, which no test here can provoke; see the note on the
+    // parameter itself.
     const db = freshDb();
     const store = new ThreadStore(db);
     const ins = db.prepare("INSERT INTO threads (id, message_count, updated_at) VALUES (?, 1, '2026-01-01T00:00:00')");

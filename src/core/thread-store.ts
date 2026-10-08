@@ -104,10 +104,21 @@ export class ThreadStore {
      * got a GDPR Art. 15 copy that was silently short, with no way for any
      * caller to reach thread 201 — the parameter did not exist.
      *
-     * The ORDER BY is fully deterministic only up to ties on
-     * (is_unread, is_favorite, updated_at); `id` is appended as the final
-     * tiebreak so that paging cannot repeat or skip a row when several threads
-     * share a timestamp, which is routine for seeded or bulk-imported data.
+     * `id` is appended to the ORDER BY so the order is TOTAL. Without it the sort
+     * key is (is_unread, is_favorite, updated_at), on which ties are routine —
+     * bulk-imported or seeded rows share a timestamp — and SQL then leaves the
+     * order of tied rows undefined, so two pages may repeat one row and never
+     * return another.
+     *
+     * ⚠ No test kills the removal of that tiebreak, and the honest reason is
+     * measured rather than assumed: with it taken out, a four-page walk over 40
+     * rows that all share one timestamp still returns 40 distinct ids. SQLite
+     * sorts the full scan stably in rowid order and re-runs the identical plan for
+     * each page, so the undefined order is in practice the same undefined order
+     * every time. What the tiebreak guards is a CHANGE of that plan — a future
+     * index on `updated_at`, a different SQLite build — which no test here can
+     * provoke. It stays because a paging query with a non-total order is wrong by
+     * construction, not because something observable goes wrong today.
      */
     offset?: number | undefined;
     includeArchived?: boolean | undefined;
