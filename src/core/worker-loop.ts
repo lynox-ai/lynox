@@ -11,7 +11,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isMandateTag, principalTag } from './request-principal.js';
-import { HandRunDoor, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
+import { HandRunDoor, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -562,7 +562,9 @@ export class WorkerLoop {
    * stale id and 409 a trigger that is already running (the scheduler picked it
    * up, or a previous Run-now is still in flight). Does NOT consult the
    * `enabled` kill-switch: pausing stops the *schedule* from auto-firing; an
-   * explicit manual run is a deliberate override (the consent gate still bites).
+   * explicit manual run is a deliberate override (the consent gate still bites — except
+   * for a test run by hand through the one-time door, `marker`, whose marker is the
+   * second disjunct of both stamp checks; see `executeTask`).
    */
   async runTriggerNow(
     triggerId: string,
@@ -973,6 +975,18 @@ export class WorkerLoop {
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
   private async executeTask(task: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+    // The one-time door (PRD customer-granted-operator-access §3.12 point 6): a marker
+    // minted by a request for THIS trigger is the second disjunct of both stamp checks
+    // below, and it is used up here, by the dispatch that sees it. Nothing passes them
+    // without one the HTTP layer minted — not a principal, not a look-alike object, not
+    // the same marker twice. A run that passes on it is a TEST and runs in the hand-run
+    // scope, which keeps its schedule untouched (hand-run-door.ts).
+    const handRun = handRunCovers(this.#handRunDoor.consume(marker, task.id), task);
+    if (handRun) return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true));
+    return this.#executeTask(task, capUSD, false);
+  }
+
+  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -1047,11 +1061,6 @@ export class WorkerLoop {
         // so a value the union doesn't know — a newer schema, a synced/corrupt row —
         // is possible at runtime) → the default fails CLOSED, never a money run.
         const effect: string = task.effect;
-        // The one-time door (PRD customer-granted-operator-access §3.12 point 6): a marker
-        // minted by a request for THIS trigger is the second disjunct of both stamp checks
-        // below, and it is used up here, by the first dispatch that sees it. Nothing else
-        // passes them — not a principal, not a look-alike object, not the same marker twice.
-        const handRun = handRunCovers(this.#handRunDoor.consume(marker, task.id), task);
         // Mandate gate — DEFENSE-IN-DEPTH backstop to the getDueTriggers exclusion (PRD
         // customer-granted-operator-access §3.12, §3.13). A trigger a mandate created or
         // last changed runs only after the OWNER stamped it, whatever its effect: a

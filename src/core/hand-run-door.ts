@@ -20,6 +20,7 @@
  * - It covers only a proposal whose last party is the principal it was minted for
  *   (`handRunCovers` in worker-loop.ts).
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { RequestPrincipal } from './request-principal.js';
 
 declare const handRunMarkerBrand: unique symbol;
@@ -34,6 +35,27 @@ export interface HandRunGrant {
 }
 
 export type HandRunMinter = (triggerId: string, principal: RequestPrincipal) => HandRunMarker;
+
+/**
+ * A test run leaves the proposal as it found it. The run's result is recorded, but its
+ * schedule — status, next run, retry count, the enabled switch — is not the test's to
+ * write: a one-shot proposal recorded `completed` or `failed` would never fire after the
+ * owner stamps it, and a refusal that disables it would switch off what was being tested.
+ * The scope is the whole run, its error path included; the task manager reads it.
+ *
+ * Entering the scope passes no check: it only withholds schedule writes for one trigger,
+ * so a caller that enters it gains nothing it could use to run anything.
+ */
+const handRunScope = new AsyncLocalStorage<string>();
+
+export function runAsHandRun<T>(triggerId: string, fn: () => Promise<T>): Promise<T> {
+  return handRunScope.run(triggerId, fn);
+}
+
+/** Whether the current run is a test run by hand of this trigger. */
+export function isHandRunOf(triggerId: string): boolean {
+  return handRunScope.getStore() === triggerId;
+}
 
 export class HandRunDoor {
   readonly #issued = new Map<object, HandRunGrant>();

@@ -1453,6 +1453,12 @@ export class LynoxHTTPApi {
     this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
     setClientErrorSecretStore(this.clientErrorResolver);
     this.engine.startWorkerLoop();
+    // Claim the hand-run minter at once, in the same turn the loop is started: whoever
+    // claims it first holds it, and nothing else may (hand-run-door.ts). Claimed on first
+    // use instead, it would sit unclaimed for as long as no mandate exists — every day,
+    // until there is one — and any in-process caller could take it in the meantime.
+    const workerLoop = this.engine.getWorkerLoop();
+    if (workerLoop) this.#handRunMinterFor(workerLoop);
     this._registerRoutes();
     await this._initPushChannel();
     await this._tryLoadWebUiHandler();
@@ -6962,9 +6968,10 @@ export class LynoxHTTPApi {
       if (!requireService(res, workerLoop, 'Worker loop')) return;
       // A mandate's hand run goes through the one-time door (PRD customer-granted-operator-
       // access §3.12 point 6): this request mints a marker for this trigger, and the
-      // dispatch uses it up. It lets the person who set up a proposal test it once, before
-      // the owner stamps it; it never makes the proposal due. The owner mints nothing: the
-      // owner's "Run now" passes the stamp checks as it always has, or not at all.
+      // dispatch uses it up. It lets the person who set up a proposal test it once per
+      // request, before the owner stamps it. It never makes the proposal due, and the test
+      // leaves its schedule as it was. The owner mints nothing: the owner's "Run now"
+      // passes the stamp checks as it always has, or not at all.
       const principal = this._principalOf(_req);
       let marker: HandRunMarker | undefined;
       if (!isOwnerPrincipal(principal)) {
@@ -6973,8 +6980,7 @@ export class LynoxHTTPApi {
         const trigger = engine.getTaskManager()?.getTrigger(params['id']!);
         if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
         // Only the proposal this mandate set up or last changed. Starting anything else
-        // by hand — the owner's schedules included — waits for the tool lock bound to the
-        // request (piece H2), which a run started here cannot carry yet.
+        // by hand, the owner's schedules included, stays the owner's in this piece.
         if ((trigger.edited_by ?? trigger.created_by) !== principalTag(principal)) {
           errorResponse(res, 403, 'Only the owner of this instance can start a schedule by hand that someone else set up.');
           return;

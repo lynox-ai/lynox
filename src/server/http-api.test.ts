@@ -191,6 +191,7 @@ vi.mock('../core/engine.js', () => ({
   Engine: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
     this.init = vi.fn().mockReturnValue(Promise.resolve(this));
     this.startWorkerLoop = vi.fn();
+    this.getWorkerLoop = vi.fn().mockReturnValue(null);
     this.shutdown = vi.fn().mockResolvedValue(undefined);
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
     this.getMemory = vi.fn().mockReturnValue({
@@ -12619,7 +12620,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
      *  `trg-1` with the given last party. Restored after `fn`. */
     async function withLoop(
       createdBy: string | undefined,
-      fn: (run: ReturnType<typeof vi.fn>, mint: ReturnType<typeof vi.fn>) => Promise<void>,
+      fn: (run: ReturnType<typeof vi.fn>, mint: ReturnType<typeof vi.fn>, claimSpy: ReturnType<typeof vi.fn>) => Promise<void>,
       claim?: () => unknown,
     ): Promise<void> {
       const run = vi.fn().mockResolvedValue({ ok: true });
@@ -12628,12 +12629,14 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       const origLoop = engineRef['getWorkerLoop'];
       const origTm = engineRef['getTaskManager'] as () => Record<string, unknown>;
       const tm = origTm();
-      engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow: run, claimHandRunMinter: claim ?? (() => mint) });
+      // ONE loop object, as in production: the route caches the minter per loop.
+      const loop = { runTriggerNow: run, claimHandRunMinter: vi.fn(claim ?? (() => mint)) };
+      engineRef['getWorkerLoop'] = (): unknown => loop;
       engineRef['getTaskManager'] = (): unknown => ({
         ...tm,
         getTrigger: (id: string) => (id === 'trg' || id === 'trg-1' ? { id: 'trg-1', created_by: createdBy } : undefined),
       });
-      try { await fn(run, mint); } finally {
+      try { await fn(run, mint, loop.claimHandRunMinter); } finally {
         engineRef['getWorkerLoop'] = origLoop;
         engineRef['getTaskManager'] = origTm;
       }
@@ -12671,12 +12674,30 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       });
     });
 
-    it('refuses every hand run when the door\'s minter was claimed by something else', async () => {
-      await withLoop(TAG, async (run) => {
-        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
-        expect(res.status).toBe(503);
+    it('refuses every hand run when the door\'s minter was claimed by something else, and does not try again', async () => {
+      await withLoop(TAG, async (run, _mint, claimSpy) => {
+        for (let i = 0; i < 2; i++) {
+          const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+          expect(res.status).toBe(503);
+        }
+        expect(claimSpy).toHaveBeenCalledTimes(1);
         expect(run).not.toHaveBeenCalled();
       }, () => { throw new Error('The hand-run minter has already been claimed.'); });
+    });
+
+    it('claims the minter when the server starts, before any request', async () => {
+      const { Engine } = await import('../core/engine.js');
+      const ctor = vi.mocked(Engine);
+      const original = ctor.getMockImplementation()!;
+      const claim = vi.fn(() => () => Object.freeze({}));
+      ctor.mockImplementationOnce(function (this: Record<string, unknown>, ...args: unknown[]) {
+        (original as (...a: unknown[]) => unknown).apply(this, args);
+        this['getWorkerLoop'] = vi.fn(() => ({ claimHandRunMinter: claim }));
+        return this;
+      } as unknown as typeof original);
+      const fresh = new LynoxHTTPApi();
+      await fresh.init();
+      expect(claim).toHaveBeenCalledTimes(1);
     });
 
     it('may not run a workflow until the tool lock exists', async () => {

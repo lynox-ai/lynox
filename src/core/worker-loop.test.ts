@@ -42,7 +42,7 @@ vi.mock('./network-guard.js', async (importActual) => {
 });
 
 import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers } from './worker-loop.js';
-import type { HandRunMarker } from './hand-run-door.js';
+import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -2249,14 +2249,42 @@ describe('WorkerLoop', () => {
     }
     type Exec = { executeTask: (t: TriggerRecord, cap: number | null, m?: HandRunMarker) => Promise<void> };
 
-    it('runs the proposal once on a marker minted for it, under the name of the one who set it up', async () => {
+    /** Whether each `recordTaskRun` call happened inside the hand-run scope. */
+    function scopeAtRecord(tm: TaskManager): boolean[] {
+      const seen: boolean[] = [];
+      (tm.recordTaskRun as ReturnType<typeof vi.fn>).mockImplementation((id: string) => { seen.push(isHandRunOf(id)); });
+      return seen;
+    }
+
+    it('runs the proposal once on a marker minted for it, as a test that leaves its schedule alone', async () => {
       const task = proposal();
       const { loop, tm, session } = setup(task);
+      const seen = scopeAtRecord(tm);
       const marker = loop.claimHandRunMinter()('hr-prop', EVA);
       expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: true });
       await vi.advanceTimersByTimeAsync(0);
       expect(session.run).toHaveBeenCalledTimes(1);
       expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', 'Tested by hand.', 'success');
+      expect(seen).toEqual([true]);
+    });
+
+    it('records a failed test run inside the scope too, error path included', async () => {
+      const task = proposal();
+      const tm = makeTaskManager([task]);
+      const seen = scopeAtRecord(tm);
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session: makeSession(new Error('provider down')) }), makeNotificationRouter(false), 60_000);
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      await (loop as unknown as Exec).executeTask(task, null, marker);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every(Boolean)).toBe(true);
+    });
+
+    it('twin: a run without a marker records outside the scope, as before', async () => {
+      const task = proposal({ created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z' });
+      const { loop, tm } = setup(task);
+      const seen = scopeAtRecord(tm);
+      await (loop as unknown as Exec).executeTask(task, null);
+      expect(seen).toEqual([false]);
     });
 
     it('refuses a look-alike marker: an in-process caller cannot mint one', async () => {
