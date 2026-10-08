@@ -464,7 +464,15 @@ function measureStaticPrefixTokens(): number {
 // happens and is not part of this prefix; a 401 the reminder does not fire for (e.g. no
 // token_url stored, or no profile for the host) gets only this rule. Baseline re-measured the same day with main's
 // prompts.ts and api-setup.ts: 23938.
-const STATIC_PREFIX_BUDGET = 23950;
+// 2026-10-08, later: +44 (23950 → 23994, both measured the same day, budget set to 1) —
+// `api_setup`'s profile schema now names `auth.oauth {preset_id, scope, client_id_key,
+// client_secret_key}` and the preset ids, says vault_keys lists those two keys (the save
+// refuses an oauth2 profile without vault_keys). Before, the schema never described the
+// preset shape, and models told users the engine had no built-in OAuth for a provider it has
+// a preset for — then offered a full-access token instead. Two texts changed in the same edit
+// are not part of this prefix, and editing each left the measurement unchanged: the
+// suggested-API catalogue and `connect`'s line in `detailedGuidance`.
+const STATIC_PREFIX_BUDGET = 23994;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

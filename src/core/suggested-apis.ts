@@ -128,9 +128,10 @@ export const SUGGESTED_API_CATALOG: SuggestedApiCatalog = Object.freeze({
     "basic auth (user/pass or pre-encoded base64)",
     "oauth2 client_credentials grant (server-to-server, no browser redirect)",
     "oauth2 refresh_token grant (if a refresh token is already held in the vault)",
+    "oauth2 authorization_code grant for a provider with a built-in preset (auth.oauth.preset_id; api_setup action=connect gives the user the sign-in link)",
   ]),
   not_supported_auth_flows: Object.freeze([
-    "oauth2 authorization_code grant with browser-redirect / callback-URL (in progress — APIs requiring this flow cannot be bootstrapped today)",
+    "oauth2 authorization_code grant with browser-redirect / callback-URL for a provider WITHOUT a built-in preset (cannot be bootstrapped today)",
   ]),
   do_not_proactively_suggest: Object.freeze([
     "payment providers (Stripe, PayPal, Adyen, etc.) — require explicit user-initiated setup",
@@ -225,8 +226,8 @@ export const SUGGESTED_API_CATALOG: SuggestedApiCatalog = Object.freeze({
       name: "bexio",
       category: "accounting / invoicing (CH)",
       docs_url: "https://docs.bexio.com/",
-      auth_type: "bearer",
-      value_prop: "Swiss accounting: contacts, invoices, quotes, projects. API base is https://api.bexio.com/2.0/ — the docs host is not the API host. The user creates a Personal Access Token at developer.bexio.com and it goes in the Authorization header as a Bearer token. Three things bexio states itself, and all three belong in the conversation before anyone connects: a PAT is valid for 60 days; it carries all default scopes and therefore full access to the company's data; and it is \"strictly intended for personal use\" and should never be shared with anyone else — for a case that needs a shared token bexio requires the authorization-code flow. This engine runs that flow for bexio: a profile with auth.oauth.preset_id \"bexio\", the client id and secret of an app the user registered with bexio, and in auth.oauth.scope the read scopes it needs (e.g. contact_show kb_invoice_show); then api_setup connect gives the user a consent link. Only read scopes are available on that path. bexio ends such a connection after a year without use; the user then connects again.",
+      auth_type: "oauth2",
+      value_prop: "Swiss accounting: contacts, invoices, quotes, projects. API base is https://api.bexio.com/2.0/ (not the docs host); send Accept: application/json. Connect with this engine's built-in bexio OAuth provider — no bootstrap; create the profile directly: auth.type \"oauth2\", auth.oauth {preset_id: \"bexio\", scope with the read scopes needed (e.g. contact_show kb_invoice_show), client_id_key and client_secret_key naming vault entries for the id and secret of the app the user registered with bexio}, and auth.vault_keys listing those same two names; then api_setup connect gives the user a sign-in link. Read scopes only. bexio ends a connection after a year without use; the user then connects again. A Personal Access Token is the fallback; say first that bexio limits it to 60 days, gives it full access to the company's data, and means it \"strictly\" for personal use.",
     }),
     Object.freeze({
       id: "notion",

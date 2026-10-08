@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 
 import { apiSetupTool } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
+import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -588,6 +589,33 @@ describe('the action list and the enum say the same thing', () => {
 
     expect(listed.length).toBeGreaterThan(4);
     for (const action of listed) expect(schema.properties.action.enum).toContain(action);
+  });
+});
+
+describe('the profile schema shows the preset shape', () => {
+  // How this was earned: the schema listed every auth field except `oauth`, so a
+  // model asked to connect a provider over OAuth had nothing that said a preset
+  // exists. In a live run it told the user the engine could not do it and offered
+  // a full-access token instead — for a provider it has a preset for.
+  const profileDescription = (): string =>
+    (apiSetupTool.definition.input_schema as { properties: { profile: { description: string } } })
+      .properties.profile.description;
+
+  it('names auth.oauth with preset_id and the fields a preset profile needs', () => {
+    const text = profileDescription();
+    for (const field of ['oauth {preset_id', 'scope', 'client_id_key', 'client_secret_key', 'vault_keys listing those two keys']) expect(text).toContain(field);
+  });
+
+  it('lists every built-in preset id, so a new preset is visible without an edit here', () => {
+    // The register mocked at the top of this file holds several presets, so a
+    // description that spells out today's single real id fails here.
+    const text = profileDescription();
+    expect(OAUTH_PRESETS.ids().length).toBeGreaterThan(1);
+    for (const id of OAUTH_PRESETS.ids()) expect(text).toContain(id);
+  });
+
+  it('tells connect that the preset supplies the endpoints', () => {
+    expect(apiSetupTool.detailedGuidance).toContain('connect: pass `id` of a profile whose auth.oauth.preset_id names a built-in provider — the preset supplies the sign-in and token URLs and the scopes it allows, and the engine runs the authorization-code flow, stores the tokens and renews them while it holds a refresh token. Returns');
   });
 });
 
