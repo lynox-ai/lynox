@@ -748,7 +748,7 @@ describe('ApiStore', () => {
      * the heading is the entire meaning here.
      */
     const OFFER_HEADING = 'Curated free APIs you can offer to bootstrap when relevant to the user query (ask first, then call `api_setup` action=bootstrap with the docs_url — never silently bootstrap):';
-    const ON_REQUEST_HEADING = 'Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url. `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:';
+    const ON_REQUEST_HEADING = 'Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:';
 
     function sectionsOf(block: string): Map<string, string[]> {
       const headings = new Map<string, string>([
@@ -788,7 +788,7 @@ describe('ApiStore', () => {
       expect(out).toContain('https://open-meteo.com/en/docs');
     });
 
-    it('places authorization_code under NOT-supported, and an inversion fails the test', () => {
+    it('places authorization_code under supported only through a preset, and an inversion fails the test', () => {
       const sections = sectionsOf(store.formatSuggestedApisForSystemPrompt());
 
       const notSupported = sections.get('not-supported') ?? [];
@@ -796,15 +796,21 @@ describe('ApiStore', () => {
       expect(notSupported.length).toBeGreaterThan(0);
       expect(supported.length).toBeGreaterThan(0);
 
-      // The claim, tied to its heading: oauth2 authorization_code is NOT in
-      // ApiAuth.type, so the agent must be told it cannot bootstrap
-      // browser-redirect-callback OAuth APIs.
-      expect(notSupported.some((l) => l.toLowerCase().includes('authorization_code'))).toBe(true);
-      expect(supported.some((l) => l.toLowerCase().includes('authorization_code'))).toBe(false);
+      // The claim, tied to its heading: the authorization-code flow runs only for
+      // a provider with a built-in preset (`api_setup` connect). Without one the
+      // agent must be told it cannot set up a browser-redirect OAuth API. Before
+      // presets the whole flow sat under NOT-supported, and a model connecting a
+      // preset provider read that line and told the user it could not be done.
+      const code = (lines: readonly string[]): string[] => lines.filter((l) => l.toLowerCase().includes('authorization_code'));
+      expect(code(notSupported).length).toBe(1);
+      expect(code(notSupported)[0]).toContain('WITHOUT a built-in preset');
+      expect(code(supported).length).toBe(1);
+      expect(code(supported)[0]).toContain('built-in preset (auth.oauth.preset_id; api_setup action=connect');
 
       // Mutation witness for the splitter itself: were `sectionsOf` to return
-      // every line under every key, the two asserts above would contradict each
-      // other and could not both hold. This pins that the sections are disjoint.
+      // every line under every key, each section would hold both authorization_code
+      // lines and the two counts above would fail. The loop below pins that the
+      // sections are disjoint.
       for (const line of notSupported) expect(supported).not.toContain(line);
     });
 
@@ -823,6 +829,9 @@ describe('ApiStore', () => {
       expect(out).toContain('extracted from the live docs at bootstrap time');
       expect(out).toContain('ask first');
       expect(out).toContain('never silently bootstrap');
+      // The carve-out from "always bootstrap": without it the rule above tells the
+      // model to bootstrap a provider whose entry says to create the profile directly.
+      expect(out).toContain('The one exception is a provider with a built-in OAuth preset: create its profile directly, as its entry below says.');
     });
 
     it('keeps the sections in order: supported, then not-supported, then do-not-suggest', () => {
@@ -938,7 +947,7 @@ describe('ApiStore', () => {
      * is a wrong profile rather than a typo.
      */
     const EXPECTED_ON_REQUEST: ReadonlyArray<readonly [string, string, string]> = [
-      ['bexio', 'https://docs.bexio.com/', 'bearer'],
+      ['bexio', 'https://docs.bexio.com/', 'oauth2'],
       ['notion', 'https://developers.notion.com/reference/intro', 'bearer'],
       ['hubspot', 'https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview', 'bearer'],
       ['airtable', 'https://airtable.com/developers/web/api/authentication', 'bearer'],
@@ -964,7 +973,7 @@ describe('ApiStore', () => {
      * documentation. Prose around them stays free.
      */
     const REQUIRED_IN_VALUE_PROP: ReadonlyArray<readonly [string, readonly string[]]> = [
-      ['bexio', ['https://api.bexio.com/2.0/', '60 days', 'full access to the company']],
+      ['bexio', ['https://api.bexio.com/2.0/', 'preset_id: "bexio"', 'auth.vault_keys listing those same two names', '60 days', 'full access to the company']],
       ['notion', ['https://api.notion.com/v1/', 'Notion-Version']],
       ['hubspot', ['https://api.hubapi.com/', 'Legacy apps', 'no automatic expiry']],
       ['airtable', ['https://api.airtable.com/v0/', '403 Forbidden']],
@@ -1014,6 +1023,12 @@ describe('ApiStore', () => {
       // What it still does, and it is the case that matters: it catches the
       // author who adds a redirect-flow provider AND updates the table below,
       // which is how a wrong entry actually arrives.
+      //
+      // What it no longer tells apart: bexio rides the redirect flow too, through
+      // its built-in preset, and is labelled `oauth2`. The label check cannot
+      // separate "redirect via a preset" (works) from "redirect without one"
+      // (Shopify, refused) — a preset-backed entry is judged by its value_prop
+      // pin above, which requires the preset to be named.
       const ENGINE_CAN_ATTACH = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2', 'oauth2 client_credentials']);
       for (const api of SUGGESTED_API_CATALOG.connect_when_user_asks) {
         expect(ENGINE_CAN_ATTACH.has(api.auth_type), `${api.id} declares auth_type "${api.auth_type}", which the engine cannot attach`).toBe(true);

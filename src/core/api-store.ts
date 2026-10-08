@@ -1401,7 +1401,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     // number it produced is not evidence of anything.)
     const lines: string[] = [];
     lines.push('You have the `api_setup` tool to bootstrap external APIs from their docs URL.');
-    lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap.');
+    lines.push('The actual endpoint schema, rate limits, and auth shape are extracted from the live docs at bootstrap time — do NOT hand-write a profile from memory; always pass `docs_url` (or `openapi_url`) to `api_setup` action=bootstrap. The one exception is a provider with a built-in OAuth preset: create its profile directly, as its entry below says.');
     lines.push('');
 
     if (cat.supported_auth_flows.length > 0) {
@@ -1440,7 +1440,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     // would be the very thing the section forbids.
     if (cat.connect_when_user_asks.length > 0) {
       lines.push('');
-      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url. `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
+      lines.push('Connect ONLY after the user names one of these providers — this is the "without the user explicitly asking" carve-out of the rule above, not a second list to offer from. Never name one yourself: if the user says only what kind of tool it is, ask which product they use and wait. Once they name it: walk them through creating the credential in their own account, have them store it with `ask_secret`, then call `api_setup` action=bootstrap with the docs_url (an entry that names a built-in preset says to create the profile directly instead). `bootstrap` derives base_url from the DOCS host, which is wrong for every entry here — take the API base from the entry, or ask the user for their own site when it says so:');
       for (const api of cat.connect_when_user_asks) {
         lines.push(`- ${api.name} (${api.category}, auth=${api.auth_type}) — ${api.value_prop} Docs: ${api.docs_url}`);
       }
