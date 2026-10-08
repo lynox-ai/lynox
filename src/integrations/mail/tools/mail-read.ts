@@ -14,6 +14,7 @@ import { wrapChannelMessage, wrapUntrustedData } from '../../../core/data-bounda
 import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
+import { oneBlockLine } from '../block-line.js';
 
 interface MailReadInput {
   account?: string | undefined;
@@ -75,14 +76,21 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
         // <untrusted_data> boundary alongside the body. Otherwise a
         // crafted subject like "Ignore previous instructions, …" would
         // appear in the model's trusted framing.
+        //
+        // Each of these values is put on one line, so a decoded line break inside one
+        // cannot start another `Label:` line in the block.
+        //
+        // A subject made only of line breaks becomes blank on one line, and a blank field
+        // is not rendered at all — so it gets the same fallback as a missing subject.
+        const subjectLine = oneBlockLine(msg.envelope.subject);
         const wrappedMessage = wrapChannelMessage({
           source: `mail:${provider.accountId}:${fromAddr}`,
           fields: {
-            Subject: msg.envelope.subject || '(no subject)',
-            From: fromDisplay,
-            To: toDisplay,
-            Cc: ccDisplay,
-            'Reply-To': replyToDisplay,
+            Subject: subjectLine.trim() === '' ? '(no subject)' : subjectLine,
+            From: oneBlockLine(fromDisplay),
+            To: oneBlockLine(toDisplay),
+            Cc: ccDisplay === null ? null : oneBlockLine(ccDisplay),
+            'Reply-To': replyToDisplay === null ? null : oneBlockLine(replyToDisplay),
             Body: cleaned.visible || msg.text || '(empty body)',
           },
         });
