@@ -25,10 +25,31 @@ function maskSecretText(text: string): string {
     // diagnostic detail while one that turns out to be a credential costs the
     // credential. Measured 2026-08-24 — without it a 64-hex instance secret
     // passed through untouched.
-    return maskSecretPatterns(text, { includeGeneric: true });
+    return maskSecretPatterns(maskSensitiveParams(text), { includeGeneric: true });
   } catch {
     return '[redacted: masking failed]';
   }
+}
+
+/**
+ * Query-parameter names whose value is a credential whatever its length: an OAuth
+ * `code` or `state`, a `token`, a `key`, a password. Matched as a whole word, alone
+ * or as one part of a `_`/`-` compound (`access_token`, `client_secret`, `api-key`),
+ * so `monkey` and `keyword` are not names this covers.
+ */
+const SENSITIVE_PARAM = /(^|[?&;])((?:[a-z0-9]+[_-])*(?:code|state|token|key|secret|password|passwd|pwd|auth|signature|sig|session|sid|nonce|otp|ticket|credential)s?(?:[_-][a-z0-9]+)*)=([^&#;\s"']+)/gi;
+
+/**
+ * Replace the value of every sensitive query parameter with `***`.
+ *
+ * The shape masker above recognises a credential by its form — a known prefix, a JWT,
+ * a long opaque run — and a short value has none: a 32-character token, an OAuth code
+ * in a provider's short format, a password. Here the parameter's NAME decides, so the
+ * value goes whatever it looks like. It reads query syntax only (`?`, `&`, `;` or the
+ * start of a query string before the name), which keeps `code=` in free prose intact.
+ */
+function maskSensitiveParams(text: string): string {
+  return text.replace(SENSITIVE_PARAM, (_m, lead: string, name: string) => `${lead}${name}=***`);
 }
 
 /**
@@ -275,9 +296,12 @@ export async function captureUserFeedback(opts: {
   try {
     const Sentry = _sentry;
     const eventId = Sentry.captureMessage('User bug report', 'info');
+    // Feedback travels as its own envelope item and does not pass `beforeSend`, so
+    // the comment, free text the person typed or pasted, is masked here before it
+    // reaches the SDK.
     Sentry.captureFeedback({
       name: opts.name,
-      message: opts.comments,
+      message: maskSecretText(opts.comments),
       associatedEventId: eventId,
     });
     return eventId;

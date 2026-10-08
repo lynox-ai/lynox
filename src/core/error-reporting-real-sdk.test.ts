@@ -167,3 +167,52 @@ it('sends no body, cookie or authorization from a POST, and the request still ar
   expect(all, 'the cookie').not.toContain(cookieValue);
   expect(all, 'the bearer').not.toContain(bearerValue);
 });
+
+it('masks a short OAuth code and state by their names on a callback path', async () => {
+  // A code in a provider's short format has no shape the masker recognises; the
+  // parameter name decides. Same capture as above, on the real SDK.
+  _resetForTesting();
+  sent.length = 0;
+  expect(await initErrorReporting('https://key@bugs.example.invalid/1')).toBe(true);
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      captureError(new Error('failure inside a callback'));
+      res.writeHead(500);
+      res.end();
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+
+  await new Promise<void>((resolve, reject) => {
+    const rq = http.request(
+      { host: '127.0.0.1', port, method: 'GET', path: '/api/oauth/callback?code=4Ab12zq&state=st9xY&q=hello' },
+      (r) => { r.resume(); r.on('end', resolve); },
+    );
+    rq.on('error', reject);
+    rq.end();
+  });
+
+  const Sentry = await import('@sentry/node');
+  await Sentry.flush(3000);
+
+  type Payload = { exception?: unknown; request?: { url?: string; query_string?: string } };
+  const events = sent
+    .map((s) => JSON.parse(s) as [unknown, [unknown, Payload][]])
+    .flatMap(([, items]) => items.map(([, payload]) => payload))
+    .filter((p) => p.exception !== undefined);
+  expect(events, 'exactly one error event was captured').toHaveLength(1);
+  const request = events[0]?.request;
+  // Positive control on the event's own field.
+  expect(request?.url, 'the event carries its request URL').toContain('/api/oauth/callback?code=***&state=***');
+  expect(request?.url).toContain('q=hello');
+  expect(request?.query_string).toContain('code=***');
+  // The property, in every copy of what would be sent: the event fields and the
+  // http breadcrumb of the test's own outgoing call.
+  const all = sent.join('\n');
+  expect(all, 'the code').not.toContain('4Ab12zq');
+  expect(all, 'the state').not.toContain('st9xY');
+});

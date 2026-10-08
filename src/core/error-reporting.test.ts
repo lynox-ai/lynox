@@ -221,6 +221,20 @@ describe('error-reporting (Bugsink)', () => {
         associatedEventId: 'event-123',
       });
     });
+
+    it('masks a credential pasted into the comment, which does not pass beforeSend', async () => {
+      await initErrorReporting('https://key@bugsink.example.com/123');
+      const token = 'c'.repeat(64);
+      await captureUserFeedback({
+        name: 'Rafael',
+        comments: `It fails with https://api.example.com/v1?token=short1 and header ${token}`,
+      });
+      const sent = mockCaptureFeedback.mock.calls[0]?.[0] as { name: string; message: string };
+      expect(sent.message, 'the long opaque value').not.toContain(token);
+      expect(sent.message, 'the short one, by its name').not.toContain('short1');
+      expect(sent.message, 'the rest of the report stays').toContain('It fails with https://api.example.com/v1?token=***');
+      expect(sent.name).toBe('Rafael');
+    });
   });
 
   describe('shutdown', () => {
@@ -442,6 +456,43 @@ describe('error-reporting scrubbing', () => {
     expect(req['url'], 'the query copy inside the URL is masked too').not.toContain(secret);
     expect(req['url'], 'the URL itself stays').toContain('https://x/api/run?t=');
     expect(req['url']).toContain('q=hello');
+  });
+
+  it('masks a short credential by its parameter name, in the URL and in the query string', async () => {
+    // Too short for any shape the masker knows: the NAME decides.
+    const { beforeSend } = await hooks();
+    const query = 'code=4%2F0Ab12&state=st-9xY&q=hello';
+    const out = beforeSend({
+      request: { query_string: query, url: `https://x/api/oauth/callback?${query}` },
+    });
+    const req = (out as { request: Record<string, unknown> }).request;
+    for (const field of ['query_string', 'url']) {
+      expect(req[field], `${field}: the code`).not.toContain('4%2F0Ab12');
+      expect(req[field], `${field}: the state`).not.toContain('st-9xY');
+      expect(req[field], `${field}: the names stay`).toContain('code=***&state=***');
+      expect(req[field], `${field}: an unrelated parameter stays`).toContain('q=hello');
+    }
+    expect(req['url'], 'the path stays').toContain('https://x/api/oauth/callback?');
+  });
+
+  it('reads compound names as the credential they name, and leaves words that only contain one', async () => {
+    const { beforeSend } = await hooks();
+    const out = beforeSend({
+      request: { query_string: 'access_token=t1&client_secret=s2&api-key=k3&monkey=banana&keyword=x&states=on' },
+    });
+    const qs = (out as { request: Record<string, string> }).request['query_string'];
+    expect(qs).toContain('access_token=***');
+    expect(qs).toContain('client_secret=***');
+    expect(qs).toContain('api-key=***');
+    expect(qs).toContain('states=***');
+    expect(qs, 'a word that merely ends in a name').toContain('monkey=banana');
+    expect(qs, 'a word that merely starts with a name').toContain('keyword=x');
+  });
+
+  it('leaves name=value in free prose alone: the names are read in query syntax only', async () => {
+    const { beforeSend } = await hooks();
+    const out = beforeSend(eventWith('child exited with code=1 after state=draining'));
+    expect(firstValue(out as Record<string, unknown>)).toBe('child exited with code=1 after state=draining');
   });
 
   it('masks breadcrumb data, which the four named deletes never covered', async () => {
