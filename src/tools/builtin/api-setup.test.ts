@@ -2904,6 +2904,36 @@ describe('api_setup tool', () => {
       fetchSpy.mockRestore();
     });
 
+    // The store refuses such a profile at admission, so a real store never hands one over.
+    // A store that did — one that skipped the gate — must still meet a refusal before the
+    // exchange, not one per token afterwards.
+    it.each([
+      ['client_credentials', 'client_credentials' as const],
+      ['refresh_token', 'refresh_token' as const],
+    ])('refuses a profile whose derived token names are protected, before any request (%s)', async (_label, grantType) => {
+      const profile = {
+        ...SHOPIFY_PROFILE,
+        id: 'mail-account-x',
+        auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, grant_type: grantType, refresh_token_key: 'SHOPIFY_REFRESH' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+      };
+      const written: string[] = [];
+      const vaultMock = makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'id', SHOPIFY_CLIENT_SECRET: 'secret', SHOPIFY_REFRESH: 'r' }) as { set: (n: string, v: string) => void };
+      const set = vaultMock.set;
+      vaultMock.set = (n, v) => { written.push(n); set(n, v); };
+      const ungated = { get: (id: string) => (id === profile.id ? profile : undefined) } as unknown as ApiStore;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'mail-account-x' }, createMockAgent(ungated, vaultMock));
+
+      expect(result).toMatch(/belongs to a credential of this instance/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(written).toEqual([]);
+      fetchSpy.mockRestore();
+    });
+
     // `expires_in` used to be formatted into the reply and dropped. Nothing knew
     // when a token died, so neither a lazy nor a scheduled refresh had anything
     // to plan against. Delete the persist block and this fails.
