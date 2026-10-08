@@ -40,9 +40,10 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 //
 // Self-host only — managed instances receive these values as container environment
 // and never materialize the files. Path matching stays a bar, not a boundary (see
-// below).
+// below). The shell reads `.lynox//x` and `.lynox/./x` as `.lynox/x`, so the name is
+// matched after any run of empty and `.` segments, as `LYNOX_DB_FILES` already is.
 const LYNOX_SECRET_FILES =
-  /\.lynox\/(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
+  /\.lynox\/+(?:\.\/+)*(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
 
 // Every SQLite store the engine keeps in the lynox dir, by location rather than by
 // name. The name list above protects the stores that hold secrets; it was never a

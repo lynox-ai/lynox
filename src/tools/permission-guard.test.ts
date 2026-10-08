@@ -376,6 +376,33 @@ describe('isDangerous', () => {
   });
 
   describe('lynox secret files via bash', () => {
+    // The shell reads empty and `.` segments as nothing, so every spelling of the same
+    // path is the same file. These names are covered by the secret-file list alone (the
+    // database names and `http-secret` have rules of their own).
+    it.each([
+      'cat ~/.lynox/./secrets.json',
+      'cat ~/.lynox//secrets.json',
+      'cat ~/.lynox/.//secrets.json',
+      'cat ~/.lynox/././.env',
+      'ls ~/.lynox//./backups/2026-10-08',
+      'cat /home/op/.lynox/./migration-export.enc',
+    ])('treats a spelled-out path as the file it names: %s', (command) => {
+      const unattended = isDangerous('bash', { command }, 'autonomous');
+      expect(unattended).toContain('lynox secret store');
+      expect(unattended).toContain('[BLOCKED');
+      expect(isDangerous('bash', { command })).not.toBeNull();
+    });
+
+    it.each([
+      'cat ~/.lynox/./workspace/notes.md',
+      // Near misses: a leading dot makes `.history` a different name, and `.env` is
+      // matched only as a whole word, so `.envrc` is a different file.
+      'cat ~/.lynox/.history',
+      'cat ~/.lynox/./.envrc',
+    ])('leaves %s free', (command) => {
+      expect(isDangerous('bash', { command }, 'autonomous')).toBeNull();
+    });
+
     // The regex matches the PATH, not a read-verb spelling — `$(<file)`, `python3 -c`,
     // and any other reader that names the file are caught the same as `cat`.
     it.each([
