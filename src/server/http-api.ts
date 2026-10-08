@@ -10074,9 +10074,11 @@ export class LynoxHTTPApi {
         ...(degraded.length > 0 ? { degraded } : {}),
         ...(skipped.length > 0 ? { skipped } : {}),
       };
-      // The erasure also empties `security_events`, so without this line nothing
-      // would record that one happened. Process log only, and counts only: the
-      // labels in `failed` can be collection or secret names, which are user data.
+      // The erasure also empties `security_events`, which would otherwise have been
+      // the place to record its outcome. The access log already records the call;
+      // this line records how it ended. Counts only: the labels in `failed` can be
+      // collection or secret names (`note` above already writes those per failure,
+      // masked for credential shapes only), and this line adds none of them.
       process.stderr.write(`[http-api] data erasure ran at ${new Date().toISOString()}: failed=${String(failed.length)} degraded=${String(degraded.length)} skipped=${String(skipped.length)}\n`);
       if (failed.length > 0) {
         // 500, not a 200 with `deleted: false`: a client that reads the status code

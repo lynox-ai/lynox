@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import BetterSqlite3 from 'better-sqlite3';
@@ -540,9 +540,24 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       expect(before.get(t), `fixture: ${t} must hold the seeded row before the erasure`).toBeGreaterThan(0);
     }
 
-    const { status, body } = await erase();
+    const stderr = vi.spyOn(process.stderr, 'write');
+    let erased: Awaited<ReturnType<typeof erase>>;
+    let logged: string[];
+    try {
+      erased = await erase();
+      logged = stderr.mock.calls.map(c => String(c[0]));
+    } finally {
+      stderr.mockRestore();
+    }
+    const { status, body } = erased;
     expect(status).toBe(200);
     expect(body['message']).toBe('All user data has been permanently deleted');
+    // `security_events` is gone with the rest, so the process log is the one place
+    // the outcome is recorded — with counts, and with none of the erased content.
+    const outcome = logged.filter(l => l.includes('data erasure ran at'));
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]).toMatch(/failed=0 degraded=0 skipped=0\n$/);
+    expect(outcome[0]).not.toContain('ZZMARKER');
 
     const left = historyTables()
       .filter(t => !HISTORY_KEPT.has(t.name) && t.rows > 0)
@@ -554,7 +569,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
     const db = new BetterSqlite3(join(dir, 'history.db'), { readonly: true });
     try {
-      // The verify-done sentence of the register row, verbatim.
+      // The erasure's acceptance sentence, verbatim.
       expect(db.prepare('SELECT task_text, response_text FROM runs').all()).toEqual([]);
       expect(db.prepare('SELECT id FROM scopes').all(), 'the seeded global scope must be back').toEqual([{ id: 'global' }]);
       expect(
