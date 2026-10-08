@@ -10008,9 +10008,10 @@ export class LynoxHTTPApi {
       // recreate would re-backfill into live reads, and every other table, enumerated
       // from `sqlite_master` rather than listed. This used to clear only the legacy
       // verb definitions, and the threads above were the only other rows of this file
-      // the erasure reached. It takes the cost history with it, which is acceptable
-      // only because `denyOnManagedInstance` refused this route above on every
-      // instance with a billing tier (see `RunHistory.deleteAllData`).
+      // the erasure reached. It takes the cost history, the HTTP and mail-send rate
+      // counters and the security trail with it, which is acceptable only because
+      // `denyOnManagedInstance` refused this route above on every instance with a
+      // non-empty billing tier (see `RunHistory.deleteAllData`).
       const runHistoryForWipe = reach('run_history', engine.getRunHistory());
       if (runHistoryForWipe) attempt('run_history', () => { runHistoryForWipe.deleteAllData(); });
 
@@ -10073,6 +10074,10 @@ export class LynoxHTTPApi {
         ...(degraded.length > 0 ? { degraded } : {}),
         ...(skipped.length > 0 ? { skipped } : {}),
       };
+      // The erasure also empties `security_events`, so without this line nothing
+      // would record that one happened. Process log only, and counts only: the
+      // labels in `failed` can be collection or secret names, which are user data.
+      process.stderr.write(`[http-api] data erasure ran at ${new Date().toISOString()}: failed=${String(failed.length)} degraded=${String(degraded.length)} skipped=${String(skipped.length)}\n`);
       if (failed.length > 0) {
         // 500, not a 200 with `deleted: false`: a client that reads the status code
         // alone must not conclude the erasure succeeded, and an Art. 17 answer is

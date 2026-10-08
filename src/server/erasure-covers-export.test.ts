@@ -14,7 +14,7 @@ import type { DataStore } from '../core/data-store.js';
 import type { SecretStore } from '../core/secret-store.js';
 import type { CRM } from '../core/crm.js';
 import type { FlatFileMemory } from '../core/memory.js';
-import type { RunHistory } from '../core/run-history.js';
+import { HISTORY_KEPT_ON_ERASURE, type RunHistory } from '../core/run-history.js';
 import type { PromptStore } from '../core/prompt-store.js';
 
 /**
@@ -482,6 +482,13 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
    */
   const HISTORY_KEPT = new Set(['schema_version', 'model_provenance_backfill_marker']);
 
+  // The independence above only holds if the code's set cannot grow on its own: a
+  // table the seed below never writes (e.g. `security_events`) would otherwise pass
+  // the emptiness check as "kept" and agree with the code by accident.
+  it('keeps exactly the tables this test names as kept', () => {
+    expect([...HISTORY_KEPT_ON_ERASURE].sort()).toEqual([...HISTORY_KEPT].sort());
+  });
+
   function historyTables(): Array<{ name: string; rows: number }> {
     const db = new BetterSqlite3(join(dir, 'history.db'), { readonly: true });
     try {
@@ -551,9 +558,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       expect(db.prepare('SELECT task_text, response_text FROM runs').all()).toEqual([]);
       expect(db.prepare('SELECT id FROM scopes').all(), 'the seeded global scope must be back').toEqual([{ id: 'global' }]);
       expect(
-        (db.prepare('SELECT COUNT(*) AS n FROM model_provenance_backfill_marker').get() as { n: number }).n,
-        'the backfill marker must survive, or the next boot re-runs the backfill',
-      ).toBe(1);
+        db.prepare('SELECT done FROM model_provenance_backfill_marker WHERE id = 1').all(),
+        'the backfill marker must survive as DONE, or every boot re-runs the backfill',
+      ).toEqual([{ done: 1 }]);
     } finally {
       db.close();
     }

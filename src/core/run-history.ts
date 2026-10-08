@@ -245,10 +245,11 @@ export interface WireSnapshotRecord {
 /**
  * The tables an Art. 17 erasure keeps (`RunHistory.deleteAllData`). Neither holds
  * user data, and the engine reads both back: `schema_version` is the migration
- * ledger, and an emptied `model_provenance_backfill_marker` would make the next boot
- * run that backfill again. A table belongs here only if both are true.
+ * ledger, and an emptied `model_provenance_backfill_marker` would make every boot
+ * run that backfill again. A table belongs here only if both are true. Exported so
+ * `erasure-covers-export.test.ts` can hold it against its own, independent list.
  */
-const HISTORY_KEPT_ON_ERASURE: ReadonlySet<string> = new Set(['schema_version', 'model_provenance_backfill_marker']);
+export const HISTORY_KEPT_ON_ERASURE: ReadonlySet<string> = new Set(['schema_version', 'model_provenance_backfill_marker']);
 
 function generateId(): string {
   return randomUUID();
@@ -3471,16 +3472,21 @@ export class RunHistory {
    * tool argument (`run_tool_calls`), the typed answer to an `ask_user`
    * (`pending_prompts`), the last user message per turn (`wire_snapshots`). A
    * hand-maintained list has to be remembered by every table a later change adds;
-   * `resetDatabase` below is the demonstration, broken for months by one stale name.
+   * `resetDatabase` above is the demonstration, broken since v19 by one stale name.
    * Here a new table is erased unless someone decides otherwise, in the one place the
    * exception lives.
    *
-   * ⚠ This takes the COST HISTORY with it, deliberately: `runs` is what the daily and
-   * monthly spend limits count from, so the counters restart at zero. That is
-   * acceptable only because the one caller, `DELETE /api/data`, refuses on every
-   * instance with a billing tier — a tenant who could call it would erase the month's
-   * counter and with it the budget. The refusal is pinned in
-   * `erasure-covers-export.test.ts`.
+   * ⚠ This takes every COUNTER that is computed from this file with it, deliberately:
+   * `runs` is what the daily and monthly spend limits count from, and
+   * `run_tool_calls` (joined to `runs` through `getToolCallCountSince`) is what the
+   * hourly and daily caps of `http_request` and of the mail-send tools count from —
+   * all of them restart at zero. The security trail (`security_events`) is erased as
+   * well. That is acceptable only because the one caller, `DELETE /api/data`, refuses
+   * on every instance with any non-empty billing tier (e.g. hosted, managed) — a
+   * tenant who could call it would erase the month's counter and with it the budget.
+   * The refusal relies on the control plane setting that env, and is pinned in
+   * `erasure-covers-export.test.ts`. (The mail dedup window is in-memory and is not
+   * touched.)
    *
    * The `global` scope is put back after the wipe, with the statement the migration
    * seeds it with: it is not user data, and `scopes.parent_id` references it.

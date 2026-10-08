@@ -11285,8 +11285,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     it('DELETE /api/data empties the run history', async () => {
       // An IDENTIFIER witness for the call; what the call must achieve on a real
       // file — every table of history.db empty, the run spine included — is asserted
-      // in `erasure-covers-export.test.ts`. This one keeps the failure path honest:
-      // the route must reach the method with the handle it was given.
+      // in `erasure-covers-export.test.ts`. This one pins the wiring on the success
+      // path: the route must reach the method with the handle it was given.
       const deleteAllData = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
