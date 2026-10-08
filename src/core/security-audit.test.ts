@@ -188,6 +188,16 @@ describe('SecurityAudit', () => {
       expect(serialised).not.toContain('detail');
     });
 
+    it('leaves out the bash allowlist observe records, which stay on the instance', () => {
+      audit = createAudit();
+      channels.securityFlagged.publish({ event_type: 'bash_autonomy_observe', tool_name: 'bash', decision: 'unproven', autonomy_level: 'autonomous', detail: 'program=cat;reason=char;current=free' });
+      audit.record({ event_type: 'danger_flagged', tool_name: 'bash', decision: 'flagged', autonomy_level: 'autonomous' });
+
+      expect(audit.getRecentEvents(1).map((e) => e['event_type'])).toContain('bash_autonomy_observe');
+      const aggs = audit.getContentFreeAggregates(24);
+      expect(aggs.map((a) => a.event_type)).toEqual(['danger_flagged']);
+    });
+
     it('returns empty array when no events in window', () => {
       audit = createAudit();
       expect(audit.getContentFreeAggregates(1)).toEqual([]);

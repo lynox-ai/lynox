@@ -2,7 +2,8 @@ import { realpathSync, existsSync } from 'node:fs';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
 import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
-import { isWorkspaceActive } from '../core/workspace.js';
+import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS } from '../core/workspace.js';
+import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
 import { channels } from '../core/observability.js';
 import { extractMatchString, globToRegex } from '../core/pre-approve.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
@@ -458,6 +459,14 @@ function extractDangerPayload(toolName: string, input: unknown, autonomy: Autono
  * when `payload.downgradeTo` is set.
  */
 export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
+  const signal = _decideDanger(toolName, input, autonomy, preApproval, audit, entry, runId, contract);
+  // Observed against the FINAL decision: a call a pre-approval or a contract lets
+  // through runs without a question, and is recorded as one that does.
+  observeBashProof(toolName, input, autonomy, signal?.warning ?? null, runId);
+  return signal;
+}
+
+function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, preApproval: PreApprovalSet | undefined, audit: PreApproveAuditLike | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined): DangerSignal | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
@@ -493,6 +502,37 @@ export function isDangerousDetailed(toolName: string, input: unknown, autonomy?:
 
   const payload = extractDangerPayload(toolName, input, autonomy, entry);
   return { warning, ...(payload ? { payload } : {}) };
+}
+
+/**
+ * Observe mode of the bash allowlist: for every unattended bash call, record whether
+ * the positive grammar in `bash-allowlist.ts` proves it, next to what the guard decided.
+ * Nothing is enforced. The record names the program only when it is on the fixed
+ * program list, and the reason as a fixed word; it carries no argument or path. It is
+ * written once per tool call (agent.ts is the only production caller) to the local
+ * security log, and it is left out of the content-free aggregate the control plane can
+ * read, so it stays on the instance.
+ */
+function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, warning: string | null, runId: string | undefined): void {
+  if (toolName !== 'bash' || autonomy !== 'autonomous') return;
+  if (!channels.securityFlagged.hasSubscribers) return;
+  if (!input || typeof input !== 'object' || !('command' in input)) return;
+  const command = String((input as { command: unknown }).command);
+  const proof = proveBashCommand(command, {
+    cwd: getWorkspaceCwd(),
+    home: process.env['HOME'],
+    readRoots: READ_ONLY_ROOTS,
+    isSensitive: (realPath) => SENSITIVE_PATHS.some((re) => re.test(realPath)),
+  });
+  const current = !warning ? 'free' : warning.includes('[BLOCKED') ? 'blocked' : 'asks';
+  channels.securityFlagged.publish({
+    event_type: BASH_OBSERVE_EVENT,
+    tool_name: 'bash',
+    decision: proof.proven ? 'proven' : 'unproven',
+    autonomy_level: autonomy,
+    run_id: runId,
+    detail: `program=${proof.program};reason=${proof.reason};current=${current}`,
+  });
 }
 
 export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {

@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { channels } from './observability.js';
 import { getLynoxDir } from './config.js';
+import { BASH_OBSERVE_EVENT } from '../tools/bash-allowlist.js';
 
 export interface SecurityEvent {
   event_type: string;
@@ -161,6 +162,10 @@ export class SecurityAudit {
    * caller serialises the whole result. This is the security invariant the
    * `/api/security/events/aggregate` endpoint relies on; the regression test
    * asserts the keys can never appear.
+   *
+   * The bash allowlist's observe records are left out. They count how a feature is
+   * used rather than whether a guard fired, and sending usage off the instance is a
+   * separate decision from sending guard activity.
    */
   getContentFreeAggregates(windowHours = 24): SecurityEventAggregate[] {
     try {
@@ -169,10 +174,11 @@ export class SecurityAudit {
                 COUNT(*) as count, MAX(created_at) as last_seen
          FROM security_events
          WHERE created_at >= datetime('now', '-' || ? || ' hours')
+           AND event_type != ?
          GROUP BY event_type, tool_name, decision, autonomy_level
          ORDER BY count DESC`,
       );
-      return stmt.all(windowHours) as SecurityEventAggregate[];
+      return stmt.all(windowHours, BASH_OBSERVE_EVENT) as SecurityEventAggregate[];
     } catch {
       return [];
     }

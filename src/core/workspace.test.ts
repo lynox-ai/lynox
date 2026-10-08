@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getWorkspaceDir, isWorkspaceActive, getWorkspaceCwd, validatePath, _resetCache } from './workspace.js';
+import { getWorkspaceDir, isWorkspaceActive, getWorkspaceCwd, validatePath, _resetCache, READ_ONLY_ROOTS } from './workspace.js';
 
 describe('workspace', () => {
   let tmpDir: string;
@@ -135,6 +135,13 @@ describe('workspace', () => {
       _resetCache();
       const result = validatePath('/any/path', 'write');
       expect(result).toBe('/any/path');
+    });
+  });
+
+  describe('READ_ONLY_ROOTS', () => {
+    it('cannot be widened at runtime by a module that imports it', () => {
+      expect(() => (READ_ONLY_ROOTS as string[]).push('/')).toThrow(TypeError);
+      expect(READ_ONLY_ROOTS).toEqual(['/app']);
     });
   });
 });
