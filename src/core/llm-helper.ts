@@ -438,8 +438,11 @@ export async function callForStructuredJson<T = unknown>(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'extract',
   );
   if (!toolUseBlock) {
+    // The block types come from the response, so on a custom endpoint they are the server's
+    // words: shown only in the shape a block type has.
+    const types = response.content.map(b => (/^[a-z_]{1,30}$/.test(String(b.type)) ? b.type : '<unprintable>'));
     throw new ExtractShapeError(
-      `Model did not call the extract tool. Got content types: [${response.content.map(b => b.type).join(', ')}]`,
+      `Model did not call the extract tool. Got content types: [${types.join(', ')}]`,
     );
   }
 

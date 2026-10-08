@@ -1976,8 +1976,11 @@ describe('api_setup tool', () => {
       const adapterError = new Error(`OpenAI-compatible API error 400: error parsing tool call: raw='{"description":"${sentinel}"}'`);
       const sdkError = Object.assign(new Error(`400 ${sentinel}`), { name: 'BadRequestError', status: 400 });
       const plainError = new Error(`socket hang up ${sentinel}`);
+      const idleTimeout = new Error('OpenAI-compatible request timed out (no data for 120000ms)');
+      const aborted = Object.assign(new Error(`aborted ${sentinel}`), { name: 'AbortError' });
+      const oddName = Object.assign(new Error('x'), { name: `Bad ${sentinel}`, status: 999 });
       const results: string[] = [];
-      for (const err of [adapterError, sdkError, plainError]) {
+      for (const err of [adapterError, sdkError, plainError, idleTimeout, aborted, oddName]) {
         const fetchSpy = mockFetchOk('<html>some docs</html>');
         mockedExtract.mockRejectedValueOnce(err);
         try {
@@ -1992,6 +1995,9 @@ describe('api_setup tool', () => {
       expect(results).toEqual([
         'Error: docs extraction failed — the extraction call failed (Error HTTP 400)',
         'Error: docs extraction failed — the extraction call failed (BadRequestError HTTP 400)',
+        'Error: docs extraction failed — the extraction call failed (Error)',
+        'Error: docs extraction failed — the extraction call timed out',
+        'Error: docs extraction failed — the extraction call was aborted',
         'Error: docs extraction failed — the extraction call failed (Error)',
       ]);
       for (const r of results) expect(r).not.toContain(sentinel);
