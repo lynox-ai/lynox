@@ -347,8 +347,11 @@ describe('SYSTEM_PROMPT doc-research hard rules', () => {
 
   it('does not use a closed vendor path as its example of an admin-UI path', () => {
     // Rule 1 cited "Settings → Apps → Develop apps" as its example, which is Shopify's
-    // admin-created custom-app path, closed to new apps since 2026-01-01. Models asked
-    // how to connect Shopify walked users down exactly that path, in those words.
+    // admin-created custom-app path: Shopify's help center (read 2026-10-09) manages only
+    // custom apps created before 2026-01-01 there. Asked how to connect Shopify, models sent
+    // users down that path, one of them in exactly those words. The example must not be a
+    // real vendor path, nor lynox's own "Settings → API Keys".
+    expect(SYSTEM_PROMPT).not.toContain('Settings → API Keys');
     expect(SYSTEM_PROMPT).toContain('an admin-UI path (e.g. "');
     expect(SYSTEM_PROMPT).not.toMatch(/develop apps/i);
   });
