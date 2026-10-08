@@ -135,6 +135,21 @@ describe('the run notice, rendered', () => {
     }
   });
 
+  it('a FAILED replay uses the plain wording, not the one that names a cost', () => {
+    // ⚠ The failed branch passes `printsCost: false`, and flipping that literal to `true`
+    // left this whole file green — so the branch the commit said it was repairing had no
+    // witness at all. The no-number case was covered only inside the COMPLETED branch, at
+    // `costUsd: 0`, which is a different line of code.
+    for (const lang of LANGS) {
+      const { kind, text } = render({ status: 'failed', error: 'boom', idempotent: true }, lang);
+      expect(kind).toBe('error');
+      expect(text.toLowerCase()).toMatch(/früher|earlier/);
+      expect(text, 'a branch that prints no amount may not mention one').not.toMatch(/\$\d/);
+      expect(text.toLowerCase(), 'and must not name a cost at all')
+        .not.toMatch(/die kosten sind|the cost is/);
+    }
+  });
+
   it('a REPLAY with NO cost to show promises nothing about one', () => {
     // A completed replay whose run cost zero prints no amount, so it must use the plain
     // wording — the conditional is the point, not the wording.

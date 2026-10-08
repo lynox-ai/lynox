@@ -6331,14 +6331,20 @@ export class LynoxHTTPApi {
                 claimedRunId = mintedRunId;
                 restartedFrom = { runId: held.runId, costUsd: heldRun?.total_cost_usd ?? 0 };
                 break;
-              // ⚠ `restartedFrom` being set is ALSO what tells the cleanup below not to
-              // release. The restart sets `started_at` back to NULL, so the release's
-              // `started_at IS NULL` matches — and if the restarted run is then refused
-              // before it starts (an exhausted credit gate, say), the claim is deleted and
-              // the record of the EARLIER attempt's spend goes with it. The next click then
-              // runs again, paid, with nothing disclosed. "Nothing was spent" and "the
-              // previous spend was carried forward" look identical in that column, which is
-              // exactly the conflation `started_at` exists to prevent, one level up.
+              // ⚠ A revision of this file skipped the release below when a restart had
+              // happened, on the reasoning that the restart clears `started_at` so the
+              // release would delete "the only record that the earlier attempt had paid".
+              // That premise was FALSE: this table has no cost column — the spend lives in
+              // `pipeline_runs.total_cost_usd`, which a restart does not touch. What the
+              // skip actually produced was a claim with `started_at IS NULL` pointing at a
+              // run that was never created, which reads as `in-flight` for ever: the view
+              // keeps its key on that 409, the confirm-release is offered for one other code
+              // only, and the owner was left with an engine restart as the way out, while
+              // the banner said "already running" about nothing. Releasing is correct here —
+              // the restarted attempt spent nothing, and a refusal before a run must never
+              // burn the key. What is genuinely lost is the DISCLOSURE of the earlier
+              // attempt's cost on the next answer, and that is the registered, out-of-scope
+              // question about accumulating it, not something to buy with a stuck key.
               case 'unknown-outcome':
                 // `started_at` is set and no run row ever landed: the insert is
                 // fire-and-forget and a 5s SQLITE_BUSY is swallowed while the run pays.
@@ -6359,9 +6365,13 @@ export class LynoxHTTPApi {
                 //
                 // ⚠ What refusing buys, stated exactly, because the sentence above reads
                 // like more: it keeps THIS request from starting a second run. It does not
-                // keep the key's owner from paying again — the view discards the key on this
-                // code, so the next click is a new attempt. Of the six verdicts only
-                // `completed` (replay) and `running` (wait) actually prevent a second spend.
+                // keep the key's owner from paying again — the view discards the key on THIS
+                // code, so the next click is a new attempt. That is specific to
+                // `run_claim_held`: `unknown-outcome` and `in-flight` keep the key, so of the
+                // six verdicts only `restart` hands out a second run without being asked, and
+                // it discloses what the earlier attempt cost. (An earlier version of this
+                // sentence counted two verdicts instead of four; the client's rule changed
+                // under it and the comment stayed.)
                 errorResponse(
                   res, 409,
                   `A run for this key is held in status "${heldRun?.status ?? 'unknown'}".`,
@@ -6429,7 +6439,7 @@ export class LynoxHTTPApi {
         // spent would come back as a 500, the view would read that as a failure, discard its
         // key, and the next click would pay for the whole workflow again. The claim row is
         // correct either way; the damage would travel entirely through the wrong answer.
-        if (ownedRunId !== undefined && idempotencyKey !== undefined && restartedFrom === undefined) {
+        if (ownedRunId !== undefined && idempotencyKey !== undefined) {
           try {
             history.releaseUnstartedWorkflowRunClaim(claimWorkflowId, idempotencyKey, ownedRunId);
           } catch { /* the boot sweep releases it instead — never at the cost of the answer */ }

@@ -143,7 +143,7 @@ describe('the run claim reaches the view that holds its key', () => {
     // directions. The keys are split by where they belong, so neither file can satisfy the
     // other's.
     const inView = ['run_already_running', 'run_outcome_unknown', 'run_claim_held',
-      'run_outcome_unknown_force', 'run_outcome_unknown_released'];
+      'run_refused', 'run_outcome_unknown_force', 'run_outcome_unknown_released'];
     const inComposer = ['run_done', 'run_failed', 'run_replayed', 'run_replayed_cost', 'run_restarted_cost', 'run_restarted_free'];
     for (const [key, source, where] of [
       ...inView.map(k => [k, VIEW, 'the view'] as const),
@@ -209,7 +209,7 @@ describe('the run claim reaches the view that holds its key', () => {
     // The route always sends an `error`, so a `msg?.error ?? t(…)` fallback never fires and
     // a German reader got the English sentence. The translation has to be chosen by code,
     // with the server's text kept only for a code this build does not know.
-    expect(RUN_FN).toMatch(/run_claim_held'\s*\n?\s*\?\s*t\('workflow_library\.run_claim_held'\)/);
+    expect(RUN_FN).toMatch(/code === 'run_claim_held'\) \{\s*\n\s*error = t\('workflow_library\.run_claim_held'\)/);
     expect(RUN_FN).toContain("t('workflow_library.run_outcome_unknown')");
     // ⚠ And the FALLBACK for an unknown 409 code is the cautious sentence, not "the run
     // failed": a 409 means the route refused, and a mangled or newer 409 must not be
@@ -228,6 +228,16 @@ describe('the run claim reaches the view that holds its key', () => {
     // instrument has to be told the difference between a call and a sentence about one.
     expect(branch409, 'an unknown 409 must not be reported as a failure')
       .not.toContain("t('workflow_library.run_failed')");
+    // ⚠ The message is chosen by CODE, not by whether the key survives. Those two stopped
+    // coinciding when `run_outcome_unknown` became non-terminal, and a branch on `keepKey`
+    // then sent that code into the "already running" banner while its own sentence became
+    // unreachable. Asserted as the structure, because that is what went wrong.
+    expect(branch409, 'the banner belongs to the two ALIVE codes only')
+      .toMatch(/code === 'run_claim_in_flight' \|\| msg\?\.code === 'run_in_progress'\) \{\s*\n\s*notice = t\('workflow_library\.run_already_running'\)/);
+    expect(branch409, 'and the unknown-outcome sentence is reached by its own code')
+      .toMatch(/code === 'run_outcome_unknown'\) \{\s*\n\s*error = t\('workflow_library\.run_outcome_unknown'\)/);
+    expect(branch409, 'an unrecognised 409 gets a sentence that asserts nothing about a run')
+      .toContain("t('workflow_library.run_refused')");
     // Positive control on the slice: it really is the branch, so the absence above means
     // something. (An empty or mis-sliced string would satisfy the negative assertion.)
     expect(branch409).toContain("t('workflow_library.run_outcome_unknown')");

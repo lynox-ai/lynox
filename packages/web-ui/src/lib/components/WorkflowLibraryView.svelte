@@ -303,22 +303,25 @@
 				// where nothing went wrong.
 				const msg = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
 				keepKey = !attemptIsOver({ httpStatus: 409, code: msg?.code });
-				if (keepKey) {
+				// ⚠ The message is chosen by CODE, never by whether the key survives. Those
+				// two coincided until `run_outcome_unknown` became non-terminal, and then the
+				// branch on `keepKey` sent that code into the "already running" banner — a
+				// sentence that is false for it — while the specific wording written for it
+				// became unreachable. Two questions, two conditions.
+				notice = '';
+				error = '';
+				if (msg?.code === 'run_claim_in_flight' || msg?.code === 'run_in_progress') {
 					notice = t('workflow_library.run_already_running');
-					error = '';
+				} else if (msg?.code === 'run_outcome_unknown') {
+					error = t('workflow_library.run_outcome_unknown');
+				} else if (msg?.code === 'run_claim_held') {
+					error = t('workflow_library.run_claim_held');
 				} else {
-					// The attempt is over for this key, and the LOCAL sentence is preferred over
-					// the server's: the route always sends an `error`, so a `?? t(…)` fallback
-					// never fired and a German user read the English message. The server's text
-					// is kept for a code this build does not know.
-					notice = '';
-					// The fallback stays `run_outcome_unknown`, not `run_failed`: a 409 means the
-					// route REFUSED, and telling the owner their run failed would be false for
-					// every unknown code — including a 409 a proxy mangled. The previous
-					// version replaced a cautious true sentence with a confident wrong one.
-					error = msg?.code === 'run_claim_held'
-						? t('workflow_library.run_claim_held')
-						: t('workflow_library.run_outcome_unknown');
+					// A 409 whose code this build does not know, or one a proxy mangled. The
+					// sentence says only what a 409 guarantees — the server refused this start
+					// — and asserts nothing about an earlier run, which `run_outcome_unknown`
+					// would have done without warrant.
+					error = t('workflow_library.run_refused');
 				}
 				if (msg?.code === 'run_outcome_unknown') {
 					// ⚠ The ONE state where the earlier run may still be alive and still

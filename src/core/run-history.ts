@@ -2293,9 +2293,14 @@ export class RunHistory {
    *  row therefore yields NULL, `NULL IN (...)` is not true, and nothing is restarted.
    *
    *  What actually prevents the forever-409 is the KEY'S LIFETIME in the client: the route
-   *  answers `run_outcome_unknown`, the library view discards the key, and the next click
-   *  is a new attempt that a person chose after being told (PRD §3.3). The way out of that
-   *  state is a new key, not a silent restart of an unknown run.
+   *  answers `run_outcome_unknown` and the library view asks its owner whether to release
+   *  the attempt, naming what a new run would duplicate. The way out of that state is a new
+   *  key that a person chose, not a silent restart of a run whose outcome nobody knows.
+   *
+   *  ⚠ This said "the library view discards the key", which was true when written and false
+   *  one commit later: a security round showed that discarding it on that code let the next
+   *  click start a second, possibly concurrent, paid run, so it became a confirm. The
+   *  decision here is unchanged; its recorded reason had stopped describing the mechanism.
    *
    *  So what restarts is a run with a DEFINITIVE end: a `pipeline_runs` row saying `failed`
    *  or `interrupted`. `started_at IS NOT NULL` is the other precondition — a claim that

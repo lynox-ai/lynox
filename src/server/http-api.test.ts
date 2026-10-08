@@ -7385,13 +7385,21 @@ describe('LynoxHTTPApi', () => {
         });
       });
 
-      it('a RESTART whose new run is refused keeps the claim, not deletes it', async () => {
-        // ⚠ The restart sets `started_at` back to NULL, so this request's own release
-        // matched it. If the restarted run is then refused before it starts — an exhausted
-        // credit gate — the claim was DELETED, and with it the only record that the earlier
-        // attempt had spent. The next click ran again, paid, with nothing disclosed. In that
-        // column "nothing was spent" and "the earlier spend was carried forward" look
-        // identical, which is the conflation `started_at` exists to prevent one level up.
+      it('a RESTART whose new run is refused RELEASES the claim, so the key stays usable', async () => {
+        // ⚠ A revision of this route skipped the release after a restart, reasoning that the
+        // restart clears `started_at` and the release would therefore delete "the only
+        // record that the earlier attempt had paid". The premise was false — this table has
+        // no cost column; the spend is in `pipeline_runs`, which a restart does not touch —
+        // and the skip produced a claim with `started_at IS NULL` pointing at a run that was
+        // never created. That reads as `in-flight` for ever: the view keeps its key on that
+        // 409, the confirm-release is offered for one other code only, and the way out was
+        // an engine restart, while the banner said "already running" about nothing.
+        //
+        // So the release is right here, and it is the same property as a first attempt's: a
+        // refusal BEFORE a run must never burn the key, or a person who tops up their credit
+        // can never retry. What a refused restart does lose is the disclosure of the earlier
+        // attempt's cost on the next answer, which is a registered question about
+        // accumulating it rather than something to buy with a key nobody can free.
         seedClaim('k-1', 'run-a', { started: true, status: 'failed' });
         claimHistory.getDb().prepare('UPDATE pipeline_runs SET total_cost_usd = ? WHERE id = ?')
           .run(12.5, 'run-a');
@@ -7399,20 +7407,18 @@ describe('LynoxHTTPApi', () => {
         await withClaimDb(async () => {
           const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
           expect(res.status).toBe(400);
-          const row = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
-          expect(row, 'the claim must survive a refused restart').not.toBeNull();
-          expect(row!.runId, 'and it holds the restarted id').not.toBe('run-a');
+          expect(claimHistory.readWorkflowRunClaim('wf-1', 'k-1'),
+            'the restarted attempt spent nothing, so its claim must not survive').toBeNull();
+          // and the earlier attempt's spend is where it always was
+          expect(claimHistory.getPipelineRun('run-a')?.total_cost_usd).toBe(12.5);
         });
-        // and the next attempt is told what the earlier one cost, rather than running clean
+        // The key is usable again: the next attempt runs rather than hanging at 409.
         mockRunSavedWorkflow.mockReset();
         runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
         await withClaimDb(async () => {
           const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
-          const body = await res.json() as { error?: string; code?: string };
-          // The claim is unstarted and still held, so the honest answer is the in-flight
-          // refusal — NOT a fresh paid run.
-          expect(res.status).toBe(409);
-          expect(body.code).toBe('run_claim_in_flight');
+          expect(res.status).toBe(200);
+          expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
         });
       });
 
