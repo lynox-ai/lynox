@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkerLoop } from './worker-loop.js';
-import { RunAbortedError } from './agent.js';
+import { RunAbortedError, ToolLoopBreakError } from './agent.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { PromptStore } from './prompt-store.js';
@@ -30,7 +30,8 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
-import { stopHandleOf } from './worker-loop.js';
+import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
+import type { ActiveTask } from './worker-loop.js';
 import { getPipelineStore } from '../tools/builtin/pipeline.js';
 
 /**
@@ -115,6 +116,10 @@ interface Harness {
   /** Ends the in-flight turn with a chosen error — for the causes that are NOT an
    *  abort, which is the distinction the recorded word now rests on. */
   failTurn: (err: Error) => void;
+  /** Ends the in-flight turn NORMALLY, with this text. */
+  finishTurn: (text: string) => void;
+  /** The real prompt store the run parks on. */
+  prompts: PromptStore;
   /** Resolves once the watch run is INSIDE its fetch — `watch: true` only. */
   fetching: Promise<void>;
   /** Lets the gated fetch return — `watch: true` only. */
@@ -125,7 +130,13 @@ interface Harness {
   notifications: () => Array<{ title: string; body: string; priority?: string; followUps?: Array<{ label: string }> }>;
 }
 
-function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean; withChannels?: boolean; watch?: boolean; abortMisses?: boolean }): Harness {
+function makeHarness(opts?: {
+  dispatch?: boolean; retriable?: boolean; park?: boolean; abortThrows?: boolean; withChannels?: boolean; watch?: boolean; abortMisses?: boolean;
+  /** What `getLastRunStop` reports for the run — a cap with pending work is the ceiling exit. */
+  lastRunStop?: { cause: string; pendingToolCount: number } | undefined;
+  /** A run that loops in the past and is now short: the execution deadline, in ms. */
+  taskTimeoutMs?: number | undefined;
+}): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'lynox-stop-'));
   tmpDirs.push(dir);
   const history = new RunHistory(join(dir, 'history.db'));
@@ -165,6 +176,7 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
   let signalRunning: () => void;
   const running = new Promise<void>(resolve => { signalRunning = resolve; });
   let rejectTurn: ((e: Error) => void) | undefined;
+  let resolveTurn: ((text: string) => void) | undefined;
   let signalFetching: () => void;
   const fetching = new Promise<void>(resolve => { signalFetching = resolve; });
   let openFetch: () => void;
@@ -213,12 +225,14 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
         resumed = true;
         return answer;
       }
-      const turn = new Promise<string>((_resolve, reject) => { rejectTurn = reject; });
+      const turn = new Promise<string>((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
       // Let the loop finish wiring (and attaching the session) before the test looks.
       setImmediate(() => signalRunning());
       inFlight.push(turn.catch(() => { /* the rejection IS the stop; the loop handles it */ }));
       return turn;
     }),
+    getLastRunStop: () => (opts?.lastRunStop === undefined ? null
+      : { ...opts.lastRunStop, pendingTools: ['web_research'], text: '' }),
   };
 
   const engine = {
@@ -245,7 +259,7 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
 
   releases.push(() => { rejectTurn?.(new Error('released by teardown')); });
 
-  const loop = new WorkerLoop(engine, router, 60_000);
+  const loop = new WorkerLoop(engine, router, 60_000, opts?.taskTimeoutMs);
   loops.push(loop);
   // ⚠ `dispatch: false` for the case that needs NO run — asking about a task that is
   // not running. Starting a run there left a turn nothing would ever settle, and the
@@ -261,6 +275,8 @@ function makeHarness(opts?: { dispatch?: boolean; retriable?: boolean; park?: bo
     loop, history, running, parked, tick,
     abortCalls: () => session.abort.mock.calls.length,
     failTurn: (err: Error) => { rejectTurn?.(err); },
+    finishTurn: (text: string) => { resolveTurn?.(text); },
+    prompts,
     fetching,
     finishFetch: () => openFetch(),
     resumed: () => resumed,
@@ -605,6 +621,8 @@ function makeClassHarness(opts: {
   /** The paused collaborator throws after release — for the run that ends on its OWN
    *  cause while a stop is outstanding. */
   failAfterRelease?: boolean;
+  /** The execution deadline, in ms — short for the case where IT aborts the controller. */
+  taskTimeoutMs?: number;
 }): ClassHarness {
   const g = gate();
   releases.push(g.open);
@@ -716,7 +734,7 @@ function makeClassHarness(opts: {
     notify: () => (opts.pauseAt === 'notify' ? hold(undefined) : Promise.resolve(undefined)),
   } as unknown as NotificationRouter;
 
-  const loop = new WorkerLoop(engine, router, 60_000);
+  const loop = new WorkerLoop(engine, router, 60_000, opts.taskTimeoutMs);
   loops.push(loop);
   return {
     loop, running, tick: loop.tick(),
@@ -783,6 +801,43 @@ describe('what a stop can reach — one case per effect class', () => {
     // The state the owner resumes from, rather than one that resumes itself.
     expect(h.halts()).toEqual(['the owner stopped the run']);
     expect(h.reArms(), 'nothing re-armed the trigger it just stopped').toHaveLength(0);
+  });
+
+  it('a preview whose signal a SHUTDOWN aborted pauses as designed — it is not the owner\'s stop', async () => {
+    // ⛔ The other two things that abort this controller. `stop()` at shutdown and the
+    // execution deadline both make `runBulkPreview` return `pending`, and for them that
+    // is the designed pause: record the tick, re-arm in 30 s, carry on after the deploy.
+    // Keyed on `signal.aborted`, every deploy during a preview halted it in the owner's
+    // name and left it for a person to resume.
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true,
+      record: { bulk_run_id: 'bulk-1' },
+    });
+    await h.running;
+    h.loop.stop();
+    h.release();
+
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2], 'a pause is not a stop').toBe('success');
+    expect(h.halts(), 'nothing halted the run in the owner\'s name').toEqual([]);
+    expect(h.reArms(), 'the read comes back next tick').toHaveLength(1);
+  });
+
+  it('a preview whose DEADLINE aborted its signal chunks on, as before', async () => {
+    const h = makeClassHarness({
+      effect: 'bulk_preview', pauseAt: 'bulkClient', previewReady: true,
+      record: { bulk_run_id: 'bulk-1' }, taskTimeoutMs: 20,
+    });
+    await h.running;
+    // Past the deadline: `WallClockBudget` floors any arm at one second, so the 20 ms
+    // asked for is 1000 ms in fact.
+    await new Promise(r => setTimeout(r, 1100));
+    h.release();
+
+    await waitUntil('the preview to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('success');
+    expect(h.halts()).toEqual([]);
+    expect(h.reArms()).toHaveLength(1);
   });
 
   it('a BULK PREVIEW is stoppable through its SIGNAL — the one handler that polls it', async () => {
@@ -877,5 +932,105 @@ describe('what a stop can reach — one case per effect class', () => {
     expect(stopHandleOf({ ...base, pendingPromptId: 'p-1' })).toBe('wait');
     expect(stopHandleOf({ ...base, session: someSession, readsSignal: true })).toBe('session');
     expect(stopHandleOf({ ...base, session: someSession, pendingPromptId: 'p-1', readsSignal: true })).toBe('wait');
+  });
+});
+
+/**
+ * The status a run that RETURNS gets — the one expression where two independent changes
+ * meet: the owner's stop (`stopped`) and the ceiling exit (`failed` with a reason). One
+ * witness per branch, and the combination, because a precedence swap between the two
+ * changes passes every test that exercises only one of them.
+ */
+describe('the recorded word for a run that returns rather than throws', () => {
+  const lastStatus = (h: Harness): string | null => h.history.getTrigger('trg-stop')?.last_run_status ?? null;
+
+  it('stopped while parked AND on its ceiling: the owner\'s word wins, and the notice says so', async () => {
+    const h = makeHarness({ park: true, withChannels: true, lastRunStop: { cause: 'budget_cap', pendingToolCount: 2 } });
+    await h.parked;
+    h.loop.stopTask('trg-stop');
+    await waitUntil('the stop to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('stopped');
+    // The LAST notice: the park itself sent one first, carrying the question.
+    const parkNotices = 1;
+    await waitUntil('the owner to be told', () => h.notifications().length > parkNotices);
+    const note = h.notifications().at(-1)!;
+    expect(note.title.startsWith('\u23f9'), 'neither a tick nor a cross').toBe(true);
+    expect(note.priority).toBe('normal');
+    expect(note.body).toContain('Stopped on your instruction');
+    expect(note.body, 'the ceiling is still reported').toContain('cost ceiling');
+  });
+
+  it('on its ceiling with no stop: failed, and the notice is a cross at high priority', async () => {
+    const h = makeHarness({ withChannels: true, lastRunStop: { cause: 'budget_cap', pendingToolCount: 2 } });
+    await h.running;
+    h.finishTurn('Partial findings so far.');
+    await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('failed');
+    await waitUntil('the owner to be told', () => h.notifications().length > 0);
+    expect(h.notifications()[0]!.title.startsWith('\u2717')).toBe(true);
+    expect(h.notifications()[0]!.priority).toBe('high');
+  });
+
+  it('a question left unanswered by a SHUTDOWN, with no stop: failed, and the question survives', async () => {
+    const h = makeHarness({ park: true });
+    await h.parked;
+    const promptId = h.prompts.getPending('thread-stop')!.id;
+    h.loop.stop();
+    await waitUntil('the run to come back', () => h.resumed());
+    await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('failed');
+    expect(h.prompts.getPending('thread-stop')?.id, 'kept for the next process').toBe(promptId);
+  });
+
+  it('a stop AND a shutdown before the wait continues: stopped, and the question is drained', async () => {
+    // Both reach the run in one tick; the teardown's "keep the question" must not undo
+    // the owner's "this run is over", or a later answer restarts what they ended.
+    const h = makeHarness({ park: true });
+    await h.parked;
+    h.loop.stopTask('trg-stop');
+    h.loop.stop();
+    await waitUntil('the run to come back', () => h.resumed());
+    await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('stopped');
+    expect(h.prompts.getPending('thread-stop'), 'nothing left to re-arm it').toBeUndefined();
+    expect(h.history.getTrigger('trg-stop')?.status).not.toBe('waiting');
+  });
+
+  it('a stop that missed and a run that then FINISHES: success — the stop had no effect', async () => {
+    const h = makeHarness({ abortMisses: true });
+    await h.running;
+    expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'requested', via: 'session' });
+    h.finishTurn('The report is done.');
+    await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('success');
+  });
+
+  it('no stop, no ceiling: success', async () => {
+    const h = makeHarness();
+    await h.running;
+    h.finishTurn('The report is done.');
+    await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('success');
+  });
+
+  it('a stop that missed and a LOOP BREAK after it: failed, and retried — the agent ended it, not the owner', async () => {
+    // `ToolLoopBreakError` extends `RunAbortedError`; an `instanceof` test read it as the
+    // abort the owner's stop produces.
+    const h = makeHarness({ retriable: true, abortMisses: true });
+    await h.running;
+    h.loop.stopTask('trg-stop');
+    h.failTurn(new ToolLoopBreakError('web_research\u0000{}'));
+    await waitUntil('the run to be recorded', () => lastStatus(h) !== null);
+    expect(lastStatus(h)).toBe('failed');
+    expect(h.history.getTrigger('trg-stop')?.retry_count ?? 0).toBe(1);
+  });
+
+  it('keepsQuestionForNextProcess: only a teardown the owner did not overrule keeps it', () => {
+    const entry = (t: boolean | undefined, s: boolean | undefined): ActiveTask => ({ tearingDown: t, stopRequested: s } as unknown as ActiveTask);
+    expect(keepsQuestionForNextProcess(entry(true, undefined))).toBe(true);
+    expect(keepsQuestionForNextProcess(entry(true, true))).toBe(false);
+    expect(keepsQuestionForNextProcess(entry(undefined, undefined))).toBe(false);
+    expect(keepsQuestionForNextProcess(entry(undefined, true))).toBe(false);
+    expect(keepsQuestionForNextProcess(undefined)).toBe(false);
   });
 });

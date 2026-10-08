@@ -6799,14 +6799,11 @@ export class LynoxHTTPApi {
         return;
       }
       if (outcome.kind === 'unstoppable') {
-        // ⚠ "through this route", and the qualifier is load-bearing rather than
-        // cautious: `Session.abort()` is process-wide, so ANOTHER task's stop does abort
-        // this workflow's step agents. An earlier draft of this sentence ended "It will
-        // finish on its own", which is the opposite of true for the one class that most
-        // often reaches it. The effect is named because the owner needs to know which
-        // run they are being refused; it is not re-capped here, because `errorResponse`
-        // already masks secrets and caps the body — a second cap read as closing an
-        // unbounded echo that was never open.
+        // ⚠ "through this route", and the qualifier is load-bearing: the run can still end
+        // other ways (its own end, the schedule paused), so the refusal says what THIS
+        // route cannot do rather than promising the run will finish. The effect is named
+        // because the owner needs to know which run they are being refused; it is not
+        // re-capped here, because `errorResponse` already masks secrets and caps the body.
         errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted through this route (effect '${outcome.effect}'). Pause the schedule with PATCH {enabled:false} so it does not start again.`);
         return;
       }
@@ -6816,7 +6813,10 @@ export class LynoxHTTPApi {
         via: outcome.via,
         note: outcome.via === 'wait'
           ? 'The run was parked on a question; the wait has been ended.'
-          : 'The abort was delivered. A tool handler already in flight is not interrupted, so the run ends when it unwinds.',
+          // ⚠ "requested", not "delivered": the session handle reaches a model call in
+          // flight, and between calls there is none, so a run there can still finish on
+          // its own. The wording says what the 202 knows.
+          : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own.',
       });
     }));
 

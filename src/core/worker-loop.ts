@@ -320,6 +320,21 @@ export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
   return undefined;
 }
 
+/**
+ * Whether a parked run's question must outlive this process: it is being torn down AND
+ * its owner has not stopped it.
+ *
+ * ⛔ The second half is what the two designs need from each other. A teardown keeps the
+ * question so the next process can re-arm the run when the answer lands; an owner's stop
+ * drains it because that run is over. A stop and a teardown can both reach one run before
+ * its wait continues, and then the stop wins: keeping the question would let a later
+ * answer restart the run its owner ended. Exported so the rule can be asserted without
+ * driving a shutdown.
+ */
+export function keepsQuestionForNextProcess(active: ActiveTask | undefined): boolean {
+  return active?.tearingDown === true && active.stopRequested !== true;
+}
+
 /** Access the current worker task context from anywhere in the async call chain. */
 export const workerTaskStorage = new AsyncLocalStorage<WorkerTaskContext>();
 
@@ -416,18 +431,11 @@ export class WorkerLoop {
    * for it. Pausing is not needed for the recorded word either: the catch prefers the
    * stop over a timeout.
    *
-   * ⚠ REACH, and it is wider than this task. `Session.abort()` also calls
-   * `abortSpawnedAgents()` and `abortPipelineAgents()`, which iterate MODULE-LEVEL sets
-   * (`spawn.ts`, `runtime-adapter.ts`) — so this stop ends every spawned sub-agent and
-   * every workflow-step agent IN THE PROCESS, including other background runs' and the
-   * interactive session's, and their parents record an abort they did not ask for.
-   * Background runs are concurrent by design (`void this.executeTask(task)` per due
-   * task), so that is not a corner. `http-api.ts` states the same hazard where it
-   * aborts a chat session and ends it "every caller added here inherits it"; this is
-   * such a caller, and naming it is the rule for a new one. Scoping the abort to one
-   * session's children is a change to `session.ts`/`runtime-adapter.ts` and ships as
-   * its own unit — a repeatable, task-keyed entry into a process-wide abort does not
-   * belong on main while it reaches that far.
+   * ⚠ REACH: this run and the agents its chain created, nothing else. `Session.abort()`
+   * aborts its own agent and the members of that agent's abort scope — children,
+   * workflow steps, grandchildren — and no other session's. An earlier version of this
+   * comment argued against shipping because the abort was process-wide; `session.ts`
+   * scoped it since, which is what this route relies on.
    */
   stopTask(taskId: string): StopOutcome {
     const active = this.activeTasks.get(taskId);
@@ -1035,7 +1043,7 @@ export class WorkerLoop {
             // stop handle. Set HERE, at the hand-over, so the flag and the signal
             // cannot drift apart — and so no list of effect names has to be kept true.
             entry.readsSignal = true;
-            await this.executeBulkPreview(task, controller.signal);
+            await this.executeBulkPreview(task, controller.signal, () => entry.stopRequested === true);
             break;
           default:
             // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
@@ -1097,7 +1105,17 @@ export class WorkerLoop {
       // model "STOPPED BY ITS OWNER: <provider error>", and lost the retry it was owed.
       // A stop that did not arrive has no effect, which is exactly what the route's 202
       // promises: a request, never a confirmation.
-      const wasStopped = entry.stopRequested === true && err instanceof RunAbortedError;
+      //
+      // ⛔ The EXACT class, not `instanceof`. `ToolLoopBreakError` and
+      // `ContinuationLoopError` extend `RunAbortedError`, and both are the agent ending
+      // its own run — so a stop that missed, followed by a loop break, was recorded as
+      // the owner's stop and lost its retry, the defect two lines up through a subclass.
+      // `Agent.send` throws the base class itself, and only it, when its controller was
+      // aborted. A subclass added later reads as a failure until someone decides
+      // otherwise, which is the direction that keeps the retry.
+      const wasStopped = entry.stopRequested === true
+        && err instanceof RunAbortedError
+        && Object.getPrototypeOf(err) === RunAbortedError.prototype;
       const status = wasStopped
         ? 'stopped' as const
         : (isTimeout ? 'timeout' as const : 'failed' as const);
@@ -1157,7 +1175,7 @@ export class WorkerLoop {
       // map entry is gone" — which is precisely what a lookup through the map cannot
       // reach. Harmless until now only because `stop()` pauses each deadline before
       // clearing.
-      this.activeTasks.get(task.id)?.pauseDeadline();
+      entry.pauseDeadline();
       this.activeTasks.delete(task.id);
       // After the result is recorded, so `next_run_at` has moved before the row is free.
       clearInterval(heartbeat);
@@ -1209,7 +1227,7 @@ export class WorkerLoop {
    * (the host budget, a rate limit, a 429, a stopped tick) is re-armed for when it may
    * go on; every other outcome ends the trigger — a halt waits for the owner's resume.
    */
-  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal): Promise<void> {
+  private async executeBulkPreview(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
     const ledger = this.engine.getBulkLedger();
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
@@ -1252,7 +1270,14 @@ export class WorkerLoop {
       // Halted rather than re-armed: a halt is the state the owner resumes from, and the
       // resume route re-upserts this trigger. No notification — the owner is the one who
       // asked, and this path (unlike the catch) is their own action completing.
-      if (signal.aborted) {
+      //
+      // ⛔ The OWNER'S flag, not `signal.aborted`. Three things abort this controller —
+      // this stop, `stop()` at shutdown, and the execution deadline — and only the first
+      // is an instruction to end the read. For the other two the `pending` answer is the
+      // designed pause: the read chunks across ticks and survives a deploy. Keyed on the
+      // signal, every deploy during a preview halted it as "stopped by its owner" and left
+      // it for a person to resume.
+      if (signal.aborted && ownerStopped()) {
         ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.stoppedByOwner);
         this.engine.getTaskManager()?.recordTaskRun(task.id, 'Bulk preview stopped on your instruction.', 'stopped');
         return;
@@ -1543,7 +1568,7 @@ export class WorkerLoop {
         // only matters to a NEXT `ask_user` in this process, and "answerable with nobody
         // awaiting it" is not the issue-#77 shape here but the durable wait working as
         // designed — the next process re-arms the run when the answer lands.
-        if (active?.tearingDown === true) {
+        if (keepsQuestionForNextProcess(active)) {
           questionWentUnanswered = true;
           return DISMISSED_ANSWER;
         }
@@ -1620,7 +1645,7 @@ export class WorkerLoop {
         // once, deliberately — it is what a crash does anyway — but it is a change from
         // the old behaviour, where the release took and a graceful shutdown could not
         // duplicate.
-        if (active?.tearingDown !== true) {
+        if (!keepsQuestionForNextProcess(active)) {
           try {
             promptStore.releaseTrigger(promptId);
           } catch (err: unknown) {
@@ -1640,7 +1665,7 @@ export class WorkerLoop {
         // is already closing, and a throw here would turn a clean teardown into a
         // failed tool call. A wait left standing by a failure here is exactly what
         // the sweep exists to collect, so the cost is bounded by `waiting_until`.
-        if (active?.tearingDown !== true) {
+        if (!keepsQuestionForNextProcess(active)) {
           try {
             this.engine.getRunHistory()?.endTriggerWait(task.id, 'open');
           } catch (err: unknown) {
@@ -1767,6 +1792,8 @@ export class WorkerLoop {
       ? reported.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : reported;
 
+    // Who ended the run, when an unanswered question is how it ended (see below).
+    const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       // §0 A7. `failed` rather than `timeout`: the run itself did not run out of
@@ -1776,16 +1803,15 @@ export class WorkerLoop {
       // verdicts.
       //
       // The ceiling exit joins it on `failed` and for the same reason: the job did not
-      // finish. No new status value — `recordTaskRun`'s union is being extended by other
-      // work in flight, and a value added from here would collide with it.
+      // finish, and it is not the owner's word either.
       //
       // ⛔ …EXCEPT when the owner is why the answer never came. A stop aborts the
       // controller, `waitForSettled` ends, and the question is dismissed — so this path,
       // not the catch, is where a stopped PARKED run arrives, and no error is thrown for
       // the catch to classify. Recorded `failed` it entered the backoff re-fire and
       // restarted the run its owner had just stopped. The flag is sufficient here
-      // because the controller abort is what produced the dismissal.
-      const endedByOwner = questionWentUnanswered && active?.stopRequested === true;
+      // because the controller abort is what produced the dismissal. Declared above the
+      // block because the notification below reads it too.
       taskManager.recordTaskRun(
         task.id,
         truncatedResult,
@@ -1802,10 +1828,14 @@ export class WorkerLoop {
         // unanswered-question path above records `failed` and still notifies as a ✓ at
         // `normal`. That asymmetry is older than this change and no test pins it either
         // way.
-        title: `${budgetCut === null ? '\u2713' : '\u2717'} ${task.title}`,
-        body: truncatedResult,
+        //
+        // ⛔ A run its owner ended says so, as the catch path does: neither ✓ (it did not
+        // finish) nor ✗ at high priority (nothing went wrong). The budget word stays in
+        // the body; the title answers who ended it.
+        title: `${endedByOwner ? '\u23f9' : (budgetCut === null ? '\u2713' : '\u2717')} ${task.title}`,
+        body: endedByOwner ? `Stopped on your instruction: ${truncatedResult}` : truncatedResult,
         taskId: task.id,
-        priority: budgetCut === null ? 'normal' : 'high',
+        priority: endedByOwner || budgetCut === null ? 'normal' : 'high',
         // Deep-link the notification to THIS run's chat thread so a tap opens the
         // result instead of a blank new chat (the service worker routes
         // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.

@@ -6235,7 +6235,7 @@ describe('LynoxHTTPApi', () => {
     // this describe, so its `beforeAll`/`afterAll` already bracket these requests, and a
     // second declaration would not parse.
 
-    it('POST /api/tasks/:id/stop answers 202 — a stop is DELIVERED, not completed', async () => {
+    it('POST /api/tasks/:id/stop answers 202 — a stop is REQUESTED, not completed', async () => {
       const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'session' });
       await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
@@ -6249,6 +6249,10 @@ describe('LynoxHTTPApi', () => {
         expect(body.via).toBe('session');
         expect(body).not.toHaveProperty('stopped');
         expect(body.note).toContain('tool handler');
+        // …and the note does not claim more than the 202 knows: between model calls the
+        // session handle reaches nothing, so "delivered" would be false there.
+        expect(body.note).not.toMatch(/delivered/i);
+        expect(body.note).toContain('may still finish on its own');
       });
     });
 
