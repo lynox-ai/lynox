@@ -9621,6 +9621,27 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      it('PUT /api/config holds background_model to the managed provider allowlist in managed-pool mode', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        const { saveUserConfig, loadConfig } = await import('../core/config.js');
+        (loadConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', cp_supplied: true });
+        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ background_model: { provider: 'openai', model_id: 'some-model', api_base_url: 'https://llm.example.test/v1' } }),
+          });
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: string }).error).toContain('not_on_managed_allowlist');
+          expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+        } finally {
+          (loadConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep' });
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       // On managed, api_base_url must be validated for EVERY curated provider,
       // not just openai — an earlier revision left it unchecked when a provider
       // field accompanied it, so a curated provider could carry a non-curated
