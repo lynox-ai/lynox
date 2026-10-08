@@ -910,8 +910,8 @@ export class AgentMemoryDb {
    *
    * It replaces a soft delete (`UPDATE memories SET is_active = 0 WHERE is_active = 1`)
    * that left every memory row in place — its text in plaintext, which this store
-   * keeps by design so the pattern match can run — readable through SQL, the export
-   * and every backup until a later `gc()` reaped inactive rows; a row that was
+   * keeps by design so the pattern match can run — readable through SQL, the migration
+   * export and every backup until a later `gc()` reaped inactive rows; a row that was
    * already inactive stayed exactly as it was. The route reached the other tables
    * only through an entity listing, so `metrics` and the `supersedes` lineage stayed
    * as well.
