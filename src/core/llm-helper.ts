@@ -267,6 +267,23 @@ export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path
   }
 }
 
+/**
+ * A string the schema refused, with its path and rule apart from the value. The message
+ * still shows the value (bounded, escaped) for logs; a caller that hands the error to a
+ * model reads `path` and `rule` instead, because the value is model output steered by
+ * whatever text the model read. Both come from the schema, never from the value.
+ */
+export class SchemaValueError extends Error {
+  readonly path: string;
+  readonly rule: string;
+  constructor(message: string, path: string, rule: string) {
+    super(message);
+    this.name = 'SchemaValueError';
+    this.path = path;
+    this.rule = rule;
+  }
+}
+
 /** A refused value as an error message may show it: quoted, escaped, at most 40 characters — the value is model output steered by whatever text the model read. */
 const shownValue = (value: string): string => `${JSON.stringify(value.slice(0, 40))}${value.length > 40 ? '…' : ''}`;
 
@@ -275,10 +292,12 @@ function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: str
     case 'string':
       if (typeof value !== 'string') throw new Error(`Expected string at "${path}", got ${typeof value}`);
       if (prop.enum && !prop.enum.includes(value)) {
-        throw new Error(`Value ${shownValue(value)} at "${path}" not in enum [${prop.enum.join(', ')}]`);
+        const rule = `not in enum [${prop.enum.join(', ')}]`;
+        throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
       }
       if (prop.pattern && !new RegExp(prop.pattern).test(value)) {
-        throw new Error(`Value ${shownValue(value)} at "${path}" does not match pattern /${prop.pattern}/`);
+        const rule = `does not match pattern /${prop.pattern}/`;
+        throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
       }
       break;
     case 'number':
