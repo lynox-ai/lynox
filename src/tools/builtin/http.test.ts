@@ -4172,16 +4172,37 @@ describe('httpRequestTool', () => {
     // A grant that succeeds followed by a 401 reads as an expired token, and the
     // reminder sent the model to mint again, which cannot help when the header is
     // the problem. Fixed text, so only whether the profile names a header decides it.
+    // Byte for byte, both states: this block is appended outside the untrusted-data
+    // wrap, and the only check on the managed branch used to be a substring, so a
+    // sentence added inside it (one interpolating a profile field among them) went
+    // unseen. The delegated-access branch has its own literal further up.
+    const MANAGED_401 = '**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\n'
+      + 'This URL maps to api_profile "store-api" (auth.type=oauth2 with token_url configured). '
+      + "The vault's access_token is almost certainly expired. Recover with:\n"
+      + '  api_setup({ action: "fetch_token", id: "store-api" })\n'
+      + 'That uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. '
+      + 'Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) '
+      + "don't expose long-lived tokens there anymore.";
+    const HEADER_HINT = '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: '
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
+      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Check the API's docs and set `auth.header_name` on this profile.";
+
     it.each([
       ['without header_name points at the header', {}, true],
-      ['with header_name stays as it was', { header_name: HEADER }, false],
-    ])('the 401 reminder %s', async (_label, extra, hints) => {
+      ['with header_name Authorization still points at the header', { header_name: 'Authorization' }, true],
+      ['with its own header_name stays as it was', { header_name: HEADER }, false],
+    ])('the 401 reminder %s, byte for byte', async (_label, extra, hints) => {
       const { store, tokenKey } = await storeWith(extra);
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
       const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
-      expect(result).toContain('OAuth2 401 on a managed-OAuth api_profile');
-      expect(result.includes('set `auth.header_name` on this profile')).toBe(hints);
+      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(MANAGED_401);
+      if (hints) {
+        expect(result).toContain(MANAGED_401 + HEADER_HINT);
+      } else {
+        expect(result).not.toContain(MANAGED_401 + '\n');
+        expect(result).not.toContain('auth.header_name');
+      }
     });
 
     it('SECURITY: an access token carrying CRLF is refused under its own header, not sent', async () => {

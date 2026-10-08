@@ -2428,7 +2428,8 @@ ${draftJson}
       if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       // The header http.ts attaches it under: the profile's own `header_name`, raw,
-      // or Authorization with `Bearer`. The name is the profile's, so it is shaped.
+      // or Authorization with `Bearer`. The name is the profile's, so it is checked
+      // against HTTP_HEADER_NAME, and a name that fails gets the text below instead.
       const named = profile.auth?.header_name;
       const slot = named !== undefined && named.toLowerCase() !== 'authorization'
         ? (HTTP_HEADER_NAME.test(named) ? named : null)
@@ -2436,7 +2437,7 @@ ${draftJson}
       // A file-loaded profile is not validated; http.ts refuses to attach under a
       // name that is not a header name, so the text says that instead of naming it.
       if (slot === null) {
-        return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown'}), but api_profile "${input.id}" has an auth.header_name that is not a valid header name, so http_request will not attach the token until it is fixed with api_setup action="update". ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
+        return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown'}), but api_profile "${input.id}" has an auth.header_name that is not a valid header name, so http_request will not attach the token until it is fixed with api_setup action="update". Do NOT set the token in a header yourself and do NOT reference \`secret:${outputName}\` manually; fix the profile instead. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
       }
       const attachedAs = slot === 'Authorization' ? '`Authorization: Bearer …`' : `the raw token in the \`${slot}\` header`;
       return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as ${attachedAs} for any http_request that maps to api_profile "${input.id}" — do NOT pass the ${slot} header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
