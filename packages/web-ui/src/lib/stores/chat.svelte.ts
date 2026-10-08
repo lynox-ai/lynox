@@ -857,6 +857,14 @@ function hasAnyPendingPrompt(): boolean {
 		|| pendingSecretPrompt !== null || pendingMailConnect !== null;
 }
 
+/** An engine `error` with `fatal: false`: an incident the engine recovered from
+ *  (an unparsable tool input it replaced and continued past), not the end of the
+ *  turn. Only an explicit `false` counts; an error without the flag, as an older
+ *  engine sends it, ends the run as it always did. */
+function isRecoveredError(data: Record<string, unknown>): boolean {
+	return data['fatal'] === false;
+}
+
 /** Clear the spinner on any tool call the stream left `running`.
  *  Used where the RUN is over (`done`, `error`) and on a `turn_end` whose stop
  *  reason really ended the turn — never on `tool_use`, where the tools have not
@@ -1477,7 +1485,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
 						if (eventType === 'done') sawTerminal = true;
-						else if (eventType === 'error') sawErrorEvent = true;
+						else if (eventType === 'error' && !isRecoveredError(data)) sawErrorEvent = true;
 						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx, { deferErrorDisposition: true });
 						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed SSE events */ }
@@ -2257,17 +2265,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'error': {
-			// `fatal: false` is the engine saying the turn goes on (an unparsable tool
-			// input it replaced and continued past). Then nothing below that ends the
-			// run applies: the stream stays live, running tool calls keep running,
-			// and `done` or the server probe settles it like any other turn. Only an
-			// explicit `false` counts; an error without the flag ends the run as before.
-			const runGoesOn = data['fatal'] === false;
-			if (!runGoesOn) {
-				retryStatus = null;
-				// Same reasoning as `done`: the run is over, so nothing is still running.
-				settleRunningToolCalls(msg);
-			}
+			// The engine recovered and the turn goes on (see `isRecoveredError`), so
+			// none of what follows applies: no failure banner or toast over a turn
+			// that may still answer, the stream stays live, running tool calls keep
+			// running, and `done` or the server probe settles it like any other turn.
+			if (isRecoveredError(data)) break;
+			retryStatus = null;
+			// Same reasoning as `done`: the run is over, so nothing is still running.
+			settleRunningToolCalls(msg);
 			// Agent sends { message: '...' }, http-api catch sends { error: '...' }
 			// Upstream LLM provider errors (e.g. Mistral 401 unauthorized) arrive here
 			// once the SSE stream is open — without explicit UI surfacing the user
@@ -2280,13 +2285,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// The outer finally block also clears these once the SSE stream closes,
 			// but the engine sometimes keeps the stream open briefly after `error`
 			// (heartbeat trailing), and we want the UI to react immediately.
-			if (!runGoesOn) {
-				isStreaming = false;
-				streamingActivity = 'idle';
-				streamingToolName = null;
-				streamingToolPhase = null;
-				currentToolStartedAt = null;
-			}
+			isStreaming = false;
+			streamingActivity = 'idle';
+			streamingToolName = null;
+			streamingToolPhase = null;
+			currentToolStartedAt = null;
 			// Toast notification — surfaces the failure even when the user has
 			// scrolled the chat error banner off-screen (mobile + long threads).
 			// Truncate the raw upstream string so a paragraph-long stack from a

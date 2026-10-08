@@ -119,8 +119,8 @@ describe('fresh run: an engine error hands the turn to the server probe', () => 
 });
 
 describe('the streaming state across an engine error', () => {
-	/** Starts a fresh run with one tool call in flight, then sends `error` with `errorData`. */
-	async function runWithToolThenError(errorData: Record<string, unknown>): Promise<{ stream: ReturnType<typeof sseStream>; sent: Promise<void> }> {
+	/** Starts a fresh run with one tool call in flight (unless `withTool` is false), then sends `error` with `errorData`. */
+	async function runWithToolThenError(errorData: Record<string, unknown>, withTool = true): Promise<{ stream: ReturnType<typeof sseStream>; sent: Promise<void> }> {
 		const stream = sseStream();
 		vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 			const url = String(input);
@@ -133,8 +133,10 @@ describe('the streaming state across an engine error', () => {
 		}));
 		const sent = store.sendMessage('look it up');
 		await settle();
-		stream.send('tool_call', { name: 'web_search', input: { query: 'x' } }, 1);
-		await settle();
+		if (withTool) {
+			stream.send('tool_call', { name: 'web_search', input: { query: 'x' } }, 1);
+			await settle();
+		}
 		stream.send('error', errorData, 2);
 		await settle();
 		return { stream, sent };
@@ -149,6 +151,8 @@ describe('the streaming state across an engine error', () => {
 		expect(store.getIsStreaming()).toBe(true);
 		expect(store.getStreamingActivity()).toBe('tool');
 		expect(toolStatus()).toBe('running');
+		// No failure banner over a turn that is still going to answer.
+		expect(store.getChatError()).toBeNull();
 
 		stream.send('done', {});
 		stream.close();
@@ -164,8 +168,23 @@ describe('the streaming state across an engine error', () => {
 		// so "still streaming" there is the flag's doing and not the harness's.
 		expect(toolStatus()).toBe('done');
 		expect(store.getIsStreaming()).toBe(false);
+		expect(store.getChatError()).not.toBeNull();
 
 		stream.close();
 		await sent;
+	});
+
+	it('reports a dropped connection, not the recovered incident, when the stream ends without `done`', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		// No tool call: the assistant bubble is empty, which is the case where a drop is
+		// reported at all (a partial answer stays standing without a banner).
+		const { stream, sent } = await runWithToolThenError({ message: 'tool input unparsable', fatal: false }, false);
+
+		// The transcript is empty and no run is live: the turn was lost in transit. A recovered incident earlier in the stream is not the reason.
+		stream.close();
+		await sent;
+		await settle();
+
+		expect(store.getChatError()).toBe(t('chat.error_connection'));
 	});
 });
