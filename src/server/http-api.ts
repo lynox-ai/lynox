@@ -10328,7 +10328,10 @@ export class LynoxHTTPApi {
         }
         if (secretStore) {
           let names: string[] = [];
-          attempt('secrets#list', () => { names = secretStore.listNames(); });
+          // The names come from the vault FILE as well as the store's map. The map is
+          // filled once, at boot; a mail account or Google connected after that writes
+          // its credentials to the vault directly, so they never appear in it.
+          attempt('secrets#list', () => { names = [...new Set([...secretStore.listNames(), ...secretStore.listVaultNames()])]; });
           attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
         }
 
@@ -10362,6 +10365,17 @@ export class LynoxHTTPApi {
         if (engineDb) scrub('engine_db', () => { engineDb.scrubFreedPages(); });
         if (ds) scrub('datastore', () => { ds.scrubFreedPages(); });
         if (secretStore) scrub('secrets', () => { secretStore.scrubFreedPages(); });
+        // The vault file is counted after its deletes AND after its scrub: whatever
+        // wrote a row between the list and here, or whatever the list missed, leaves
+        // the answer short of "all". After the scrub on purpose: `scrub` skips any
+        // store with a `<key>#…` failure, and a leftover row must not cost the rows
+        // that WERE deleted their scrub.
+        if (secretStore) {
+          attempt('secrets#residue', () => {
+            const left = secretStore.vaultRowCount;
+            if (left > 0) throw new Error(`${String(left)} row(s) still in vault.db after the deletes`);
+          });
+        }
 
         // Reset config to defaults. The reset and the engine's reload are separate
         // attempts on purpose: a failed reload leaves no customer data behind, so
