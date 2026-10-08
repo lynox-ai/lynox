@@ -11321,6 +11321,24 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/data truncates the WAL of every store it erased', async () => {
+      // An IDENTIFIER witness for the wiring; that the WAL then holds no erased value
+      // is asserted on the real files in `erasure-covers-export.test.ts` (and for
+      // engine.db, whose fixture values are encrypted, in `engine-db.test.ts`).
+      const wal = { engine: vi.fn(), history: vi.fn(), memory: vi.fn(), data: vi.fn(), secrets: vi.fn() };
+      await swapEngine({
+        getEngineDb: () => ({ truncateWal: wal.engine, deleteAllData: () => undefined }),
+        getRunHistory: () => ({ truncateWal: wal.history, deleteAllData: () => undefined }),
+        getKnowledgeLayer: () => ({ getDb: () => ({ truncateWal: wal.memory, deleteAllData: () => undefined }) }),
+        getDataStore: () => ({ truncateWal: wal.data, listCollections: () => [], dropCollection: () => undefined }),
+        getSecretStore: () => ({ truncateWal: wal.secrets, listNames: () => [], deleteSecret: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        for (const [store, fn] of Object.entries(wal)) expect(fn, store).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('DELETE /api/data empties the run history', async () => {
       // An IDENTIFIER witness for the call; what the call must achieve on a real
       // file — every table of history.db empty, the run spine included — is asserted

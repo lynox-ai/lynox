@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -46,6 +46,24 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
     tmpDirs.length = 0;
+  });
+
+  it('leaves no deleted value in the bytes of engine.db or its WAL after deleteAllData + truncateWal', () => {
+    // The route-level byte scan cannot see engine.db: the values its fixture writes
+    // there are encrypted at rest. A plaintext table written through the store's own
+    // connection can, and that connection is where `secure_delete` is set.
+    const e = createEngineDb();
+    const raw = e.getDb();
+    raw.exec('CREATE TABLE zz_probe (x TEXT)');
+    raw.prepare('INSERT INTO zz_probe (x) VALUES (?)').run('ZZDELETED-engine-7f3a');
+    e.truncateWal();
+    const path = raw.name;
+    expect(readFileSync(path).includes(Buffer.from('ZZDELETED')), 'fixture: the value is in the main file').toBe(true);
+    e.deleteAllData();
+    e.truncateWal();
+    expect(readFileSync(path).includes(Buffer.from('ZZDELETED'))).toBe(false);
+    expect(readFileSync(`${path}-wal`).includes(Buffer.from('ZZDELETED'))).toBe(false);
+    e.close();
   });
 
   it('creates the database and stamps the latest schema_version', () => {
