@@ -54,6 +54,13 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
   const MARK = {
     thread_title: 'ZZMARKER-thread-title-7f3a',
     thread_message: 'ZZMARKER-thread-message-7f3a',
+    // An ARCHIVED thread and a titled one with NO messages. Both were unseeded
+    // until a refuter pointed out what that costs: the overview listing filters
+    // `message_count > 0` and defaults `is_archived = 0`, so with neither seeded a
+    // route that reads through that listing passes this file — which is how the
+    // export came to omit a row class the erasure destroys.
+    archived_thread: 'ZZMARKER-archived-thread-7f3a',
+    empty_titled_thread: 'ZZMARKER-empty-titled-thread-7f3a',
     memory: 'ZZMARKER-flatfile-memory-7f3a',
     knowledge_graph: 'ZZMARKER-kg-entity-7f3a',
     durable_knowledge: 'ZZMARKER-durable-fact-7f3a',
@@ -64,7 +71,44 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // Secret NAMES are exported, values never are — so the marker has to live in
     // the name or this surface cannot be checked at all.
     secret_name: 'ZZMARKER_SECRET_NAME_7F3A',
+    // The DK REVIEW QUEUE. The export emits it as `durable_knowledge.pending_entries`
+    // and it was unseeded, so a regression sparing `status='pending_review'` rows —
+    // or a queue that moves to its own file — left an un-erased personal-data row
+    // sitting in export #2's own payload with every assertion green. A refuter
+    // demonstrated exactly that.
+    durable_pending: 'ZZMARKER-durable-pending-7f3a',
+    // `config` is exported (redacted) and reset by the erasure. With nothing seeded
+    // it was `{}` in both exports, so the reset was witnessed by nothing and
+    // deleting it survived every test.
+    config: 'ZZMARKER-config-7f3a',
   } as const;
+
+  /** Which top-level export key each marker must appear in — the control is
+   *  PER KEY, not a substring search over the whole dump.
+   *
+   *  ⚠ The whole-dump search was the flaw a refuter demonstrated: `MARK.contact`
+   *  also appears in `deals` (as `contact_name`) and in `datastore` (the CRM is a
+   *  view over two DataStore collections, which `listCollections` returns). Seeding
+   *  only the deal and never calling `upsertContact` therefore satisfied the
+   *  control while the `contacts` surface was never reached — so its absence from
+   *  export #2 proved nothing about it. A control that cannot say WHICH key
+   *  produced the hit is not a per-surface control. */
+  const MARKER_HOME: Record<keyof typeof MARK, string> = {
+    thread_title: 'threads',
+    thread_message: 'threads',
+    archived_thread: 'threads',
+    empty_titled_thread: 'threads',
+    memory: 'memory',
+    knowledge_graph: 'knowledge_graph',
+    durable_knowledge: 'durable_knowledge',
+    durable_pending: 'durable_knowledge',
+    memory_block: 'durable_knowledge',
+    contact: 'contacts',
+    deal: 'deals',
+    datastore: 'datastore',
+    secret_name: 'secrets',
+    config: 'config',
+  };
 
   function engineOf(): {
     getThreadStore: () => ThreadStore | null;
@@ -100,7 +144,11 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'lynox-erasure-'));
-    for (const k of ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_DURABLE_MEMORY_ENABLED', 'LYNOX_BILLING_TIER']) {
+    for (const k of [
+      'LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY',
+      'LYNOX_DURABLE_MEMORY_ENABLED', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE',
+      'LYNOX_SUBJECT_GRAPH_ENABLED',
+    ]) {
       saved[k] = process.env[k];
     }
     process.env['LYNOX_DATA_DIR'] = dir;
@@ -111,10 +159,20 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // without this `getKnowledgeStore()` is null and `durable_knowledge` would be
     // empty for a reason that has nothing to do with erasure.
     process.env['LYNOX_DURABLE_MEMORY_ENABLED'] = 'true';
-    // `denyOnManagedInstance` 403s the erasure on any instance with a billing
-    // tier set, and a stray env var from the shell would turn this file green
-    // without the route ever running.
+    // `denyOnManagedInstance` 403s the erasure on any instance with a billing tier
+    // set, so a stray env var makes this file fail for a reason that has nothing to
+    // do with the property — and `readEnvAlias` falls back to `LYNOX_MANAGED_MODE`,
+    // so deleting only the canonical name left half a guard.
     delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_MANAGED_MODE'];
+    // This one selects which DATABASE the export's entity list comes from:
+    // flag-on, `KnowledgeLayer.listEntities` reads engine.db via the subject store,
+    // while the erasure always deletes from agent-memory.db. The fixture's legacy
+    // entity would then be missing from export #1 and the positive control would
+    // fail on a correct erasure. `process.env` is per-fork and shared across test
+    // files, and at least one other file leaves this set, so the configuration
+    // under test has to be pinned rather than inherited.
+    delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
     reloadConfig();
     api = new LynoxHTTPApi();
     await api.init();
@@ -123,13 +181,22 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
   }, 120_000);
 
   afterAll(async () => {
-    await api.shutdown();
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+    // `finally`, and the shutdown is optional-chained: if `beforeAll` throws before
+    // the server exists — a full disk on `mkdtempSync` is the realistic one — then
+    // `api` is undefined, `await api.shutdown()` throws out of the hook, and
+    // `LYNOX_DATA_DIR` plus `LYNOX_DURABLE_MEMORY_ENABLED=true` leak into every
+    // later file in this fork. A cleanup hook that can fail before it cleans up is
+    // the one place where the recovery depends on the thing that broke.
+    try {
+      await api?.shutdown();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+      reloadConfig();
     }
-    rmSync(dir, { recursive: true, force: true });
-    reloadConfig();
   });
 
   /** Writes one marker into every surface the export reads, through the real
@@ -141,6 +208,13 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     if (ts === null) throw new Error('fixture: no thread store');
     ts.createThread('t-marked', { title: MARK.thread_title });
     ts.appendMessages('t-marked', [{ role: 'user', content: MARK.thread_message }], 0, { message_count: 1 });
+    ts.createThread('t-archived', { title: MARK.archived_thread });
+    ts.appendMessages('t-archived', [{ role: 'user', content: 'archived body' }], 0, { message_count: 1 });
+    ts.updateThread('t-archived', { is_archived: true });
+    // No `appendMessages` — the rollup counter stays 0, which is the state
+    // `escalation.ts` leaves behind between its two transactions, and the state a
+    // user leaves by opening a thread and typing nothing.
+    ts.createThread('t-empty-titled', { title: MARK.empty_titled_thread });
 
     const mem = e.getMemory();
     if (mem === null) throw new Error('fixture: no memory');
@@ -153,6 +227,10 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const ks = e.getKnowledgeStore();
     if (ks === null) throw new Error('fixture: no knowledge store — is LYNOX_DURABLE_MEMORY_ENABLED set?');
     ks.write({ text: MARK.durable_knowledge, sourceChannel: 'user', sourceUntrusted: false });
+    // `sourceUntrusted` routes the write to `pending_review` — the queue half of
+    // the substrate, which the export reads and nothing here used to seed. A queued
+    // fact is stored personal data whether or not it was ever approved.
+    ks.write({ text: MARK.durable_pending, sourceChannel: 'agent', sourceUntrusted: true });
     ks.setBlockContent('profile', MARK.memory_block);
 
     const crm = e.getCRM();
@@ -172,6 +250,13 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const ss = e.getSecretStore();
     if (ss === null) throw new Error('fixture: no secret store');
     ss.set(MARK.secret_name, 'the-value-which-is-never-exported');
+
+    // The config file, through the same writer the erasure's reset uses. `language`
+    // is a plain, non-secret field, so `redactConfigForResponse` leaves it in the
+    // dump — a redacted field would have made this marker unobservable and the
+    // surface uncheckable, which is what `config` already was.
+    const { saveUserConfig } = await import('../core/config.js');
+    saveUserConfig({ language: MARK.config } as unknown as Parameters<typeof saveUserConfig>[0]);
   }
 
   it('leaves not one seeded datum behind, and only then says so', async () => {
@@ -180,13 +265,21 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const beforeRes = await get('/api/export');
     expect(beforeRes.status).toBe(200);
     const before = await beforeRes.text();
+    const beforeJson = JSON.parse(before) as Record<string, unknown>;
 
     // POSITIVE CONTROL, and the assertion this test would be worthless without:
     // a marker missing HERE means the fixture never reached that surface, in which
-    // case its absence from the second export proves nothing at all. Named
-    // individually so a failure says WHICH surface went unseeded.
-    const unseeded = Object.entries(MARK).filter(([, v]) => !before.includes(v)).map(([k]) => k);
-    expect(unseeded, 'the export must show every seeded surface before anything is erased').toEqual([]);
+    // case its absence from the second export proves nothing at all.
+    //
+    // Checked inside its OWN key (`MARKER_HOME`) rather than anywhere in the dump.
+    // The whole-dump version passed while a surface went unseeded: `MARK.contact`
+    // also occurs in `deals` as `contact_name` and in `datastore`, because the CRM
+    // is a view over two DataStore collections — so seeding only the deal satisfied
+    // the control with `contacts` never written.
+    const unseeded = Object.entries(MARK)
+      .filter(([k, v]) => !JSON.stringify(beforeJson[MARKER_HOME[k as keyof typeof MARK]]).includes(v))
+      .map(([k]) => `${k}→${MARKER_HOME[k as keyof typeof MARK]}`);
+    expect(unseeded, 'the export must show every seeded surface, in its own key, before anything is erased').toEqual([]);
 
     const { status, body } = await erase();
     expect(status).toBe(200);
@@ -208,33 +301,95 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const afterJson = JSON.parse(after) as Record<string, unknown>;
     expect(Object.keys(afterJson).sort()).toEqual([
       'config', 'contacts', 'datastore', 'deals', 'durable_knowledge', 'exported_at',
-      'knowledge_graph', 'memory', 'secrets', 'threads', 'version',
+      'knowledge_graph', 'memory', 'secrets', 'threads', 'threads_may_be_incomplete', 'version',
     ]);
 
     const survivors = Object.entries(MARK).filter(([, v]) => after.includes(v)).map(([k]) => k);
     expect(survivors, 'these surfaces still hold data the export returns').toEqual([]);
 
-    // And at the SOURCE, not only in the answer. A surface that stopped being READ
-    // — an accessor gone null, a key dropped from the dump — would satisfy the line
-    // above while the rows sit untouched on disk. This is the half that tells the
-    // two apart.
+    // And at the SOURCE as well as in the answer.
+    //
+    // ⚠ What this half does and does not do, corrected after a refuter demonstrated
+    // the overclaim twice. It catches a dropped export key and an accessor gone
+    // null. It is NOT an independent witness: every line below calls the same store
+    // method the export route calls (`listActive`, `getBlock`, `listNames`,
+    // `listCollections`, `load`), so a LISTING that stopped returning rows which are
+    // still on disk satisfies both halves at once — demonstrated with a DataStore
+    // table whose `ds_collections` meta row was gone while its rows remained. The
+    // independent check is the re-seed at the end of this test, not these lines.
     const e = engineOf();
-    expect(e.getThreadStore()!.listThreads({ limit: 200, includeArchived: true })).toEqual([]);
+    // Through the EXHAUSTIVE reader, not the overview listing: the listing caps at
+    // 200 and filters `message_count > 0`, so it reports "no threads" for a table
+    // that still holds the archived and the empty-titled one. A source check read
+    // through a capped listing is the same instrument the defect came from.
+    expect(e.getThreadStore()!.listThreadsForExport({ limit: 500 })).toEqual([]);
     // `save(ns, '')` leaves the namespace EMPTY, which `load` reports as either ''
     // or null depending on whether the file survives — the property is that the
     // text is gone, not which of the two empties it became.
     expect(await e.getMemory()!.load('knowledge') ?? '').toBe('');
     expect(e.getKnowledgeStore()!.listActive(500)).toEqual([]);
+    // The review queue, which the export emits as `durable_knowledge.pending_entries`
+    // and which nothing checked: a wipe that spared `status='pending_review'` left a
+    // personal-data row in export #2's own payload with every other line green.
+    expect(e.getKnowledgeStore()!.listPendingMasked(500)).toEqual([]);
     expect(e.getKnowledgeStore()!.getBlock('profile')?.content ?? '').not.toContain(MARK.memory_block);
     expect(e.getCRM()!.listContacts(undefined, 500)).toEqual([]);
     expect(e.getCRM()!.getAllDeals(undefined, 500)).toEqual([]);
-    // Not "no collections": the export above runs a CRM read, which legitimately
-    // re-creates the two EMPTY CRM tables (that is what the invalidated schema
-    // cache is for). The property is that nothing holds a record — a collection
-    // with a schema and no rows discloses nothing.
-    expect(e.getDataStore()!.listCollections().filter(c => c.recordCount > 0)).toEqual([]);
+    // Not "no collections": the erasure re-creates the CRM's three EMPTY tables on
+    // purpose (that is what `rebuildSchema` is for). The property is that nothing
+    // holds a record — a collection with a schema and no rows discloses nothing.
+    //
+    // Counted by READING each collection, not from `recordCount`: that field is the
+    // denormalised `ds_collections.record_count` column, so it is a correlate of
+    // "holds a record" rather than the property, and a stale counter would make
+    // this line pass over a populated table.
+    const ds2 = e.getDataStore()!;
+    const populated = ds2.listCollections()
+      .filter(c => ds2.queryRecords({ collection: c.name, limit: 1 }).rows.length > 0)
+      .map(c => c.name);
+    expect(populated, 'a collection still holds rows').toEqual([]);
+    // ⚠ The CRM's schema latch must be CLOSED again, and this is a security
+    // assertion rather than a tidiness one. `roles.ts` admits `contacts_search` to
+    // the READ-ONLY tool surface with the justification that `ensureSchema` is "a
+    // latch already closed during boot; the CRM's DDL is therefore unreachable
+    // here". A repair that only re-opened the latch would falsify that sentence for
+    // the rest of the process: the next `contacts_search` from a read-only spawned
+    // agent would run `CREATE TABLE`. `rebuildSchema` re-ensures inside the same
+    // synchronous call so no other caller can observe it open — this line is what
+    // holds that.
+    expect(e.getCRM()!.initialized, 'the CRM schema latch must be closed again').toBe(true);
     expect(e.getDataStore()!.listCollections().map(c => c.name)).not.toContain('marked_rows');
     expect(e.getSecretStore()!.listNames()).not.toContain(MARK.secret_name);
+
+    // ⚠ The discriminator, and without it this test's central assertion has a
+    // second explanation. "No marker survived" is satisfied just as well by a
+    // surface that STOPPED BEING READ as by one that was emptied — and three of the
+    // export's sections substitute an empty block on a caught error
+    // (`knowledge_graph`, `durable_knowledge`, and `datastore` per collection), so
+    // a store left unusable by the erasure yields 200, all keys present, no
+    // markers: every check above points the reassuring way. Re-seeding and
+    // re-exporting is what tells the two apart — a section that is still wired
+    // shows the new datum, a silently-quiet one does not.
+    const RESEED = 'ZZMARKER-after-erasure-7f3a';
+    const ts2 = e.getThreadStore()!;
+    ts2.createThread('t-reseed', { title: RESEED });
+    ts2.appendMessages('t-reseed', [{ role: 'user', content: 'reseeded' }], 0, { message_count: 1 });
+    await e.getMemory()!.save('knowledge', RESEED);
+    e.getKnowledgeStore()!.write({ text: `${RESEED} is a durable fact`, sourceChannel: 'user', sourceUntrusted: false });
+    e.getCRM()!.upsertContact({ name: RESEED, email: 'reseed@example.invalid' });
+    e.getSecretStore()!.set('ZZMARKER_RESEED_7F3A', 'v');
+    e.getKnowledgeLayer()!.getDb().createEntity({ canonicalName: RESEED, entityType: 'person', scopeType: 'global', scopeId: '' });
+
+    const reRes = await get('/api/export');
+    expect(reRes.status).toBe(200);
+    const reText = await reRes.text();
+    for (const section of ['threads', 'memory', 'durable_knowledge', 'contacts', 'knowledge_graph'] as const) {
+      expect(
+        (JSON.stringify((JSON.parse(reText) as Record<string, unknown>)[section])).includes(RESEED),
+        `${section} stopped being read — an empty section is not an emptied store`,
+      ).toBe(true);
+    }
+    expect(reText).toContain('ZZMARKER_RESEED_7F3A');
   }, 120_000);
 
   it('reads and erases ALL threads past the 200-row page, in both routes', async () => {
@@ -244,8 +399,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // tests share one booted engine, so a count asserted against "250 seeded" is
     // only true if nothing else is in the table. Without this the case passes or
     // fails depending on test ORDER, which is the worst kind of green.
-    await erase();
-    expect(ts.listThreads({ limit: 200, includeArchived: true }), 'fixture guard').toEqual([]);
+    const firstErase = await erase();
+    expect(firstErase.status, 'the fixture reset must itself have succeeded').toBe(200);
+    expect(ts.listThreadsForExport({ limit: 500 }), 'fixture guard').toEqual([]);
     // 250: both routes used to take a single `listThreads({ limit: 200 })`, so the
     // export returned 200 of these and the erasure deleted 200 of them — and
     // answered success. The number is deliberately just past one page; nothing is
@@ -265,6 +421,6 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const { status, body } = await erase();
     expect(status).toBe(200);
     expect(body['deleted']).toBe(true);
-    expect(ts.listThreads({ limit: 200, includeArchived: true }), 'an erasure must leave zero threads').toEqual([]);
+    expect(ts.listThreadsForExport({ limit: 500 }), 'an erasure must leave zero threads').toEqual([]);
   }, 120_000);
 });

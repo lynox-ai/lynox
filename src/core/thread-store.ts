@@ -97,41 +97,51 @@ export class ThreadStore {
 
   listThreads(opts?: {
     limit?: number | undefined;
-    /**
-     * Rows to skip, for a caller that has to read EVERY thread rather than a
-     * screenful. Without it the 200-row cap below was not a page size but a
-     * ceiling: `GET /api/export` asked for 200 and a tenant with more threads
-     * got a GDPR Art. 15 copy that was silently short, with no way for any
-     * caller to reach thread 201 — the parameter did not exist.
-     *
-     * `id` is appended to the ORDER BY so the order is TOTAL. Without it the sort
-     * key is (is_unread, is_favorite, updated_at), on which ties are routine —
-     * bulk-imported or seeded rows share a timestamp — and SQL then leaves the
-     * order of tied rows undefined, so two pages may repeat one row and never
-     * return another.
-     *
-     * ⚠ No test kills the removal of that tiebreak, and the honest reason is
-     * measured rather than assumed: with it taken out, a four-page walk over 40
-     * rows that all share one timestamp still returns 40 distinct ids. SQLite
-     * sorts the full scan stably in rowid order and re-runs the identical plan for
-     * each page, so the undefined order is in practice the same undefined order
-     * every time. What the tiebreak guards is a CHANGE of that plan — a future
-     * index on `updated_at`, a different SQLite build — which no test here can
-     * provoke. It stays because a paging query with a non-total order is wrong by
-     * construction, not because something observable goes wrong today.
-     */
-    offset?: number | undefined;
     includeArchived?: boolean | undefined;
   }): ThreadRecord[] {
     const limit = Math.min(opts?.limit ?? 50, 200);
-    const offset = Math.max(0, opts?.offset ?? 0);
     const includeArchived = opts?.includeArchived ?? false;
     // Slice B3: unread (agent-escalated) threads float to the very top, then the
     // existing favorite/recency order.
     const sql = includeArchived
-      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?'
-      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?';
-    return this.db.prepare(sql).all(limit, offset) as ThreadRecord[];
+      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?'
+      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?';
+    return this.db.prepare(sql).all(limit) as ThreadRecord[];
+  }
+
+  /**
+   * Every thread row, for an exhaustive read — the GDPR Art. 15 export.
+   *
+   * ⚠ Deliberately NOT `listThreads` with an offset, and the three differences are
+   * each a defect that version had:
+   *
+   *  · **`message_count > 0` is gone.** That filter belongs to the thread OVERVIEW:
+   *    a started, empty thread should not appear in the sidebar. But a thread row
+   *    carries `title` — written by the user or composed from their conversation —
+   *    and `primary_subject_id`, which names a person. An export driven by the
+   *    listing omitted all of it, and `message_count` is a rollup counter, so a
+   *    missed update hides a thread that HAS messages (`escalation.ts` creates the
+   *    row and appends in two separate transactions; anything between them leaves
+   *    a titled thread at 0).
+   *  · **`is_archived` is not consulted.** Archiving is a UI gesture, not consent
+   *    to be left out of a data-subject access request.
+   *  · **The key is `id`, not the sort order.** `OFFSET` over `updated_at DESC` is
+   *    not a snapshot: a thread that receives a message mid-walk moves to the front
+   *    and shifts the window, so one row is returned twice and another never. `id`
+   *    is the primary key and immutable, so a walk over `id > last` cannot repeat
+   *    or skip an existing row however the table is written during it. A row
+   *    INSERTED mid-walk may or may not appear — unavoidable without a snapshot,
+   *    and not a loss.
+   *
+   * Pass the previous page's last `id` as `after`; omit it for the first page.
+   */
+  listThreadsForExport(opts: { after?: string | undefined; limit: number }): ThreadRecord[] {
+    const limit = Math.max(1, Math.min(opts.limit, 500));
+    const after = opts.after;
+    return (after === undefined
+      ? this.db.prepare('SELECT * FROM threads ORDER BY id ASC LIMIT ?').all(limit)
+      : this.db.prepare('SELECT * FROM threads WHERE id > ? ORDER BY id ASC LIMIT ?').all(after, limit)
+    ) as ThreadRecord[];
   }
 
   /**

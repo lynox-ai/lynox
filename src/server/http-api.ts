@@ -9437,23 +9437,39 @@ export class LynoxHTTPApi {
       // Threads + messages
       const threadStore = engine.getThreadStore();
       if (threadStore) {
-        // Page through ALL threads. A single { limit: 200 } call returned a GDPR
-        // Art. 15 copy that stopped at thread 200 and said nothing about it — the
-        // `durable_knowledge` block below at least marks its own truncation with
-        // `may_be_incomplete`, so a short thread list read as a complete one. The
-        // store had no `offset` at all, so no caller could have paged even
-        // deliberately. Same shape and same page cap as the entity loop below.
-        const THREAD_PAGE = 200;
-        const THREAD_MAX_PAGES = 1000;
+        // Walk ALL threads by PRIMARY KEY, not through the overview listing.
+        //
+        // The listing capped at 200 with no offset, so this route returned an
+        // Art. 15 copy that stopped at thread 200 and said nothing about it. Paging
+        // it would not have been enough: the listing also filters
+        // `message_count > 0` and defaults `is_archived = 0`, so a titled thread
+        // whose rollup counter is 0 and every archived thread stayed out of the
+        // dump — and `OFFSET` over `updated_at DESC` is not a snapshot, so a thread
+        // that receives a message mid-walk shifts the window and makes the export
+        // repeat one row while losing another. `listThreadsForExport` keys on the
+        // immutable `id` instead; its docblock carries the reasoning.
+        //
+        // The cap is a REAL cap, not a page bound: the whole dump is materialised
+        // and then serialised into one string, so an unbounded walk trades a short
+        // answer for no answer at all (a `RangeError` past ~512 MB, or an OOM of the
+        // process that also serves the Web UI). It is surfaced in the PAYLOAD, like
+        // the `durable_knowledge` block below and unlike this route's entity loop,
+        // because a recipient who cannot see the truncation reads a short answer as
+        // a complete one — which is the defect this whole route is being fixed for.
+        const THREAD_PAGE = 500;
+        const THREAD_CAP = 20_000;
         const threads: ThreadRecord[] = [];
-        let threadsTruncated = true;
-        for (let page = 0; page < THREAD_MAX_PAGES; page++) {
-          const batch = threadStore.listThreads({ limit: THREAD_PAGE, offset: page * THREAD_PAGE, includeArchived: true });
+        let threadsTruncated = false;
+        let after: string | undefined;
+        for (;;) {
+          const batch = threadStore.listThreadsForExport({ after, limit: THREAD_PAGE });
           threads.push(...batch);
-          if (batch.length < THREAD_PAGE) { threadsTruncated = false; break; }
+          if (batch.length < THREAD_PAGE) break;
+          after = batch[batch.length - 1]!.id;
+          if (threads.length >= THREAD_CAP) { threadsTruncated = true; break; }
         }
         if (threadsTruncated) {
-          process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_MAX_PAGES * THREAD_PAGE}-row cap — dump may be incomplete\n`);
+          process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_CAP}-row cap — dump is incomplete\n`);
         }
         const threadsWithMessages = threads.map(t => ({
           ...t,
@@ -9469,9 +9485,11 @@ export class LynoxHTTPApi {
             created_at: m.created_at,
           })),
         }));
+        exportData['threads_may_be_incomplete'] = threadsTruncated;
         exportData['threads'] = threadsWithMessages;
       } else {
         exportData['threads'] = [];
+        exportData['threads_may_be_incomplete'] = false;
       }
 
       // Flat-file memory (all namespaces)
@@ -9641,15 +9659,50 @@ export class LynoxHTTPApi {
       // erase everything must not say it did. Until this list existed, a throwing
       // wipe was written to stderr and the caller still read
       // "All user data has been permanently deleted" with HTTP 200 — the one case
-      // in which that sentence is a lie. Store keys only, never the error text: a
-      // SQLite message carries file paths, and this body goes to a browser.
+      // in which that sentence is a lie.
+      //
+      // Store keys only, never the error text: a SQLite message carries file paths,
+      // and this body goes to a browser. The stderr line is masked for the same
+      // reason the client-bound strings in this file are — it is the one place here
+      // where an unmasked store message would land in a log.
       const failed: string[] = [];
+      const note = (key: string, err: unknown): void => {
+        failed.push(key);
+        const detail = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`⚠ /api/data: ${key} wipe failed: ${maskSecretPatterns(detail)}\n`);
+      };
       const attempt = (key: string, fn: () => void): void => {
         try {
           fn();
         } catch (err) {
-          failed.push(key);
-          process.stderr.write(`⚠ /api/data: ${key} wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          note(key, err);
+        }
+      };
+      // ⚠ A separate helper, not an overload, and the reason is a typing hole rather
+      // than a style preference: TypeScript assigns `() => Promise<void>` to
+      // `() => void`, so an async callback handed to `attempt` would return before
+      // it settled, its rejection would never reach the catch, `failed` would stay
+      // empty — and the route would answer 200 with the completeness sentence over
+      // a store it did not wipe. Exactly the lie this block exists to stop. Every
+      // callback below is synchronous today; this is what keeps the next one honest.
+      const attemptAsync = async (key: string, fn: () => Promise<void>): Promise<void> => {
+        try {
+          await fn();
+        } catch (err) {
+          note(key, err);
+        }
+      };
+      // Per ITEM, inside a store's own attempt: one wrapper around a whole loop
+      // abandons the rest of the loop on the first throw, so a single locked row
+      // left every later row of that store in place while the answer named only the
+      // store. The item is appended to the key so the answer says which.
+      const attemptEach = <T>(key: string, items: readonly T[], fn: (item: T) => void, name: (item: T) => string): void => {
+        for (const item of items) {
+          try {
+            fn(item);
+          } catch (err) {
+            note(`${key}:${name(item)}`, err);
+          }
         }
       };
 
@@ -9664,18 +9717,13 @@ export class LynoxHTTPApi {
       const threadStore = engine.getThreadStore();
       if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 
-      // Delete all flat-file memory
+      // Delete all flat-file memory — the DEFAULT scope only. A tenant whose agent
+      // wrote under a second context or a `user-…` scope keeps those files, and the
+      // export cannot show them either, so neither route sees that half.
       const memory = engine.getMemory();
       if (memory) {
         for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
-          // Awaited inside its own attempt so one unwritable namespace does not
-          // skip the other three (`attempt` is sync; `save` returns a promise).
-          try {
-            await memory.save(ns, '');
-          } catch (err) {
-            failed.push(`memory:${ns}`);
-            process.stderr.write(`⚠ /api/data: memory:${ns} wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
-          }
+          await attemptAsync(`memory:${ns}`, async () => { await memory.save(ns, ''); });
         }
       }
 
@@ -9683,17 +9731,36 @@ export class LynoxHTTPApi {
       const kg = engine.getKnowledgeLayer();
       if (kg) {
         attempt('knowledge_graph', () => {
+          // Bounded, like both loops in the export route — and for a reason
+          // `attempt` cannot cover: it catches a THROW, not a non-termination. The
+          // loop re-lists after deleting, so the day `deleteEntity` stops removing
+          // a row the listing returns (a scope filter added on one side only, a
+          // delete that silently no-ops), this spins forever: the request never
+          // answers, the event loop is held by synchronous SQLite calls, and the
+          // caller sees a timeout rather than `failed: ['knowledge_graph']`.
+          // Measured by a refuter with `deleteEntity` stubbed to a no-op: the
+          // request never returned and the run was killed at 120 s.
           const db = kg.getDb();
+          const MAX_ROUNDS = 10_000;
           let entities = db.listEntities({ limit: 200 });
-          while (entities.length > 0) {
+          for (let round = 0; entities.length > 0; round++) {
+            if (round >= MAX_ROUNDS) {
+              throw new Error(`entity wipe made no progress after ${MAX_ROUNDS} rounds`);
+            }
             for (const entity of entities) {
               db.deleteEntity(entity.id);
             }
             entities = db.listEntities({ limit: 200 });
           }
-          // Also deactivate all memories
-          db.deactivateAllMemories();
         });
+        // Its own attempt: a throw in the entity loop above used to skip this line,
+        // so one undeletable entity left every memory row active.
+        //
+        // ⚠ And this is a SOFT delete — `UPDATE memories SET is_active = 0`. The
+        // text stays on disk, in plaintext by design on this legacy store, until a
+        // later `gc()` run reaps it. The hard-delete primitive exists
+        // (`purgeMemoriesByIds`) and only the single-subject path uses it.
+        attempt('knowledge_graph_memories', () => { kg.getDb().deactivateAllMemories(); });
       }
 
       // Delete all subject-graph data (engine.db) — Foundation Rework v2 tables.
@@ -9711,6 +9778,10 @@ export class LynoxHTTPApi {
       // `erasure-covers-export.test.ts`). The store's own targeted deletes
       // (`deleteEntry`/`deleteBySubject`) stay unwired by design — they serve a
       // SINGLE data-subject request, not a tenant-wide wipe.
+      //
+      // ⚠ A null handle here is NOT an empty database: a caught boot failure leaves
+      // `engineDb === null` with the file intact, and this route then skips it and
+      // still answers success.
       const engineDb = engine.getEngineDb();
       // The wipe is one atomic transaction: a failure leaves ALL engine.db PII
       // intact, which is exactly why it has to reach the answer rather than only
@@ -9727,45 +9798,47 @@ export class LynoxHTTPApi {
       // Delete all DataStore collections (includes CRM tables)
       const ds = engine.getDataStore();
       if (ds) {
-        attempt('datastore', () => {
-          const collections = ds.listCollections();
-          for (const col of collections) {
-            ds.dropCollection(col.name);
-          }
-          // Anything holding a CACHED view of those collections is now wrong, and
-          // only the code that dropped them knows it. Today that is exactly one
-          // consumer: `CRM.ensureSchema` memoises "the contacts/deals collections
-          // exist", so without this every CRM read threw
-          // `Collection "contacts" not found` for the rest of the process — the
-          // read inside `GET /api/export` included, so the tenant could not export
-          // their data to verify the erasure. 500 until a restart.
-          // The general guard is not this line but the witness around it: the
-          // real-engine test asserts the export still ANSWERS after an erasure,
-          // which fails for any store left in an unusable state, not just this one.
-          engine.getCRM()?.invalidateSchemaCache();
-        });
+        try {
+          // The LISTING is wrapped too, and that is not symmetry for its own sake:
+          // as an argument to `attemptEach` it sat OUTSIDE the wrapper, so a store
+          // whose `listCollections` throws took the whole route down — 500 from the
+          // outer handler, no `failed` list, and the answer could not say which
+          // store had failed. The same holds for the secret names below.
+          let collections: ReturnType<typeof ds.listCollections> = [];
+          attempt('datastore:list', () => { collections = ds.listCollections(); });
+          attemptEach('datastore', collections, col => { ds.dropCollection(col.name); }, col => col.name);
+        } finally {
+          // In a `finally`, and the position IS the fix rather than a detail of it:
+          // anything holding a cached view of those collections is now wrong, and
+          // only the code that dropped them knows it. `CRM.ensureSchema` memoises
+          // "the contacts/deals collections exist", so without this every CRM read
+          // threw `Collection "contacts" not found` for the rest of the process —
+          // the read inside `GET /api/export` included, so the tenant could not
+          // export their data to verify the erasure. Running the repair after the
+          // drop loop inside the same try skipped it on exactly the path where a
+          // partial drop had already broken the memo.
+          attempt('crm_schema', () => { engine.getCRM()?.rebuildSchema(); });
+        }
       }
 
-      // Delete all secrets from vault
+      // Delete all secrets from the vault. `LYNOX_SECRET_*` env-sourced entries are
+      // re-read at every boot, so those return after a restart.
       const secretStore = engine.getSecretStore();
       if (secretStore) {
-        attempt('secrets', () => {
-          const names = secretStore.listNames();
-          for (const name of names) {
-            secretStore.deleteSecret(name);
-          }
-        });
+        let names: string[] = [];
+        attempt('secrets:list', () => { names = secretStore.listNames(); });
+        attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
       }
 
-      // Reset config to defaults
-      try {
+      // Reset config to defaults. The reset and the engine's reload are separate
+      // attempts on purpose: a failed reload leaves no customer data behind, so
+      // reporting it as `config` would tell the caller that a store still holds
+      // their data when the file on disk is already `{}`.
+      await attemptAsync('config', async () => {
         const { saveUserConfig } = await import('../core/config.js');
         saveUserConfig({});
-        await engine.reloadUserConfig();
-      } catch (err) {
-        failed.push('config');
-        process.stderr.write(`⚠ /api/data: config reset failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
+      });
+      await attemptAsync('config_reload', async () => { await engine.reloadUserConfig(); });
 
       if (failed.length > 0) {
         // 500, not a 200 with `deleted: false`: a client that reads the status code
