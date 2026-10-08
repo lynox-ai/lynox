@@ -26,6 +26,11 @@ export { loadManifestFile, validateManifest } from './validate.js';
 
 export interface RunManifestOptions {
   agentsDir?: string | undefined;
+  /** The run's id, minted by the caller instead of here. A route that holds a claim on
+   *  this run has to know the id BEFORE the run starts — the claim is taken first, and a
+   *  run that throws before answering leaves nothing to look the id up by. Absent: minted
+   *  below, which is every other caller. */
+  runId?: string | undefined;
   gateAdapter?: GateAdapter | undefined;
   hooks?: RunHooks | undefined;
   mockResponses?: Map<string, string> | undefined;
@@ -177,6 +182,7 @@ export interface RunCtxInput {
   parentPrompt?: SubAgentPromptHandles | undefined;
   parentSessionCounters?: SessionCounters | undefined;
   runHistory?: RunHistory | undefined;
+  runId?: string | undefined;
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   observeToolCall?: StepToolRecorder | undefined;
@@ -226,6 +232,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     parentPrompt: input.parentPrompt,
     parentSessionCounters: input.parentSessionCounters,
     runHistory: input.runHistory,
+    runId: input.runId,
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     observeToolCall: input.observeToolCall,
@@ -437,7 +444,29 @@ export async function runManifest(
     pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
 
-  const runId = randomUUID();
+  // A caller that holds a claim on this run passes the id in; it cannot wait for one
+  // minted here, because the claim is taken before the run and a run that throws before
+  // answering returns no id at all.
+  //
+  // ⚠ Validated, because `runManifest` is a PUBLISHED export of this package, so this
+  // option is public surface and the two failure modes are both silent:
+  //  · `??` is nullish, so `{ runId: '' }` would run under the empty-string id rather
+  //    than minting one — the same trap this repo has already paid for elsewhere.
+  //  · a DUPLICATE id makes the start-INSERT below hit the `pipeline_runs` primary key,
+  //    where it is swallowed as fire-and-forget; the finalize UPDATE then rewrites the
+  //    OTHER run's row, which afterwards reads as "that workflow's completed run failed
+  //    and cost nothing". Minting the id here made that state unreachable; accepting one
+  //    from a caller is what makes it reachable, so the check belongs with the option.
+  // Refused before `onRunStart` fires, so a rejected run never stamps a claim.
+  if (options.runId !== undefined) {
+    if (typeof options.runId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.runId)) {
+      throw new Error('runManifest: `runId` must be a UUID when supplied.');
+    }
+    if (options.runHistory?.getPipelineRun(options.runId) !== undefined) {
+      throw new Error(`runManifest: a run with id "${options.runId}" already exists — a supplied runId must be unused.`);
+    }
+  }
+  const runId = options.runId ?? randomUUID();
 
   const state: RunState = {
     runId,
@@ -455,6 +484,13 @@ export async function runManifest(
     }
   }
 
+  // ⚠ NOT wrapped in a try/catch, and that asymmetry against the guarded history writes
+  // below is deliberate. The route's hook stamps its run claim as having spent something;
+  // if a throw here were swallowed the run would proceed and spend while the claim still
+  // read "nothing spent", so the request's own cleanup would release a paid claim and the
+  // retry would pay twice. Failing the run before it spends is the safe direction. The
+  // neighbouring comment at the start-INSERT says a history failure must never break the
+  // run — that applies to the RECORD of a run, not to a gate that precedes it.
   options.hooks?.onRunStart?.();
 
   // 2a durable run-record: the orchestrator is the SINGLE canonical writer of

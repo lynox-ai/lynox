@@ -23,7 +23,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
   };
 });
 
-import { runManifest, retryManifest, workflowBoundExceeded } from './runner.js';
+import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
@@ -1912,5 +1912,123 @@ describe('runManifest — DoS bound wiring', () => {
     expect(state.error).toContain('step limit');
     expect(state.outputs.has('p1')).toBe(true);
     expect(state.outputs.has('p2')).toBe(false);
+  });
+});
+
+describe('the claim seam: a caller may mint the run id and pass hooks through', () => {
+  // The route takes its claim BEFORE the run, so it cannot wait for an id minted inside
+  // runManifest — and a run that throws before answering returns no id to link up later.
+  // These two witnesses are diagnostic: without them a missing seam shows up only as the
+  // route test failing, with no hint of WHICH of the four seams dropped the value.
+
+  /** A UUID the shape check accepts, distinguishable per case. */
+  const uuid = (tail: string): string => `11111111-2222-4333-8444-${tail.padStart(12, '0')}`;
+
+  it('uses a run id handed in by the caller instead of minting one', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const handed = uuid('1');
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runId: handed });
+    expect(state.runId).toBe(handed);
+  });
+
+  describe('and the option is validated, because it is published surface', () => {
+    // ⚠ The witness above used to pass `'run-from-caller'`, and the shape check below
+    // failed it — correctly. A fixture that could not survive the guard is a fixture that
+    // was never a model of the real caller, which mints a UUID.
+    it('refuses an empty string rather than running under it', async () => {
+      // `??` is nullish: without the check, `{ runId: '' }` runs under the empty id
+      // instead of minting one, and every claim lookup keyed on it misses.
+      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: '' }))
+        .rejects.toThrow(/must be a UUID/);
+    });
+
+    it('refuses a non-UUID id', async () => {
+      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: 'run-from-caller' }))
+        .rejects.toThrow(/must be a UUID/);
+    });
+
+    it('refuses BEFORE the stamp fires, so a rejected run never marks a claim', async () => {
+      // The ordering the comment at the check claims, and nothing drove it: moving the whole
+      // validation below `options.hooks?.onRunStart?.()` left every test green. Moved, a
+      // rejected run stamps its claim as having spent — after which the request's cleanup
+      // can no longer release it and the key is stuck reading "outcome unknown" for ever.
+      let stamped = 0;
+      const hooks: RunHooks = { onRunStart: () => { stamped += 1; } };
+      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: 'not-a-uuid', hooks }))
+        .rejects.toThrow(/must be a UUID/);
+      expect(stamped, 'the stamp must not have fired for a refused run').toBe(0);
+    });
+
+    it('refuses an id that already names a run, and leaves that run untouched', async () => {
+      // The damage this prevents: the start-INSERT hits `pipeline_runs`' primary key, is
+      // swallowed as fire-and-forget, and the finalize UPDATE then rewrites the OTHER
+      // run's row — which afterwards reads as "that completed run failed and cost
+      // nothing". Minting the id inside made this unreachable; accepting one from a
+      // caller is what makes it reachable.
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-runid-guard-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      try {
+        const taken = uuid('2');
+        history.getDb().prepare(
+          `INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_cost_usd)
+           VALUES (?, 'the other run', 'completed', '{}', 1.25)`,
+        ).run(taken);
+        await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: taken, runHistory: history }))
+          .rejects.toThrow(/already exists/);
+        const row = history.getPipelineRun(taken);
+        expect(row?.status).toBe('completed');
+        expect(row?.total_cost_usd).toBe(1.25);
+        expect(row?.manifest_name).toBe('the other run');
+      } finally {
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a THROWING onRunStart fails the run instead of being swallowed', async () => {
+      // ⚠ The asymmetry against the guarded history writes in `runManifest` is deliberate,
+      // and a mutant wrapping this call in a try/catch survived until this witness existed.
+      // The route's hook stamps its claim as having spent something; a swallowed throw lets
+      // the run proceed and spend while the claim still reads "nothing spent", so the
+      // request's own cleanup releases a PAID claim and the retry pays twice. Failing before
+      // the run spends is the safe direction — and it has to stay the direction, because the
+      // neighbouring comment ("a history failure must never break the run") invites the
+      // opposite fix.
+      const hooks: RunHooks = { onRunStart: () => { throw new Error('the stamp could not be written'); } };
+      await expect(runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), hooks }))
+        .rejects.toThrow(/the stamp could not be written/);
+    });
+
+    it('accepts a UUID that names no run yet', async () => {
+      // The positive half: the guard must not refuse the only caller it has.
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-runid-ok-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      try {
+        const fresh = uuid('3');
+        const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map(), runId: fresh, runHistory: history });
+        expect(state.runId).toBe(fresh);
+      } finally {
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('still mints one when the caller passes none', async () => {
+    // The negative half: every caller that holds no claim must keep working, and an
+    // accidental `runId: undefined` must not produce an empty id.
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses });
+    expect(state.runId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('buildRunCtx carries runId and hooks to the options it builds', () => {
+    // The seam that had no parameter at all before: nothing on the saved-workflow path
+    // passed hooks, so a stamping `onRunStart` would have been dropped silently.
+    const onRunStart = vi.fn();
+    const opts = buildRunCtx({ autonomy: 'autonomous', runId: 'run-x', hooks: { onRunStart } });
+    expect(opts.runId).toBe('run-x');
+    opts.hooks?.onRunStart?.();
+    expect(onRunStart).toHaveBeenCalledTimes(1);
   });
 });

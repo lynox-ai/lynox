@@ -826,7 +826,23 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
  * prose. For a message that is entirely uncontrolled the caller asks for more —
  * see the SSE error path, which also caps the length.
  */
-function errorResponse(res: ServerResponse, status: number, message: string, code?: string): void {
+function errorResponse(
+  res: ServerResponse,
+  status: number,
+  message: string,
+  code?: string,
+  /** Extra top-level fields for a refusal that carries DATA the client must act on —
+   *  the run claim's 409 returns the id of the run already holding the key. It rides
+   *  here rather than in a hand-written `jsonResponse` for the reason below: the one
+   *  place that masks and caps the message stays the one place that builds the body.
+   *
+   *  `error` and `code` are typed out AND stripped at runtime — see
+   *  {@link buildClientErrorBody}. The type alone was not a guard: TypeScript checks excess
+   *  properties on an inline literal only, so `errorResponse(…, rec)` and `errorResponse(…,
+   *  { ...rec })` for a `Record<string, unknown>` both compiled, which is the most natural
+   *  way such a bag gets built. */
+  extra?: Record<string, unknown> & { error?: never; code?: never },
+): void {
   // ⭐ `code` is for the refusals a CLIENT has to tell apart. Two 409s on the same route
   // can need opposite next moves from the owner — wait, or go and answer a question — and
   // a view cannot read a sentence. It rides here rather than in a second response shape so
@@ -834,10 +850,44 @@ function errorResponse(res: ServerResponse, status: number, message: string, cod
   // hand skipped both, and left a template the next author copies with an interpolated
   // string in it. Omitted by default, so the 264 existing callers are unchanged and a
   // client's default branch keeps its meaning.
-  jsonResponse(res, status, {
+  jsonResponse(res, status, buildClientErrorBody(message, code, extra));
+}
+
+/**
+ * The body of a client-bound refusal: the masked, capped message, an optional machine
+ * code, and whatever data the caller needs to ride along.
+ *
+ * Exported and pure so the one property that matters can be driven directly: **nothing in
+ * `extra` can replace `error` or `code`.** That property had three defences in two
+ * revisions and only this one holds. Spreading `extra` first protects them, but a spread
+ * ORDER is something the next edit moves and no test observes, because no caller passes an
+ * `extra.error`. Typing `error?: never` protects them too — but only against an inline
+ * object literal: TypeScript's excess-property check does not apply to a variable, so
+ * passing a `Record<string, unknown>` that happens to hold `error`, or a spread of one,
+ * compiled cleanly. Measured across twelve call shapes. So the keys are REMOVED here, and
+ * the order is kept as a second line of defence rather than as the guarantee.
+ */
+export function buildClientErrorBody(
+  message: string,
+  code?: string,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  // Destructuring is the strip: whatever those two held does not reach `safe`.
+  const { error: _droppedError, code: _droppedCode, ...safe } = extra ?? {};
+  // ⚠ And every STRING in `extra` is masked and capped too. Only `message` was, which made
+  // the docblock's own argument — that the one place which masks is the one place which
+  // builds the body — true of the message and quietly false of the fields it had just
+  // added. Nothing passes a credential there today (the only caller sends a server-minted
+  // run id), so this closes a shape rather than a leak; a shape in the body-builder is
+  // worth closing, because the next caller is the one that would not think about it.
+  for (const [k, v] of Object.entries(safe)) {
+    if (typeof v === 'string') safe[k] = capForClient(maskForClient(v));
+  }
+  return {
+    ...safe,
     error: capForClient(maskForClient(message)),
     ...(code !== undefined ? { code } : {}),
-  });
+  };
 }
 
 /**
@@ -889,10 +939,67 @@ export function looksBinaryUpload(buf: Buffer): boolean {
   return suspicious / sample.length > 0.1;
 }
 
+/**
+ * How many of a replayed run's step errors the answer carries.
+ *
+ * The replay is the one body in this route that is free and repeatable: the claim of a
+ * completed run is never deleted, so the same request can be made for ever at no LLM cost.
+ * Each message is capped on its own, but without a COUNT cap the array is as long as the
+ * workflow has failing steps — measured at 1.29 MB for 2000 of them, from a 90-byte POST.
+ * Fifty is far more than a person reads and far less than a megabyte; past it the body says
+ * `stepErrorsTruncated` rather than quietly looking complete.
+ */
+const MAX_REPLAYED_STEP_ERRORS = 50;
+
 /** Type-guard that sends 503 if the service is null/undefined. Caller must `return` after a false result. */
 function requireService<T>(res: ServerResponse, service: T | null | undefined, name: string): service is NonNullable<T> {
   if (service === null || service === undefined) errorResponse(res, 503, `${name} not available`);
   return service !== null && service !== undefined;
+}
+
+/**
+ * What a run claim that is ALREADY HELD means, decided from the only two facts that
+ * are observable about it (PRD idempotency-bulk-first §3.1): is `started_at` set, and
+ * what does the claimed run's `pipeline_runs` row say.
+ *
+ * Pure and exported so the state space can be driven exhaustively without an HTTP
+ * round trip, and so the DECISION is testable apart from its EFFECT: the route's
+ * restart and release both write, and a test of the table must not have to perform
+ * them to read the verdict.
+ *
+ * The default arm is deliberately the refusing one. A status this function does not
+ * enumerate — `rejected` today, whatever a later runner adds — answers 409 and never
+ * restarts, so a value nobody thought about cannot hand out a second paid run. The
+ * reachable-but-unenumerated case is the one that fails open elsewhere.
+ */
+export type HeldRunClaim = {
+  /** Non-null once the run fired `onRunStart`, i.e. once something may have been spent. */
+  startedAt: string | null;
+  /** The claimed run's status, or null when no `pipeline_runs` row exists for it. */
+  status: string | null;
+};
+export type HeldRunClaimVerdict =
+  /** Nothing spent yet: another request holds the claim and has not started its run. */
+  | 'in-flight'
+  /** Spent, and the run is still going. */
+  | 'running'
+  /** Spent and finished — answer with the stored outcome instead of running again. */
+  | 'completed'
+  /** Spent and definitively over without a result: hand the claim to a new run id. */
+  | 'restart'
+  /** Spent, and no run row ever landed (the fire-and-forget insert lost to SQLITE_BUSY).
+   *  A dead run and one still spending are indistinguishable here, so this refuses. */
+  | 'unknown-outcome'
+  /** Spent, row present, status not one this route acts on. Refuses by construction. */
+  | 'held';
+
+export function decideHeldRunClaim(claim: HeldRunClaim): HeldRunClaimVerdict {
+  if (claim.startedAt === null) return 'in-flight';
+  if (claim.status === null) return 'unknown-outcome';
+  if (claim.status === 'completed') return 'completed';
+  if (claim.status === 'failed' || claim.status === 'interrupted') return 'restart';
+  if (claim.status === 'running') return 'running';
+  return 'held';
 }
 
 /**
@@ -6045,6 +6152,7 @@ export class LynoxHTTPApi {
       // runSavedWorkflow (a missing required param → 400 from there). An absent
       // body keeps the legacy no-arg behaviour (all params bind to defaults).
       let runParams: Record<string, unknown> | undefined;
+      let idempotencyKey: string | undefined;
       if (body !== undefined && body !== null) {
         if (typeof body !== 'object' || Array.isArray(body)) {
           errorResponse(res, 400, 'Invalid request body — expected an object.');
@@ -6057,6 +6165,24 @@ export class LynoxHTTPApi {
             return;
           }
           runParams = rawParams as Record<string, unknown>;
+        }
+        // The run claim's key, and it is optional BY CONSTRUCTION: the cron executor and
+        // every chat-driven run reach the workflow runner without one, and keeping those
+        // callers working unchanged is a requirement of this change rather than a
+        // courtesy. No key = no claim is taken at all, i.e. exactly today's behaviour.
+        //
+        // Only the client can mint it: for a run that does not exist yet there is nothing
+        // server-side to derive an identity from. (The four idempotent routes in this file
+        // are NOT a model for that — there the server minted the id and the client echoes
+        // it back.) It is stored verbatim rather than trimmed, because an opaque identifier
+        // that the server rewrites stops being the thing the client holds.
+        const rawKey = (body as Record<string, unknown>)['idempotencyKey'];
+        if (rawKey !== undefined) {
+          if (typeof rawKey !== 'string' || rawKey.trim() === '' || rawKey.length > 200) {
+            errorResponse(res, 400, 'Invalid "idempotencyKey" — expected a non-empty string of at most 200 characters.');
+            return;
+          }
+          idempotencyKey = rawKey;
         }
       }
       // Consent gate — mirror the cron gate in `WorkerLoop.executePipeline`.
@@ -6099,12 +6225,233 @@ export class LynoxHTTPApi {
         );
         return;
       }
-      // Route through the budget + managed-credit lifecycle (cap, credit gate,
-      // cost report) — runSavedWorkflow alone bypasses all three.
+      // Loaded BEFORE the claim is taken, and that order is load-bearing: this was the one
+      // statement between taking the claim and the `try` below, so a rejected import left
+      // an unstarted claim standing until the next boot sweep — and the view KEEPS its key
+      // on the 409 that state produces, so the owner would click forever on a run that
+      // never started. (Cached after the first request, so the move costs nothing.)
       const { runGuardedSavedWorkflow } = await import('../core/saved-workflow-runner.js');
-      // A person pressed Run over this authenticated route: the workflow's write grant may
-      // apply, with the cron and values of the schedule it was accepted for, never the request's.
-      const result = await runGuardedSavedWorkflow(engine, params['id']!, runParams, { origin: { kind: 'library' } });
+
+      // ── The run claim (PRD idempotency-bulk-first §3.1) ──────────────────────────
+      // Keyed on the RESOLVED workflow id: `getPipeline` accepts a prefix, so keying on
+      // the path segment would file one workflow's attempts under two different claims.
+      // Nothing is claimed when the id resolves to nothing. Precisely: such a row would
+      // not LINGER — an unresolved workflow never starts, so the release at the end of the
+      // request takes it away again. What the guard prevents is a write for an id that
+      // names nothing, and a concurrent second call answering 409 for a workflow that does
+      // not exist instead of the 404 it has coming.
+      const claimWorkflowId = plannedForRun?.id ?? params['id']!;
+      const mintedRunId = randomUUID();
+      // Set only for the request that OWNS a claim; `undefined` means "no claim held",
+      // which is both the no-key path and every refusal below.
+      let claimedRunId: string | undefined;
+      // Set only when this request RESTARTED a claim, so the answer can disclose that an
+      // earlier attempt under the same key already spent something. Without it a second
+      // paid run reads as a first one: the 200 carries this run's cost and nothing else,
+      // and the person who clicked again after a lost answer has no way to see the first
+      // charge. Decided 2026-10-07 — honesty towards the owner, not a new contract.
+      let restartedFrom: { runId: string; costUsd: number } | undefined;
+      if (idempotencyKey !== undefined && plannedForRun) {
+        if (history.claimWorkflowRun(claimWorkflowId, idempotencyKey, mintedRunId)) {
+          claimedRunId = mintedRunId;
+        } else {
+          const held = history.readWorkflowRunClaim(claimWorkflowId, idempotencyKey);
+          if (held === null) {
+            // Released between our INSERT and this read — its holder's run was refused
+            // before it started. One retry, because the state just observed is the state
+            // the first attempt wanted; a second conflict means someone else got there.
+            if (history.claimWorkflowRun(claimWorkflowId, idempotencyKey, mintedRunId)) {
+              claimedRunId = mintedRunId;
+            } else {
+              errorResponse(res, 409, 'A run for this key is already starting.', 'run_claim_in_flight');
+              return;
+            }
+          } else {
+            // Read the run row unconditionally rather than only when `started_at` is set.
+            // Skipping it would make the verdict depend on a status this route FABRICATED
+            // for the unstarted case, and a test could then not tell "the status was
+            // ignored" from "there was no row".
+            const heldRun = history.getPipelineRun(held.runId);
+            const verdict = decideHeldRunClaim({ startedAt: held.startedAt, status: heldRun?.status ?? null });
+            switch (verdict) {
+              case 'in-flight':
+                errorResponse(res, 409, 'A run for this key is already starting.', 'run_claim_in_flight', { runId: held.runId });
+                return;
+              case 'running':
+                errorResponse(res, 409, 'A run for this key is already in progress.', 'run_in_progress', { runId: held.runId });
+                return;
+              case 'completed': {
+                // The replay. This key's run already finished, so the answer is ITS
+                // outcome, read back from the two tables that hold it — not a second run.
+                // `idempotent: true` is the marker the four existing idempotent routes in
+                // this file already answer with, so a client has one field to look at.
+                const heldSteps = history.getPipelineStepResults(held.runId);
+                const heldFailed = heldSteps.filter(st => st.error !== null && st.error !== '');
+                const replayStepErrors = heldFailed.slice(0, MAX_REPLAYED_STEP_ERRORS);
+                const replayStepErrorsTruncated = heldFailed.length > replayStepErrors.length;
+                jsonResponse(res, 200, {
+                  ran: true,
+                  idempotent: true,
+                  runId: held.runId,
+                  status: heldRun?.status ?? 'completed',
+                  error: heldRun?.error === null || heldRun?.error === undefined
+                    ? undefined
+                    : capForClient(maskForClient(heldRun.error)),
+                  costUsd: heldRun?.total_cost_usd ?? 0,
+                  // ⚠ CAPPED BY COUNT, not only per string. Each message is capped at 600
+                  // characters, but the array was unbounded — and unlike the first run's
+                  // answer, this one is free and repeatable for ever: the claim of a
+                  // completed run is never deleted. Measured on the uncapped version: 2000
+                  // step rows returned a 1.29 MB body for a 90-byte POST, which
+                  // `jsonResponse` stringifies and measures in memory, at up to 600
+                  // requests a minute from loopback. The truncation is stated in the body
+                  // rather than silent, because a client that cannot see it would read a
+                  // short list as "those were all the failures".
+                  stepErrors: replayStepErrors.map(s => ({
+                    stepId: s.step_id,
+                    error: capForClient(maskForClient(s.error ?? '')),
+                    costUsd: s.cost_usd,
+                  })),
+                  ...(replayStepErrorsTruncated ? { stepErrorsTruncated: true } : {}),
+                });
+                return;
+              }
+              case 'restart':
+                // The run is definitively over without a result, so the claim moves to a
+                // NEW run id — the old one is `pipeline_runs`' primary key and the control
+                // plane's cost dedup drops a report whose run id it has already seen, so
+                // reusing it would lose both the row and the billing.
+                if (!history.restartWorkflowRunClaim(claimWorkflowId, idempotencyKey, held.runId, mintedRunId)) {
+                  // Another retry won the swap. Same `code` as the branch above, so the same
+                  // body shape: a client that switches on `code` must not find the run id
+                  // present on one 409 and missing on the other.
+                  errorResponse(res, 409, 'A run for this key is already in progress.', 'run_in_progress', { runId: held.runId });
+                  return;
+                }
+                claimedRunId = mintedRunId;
+                restartedFrom = { runId: held.runId, costUsd: heldRun?.total_cost_usd ?? 0 };
+                break;
+              // ⚠ A revision of this file skipped the release below when a restart had
+              // happened, on the reasoning that the restart clears `started_at` so the
+              // release would delete "the only record that the earlier attempt had paid".
+              // That premise was FALSE: this table has no cost column — the spend lives in
+              // `pipeline_runs.total_cost_usd`, which a restart does not touch. What the
+              // skip actually produced was a claim with `started_at IS NULL` pointing at a
+              // run that was never created, which reads as `in-flight` for ever: the view
+              // keeps its key on that 409, the confirm-release is offered for one other code
+              // only, and the owner was left with an engine restart as the way out, while
+              // the banner said "already running" about nothing. Releasing is correct here —
+              // the restarted attempt spent nothing, and a refusal before a run must never
+              // burn the key. What is genuinely lost is the DISCLOSURE of the earlier
+              // attempt's cost on the next answer, and that is the registered, out-of-scope
+              // question about accumulating it, not something to buy with a stuck key.
+              case 'unknown-outcome':
+                // `started_at` is set and no run row ever landed: the insert is
+                // fire-and-forget and a 5s SQLITE_BUSY is swallowed while the run pays.
+                // A dead run and one still spending are indistinguishable from here, so
+                // this refuses instead of restarting — a restart would be a second paid
+                // run that nobody asked for. The way out is a NEW attempt, which the
+                // person chooses; the message says so rather than implying a wait.
+                errorResponse(
+                  res, 409,
+                  'A previous run for this key started and its outcome was never recorded. It may still be running, '
+                  + 'so this key will not start another one — start a new attempt if you want to run it again.',
+                  'run_outcome_unknown', { runId: held.runId },
+                );
+                return;
+              case 'held':
+                // A status this route does not act on. Refusing is the default arm on
+                // purpose: a value nobody enumerated must not reach the restart.
+                //
+                // ⚠ What refusing buys, stated exactly, because the sentence above reads
+                // like more: it keeps THIS request from starting a second run. It does not
+                // keep the key's owner from paying again — the view discards the key on THIS
+                // code, so the next click is a new attempt. That is specific to
+                // `run_claim_held`: `in-flight`, `running` and `unknown-outcome` all keep the
+                // key, so of the six verdicts only `restart` hands out a second run without
+                // being asked, and it discloses what the earlier attempt cost.
+                //
+                // ⚠ Two corrections to this comment, both from rounds on it: an earlier
+                // version counted two verdicts instead of four, and the version after that
+                // listed two key-keeping codes instead of three (it omitted `running`). And
+                // one thing the sentence does NOT cover, named so it reads as what it is: a
+                // claim that was RELEASED and then re-claimed reaches no verdict at all —
+                // `claimWorkflowRun` simply succeeds — so a refused restart followed by a
+                // fresh click does start a second paid run without disclosure. That is the
+                // deferred accumulation question, not something this count speaks to.
+                errorResponse(
+                  res, 409,
+                  `A run for this key is held in status "${heldRun?.status ?? 'unknown'}".`,
+                  'run_claim_held', { runId: held.runId },
+                );
+                return;
+            }
+          }
+        }
+      }
+
+      // Route through the budget + managed-credit lifecycle (cap, credit gate,
+      // cost report) — runSavedWorkflow alone bypasses all three. (Imported above the
+      // claim block, for the reason stated there.)
+      // `const`, so the narrowing below survives into the hook's closure.
+      const ownedRunId = claimedRunId;
+      let result: Awaited<ReturnType<typeof runGuardedSavedWorkflow>>;
+      try {
+        // `claimWorkflowId`, not `params['id']`, and that matters: `getPipeline` resolves a
+        // prefix, so passing the raw segment would have the runner resolve it a SECOND time.
+        // If the resolution changed in between — a workflow created or deleted concurrently
+        // — the claim filed under workflow A would guard, and later replay, a run of
+        // workflow B. One resolution, used for both.
+        //
+        // ⚠ TWO independent things ride in this one options object and a rebase has to keep
+        // BOTH. `origin` says a person pressed Run over this authenticated route, so the
+        // workflow's stored write grant may apply — with the cron and values of the schedule
+        // it was accepted for, never the request's. It is passed ALWAYS, and an absent one
+        // falls back to "no contract" silently. The claim fields are passed only when this
+        // request owns a claim. An earlier shape handed `undefined` for the whole object when
+        // there was none, which would have dropped `origin` for every keyless call: the
+        // cheapest way to lose a security decision is to make it the sibling of an optional one.
+        result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
+          origin: { kind: 'library' },
+          ...(ownedRunId === undefined ? {} : {
+            runId: ownedRunId,
+            // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
+            // the first spend and before the run row is inserted, synchronously on this same
+            // history handle — so a process that dies mid-run still leaves the mark behind.
+            //
+            // ⚠ Precisely "before the first spend", and NOT "after every precondition that
+            // throws", which this comment claimed until a refuter checked it: a step that uses
+            // inline runtime without parentTools throws from inside step execution, i.e. AFTER
+            // the stamp and before any spend. Such a run is then recorded as having spent
+            // nothing-that-it-spent. It is not stuck — the run row reaches `failed`, so the
+            // next request with that key restarts — but the claim is no longer releasable.
+            //
+            // ⚠ And the stamp is deliberately NOT wrapped in a try/catch, unlike its guarded
+            // neighbours in `runManifest` whose comment says a history failure must never break
+            // the run. Here it must: a swallowed stamp lets the run proceed and spend while the
+            // claim still reads "nothing spent", so this request's own cleanup would release a
+            // paid claim and the retry would pay twice. Do not "fix" the asymmetry.
+            hooks: { onRunStart: () => { history.markWorkflowRunStarted(ownedRunId); } },
+          }),
+        });
+      } finally {
+        // Release ONLY what spent nothing, and let SQL decide it: the method's WHERE
+        // carries `run_id = ? AND started_at IS NULL`, so a read-then-delete here would
+        // add a race for no gain. In a `finally` because a throw out of the wrapper would
+        // otherwise strand the key — not every path through it is caught, and a stranded
+        // key is indistinguishable from a paid one from the next request's point of view.
+        //
+        // ⚠ And it is wrapped, like every other history write on this path. A throw from a
+        // `finally` REPLACES the result that was already computed: a run that completed and
+        // spent would come back as a 500, the view would read that as a failure, discard its
+        // key, and the next click would pay for the whole workflow again. The claim row is
+        // correct either way; the damage would travel entirely through the wrong answer.
+        if (ownedRunId !== undefined && idempotencyKey !== undefined) {
+          try {
+            history.releaseUnstartedWorkflowRunClaim(claimWorkflowId, idempotencyKey, ownedRunId);
+          } catch { /* the boot sweep releases it instead — never at the cost of the answer */ }
+        }
+      }
       if (!result.ok) {
         const code = result.error?.includes('not found') ? 404 : 400;
         errorResponse(res, code, result.error ?? 'Workflow run failed');
@@ -6116,6 +6463,13 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         ran: true,
         runId: result.runId,
+        // Absent on a first run, so a client can branch on presence. `previousCostUsd` is
+        // read off the earlier run's row, which the boot sweep backfills from the step
+        // rows — so an interrupted run's PARTIAL spend is what it reports, not zero.
+        ...(restartedFrom === undefined ? {} : {
+          restartedFrom: restartedFrom.runId,
+          previousCostUsd: restartedFrom.costUsd,
+        }),
         status: result.status,
         // Workflow step errors come from tools, i.e. from whatever a remote
         // service said. Array-valued, so each entry is treated like any other

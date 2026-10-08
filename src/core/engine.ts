@@ -1218,6 +1218,38 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] pipeline-run sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
+      // The run claims of `POST /api/workflows/:id/run` (PRD idempotency-bulk-first §3.1).
+      // A claim with no `started_at` was held by a request that died before its run began,
+      // and no such request can be alive at boot — without this sweep its key answers 409
+      // for good, and a client that persisted the key could never run that workflow again.
+      //
+      // A claim WITH `started_at` is left standing on purpose, and the asymmetry is the
+      // design: its run spent money, so the route must be able to READ that and answer from
+      // it — replay a completed run, refuse one still running, refuse one whose outcome was
+      // never recorded, and restart one that ended definitively. A release would be
+      // indistinguishable from "nothing was spent".
+      //
+      // ⚠ "reads it and refuses" is what this said, and it is not what the route does: for
+      // `failed` and `interrupted` it restarts and runs the workflow again. The sweep cannot
+      // make that distinction anyway — it decides at boot, when the same claim could just as
+      // well become the `completed` whose replay keeping it is what makes possible.
+      //
+      // Deliberately NOT ordered against the pipeline sweep above — this one reads only
+      // `started_at`, so no run status that one rewrites can change the outcome.
+      //
+      // ⚠ "No such request can be alive at boot" holds for THIS process, and the premise is
+      // worth naming: the sibling sweep reasons explicitly about one engine per DB. A second
+      // process opening the same `history.db` would delete the first one's in-flight
+      // unstarted claims, and then two requests could run under one key. Unreachable in the
+      // shipped topology — the HTTP server listens only after `init()` returns, and there is
+      // one production Engine — but it is a premise, not a property. Separate try, like its
+      // siblings.
+      try {
+        const sweptClaims = this.runHistory.sweepUnstartedWorkflowRunClaims();
+        if (sweptClaims > 0) process.stderr.write(`[lynox] run-history: released ${sweptClaims} run claim(s) that had spent nothing\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] run-claim sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     // Initialize the resumable run-event buffer manager (pure in-memory, no DB).

@@ -694,6 +694,13 @@ export async function runSavedWorkflow(
      * only a caller that knows how the run was started can answer.
      */
     decideGrant?: ((planned: PlannedPipeline) => GrantDecision) | undefined;
+    /** The run's id, when the caller already holds a claim keyed by it (the HTTP route).
+     *  Absent for the cron executor, which holds no claim and lets the run mint its own. */
+    runId?: string | undefined;
+    /** Run hooks the caller needs to fire. The route's `onRunStart` stamps its claim as
+     *  having spent something, synchronously and before the first spend — so a process
+     *  that dies before answering still leaves the mark behind. */
+    hooks?: RunHooks | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
@@ -795,6 +802,9 @@ export async function runSavedWorkflow(
       // (`runtime.seed`). The accumulator still carries taint ACROSS steps — a saved workflow
       // whose step 1 reads external content must not land step 2's durable write as active.
       runTaint: { ...newRunTaint(), seeded: runtime?.seed ?? 'none' },
+      // The claim seam: both are undefined for every caller that holds no claim.
+      runId: runtime?.runId,
+      hooks: runtime?.hooks,
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI

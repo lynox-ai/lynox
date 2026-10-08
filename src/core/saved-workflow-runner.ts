@@ -1,3 +1,4 @@
+import type { RunHooks } from '../types/orchestration.js';
 import { randomUUID } from 'node:crypto';
 import type { UntrustedCause } from './untrusted-signals.js';
 
@@ -75,6 +76,14 @@ export async function runGuardedSavedWorkflow(
     seed?: UntrustedCause | undefined;
     /** How the run was started. Absent = the run passes no contract on, whatever is stored. */
     origin?: GrantRunOrigin | undefined;
+    /** The run's id, when the caller already holds a claim keyed by it. The claim is taken
+     *  BEFORE this wrapper runs, so the id cannot be minted inside the run. */
+    runId?: string | undefined;
+    /** Run hooks the caller needs fired. The route's `onRunStart` stamps its claim as having
+     *  spent something — it has to reach `runManifest`, and nothing on this path passed hooks
+     *  through before. Without that seam the stamp never happens and every claim reads as
+     *  "nothing spent", which releases a claim after a paid crash. */
+    hooks?: RunHooks | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
@@ -143,7 +152,14 @@ export async function runGuardedSavedWorkflow(
     toolContext,
     memory: engine.getMemory(),
     seed: opts?.seed,
+    // Two independent additions to one runtime object, and the library's Run button is the
+    // one caller that passes BOTH: the grant decider says what the run may do, the claim
+    // seam says which run it is. A rebase that kept either alone would leave the other
+    // silently absent — the grant would fall back to "no contract", or the stamp would never
+    // fire and a paid claim would be released.
     ...(opts?.origin !== undefined ? { decideGrant: grantDecider(engine, opts.origin) } : {}),
+    runId: opts?.runId,
+    hooks: opts?.hooks,
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

@@ -15,12 +15,13 @@ import type { LynoxHooks } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
-import { readDurableKnowledgeForDebug } from './http-api.js';
+import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BulkTriggerLockedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
+import { RunHistory } from '../core/run-history.js';
 
 // === Mock dependencies ===
 
@@ -7104,6 +7105,701 @@ describe('LynoxHTTPApi', () => {
       mockHistoryDeletePlannedPipeline.mockReturnValue(false);
       const res = await jsonFetch('/api/workflows/ghost', { method: 'DELETE' });
       expect(res.status).toBe(404);
+    });
+
+    describe('the run claim — POST with an idempotency key (PRD §3.1)', () => {
+      // These drive a REAL `history.db`. A mock would prove the route CALLS something;
+      // only real rows prove that a repeat is refused and that a paid run is never
+      // silently released. `runSavedWorkflow` stays mocked — the orchestrator is not the
+      // subject — but `runGuardedSavedWorkflow` is the real one.
+      //
+      // ⚠ TWO of the four seams travel here, not four, as this said until a refuter checked
+      // it: route → wrapper, and wrapper → `runSavedWorkflow`'s runtime argument. Seam 3
+      // (`runSavedWorkflow` reading them off `runtime` into `buildRunCtx`) is BEHIND the mock
+      // boundary and seam 4 (`buildRunCtx` → `runManifest`) below it; they are witnessed in
+      // `pipeline.test.ts` and `runner.test.ts`. Seam 3 had no witness anywhere until that
+      // review — precisely because this sentence claimed it did.
+      let claimDir: string;
+      let claimHistory: RunHistory;
+
+      // ⚠ THIS BLOCK REPAYS ITS OWN RATE-LIMIT SPEND, for the reason the trigger-run
+      // describe above documents: the per-IP window is 600 requests / 60 s, every request
+      // in this file comes from 127.0.0.1, so the whole file shares ONE bucket and already
+      // sits close to the ceiling. Measured here: these cases made ELEVEN
+      // `GET /api/oauth/callback` tests four thousand lines below fail with
+      // `expected 429 to be 200`, deterministically — a failure that names no cause and
+      // points at the wrong file. Snapshot and restore, never `clear()`: clearing would
+      // hand a later describe headroom it is not supposed to have and hide a regression in
+      // the limit itself.
+      const rateCounts = (): Map<string, { count: number }> =>
+        (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      let claimWindowBefore = new Map<string, number>();
+      beforeAll(() => { claimWindowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+      afterAll(() => { for (const [k, e] of rateCounts()) e.count = claimWindowBefore.get(k) ?? 0; });
+
+      function swapEngine(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origs: Record<string, unknown> = {};
+        for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+        return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+      }
+
+      /** Run `test` with the route reading and writing the real claim table. */
+      function withClaimDb(test: () => Promise<void>): Promise<void> {
+        return swapEngine({ getRunHistory: () => claimHistory }, test);
+      }
+
+      beforeEach(() => {
+        claimDir = mkdtempSync(join(tmpdir(), 'lynox-route-claim-'));
+        claimHistory = new RunHistory(join(claimDir, 'history.db'));
+        // clearAllMocks (global beforeEach) clears CALLS, not implementations — an
+        // implementation left standing here would reach every sibling describe.
+        mockRunSavedWorkflow.mockReset();
+      });
+      afterEach(() => {
+        mockRunSavedWorkflow.mockReset();
+        try { claimHistory.close(); } catch { /* already closed */ }
+        rmSync(claimDir, { recursive: true, force: true });
+      });
+
+      /**
+       * A runner that reaches the point where it SPENDS — it fires `onRunStart` off the
+       * runtime argument, exactly where `runManifest` fires it — and then ends in `shape`.
+       * Reading the hook off argument 5 is what makes this a test of the seam rather than
+       * of the mock: without the `hooks` pass-through there is nothing to call.
+       */
+      function runnerThatStarts(shape: unknown): void {
+        mockRunSavedWorkflow.mockImplementation(async (...args: unknown[]) => {
+          const runtime = args[4] as { hooks?: { onRunStart?: () => void } } | undefined;
+          runtime?.hooks?.onRunStart?.();
+          return shape;
+        });
+      }
+
+      it('WITNESS 2: a run that throws AFTER the start does NOT release the claim', async () => {
+        // The one witness that separates BLOCKER 1 from "works". A run that threw after
+        // it started comes back in EXACTLY the shape of a run refused before it started
+        // — `{ ok: false, error: 'Workflow execution failed: …' }`, with no runId, from
+        // pipeline.ts's catch — and the route has ONE error branch for both. A release
+        // sited there releases a claim whose run already spent money, and the retry pays
+        // twice: the very damage the claim exists to prevent, just moved. `started_at` is
+        // the only thing that tells the two apart, which is why it is a column.
+        runnerThatStarts({ ok: false, error: 'Workflow execution failed: boom' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ idempotencyKey: 'k-1' }),
+          });
+          // The failure is still reported as a failure — this witness is about the claim,
+          // not about swallowing the error.
+          expect(res.status).toBe(400);
+          const claim = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
+          expect(claim).not.toBeNull();
+          expect(claim?.startedAt).not.toBeNull();
+        });
+      });
+
+      it('a run REFUSED before it started releases the claim, so a legitimate retry gets through', async () => {
+        // The other half of the asymmetry, on the same machinery and in the same shape:
+        // `ok: false` with no runId. Without this witness, "never release" would satisfy
+        // witness 2 while burning the key of every user whose run was refused — a credit
+        // top-up could then never be retried.
+        mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Run blocked: credit exhausted' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', {
+            method: 'POST',
+            body: JSON.stringify({ idempotencyKey: 'k-1' }),
+          });
+          expect(res.status).toBe(400);
+          expect(claimHistory.readWorkflowRunClaim('wf-1', 'k-1')).toBeNull();
+        });
+      });
+
+      it('crash after started_at, before the run row: the claim stands and the key is NOT reusable', async () => {
+        // The `SQLITE_BUSY` state (PRD §3.1, table row 2): `started_at` is set and no
+        // `pipeline_runs` row ever landed, because the insert is fire-and-forget. The
+        // route cannot tell a dead run from one still spending, so it refuses — and
+        // refusing is what keeps a second paid run from being handed out silently.
+        runnerThatStarts({ ok: false, error: 'Workflow execution failed: process died' });
+        await withClaimDb(async () => {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          mockRunSavedWorkflow.mockClear();
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(409);
+          // and the second call never reached the runner at all
+          expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+        });
+      });
+
+      /** Put a claim into a given state directly, so a branch can be driven without
+       *  having to produce the state through a run first. */
+      function seedClaim(key: string, runId: string, opts: { started: boolean; status?: string }): void {
+        claimHistory.claimWorkflowRun('wf-1', key, runId);
+        if (opts.started) claimHistory.markWorkflowRunStarted(runId);
+        if (opts.status !== undefined) {
+          claimHistory.getDb().prepare(
+            `INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_cost_usd)
+             VALUES (?, 'wf', ?, '{}', 0.25)`,
+          ).run(runId, opts.status);
+        }
+      }
+
+      it('answers 409 run_claim_in_flight while another request holds an UNSTARTED claim', async () => {
+        seedClaim('k-1', 'run-a', { started: false });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(409);
+          const body = await res.json() as { code: string; runId: string };
+          expect(body.code).toBe('run_claim_in_flight');
+          expect(body.runId).toBe('run-a');
+          expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+        });
+      });
+
+      it('answers 409 run_in_progress while the claimed run is RUNNING', async () => {
+        seedClaim('k-1', 'run-a', { started: true, status: 'running' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(409);
+          const body = await res.json() as { code: string; runId: string };
+          expect(body.code).toBe('run_in_progress');
+          expect(body.runId).toBe('run-a');
+          expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+        });
+      });
+
+      it('REPLAYS a completed run: 200 with its own outcome, and no second run', async () => {
+        // The point of the key. The answer is read back out of `pipeline_runs` and
+        // `pipeline_step_results` — not re-derived, and not a second execution.
+        seedClaim('k-1', 'run-a', { started: true, status: 'completed' });
+        // ⚠ A CREDENTIAL-SHAPED string, not a benign one. This 200 is the only new
+        // client-facing body built by hand rather than through `errorResponse`, so nothing
+        // else guards its masking — and with a benign fixture a mutant returning the raw
+        // stored value survived all 594 tests, because masking had nothing to act on.
+        const leaked = `sk-ant-${'e'.repeat(60)}`;
+        claimHistory.getDb().prepare(
+          `INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, error, cost_usd)
+           VALUES (?, 's2', 'failed', ?, 0.1)`,
+        ).run('run-a', `step 2 refused ${leaked}`);
+        claimHistory.getDb().prepare('UPDATE pipeline_runs SET error = ? WHERE id = ?')
+          .run(`the run also said ${leaked}`, 'run-a');
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as {
+            ran: boolean; idempotent: boolean; runId: string; status: string; costUsd: number;
+            error: string; stepErrors: Array<{ stepId: string; error: string; costUsd: number }>;
+          };
+          expect(body.idempotent).toBe(true);
+          expect(body.runId).toBe('run-a');
+          expect(body.status).toBe('completed');
+          expect(body.costUsd).toBe(0.25);
+          expect(body.stepErrors).toHaveLength(1);
+          expect(body.stepErrors[0]!.stepId).toBe('s2');
+          expect(body.stepErrors[0]!.costUsd).toBe(0.1);
+          // Masking, on both strings this body carries, and in both directions: the
+          // credential is gone and the diagnosis survives.
+          const raw = JSON.stringify(body);
+          expect(raw).not.toContain(leaked);
+          expect(body.error).toContain('the run also said');
+          expect(body.stepErrors[0]!.error).toContain('step 2 refused');
+          expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+        });
+      });
+
+      it('caps the replayed step errors by COUNT and says so when it truncates', async () => {
+        // The replay is the one body here that is free and repeatable — the claim of a
+        // completed run is never deleted — so an unbounded array is an amplifier: measured
+        // at 1.29 MB for 2000 step rows from a 90-byte POST, at up to 600 requests a minute
+        // from loopback. Each message was already capped; the COUNT was not.
+        seedClaim('k-1', 'run-a', { started: true, status: 'completed' });
+        const ins = claimHistory.getDb().prepare(
+          `INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, error, cost_usd)
+           VALUES (?, ?, 'failed', ?, 0)`,
+        );
+        for (let i = 0; i < 60; i++) ins.run('run-a', `s${i}`, `step ${i} blew up`);
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as { stepErrors: unknown[]; stepErrorsTruncated?: boolean };
+          expect(body.stepErrors).toHaveLength(50);
+          // ⚠ And the truncation is STATED. A short list that looks complete would read as
+          // "those were all the failures", which is the quiet half of the same defect.
+          expect(body.stepErrorsTruncated).toBe(true);
+        });
+      });
+
+      it('does NOT claim truncation when the whole list fits', async () => {
+        // The other direction, so a constant `true` cannot satisfy the test above.
+        seedClaim('k-1', 'run-a', { started: true, status: 'completed' });
+        claimHistory.getDb().prepare(
+          `INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, error, cost_usd)
+           VALUES (?, 's1', 'failed', 'the only failure', 0)`,
+        ).run('run-a');
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          const raw = await res.text();
+          expect(JSON.parse(raw).stepErrors).toHaveLength(1);
+          expect(raw).not.toContain('stepErrorsTruncated');
+        });
+      });
+
+      it('RESTARTS a failed run onto a new run id and runs it', async () => {
+        seedClaim('k-1', 'run-a', { started: true, status: 'failed' });
+        // The restarted run has to actually START, or the claim is released at the end of
+        // the request and `after` is null — which would make the comparison below pass
+        // against `undefined` and prove nothing.
+        runnerThatStarts({ ok: true, runId: 'ignored', status: 'completed' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const after = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
+          expect(after).not.toBeNull();
+          expect(after!.runId).not.toBe('run-a');
+          expect(after!.startedAt).not.toBeNull();
+          // and the run it started carries THAT id, not a freshly minted one of its own
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string };
+          expect(runtime.runId).toBe(after!.runId);
+        });
+      });
+
+      it('a RESTART discloses the earlier attempt and what it had already cost', async () => {
+        // The honesty requirement: this run really ran, and an earlier attempt under the
+        // same key already spent something. Without these two fields a second paid run is
+        // indistinguishable from a first one — the 200 carries this run's cost and nothing
+        // else, and the person who clicked again after a lost answer never sees the first
+        // charge. `interrupted` with a backfilled partial spend is the realistic shape: the
+        // boot sweep writes exactly that after a container restart mid-run.
+        seedClaim('k-1', 'run-a', { started: true, status: 'interrupted' });
+        claimHistory.getDb().prepare('UPDATE pipeline_runs SET total_cost_usd = ? WHERE id = ?')
+          .run(0.3, 'run-a');
+        runnerThatStarts({ ok: true, runId: 'ignored', status: 'completed', costUsd: 0.12 });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as { restartedFrom?: string; previousCostUsd?: number; costUsd: number };
+          expect(body.restartedFrom).toBe('run-a');
+          expect(body.previousCostUsd, 'the PARTIAL spend of the interrupted run').toBe(0.3);
+          // and this run's own cost stays its own — the two are not summed or confused
+          expect(body.costUsd).toBe(0.12);
+        });
+      });
+
+      it('a RESTART whose new run is refused RELEASES the claim, so the key stays usable', async () => {
+        // ⚠ A revision of this route skipped the release after a restart, reasoning that the
+        // restart clears `started_at` and the release would therefore delete "the only
+        // record that the earlier attempt had paid". The premise was false — this table has
+        // no cost column; the spend is in `pipeline_runs`, which a restart does not touch —
+        // and the skip produced a claim with `started_at IS NULL` pointing at a run that was
+        // never created. That reads as `in-flight` for ever: the view keeps its key on that
+        // 409, the confirm-release is offered for one other code only, and the way out was
+        // an engine restart, while the banner said "already running" about nothing.
+        //
+        // So the release is right here, and it is the same property as a first attempt's: a
+        // refusal BEFORE a run must never burn the key, or a person who tops up their credit
+        // can never retry. What a refused restart does lose is the disclosure of the earlier
+        // attempt's cost on the next answer, which is a registered question about
+        // accumulating it rather than something to buy with a key nobody can free.
+        seedClaim('k-1', 'run-a', { started: true, status: 'failed' });
+        claimHistory.getDb().prepare('UPDATE pipeline_runs SET total_cost_usd = ? WHERE id = ?')
+          .run(12.5, 'run-a');
+        mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Run blocked: credit exhausted' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(400);
+          expect(claimHistory.readWorkflowRunClaim('wf-1', 'k-1'),
+            'the restarted attempt spent nothing, so its claim must not survive').toBeNull();
+          // and the earlier attempt's spend is where it always was
+          expect(claimHistory.getPipelineRun('run-a')?.total_cost_usd).toBe(12.5);
+        });
+        // The key is usable again: the next attempt runs rather than hanging at 409.
+        mockRunSavedWorkflow.mockReset();
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
+        });
+      });
+
+      it('masks a string that rides in `extra`, not only the message', async () => {
+        // `extra` travels in the body the masker owns, and only `message` was masked —
+        // which made the docblock's argument true of the message and false of the fields
+        // beside it. Driven through the exported builder, since no route passes a
+        // credential there today.
+        const key = `sk-ant-${'c'.repeat(60)}`;
+        const body = buildClientErrorBody('a refusal', 'some_code', { runId: 'run-a', note: `leaked ${key}` });
+        expect(JSON.stringify(body)).not.toContain(key);
+        expect(body['note']).toContain('leaked');
+        expect(body['runId'], 'a plain id is untouched').toBe('run-a');
+      });
+
+      it('a FIRST run discloses no earlier attempt, because there was none', async () => {
+        // The other direction, so "always send the fields" cannot satisfy the test above:
+        // a client branches on their PRESENCE, so present-but-zero would announce an
+        // earlier charge that never happened.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed', costUsd: 0.12 });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const raw = await res.text();
+          expect(raw).not.toContain('restartedFrom');
+          expect(raw).not.toContain('previousCostUsd');
+        });
+      });
+
+      it('refuses a status it does not act on, instead of restarting it', async () => {
+        // `rejected` is reachable today and is NOT in the restart set. The default arm
+        // has to refuse: a status nobody enumerated must never buy a second paid run.
+        seedClaim('k-1', 'run-a', { started: true, status: 'rejected' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(409);
+          const body = await res.json() as { code: string; error: string };
+          expect(body.code).toBe('run_claim_held');
+          expect(body.error).toContain('rejected');
+          expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+        });
+      });
+
+      it('a library start carries the ORIGIN and the claim seam, not one or the other', async () => {
+        // ⚠ The rebase witness. Two tracks added fields to one options object at this exact
+        // call: `origin`, which decides whether the workflow's stored write grant applies,
+        // and the claim's pre-minted id plus its stamping hook. Keeping either side alone
+        // compiles and passes every test the other side wrote — the grant quietly falls back
+        // to "no contract", or the stamp never fires and a paid claim is released. Neither
+        // loss has a symptom, which is why the conjunction is the assertion.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          // `runSavedWorkflow`'s 5th argument is the runtime the wrapper built from both.
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string; hooks?: unknown; decideGrant?: unknown };
+          expect(runtime.runId, 'the claim seam').toEqual(expect.any(String));
+          expect(runtime.hooks, 'the stamping hook').toBeDefined();
+          expect(runtime.decideGrant, 'the grant decider, which only an origin produces').toBeDefined();
+        });
+      });
+
+      it('a KEYLESS library start still carries the origin', async () => {
+        // The half a conditional object can silently drop: an earlier shape passed
+        // `undefined` for the whole options object when no claim was held, which would have
+        // removed `origin` from every call without a key — i.e. from the cron-free default
+        // path. The grant decision must not be the sibling of an optional field.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string; hooks?: unknown; decideGrant?: unknown };
+          expect(runtime.decideGrant, 'the origin survives a request with no key').toBeDefined();
+          expect(runtime.runId, 'and no claim was taken').toBeUndefined();
+          expect(runtime.hooks).toBeUndefined();
+        });
+      });
+
+      it('the run receives the PRE-MINTED id, and the claim row holds the SAME one', async () => {
+        // The seam, read at the route: the id the claim was taken with is the id the run is
+        // given. If the run minted its own, the stamp would land on no claim.
+        //
+        // ⚠ The equality is asserted against the LIVE row, so the run has to start —
+        // otherwise the request's cleanup releases the claim and there is nothing left to
+        // compare. The first version asserted `typeof runId === 'string'` and then that the
+        // row was ABSENT, so it could not fail for the property in its own name; a mutant
+        // replacing `runId: ownedRunId` with a fresh UUID was killed by one other test, on
+        // the restart path only.
+        runnerThatStarts({ ok: true, runId: 'ignored-by-the-route', status: 'completed' });
+        await withClaimDb(async () => {
+          await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string; hooks?: unknown };
+          expect(runtime.hooks).toBeDefined();
+          const row = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
+          expect(row).not.toBeNull();
+          expect(runtime.runId).toBe(row!.runId);
+          expect(row!.startedAt, 'the stamp has to have reached THAT row').not.toBeNull();
+        });
+      });
+
+      it('releases the claim when the wrapper THROWS, rather than stranding the key', async () => {
+        // The `finally` exists for this, and nothing drove it: every runner double resolved,
+        // so a mutant turning `try { … } finally { … }` into two plain blocks survived all
+        // 594 tests in this file.
+        mockRunSavedWorkflow.mockRejectedValue(new Error('boom before any run'));
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(500);
+          expect(claimHistory.readWorkflowRunClaim('wf-1', 'k-1'),
+            'a key stranded here is indistinguishable from a paid one to the next request')
+            .toBeNull();
+        });
+      });
+
+      it('a release that THROWS does not turn a finished run into a failure', async () => {
+        // The inner `try/catch`, and the reason it is there: a throw from a `finally`
+        // REPLACES the result already computed. Without it a completed, paid run comes back
+        // as a 500, the view reads that as a failure, discards its key, and the next click
+        // pays for the whole workflow again.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        const exploding = new Proxy(claimHistory, {
+          get(target, prop) {
+            if (prop === 'releaseUnstartedWorkflowRunClaim') {
+              return (): never => { throw new Error('SQLITE_BUSY'); };
+            }
+            const v = Reflect.get(target, prop, target);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
+        await swapEngine({ getRunHistory: () => exploding }, async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as { ran: boolean; status: string };
+          expect(body.ran).toBe(true);
+          expect(body.status).toBe('completed');
+        });
+      });
+
+      it('retries the claim ONCE when it was released between the insert and the read', async () => {
+        // The `held === null` branch: the holder's run was refused before it started, so the
+        // state this request wanted is the state it now observes. Unreachable from a single
+        // request, so a mutant replacing the whole branch with an unconditional 409 survived
+        // all 594 tests. Driven by making the READ disagree with the insert exactly once.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        let reads = 0;
+        const vanishing = new Proxy(claimHistory, {
+          get(target, prop) {
+            if (prop === 'readWorkflowRunClaim') {
+              return (wf: string, key: string): null | { runId: string; startedAt: string | null } => {
+                reads += 1;
+                if (reads === 1) {
+                  // The release that landed just after our INSERT lost: the holder's run was
+                  // refused before it started, so its own cleanup took the row away. The row
+                  // really goes, which is what lets the retry below succeed.
+                  claimHistory.getDb().prepare('DELETE FROM workflow_run_claims WHERE key = ?').run(key);
+                  return null;
+                }
+                return claimHistory.readWorkflowRunClaim(wf, key);
+              };
+            }
+            const v = Reflect.get(target, prop, target);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
+        // A foreign claim makes the first INSERT lose — it has to still be there when the
+        // route inserts, or the branch is never reached. The read above is what removes it.
+        claimHistory.claimWorkflowRun('wf-1', 'k-1', 'run-foreign');
+        await swapEngine({ getRunHistory: () => vanishing }, async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          expect(reads, 'the branch has to have been taken').toBeGreaterThan(0);
+          expect(mockRunSavedWorkflow).toHaveBeenCalledTimes(1);
+          // ⚠ And the request RE-CLAIMED: asserting only "did not 409" let a mutant that
+          // ran while holding NO claim row survive — after which `markWorkflowRunStarted`
+          // updates nothing and two concurrent requests both run, which is the double paid
+          // run the whole feature exists to prevent. The row and its stamp are the property.
+          const row = claimHistory.readWorkflowRunClaim('wf-1', 'k-1');
+          expect(row, 'the retry has to have taken the claim').not.toBeNull();
+          expect(row!.startedAt, 'and the stamp has to have reached it').not.toBeNull();
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string };
+          expect(runtime.runId).toBe(row!.runId);
+        });
+      });
+
+      it('a 409 carries the run id ALONGSIDE the route\'s own sentence', async () => {
+        // The shape, read off a real refusal rather than off the helper.
+        seedClaim('k-1', 'run-a', { started: true, status: 'running' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          const body = await res.json() as { error: string; code: string; runId: string };
+          expect(body.runId).toBe('run-a');
+          expect(body.code).toBe('run_in_progress');
+          expect(body.error).toContain('already in progress');
+        });
+      });
+
+      it('files the claim under the RESOLVED workflow id, not the path segment', async () => {
+        // `getPipeline` accepts a prefix. Keying on `params.id` would let one workflow's
+        // two attempts sit in two different claims and never refuse each other.
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(200);
+          expect(claimHistory.readWorkflowRunClaim('wf-1', 'k-1')).not.toBeNull();
+          expect(claimHistory.readWorkflowRunClaim('wf', 'k-1')).toBeNull();
+          // And the RUNNER gets the resolved id too, not the path segment: passing the raw
+          // segment would have it resolve the prefix a second time, and a workflow created
+          // or deleted in between would make the claim guard a run of a different workflow.
+          expect(mockRunSavedWorkflow.mock.calls[0]![0]).toBe('wf-1');
+        });
+      });
+
+      it('takes NO claim when no key is sent — the cron and chat paths are unchanged', async () => {
+        runnerThatStarts({ ok: true, runId: 'r', status: 'completed' });
+        await withClaimDb(async () => {
+          const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+          expect(res.status).toBe(200);
+          expect(claimHistory.getDb().prepare('SELECT COUNT(*) AS n FROM workflow_run_claims').get()).toEqual({ n: 0 });
+          // and nothing is threaded, so the run mints its own id as it always did
+          const runtime = mockRunSavedWorkflow.mock.calls[0]![4] as { runId?: string; hooks?: unknown };
+          expect(runtime.runId).toBeUndefined();
+          expect(runtime.hooks).toBeUndefined();
+        });
+      });
+
+      it('rejects a malformed key with 400 and takes no claim', async () => {
+        await withClaimDb(async () => {
+          for (const bad of [{ idempotencyKey: '' }, { idempotencyKey: '   ' }, { idempotencyKey: 42 }, { idempotencyKey: 'x'.repeat(201) }]) {
+            const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST', body: JSON.stringify(bad) });
+            expect(res.status).toBe(400);
+          }
+          expect(claimHistory.getDb().prepare('SELECT COUNT(*) AS n FROM workflow_run_claims').get()).toEqual({ n: 0 });
+          expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+        });
+      });
+
+      it('takes no claim for a workflow that does not resolve', async () => {
+        // ⚠ The first version of this witness asserted the claim TABLE was empty
+        // afterwards, and a mutant that removed the guard SURVIVED it: an unresolved
+        // workflow can never start, so the request's own cleanup released the row before
+        // the assertion could see it. The route deleted the evidence. The property is
+        // "no claim is TAKEN", so the observable has to be the call, counted at a point
+        // where it still exists (memory/fb_probe_vs_survivor.md).
+        const taken: string[][] = [];
+        const spy = new Proxy(claimHistory, {
+          get(target, prop) {
+            // Bind to the TARGET, not the proxy: RunHistory reaches its own sqlite handle
+            // through `this`, and handing it the proxy breaks every other method.
+            if (prop === 'claimWorkflowRun') {
+              return (wf: string, key: string, runId: string): boolean => {
+                taken.push([wf, key, runId]);
+                return claimHistory.claimWorkflowRun(wf, key, runId);
+              };
+            }
+            const v = Reflect.get(target, prop, target);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
+        mockGetPipeline.mockReturnValue(undefined);
+        mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow "ghost" not found.' });
+        await swapEngine({ getRunHistory: () => spy }, async () => {
+          const res = await jsonFetch('/api/workflows/ghost/run', { method: 'POST', body: JSON.stringify({ idempotencyKey: 'k-1' }) });
+          expect(res.status).toBe(404);
+          expect(taken).toEqual([]);
+          expect(claimHistory.getDb().prepare('SELECT COUNT(*) AS n FROM workflow_run_claims').get()).toEqual({ n: 0 });
+        });
+      });
+    });
+
+    describe('the run route\'s statement ORDER, where a move is the whole defect', () => {
+      // Two orderings in this handler are load-bearing and neither is observable from a
+      // request, because the thing that would go wrong needs a failure that does not happen
+      // in a test: a rejected dynamic import. Both moved cleanly in a mutation round with
+      // 600 tests green, so they are pinned here on the source. Named as what it is: a
+      // check on the TEXT, which cannot see behaviour — but the alternative was nothing.
+      const ROUTE_SRC = readFileSync(
+        resolvePath(dirname(fileURLToPath(import.meta.url)), 'http-api.ts'), 'utf8',
+      );
+      const handler = ROUTE_SRC.slice(ROUTE_SRC.indexOf("'POST', '/api/workflows/:id/run'"));
+      const body = handler.slice(0, handler.indexOf("parseDynamicRoute('user', 'PATCH'"));
+
+      it('loads the runner module BEFORE taking the claim', () => {
+        // A rejected import between the claim and the `try` leaves an unstarted claim
+        // standing until the next boot sweep — and the view KEEPS its key on the 409 that
+        // state produces, so the owner clicks for ever on a run that never started.
+        const imp = body.indexOf("await import('../core/saved-workflow-runner.js')");
+        const claim = body.indexOf('history.claimWorkflowRun(');
+        expect(imp, 'the import has to be in this handler').toBeGreaterThan(-1);
+        expect(claim, 'and so does the claim').toBeGreaterThan(-1);
+        expect(imp, 'the import must come first').toBeLessThan(claim);
+      });
+
+      it('releases inside a `finally`, not after the call', () => {
+        // The release has to run on a throw out of the wrapper too. There is a behavioural
+        // witness for that above; this one says the construct is still the one that makes
+        // it reachable, since a plain sequence passes that witness for the resolved path.
+        //
+        // ⚠ By INDEX, not by a character distance. The first version allowed 900 characters
+        // between the two and failed the moment the comment between them grew — the same
+        // brittleness a sibling test in the web-ui package already paid for. A count is not
+        // a structure, and prose moves it.
+        const fin = body.indexOf('} finally {');
+        const rel = body.indexOf('releaseUnstartedWorkflowRunClaim');
+        expect(fin, 'the handler has to have a finally').toBeGreaterThan(-1);
+        expect(rel, 'and a release').toBeGreaterThan(-1);
+        expect(fin, 'the release has to come after the finally opens').toBeLessThan(rel);
+      });
+    });
+
+    describe('buildClientErrorBody — nothing in `extra` may replace the message', () => {
+      // ⚠ THREE defences in two revisions, and only the third holds. Spreading `extra`
+      // first protects `error`/`code`, but a spread order is something the next edit moves
+      // and no test observes — no caller passes an `extra.error`, so nothing fails. Typing
+      // `error?: never` protects them against an inline literal ONLY: TypeScript's
+      // excess-property check does not reach a variable, so a `Record<string, unknown>`
+      // holding `error`, or a spread of one, compiled cleanly. Measured across twelve call
+      // shapes. The keys are now REMOVED, which is the version a test can drive.
+      const KEY = `sk-ant-${'f'.repeat(60)}`;
+
+      it('drops an `error` arriving through a variable, not just an inline literal', () => {
+        const bag: Record<string, unknown> = { error: 'unmasked bypass', runId: 'run-a' };
+        const body = buildClientErrorBody('the real refusal', 'some_code', bag);
+        expect(body['error']).toBe('the real refusal');
+        expect(body['runId']).toBe('run-a');
+      });
+
+      it('drops it through a SPREAD of that variable too', () => {
+        const bag: Record<string, unknown> = { error: 'unmasked bypass' };
+        expect(buildClientErrorBody('the real refusal', undefined, { ...bag })['error'])
+          .toBe('the real refusal');
+      });
+
+      it('drops a `code` the caller tried to smuggle, keeping the real one', () => {
+        const bag: Record<string, unknown> = { code: 'not_the_real_code' };
+        expect(buildClientErrorBody('m', 'run_in_progress', bag)['code']).toBe('run_in_progress');
+      });
+
+      it('omits `code` entirely when there is none, rather than echoing extra\'s', () => {
+        const bag: Record<string, unknown> = { code: 'smuggled' };
+        expect('code' in buildClientErrorBody('m', undefined, bag)).toBe(false);
+      });
+
+      it('masks and caps the message, which is the reason this is one function', () => {
+        const body = buildClientErrorBody(`refused: ${KEY}`, 'c');
+        expect(JSON.stringify(body)).not.toContain(KEY);
+        expect(body['error']).toContain('refused');
+      });
+
+      it('passes every other extra field through untouched', () => {
+        const body = buildClientErrorBody('m', 'c', { runId: 'run-a', retryAfter: 5 });
+        expect(body['runId']).toBe('run-a');
+        expect(body['retryAfter']).toBe(5);
+      });
+    });
+
+    describe('decideHeldRunClaim — the state space, without the HTTP round trip', () => {
+      // The table of PRD §3.1, driven directly. The verdict is separable from its
+      // effect on purpose: the restart and the release both WRITE, and reading the
+      // table must not require performing them.
+      it('reads nothing-spent as in-flight whatever the run row says', () => {
+        expect(decideHeldRunClaim({ startedAt: null, status: null })).toBe('in-flight');
+        expect(decideHeldRunClaim({ startedAt: null, status: 'running' })).toBe('in-flight');
+        expect(decideHeldRunClaim({ startedAt: null, status: 'completed' })).toBe('in-flight');
+      });
+
+      it('reads spent-with-no-row as unknown-outcome', () => {
+        expect(decideHeldRunClaim({ startedAt: 'T', status: null })).toBe('unknown-outcome');
+      });
+
+      it('maps each run status a run can end in', () => {
+        expect(decideHeldRunClaim({ startedAt: 'T', status: 'completed' })).toBe('completed');
+        expect(decideHeldRunClaim({ startedAt: 'T', status: 'failed' })).toBe('restart');
+        expect(decideHeldRunClaim({ startedAt: 'T', status: 'interrupted' })).toBe('restart');
+        expect(decideHeldRunClaim({ startedAt: 'T', status: 'running' })).toBe('running');
+      });
+
+      it('refuses every status it does not enumerate', () => {
+        // The arm that matters for a value nobody has written yet. `rejected` exists
+        // today; the rest stand in for whatever a later runner adds.
+        for (const status of ['rejected', 'planned', 'executed', 'awaiting_input', '', 'COMPLETED']) {
+          expect(decideHeldRunClaim({ startedAt: 'T', status })).toBe('held');
+        }
+      });
     });
   });
 

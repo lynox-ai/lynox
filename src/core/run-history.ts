@@ -1304,6 +1304,95 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (54);
    ALTER TABLE run_tool_calls ADD COLUMN connection_id TEXT;
    ALTER TABLE run_tool_calls ADD COLUMN connection_created_at TEXT;`,
+  // v55: the run claim for POST /api/workflows/:id/run (PRD idempotency-bulk-first §3.1).
+  //
+  // `(workflow_id, key)` is the PRIMARY KEY and therefore the refusal: a second call
+  // with the same key loses the INSERT, which is how the route learns it is a repeat.
+  // The PRIMARY KEY must NOT span `run_id` — a restart swaps that column, and a key over
+  // all three would make every restart a fresh claim, so the refusal would never fire.
+  // (This said "the index" until a refuter read it against the line four below, which
+  // creates an index ON `run_id`. Two different things; only the KEY is the refusal.)
+  //
+  // The secondary index on `run_id` is created here non-unique and made UNIQUE by v56 —
+  // see there for why, and for why it is not simply edited into this statement.
+  //
+  // `started_at` is the DISCRIMINATOR, and it is a column rather than a return value
+  // because a process that dies between the run's start and its answer leaves no return
+  // value at all. The onRunStart hook sets it synchronously on this same handle, before
+  // anything is spent. Its two states are not symmetric:
+  //   NULL     — nothing was spent; the claim may be released (boot sweep, request end).
+  //   set      — spent. Even with no `pipeline_runs` row (the SQLITE_BUSY case, where the
+  //              run's own insert was swallowed) the claim is NEVER silently released.
+  //              A restart needs a row naming a definitive end; a missing row does not.
+  //
+  // ⚠ A claim with `started_at` set is not removed by any path that READS it: both of the
+  // targeted deletes are gated on `started_at IS NULL`. So a completed run's claim stays
+  // and its replay keeps working. Whether it should instead expire is an open decision in
+  // the PRD (§3.2, point 6), not an oversight; `created_at` exists so a bounded sweep can
+  // be written without a migration, and until that decision is taken nothing reads it.
+  //
+  // ⚠ "PERMANENT: nothing deletes it" is what this said, and it was wrong twice over, both
+  // times by this same change: `resetDatabase` deletes the whole table ungated, and
+  // `restartWorkflowRunClaim` sets `started_at` back to NULL — after which the gated
+  // deletes DO apply, so a restarted claim whose new run never starts is released
+  // normally. Permanence is a property of a claim that stays started, not of the row.
+  //
+  // No FK to `pipeline_runs`: the claim is written BEFORE that row exists, and it has to
+  // outlive a row whose insert was lost. The soft reference is the point.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (55);
+   CREATE TABLE IF NOT EXISTS workflow_run_claims (
+     workflow_id TEXT NOT NULL,
+     key TEXT NOT NULL,
+     run_id TEXT NOT NULL,
+     started_at TEXT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (workflow_id, key)
+   );
+   CREATE INDEX IF NOT EXISTS idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
+
+  // v56: make that index UNIQUE, so "one claim per run id" is a property of the table.
+  //
+  // `markWorkflowRunStarted` is keyed on `run_id` ALONE, so with a non-unique index one
+  // stamp sets `started_at` on every claim carrying that id — measured on a probe, two rows
+  // stamped by one call. Every producer mints a fresh UUID, so a collision cannot arise
+  // today; UNIQUE turns a convention of the single writer into something the database
+  // enforces, and a violation becomes a loud INSERT error instead of a silent double stamp.
+  //
+  // ⚠ WHY A NEW MIGRATION AND NOT AN EDIT TO v55. The first attempt changed v55's statement
+  // in place. On a database that had already run v55 that is a no-op in both directions:
+  // `schema_version` still reads 55 so the migration never re-runs, and
+  // `CREATE UNIQUE INDEX IF NOT EXISTS` sees the existing NAME and does nothing — leaving
+  // the index non-unique while the comment claimed uniqueness was established. An applied
+  // migration is history; the change belongs in a new one.
+  //
+  // The DELETE repairs a database that reached the non-unique state: rows sharing a run id
+  // are a corruption (one stamp would mark them all), and without the repair the index
+  // creation would fail and take the engine's boot with it. It is a no-op on every database
+  // that never had a duplicate, which is every database that only ever ran this code.
+  //
+  // ⚠ WHICH row survives is the whole question, and `MIN(rowid)` was the wrong answer. A
+  // duplicate can be asymmetric: the earlier row unstarted, the later one carrying
+  // `started_at`, i.e. the spend. Keeping the earliest would then destroy the only record
+  // that money was spent, and that key's owner pays again on the next click — the exact
+  // damage this delivery exists to prevent, caused by its own repair. So a STARTED row
+  // wins, and `rowid` only breaks a tie among equals.
+  //
+  // Written as two UNIONed selects rather than a window function because this runs in the
+  // engine's boot path on whatever SQLite the host shipped: the first keeps the earliest
+  // started row of every run id that has one, the second the earliest row of every run id
+  // that has none.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (56);
+   DELETE FROM workflow_run_claims
+     WHERE rowid NOT IN (
+       SELECT MIN(rowid) FROM workflow_run_claims
+         WHERE started_at IS NOT NULL GROUP BY run_id
+       UNION
+       SELECT MIN(rowid) FROM workflow_run_claims
+         WHERE run_id NOT IN (SELECT run_id FROM workflow_run_claims WHERE started_at IS NOT NULL)
+         GROUP BY run_id
+     );
+   DROP INDEX IF EXISTS idx_workflow_run_claims_run;
+   CREATE UNIQUE INDEX idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
 ];
 
 export class RunHistory {
@@ -2156,6 +2245,96 @@ export class RunHistory {
          total_duration_ms = (SELECT COALESCE(SUM(duration_ms), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id)
        WHERE status = 'running'`,
     ).run().changes;
+  }
+
+  /** What a claim says, as the route needs it. `startedAt === null` means nothing was
+   *  spent under this claim; a non-null value means it was, whatever `pipeline_runs`
+   *  does or does not hold (PRD idempotency-bulk-first §3.1). */
+  readWorkflowRunClaim(workflowId: string, key: string): { runId: string; startedAt: string | null } | null {
+    const r = this.db.prepare(
+      'SELECT run_id, started_at FROM workflow_run_claims WHERE workflow_id = ? AND key = ?',
+    ).get(workflowId, key) as { run_id: string; started_at: string | null } | undefined;
+    return r === undefined ? null : { runId: r.run_id, startedAt: r.started_at };
+  }
+
+  /** Take the claim, or learn that someone already holds it. The INSERT **is** the
+   *  barrier: `ON CONFLICT DO NOTHING` plus `changes()` distinguishes "key already
+   *  taken" from every other write error, which a thrown insert cannot — and that
+   *  conflation is what would release a claim after a paid crash.
+   *  Returns true only for the caller that took it. */
+  claimWorkflowRun(workflowId: string, key: string, runId: string): boolean {
+    return this.db.prepare(
+      `INSERT INTO workflow_run_claims (workflow_id, key, run_id) VALUES (?, ?, ?)
+       ON CONFLICT (workflow_id, key) DO NOTHING`,
+    ).run(workflowId, key, runId).changes === 1;
+  }
+
+  /** Stamp the claim as having spent something. Called SYNCHRONOUSLY from the run's
+   *  `onRunStart` hook, on this same handle, before the first spend — so a process
+   *  that dies before answering still leaves the mark. Keyed by `run_id` because the
+   *  hook knows the run, not the caller's key. No-op when no claim points here (a
+   *  cron or chat-driven run has none), which is why this returns void rather than a
+   *  boolean nobody could act on. */
+  markWorkflowRunStarted(runId: string): void {
+    this.db.prepare(
+      'UPDATE workflow_run_claims SET started_at = ? WHERE run_id = ? AND started_at IS NULL',
+    ).run(new Date().toISOString(), runId);
+  }
+
+  /** Hand the claim to a NEW run id after the old run ended without a result.
+   *
+   *  ⚠ The status subquery is DELIBERATELY not NULL-safe, and an earlier version of this
+   *  method was. It wrapped the subquery in `COALESCE(..., 'interrupted')` so that a claim
+   *  whose run row never landed (the `SQLITE_BUSY` case) would restart, and the docblock
+   *  argued that without it a client holding the key would wait at 409 forever. Both the
+   *  mechanism and the argument were wrong, in the dangerous direction: a missing row
+   *  cannot tell a run that DIED from one that is still spending, so an automatic restart
+   *  there is a second paid run — the exact damage the claim exists to prevent. A missing
+   *  row therefore yields NULL, `NULL IN (...)` is not true, and nothing is restarted.
+   *
+   *  What actually prevents the forever-409 is the KEY'S LIFETIME in the client: the route
+   *  answers `run_outcome_unknown` and the library view asks its owner whether to release
+   *  the attempt, naming what a new run would duplicate. The way out of that state is a new
+   *  key that a person chose, not a silent restart of a run whose outcome nobody knows.
+   *
+   *  ⚠ This said "the library view discards the key", which was true when written and false
+   *  FIVE commits later: a security round showed that discarding it on that code let the
+   *  next click start a second, possibly concurrent, paid run, so it became a confirm. The
+   *  decision here is unchanged; its recorded reason had stopped describing the mechanism.
+   *  (The retraction first said "one commit later" — wrong, and wrong on the one thing in
+   *  it that can be checked: the sentence was written in "Restart a claim only on a run
+   *  with a definitive end" and falsified in "Stop the client from undoing the server's own
+   *  refusal", five apart. A correction carrying a wrong number is worse than none, because
+   *  the number is what a reader trusts.)
+   *
+   *  So what restarts is a run with a DEFINITIVE end: a `pipeline_runs` row saying `failed`
+   *  or `interrupted`. `started_at IS NOT NULL` is the other precondition — a claim that
+   *  never spent anything is released, not restarted. Returns true only for the caller that
+   *  won the swap, so two retries cannot both restart. */
+  restartWorkflowRunClaim(workflowId: string, key: string, oldRunId: string, newRunId: string): boolean {
+    return this.db.prepare(
+      `UPDATE workflow_run_claims SET run_id = ?, started_at = NULL
+         WHERE workflow_id = ? AND key = ? AND run_id = ? AND started_at IS NOT NULL
+           AND (SELECT status FROM pipeline_runs WHERE id = ?) IN ('failed','interrupted')`,
+    ).run(newRunId, workflowId, key, oldRunId, oldRunId).changes === 1;
+  }
+
+  /** Release a claim that spent nothing — the request's own cleanup when the run was
+   *  refused before it started. The `started_at IS NULL` guard is what keeps this from
+   *  releasing a paid run: a refusal before the start and a crash after it arrive at
+   *  the route in the SAME shape, so the shape cannot be the discriminator. */
+  releaseUnstartedWorkflowRunClaim(workflowId: string, key: string, runId: string): boolean {
+    return this.db.prepare(
+      'DELETE FROM workflow_run_claims WHERE workflow_id = ? AND key = ? AND run_id = ? AND started_at IS NULL',
+    ).run(workflowId, key, runId).changes === 1;
+  }
+
+  /** Boot sweep for claims: drop the ones that never spent anything. A claim WITH
+   *  `started_at` is left standing on purpose — its run paid, and the route reads it as
+   *  `interrupted` and allows a restart. Sweeping those would hand a second paid run to
+   *  the next caller. Returns the number of rows dropped. */
+  sweepUnstartedWorkflowRunClaims(): number {
+    return this.db.prepare('DELETE FROM workflow_run_claims WHERE started_at IS NULL').run().changes;
   }
 
   /**
@@ -3161,10 +3340,23 @@ export class RunHistory {
    */
   resetDatabase(): void {
     const tables = [
-      'run_tool_calls', 'run_spawns', 'prompt_snapshots', 'memory_embeddings',
+      'run_tool_calls', 'run_spawns', 'prompt_snapshots',
       'pre_approval_sets', 'pre_approval_events', 'pipeline_runs', 'pipeline_step_results',
       'advisor_suggestions', 'tasks', 'security_events', 'processes', 'wire_snapshots', 'runs',
+      // A claim left behind by a wipe that took `pipeline_runs` with it has `started_at`
+      // set and no run row, which the route reads as "it may still be running" — a
+      // sentence that is false about a run the reset destroyed. This list is the
+      // hand-maintained kind every new table has to remember to join, and v55 did not.
+      'workflow_run_claims',
     ];
+    // ⚠ `memory_embeddings` is NOT in that list, and removing it is a pre-existing repair
+    // this change had to make to mean anything: v19 drops that table ("replaced by
+    // Knowledge Graph"), so it has not existed on any database since. It stood at position
+    // four, and `DELETE FROM` a missing table throws — so this method threw before reaching
+    // anything after it, on every real `history.db` (measured: 14 of the 15 names existed).
+    // Adding a 15th entry to a list that never gets that far would have been a line that
+    // cannot run, so the dead entry goes. No production caller invokes this, which is why
+    // the method could stay broken unnoticed since v19.
     this.db.pragma('foreign_keys = OFF');
     for (const table of tables) {
       this.db.prepare(`DELETE FROM "${table}"`).run();
