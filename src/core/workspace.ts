@@ -89,7 +89,7 @@ export function isPathWithin(child: string, parent: string): boolean {
 }
 
 /** Allowed read-only roots (besides workspace + /tmp). */
-const READ_ONLY_ROOTS = ['/app'];
+export const READ_ONLY_ROOTS: readonly string[] = ['/app'];
 
 /**
  * Resolve a path and validate it's within allowed boundaries.

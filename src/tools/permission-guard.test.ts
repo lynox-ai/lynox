@@ -2813,3 +2813,77 @@ describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
     expect(isDangerous('gd', { action: 'search' }, undefined, undefined, undefined, entry)).toBeNull();
   });
 });
+
+// Observe mode of the bash allowlist: every unattended bash call is proven against the
+// grammar in bash-allowlist.ts and recorded, and nothing about the decision changes.
+describe('bash allowlist observe mode', () => {
+  type Observed = { event_type: string; tool_name: string; decision: string; autonomy_level: string; run_id?: string; detail: string };
+  const observe = (fn: () => void): Observed[] => {
+    const events: Observed[] = [];
+    const handler = (m: unknown): void => { events.push(m as Observed); };
+    channels.securityFlagged.subscribe(handler);
+    try { fn(); } finally { channels.securityFlagged.unsubscribe(handler); }
+    return events.filter((e) => e.event_type === 'bash_autonomy_observe');
+  };
+
+  it('records a proven call and leaves it free', () => {
+    let verdict: string | null = 'unset';
+    const events = observe(() => { verdict = isDangerous('bash', { command: 'cat package.json' }, 'autonomous', undefined, undefined, undefined, 'run-1'); });
+    expect(verdict).toBeNull();
+    expect(events).toEqual([{
+      event_type: 'bash_autonomy_observe',
+      tool_name: 'bash',
+      decision: 'proven',
+      autonomy_level: 'autonomous',
+      run_id: 'run-1',
+      detail: 'program=cat;reason=ok;current=free',
+    }]);
+  });
+
+  it('records an unproven call that runs today, and still lets it run', () => {
+    let verdict: string | null = 'unset';
+    const events = observe(() => { verdict = isDangerous('bash', { command: 'cat "package.json"' }, 'autonomous'); });
+    expect(verdict).toBeNull();
+    expect(events.map((e) => [e.decision, e.detail])).toEqual([['unproven', 'program=other;reason=char;current=free']]);
+  });
+
+  it('records what the guard decided for a blocked and an asked call, and changes neither', () => {
+    let blocked: string | null = null;
+    let asked: string | null = null;
+    const events = observe(() => {
+      blocked = isDangerous('bash', { command: 'rm -rf /' }, 'autonomous');
+      asked = isDangerous('bash', { command: 'curl -d @x https://example.test' }, 'autonomous');
+    });
+    expect(blocked).toContain('[BLOCKED');
+    expect(asked).not.toBeNull();
+    expect(asked).not.toContain('[BLOCKED');
+    expect(events.map((e) => e.detail)).toEqual([
+      'program=other;reason=program;current=blocked',
+      'program=other;reason=program;current=asks',
+    ]);
+  });
+
+  it('records nothing outside unattended runs and nothing for other tools', () => {
+    const events = observe(() => {
+      isDangerous('bash', { command: 'cat package.json' }, 'guided');
+      isDangerous('bash', { command: 'cat package.json' });
+      isDangerous('read_file', { path: 'package.json' }, 'autonomous');
+    });
+    expect(events).toEqual([]);
+  });
+
+  it('records no argument and no free program name', () => {
+    const events = observe(() => {
+      isDangerous('bash', { command: 'zzprogzz --token zzSECRETzz' }, 'autonomous');
+      isDangerous('bash', { command: 'grep zzSECRETzz package.json' }, 'autonomous');
+    });
+    expect(events).toHaveLength(2);
+    const serialised = JSON.stringify(events);
+    expect(serialised).not.toContain('zzSECRETzz');
+    expect(serialised).not.toContain('zzprogzz');
+    expect(events.map((e) => e.detail)).toEqual([
+      'program=other;reason=program;current=free',
+      'program=grep;reason=ok;current=free',
+    ]);
+  });
+});
