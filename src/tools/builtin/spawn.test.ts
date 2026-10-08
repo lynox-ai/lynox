@@ -364,6 +364,16 @@ describe('spawn_agent tool', () => {
       'and both are released when the chain unwinds').toBe(0);
   });
 
+  it('a child runs under its parent\'s principal, so a mandate\'s lock reaches it (PRD D1, §3.13 E5)', async () => {
+    // The child's tool list is already the parent's filtered one; the principal is what makes
+    // the child refuse a locked tool_use by name and lock its own children in turn.
+    const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org' };
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    vi.mocked(MockAgent).mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'child', task: 'Analyze' }] }, makeAgent({ principal: MANDATE } as Partial<IAgent>));
+    expect((vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>)['principal']).toEqual(MANDATE);
+  });
+
   it('spawns a sub-agent and returns result', async () => {
     const agent = makeAgent();
     const result = await spawnAgentTool.handler(

@@ -2060,6 +2060,42 @@ describe('Agent', () => {
       return store;
     }
 
+    it('a mandate\'s turn does not resolve a provider key, and the vault is never asked (PRD D1)', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_k', name: 'http_request',
+          input: { url: 'https://collector.example.org', headers: { 'x-api-key': 'secret:ANTHROPIC_API_KEY' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
+        secretStore: store, principal: { kind: 'mandate', email: 'setup@example.org' },
+      });
+      await agent.send('send the key');
+      expect(tool.handler).not.toHaveBeenCalled();
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+      expect(store.findUnresolvedSecretRefs).not.toHaveBeenCalled();
+    });
+
+    it('control: a mandate\'s turn still resolves a secret it may use', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_m', name: 'http_request',
+          input: { url: 'https://api.example.com', headers: { Authorization: 'Bearer secret:MY_KEY' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
+        secretStore: store, principal: { kind: 'mandate', email: 'setup@example.org' },
+      });
+      await agent.send('Call API');
+      expect(tool.handler).toHaveBeenCalled();
+    });
+
     it('resolves secret:KEY_NAME in tool input after consent', async () => {
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
@@ -4692,6 +4728,77 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
     it('is not added when web_research is registered, excluded or not', async () => {
       expect(await namesFor([makeTool('bash'), makeTool('web_research')])).not.toContain('web_search');
       expect(await namesFor([makeTool('bash'), makeTool('web_research')], ['web_research'])).not.toContain('web_search');
+    });
+  });
+
+  describe('mandate tool lock (PRD customer-granted-operator-access D1)', () => {
+    // A mandate's agent gets only the tools on MANDATE_TOOL_SURFACE. The lock is read from
+    // `principal` at the three places `excludeTools` applies, so each place has its own
+    // case: the list sent to the model, the list handed to children, the refusal at
+    // execution. `plugin_reader` stands for any tool the allowlist does not name.
+    const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org' };
+    const toolSet = (): ToolEntry[] => [makeTool('bash'), makeTool('read_file'), makeTool('task_list'), makeTool('plugin_reader')];
+    // The LAST request: `streamRequestOf` reads the first, and the reused-agent case sends twice.
+    const sentNames = async (agent: Agent): Promise<Array<string | undefined>> => {
+      mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+      await agent.send('hi');
+      const calls = (agent as unknown as {
+        client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } };
+      }).client.beta.messages.stream.mock.calls;
+      return (calls.at(-1)![0] as StreamRequest).tools.map((t) => t.name);
+    };
+    const build = (principal?: typeof MANDATE): Agent => new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: toolSet(),
+      ...(principal ? { principal } : {}),
+      toolContext: createToolContext({ lazy_tools_enabled: false }),
+    });
+
+    it('sends a mandate\'s model only the tools on the surface', async () => {
+      const names = await sentNames(build(MANDATE));
+      expect(names).toContain('task_list');
+      expect(names).not.toContain('bash');
+      expect(names).not.toContain('read_file');
+      expect(names, 'a tool the allowlist does not name is withheld').not.toContain('plugin_reader');
+    });
+
+    it('control: the owner\'s agent sends all of them', async () => {
+      const names = await sentNames(build());
+      expect(names).toEqual(expect.arrayContaining(['bash', 'read_file', 'task_list', 'plugin_reader']));
+    });
+
+    it('reaches an agent built for the owner once its principal is set — the reused-agent case', async () => {
+      const agent = build();
+      agent.principal = MANDATE;
+      expect(await sentNames(agent)).not.toContain('bash');
+      agent.principal = { kind: 'owner' };
+      expect(await sentNames(agent), 'and an owner run gets them back').toContain('bash');
+    });
+
+    it('hands children only the surface (getAvailableTools feeds spawn and workflow steps)', () => {
+      const names = build(MANDATE).getAvailableTools().map(t => t.definition.name);
+      expect(names).toEqual(['task_list']);
+    });
+
+    it('refuses a tool_use that names a locked tool, even though the tool is in the registry', async () => {
+      const bash = makeTool('bash');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sh', name: 'bash', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [bash], principal: MANDATE });
+      expect(await agent.send('run a shell')).toBe('Done');
+      expect(bash.handler).not.toHaveBeenCalled();
+      const content = (agent.getMessages().at(-2) as { content: Array<{ type: string; is_error?: boolean }> }).content;
+      expect(content.find(b => b.type === 'tool_result')?.is_error).toBe(true);
+    });
+
+    it('control: the same tool_use runs for the owner', async () => {
+      const bash = makeTool('bash');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sh', name: 'bash', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [bash] });
+      await agent.send('run a shell');
+      expect(bash.handler).toHaveBeenCalled();
     });
   });
 });

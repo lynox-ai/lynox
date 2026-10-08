@@ -967,6 +967,21 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
   });
 
+  it('threads options.principal into the inline spawner, also through a nested pipeline (PRD D1, §3.13 E5)', async () => {
+    // spawnInline's principal is the 18th positional argument (index 17), after abortScope.
+    const principal = { kind: 'mandate', email: 'setup@example.org' } as const;
+    const tools = [{ definition: { name: 'task_list', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    mockSpawnInline.mockClear();
+    await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
+      CONFIG, { parentTools: tools, principal });
+    expect(mockSpawnInline.mock.calls[0]![17]).toEqual(principal);
+    mockSpawnInline.mockClear();
+    await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
+      CONFIG, { parentTools: tools, principal });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    expect(mockSpawnInline.mock.calls[0]![17]).toEqual(principal);
+  });
+
   it('threads options.abortScope through a nested pipeline into its inline steps', async () => {
     // ⛔ The nested forward was pinned by NOTHING: deleting it survived the whole suite,
     // while the comment at the forwarding line claimed "without this line a nested

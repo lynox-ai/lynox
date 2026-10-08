@@ -88,6 +88,12 @@ export interface AgentConfig {
   gcpRegion?:          string | undefined;
   currentRunId?:       string | undefined;
   /**
+   * Who started the turn this agent runs. A mandate's lock withholds tools at every place
+   * `excludeTools` applies (PRD customer-granted-operator-access D1). Absent = the owner.
+   * A spawned child carries its parent's.
+   */
+  principal?:          import('../core/request-principal.js').RequestPrincipal | undefined;
+  /**
    * Sink for this agent's own tool calls — the ONE owner of tool-call
    * persistence. The agent calls it with the run id it is currently working
    * under, so a spawned child (which carries its OWN `currentRunId`) books onto

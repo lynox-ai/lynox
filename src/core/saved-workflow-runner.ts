@@ -4,6 +4,8 @@ import type { UntrustedCause } from './untrusted-signals.js';
 
 import type { Engine, RunContext } from './engine.js';
 import { checkPersistentBudget } from './session-budget.js';
+import { toolLockFor } from './mandate-tool-lock.js';
+import type { RequestPrincipal } from './request-principal.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
 import { decideRunGrant, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
@@ -84,6 +86,9 @@ export async function runGuardedSavedWorkflow(
      *  through before. Without that seam the stamp never happens and every claim reads as
      *  "nothing spent", which releases a claim after a paid crash. */
     hooks?: RunHooks | undefined;
+    /** Who started the run, when a request did. A mandate's steps get only the tools its
+     *  lock allows (PRD customer-granted-operator-access D1, §3.13 E4). Absent = the owner. */
+    principal?: RequestPrincipal | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
@@ -146,9 +151,16 @@ export async function runGuardedSavedWorkflow(
   //    the first draft of this comment said the latter, which would read as a check that had
   //    been considered and ruled out. What else this path does or does not receive is tracked
   //    outside this repo rather than described here.
+  //
+  //    A run a MANDATE started by hand is the exception the paragraph above leaves room for:
+  //    there is still no parent agent, but there is a principal, and its lock is a grant this
+  //    run must not exceed. Its steps get the engine's set narrowed to that lock, and the
+  //    step agents are built from this list, so they cannot reach what it leaves out.
   const toolContext = engine.getToolContext();
+  const lock = opts?.principal ? toolLockFor(opts.principal) : null;
+  const tools = lock === null ? toolContext.tools : toolContext.tools.filter(t => lock.has(t.definition.name));
   const result = await runSavedWorkflow(workflowId, engine.getRunHistory(), config, params, {
-    tools: toolContext.tools,
+    tools,
     toolContext,
     memory: engine.getMemory(),
     seed: opts?.seed,
@@ -160,6 +172,9 @@ export async function runGuardedSavedWorkflow(
     ...(opts?.origin !== undefined ? { decideGrant: grantDecider(engine, opts.origin) } : {}),
     runId: opts?.runId,
     hooks: opts?.hooks,
+    // And the step agents are built for that principal, so its lock also refuses them the
+    // protected secrets and its writes carry its name.
+    principal: opts?.principal,
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

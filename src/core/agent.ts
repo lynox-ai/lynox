@@ -69,7 +69,7 @@ import { InputRequiredError, isInputRequired } from './input-required.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
-import { maskSecretPatterns } from './secret-store.js';
+import { maskSecretPatterns, isProtectedSecretWrite } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
@@ -103,6 +103,9 @@ import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
 import { runInCallSlot } from './call-connection.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
+import type { RequestPrincipal } from './request-principal.js';
+import { toolLockFor } from './mandate-tool-lock.js';
 
 /**
  * Per-image token estimate for occupancy accounting. Anthropic bills vision by
@@ -465,8 +468,8 @@ export class Agent implements IAgent {
    * disabled tools cannot be re-introduced by descending the agent tree.
    */
   getAvailableTools(): ToolEntry[] {
-    if (this._excludeSet.size === 0) return this.tools;
-    return this.tools.filter(t => !this._excludeSet.has(t.definition.name));
+    if (this._excludeSet.size === 0 && this._toolLock === null) return this.tools;
+    return this.tools.filter(t => !this._withheld(t.definition.name));
   }
   /** Snapshot of the parent's excludeTools — propagated to spawned children. */
   getExcludedToolNames(): readonly string[] {
@@ -913,6 +916,28 @@ export class Agent implements IAgent {
    */
   isInternalRun = false;
 
+  /**
+   * Who started the turn this agent runs (PRD customer-granted-operator-access D1, §3.13).
+   * Its lock (`toolLockFor`) withholds tools on top of `excludeTools`, at every place
+   * `excludeTools` is applied: the tool list sent to the model, the tools handed to children
+   * (`getAvailableTools`), and the refusal at execution. It is applied at those places
+   * rather than when the agent is built because a session keeps its agent across runs and
+   * rebuilds it only for some changes: an agent built during an owner's run is reused by a
+   * mandate's run, and a lock that lived only in the constructor would not reach it.
+   */
+  get principal(): RequestPrincipal { return this._principal; }
+  set principal(p: RequestPrincipal) {
+    this._principal = p;
+    this._toolLock = toolLockFor(p);
+  }
+  private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+  private _toolLock: ReadonlySet<string> | null = null;
+
+  /** Whether a tool is kept from this agent: disabled by the user, or outside the lock. */
+  private _withheld(name: string): boolean {
+    return this._excludeSet.has(name) || (this._toolLock !== null && !this._toolLock.has(name));
+  }
+
   /** Override effort for the next run without recreating the agent. */
   setEffort(level: EffortLevel | undefined): void { this.effort = level; }
   getEffort(): EffortLevel | undefined { return this.effort; }
@@ -1184,6 +1209,7 @@ export class Agent implements IAgent {
     this.maxContextWindowTokens = config.maxContextWindowTokens;
     this.nativeContextWindow = config.nativeContextWindow;
     this.currentRunId = config.currentRunId;
+    if (config.principal !== undefined) this.principal = config.principal;
     this.recordToolCall = config.recordToolCall;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
@@ -2907,7 +2933,7 @@ export class Agent implements IAgent {
     // and the fallback would otherwise hand back the search the operator switched off, outside any
     // approval gate on web_research.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
-    const searchExcluded = this._excludeSet.has('web_research') || this._excludeSet.has('web_search');
+    const searchExcluded = this._withheld('web_research') || this._withheld('web_search');
     const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
@@ -2937,7 +2963,7 @@ export class Agent implements IAgent {
     // sub-agents byte-identical, so the flag only reshapes the prefix where it
     // pays — full-tool tenants carrying mail_*/google_*/api_setup/etc.
     const lazyToolsActive = lazyEnabled
-      && this.tools.some(t => !this._excludeSet.has(t.definition.name)
+      && this.tools.some(t => !this._withheld(t.definition.name)
         && LAZY_DEFERRED_TOOLS.has(t.definition.name));
     // Tenant tool definitions. Deterministically SORTED by name (code-point) — a
     // cheap cache-safety pin: order today is registration order, so a future
@@ -2956,7 +2982,7 @@ export class Agent implements IAgent {
     const mappedTenantTools: BetaTool[] = this._suppressTools
       ? []
       : this.tools
-          .filter(t => !this._excludeSet.has(t.definition.name))
+          .filter(t => !this._withheld(t.definition.name))
           .map(t => (lazyToolsActive && LAZY_DEFERRED_TOOLS.has(t.definition.name)
             ? { ...t.definition, defer_loading: true }
             : t.definition));
@@ -3875,6 +3901,14 @@ export class Agent implements IAgent {
         is_error: true,
       };
     }
+    if (this._withheld(tc.name)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: tc.id,
+        content: annotateNonRetryable(`Tool not available in this session: ${tc.name}`),
+        is_error: true,
+      };
+    }
 
     // DK.1 (H4): record the dispatched tool name so a `remember` write later this turn can
     // derive `sourceUntrusted` from the capability denylist (over-marking is the SAFE
@@ -4002,6 +4036,25 @@ export class Agent implements IAgent {
     if (this.secretStore && !Agent.SECRET_RESOLUTION_EXEMPT.has(tc.name)) {
       const secretNames = this.secretStore.extractSecretNames(tc.input);
       if (secretNames.length > 0) {
+        // A mandate's turn does not resolve the instance's provider keys or its infrastructure
+        // secrets (PRD customer-granted-operator-access D1). The same hurdle as the missing
+        // `bash`: on a managed instance the provider key in the environment is the platform's,
+        // and the consent and destination prompts below are no bar for a mandate, which
+        // answers its own session's prompts. Every provider slot is refused, the tenant's own
+        // keys included: a mandate sets the instance up and has no use for them in a request.
+        // Refused on the name, before the vault is asked: the value is never bound, and the
+        // answer is the same whether the vault holds the name or not.
+        if (this._toolLock !== null) {
+          const held = secretNames.filter(n => isProtectedSecretWrite(n));
+          if (held.length > 0) {
+            return {
+              type: 'tool_result',
+              tool_use_id: tc.id,
+              content: annotateNonRetryable(`Secret(s) not available in this session: ${held.map(n => `"${n}"`).join(', ')}.`),
+              is_error: true,
+            };
+          }
+        }
         // Fail-loud gate: refuse the tool call if ANY referenced secret
         // is missing from the vault. Previously the resolver silently
         // left the `secret:NAME` literal in place, which then got sent

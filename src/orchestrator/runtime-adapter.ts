@@ -1,3 +1,4 @@
+import type { RequestPrincipal } from '../core/request-principal.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -643,6 +644,9 @@ export async function spawnViaAgent(
   runTaint?: RunTaint | undefined,
   /** The session whose abort may reach this step, if any — see `AbortScope`. */
   abortScope?: AbortScope | undefined,
+  /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
+   *  D1, §3.13 E5). After `abortScope` for the reason given there. Absent = the owner. */
+  principal?: RequestPrincipal | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -813,6 +817,8 @@ export async function spawnViaAgent(
     userTimezone,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
+    // And the run's principal, so a mandate's step runs under the mandate's lock.
+    principal,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -938,6 +944,9 @@ export async function spawnInline(
    * part that holds.
    */
   abortScope?: AbortScope | undefined,
+  /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
+   *  D1, §3.13 E5). After `abortScope` for the reason given there. Absent = the owner. */
+  principal?: RequestPrincipal | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1139,6 +1148,8 @@ export async function spawnInline(
     memory: parentMemory ?? undefined,
     // Inherited, so anything THIS step spawns is reachable by the same abort.
     abortScope,
+    // And the run's principal, so a mandate's step runs under the mandate's lock.
+    principal,
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
@@ -1256,8 +1267,11 @@ export async function spawnPipeline(
    * part that holds.
    */
   abortScope?: AbortScope | undefined,
-  /** See `RunManifestOptions.isAcceptedParam`. Last, for the reason given above. */
+  /** See `RunManifestOptions.isAcceptedParam`. After `abortScope`, for the reason given above. */
   isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined,
+  /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
+   *  D1, §3.13 E5). After `isAcceptedParam` for the reason given above. Absent = the owner. */
+  principal?: RequestPrincipal | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1330,6 +1344,8 @@ export async function spawnPipeline(
     // pipeline's agents reachable by nothing, which is the shape the scoping is meant to
     // remove rather than relocate.
     abortScope,
+    // The nested run's steps are built for the same principal as this one.
+    principal,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.

@@ -42,6 +42,13 @@ export interface RunManifestOptions {
    * runs, which have no calling session.
    */
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
+  /**
+   * Who started the run. Every step agent is built for it, so a mandate's step runs under
+   * the mandate's lock — its tool list is the parent's filtered one already, and the
+   * principal is what also refuses the protected secrets and stamps the step's writes
+   * (PRD customer-granted-operator-access D1, §3.13 E5). Absent = the owner.
+   */
+  principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
   cachedOutputs?: Map<string, AgentOutput> | undefined;
   depth?: number | undefined;
   runHistory?: RunHistory | undefined;
@@ -184,6 +191,8 @@ export interface RunCtxInput {
   parentTools?: ToolEntry[] | undefined;
   parentToolContext?: import('../types/index.js').ToolContext | undefined;
   parentActiveScopes?: import('../types/index.js').MemoryScopeRef[] | undefined;
+  /** See `RunManifestOptions.principal`. */
+  principal?: import('../core/request-principal.js').RequestPrincipal | undefined;
   parentMemory?: IMemory | null | undefined;
   userTimezone?: string | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
@@ -235,6 +244,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     parentTools: input.parentTools,
     parentToolContext: input.parentToolContext,
     parentActiveScopes: input.parentActiveScopes,
+    principal: input.principal,
     parentMemory: input.parentMemory ?? null,
     userTimezone: input.userTimezone,
     parentPrompt: input.parentPrompt,
@@ -956,7 +966,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam, options.principal);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -982,7 +992,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -994,7 +1004,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

@@ -11,6 +11,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
 import { isMandateTag, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
+import type { RequestPrincipal } from './request-principal.js';
 import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
@@ -1002,13 +1003,21 @@ export class WorkerLoop {
     // inside the run asks the run, not the row: the stamp may change while it is under way.
     const grant = this.#handRunDoor.consume(marker, task.id);
     const handRun = mandateNeedsOwnerStamp(task) && handRunCovers(grant, task);
-    if (!handRun || !grant) return this.#executeTask(task, capUSD, false);
+    // Who started the run by hand, when a request did. It decides the run's TOOLS, and that
+    // is separate from whether the run is a test: a mandate may start by hand a schedule it
+    // set up that the owner has since stamped, which is no test (the stamp makes it due on
+    // its own) and still a turn the mandate started (PRD §3.13 E4, D1). Without a grant the
+    // run was not started by a request, and it runs as the owner's schedule.
+    //
+    // It is read from the grant, so it holds for the attempt this dispatch starts.
+    const starter = grant?.principal;
+    if (!handRun || !grant) return this.#executeTask(task, capUSD, false, starter);
     // One line per hand start, naming who started it. A process log, not a record.
     process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
-    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true));
+    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true, grant.principal));
   }
 
-  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean): Promise<void> {
+  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean, starter?: RequestPrincipal): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -1107,7 +1116,7 @@ export class WorkerLoop {
             // executePipeline handles a null target_workflow_id (FK ON DELETE SET
             // NULL nulls a deleted workflow's link) as a benign skip — never a
             // fall-through to an autonomous run of the title.
-            await this.executePipeline(task);
+            await this.executePipeline(task, starter);
             break;
           case 'run_agent':
             // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
@@ -1129,9 +1138,9 @@ export class WorkerLoop {
             // change-detection gate first (executeWatch: no change → no spend); any
             // other source runs the agent turn directly (executeStandard).
             if (task.source === 'watch') {
-              await this.executeWatch(task, capUSD);
+              await this.executeWatch(task, capUSD, starter);
             } else {
-              await this.executeStandard(task, capUSD);
+              await this.executeStandard(task, capUSD, starter);
             }
             break;
           case 'bulk_apply':
@@ -1485,7 +1494,8 @@ export class WorkerLoop {
   }
 
   /** Execute a standard or scheduled task via headless Session. */
-  private async executeStandard(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
+  /** @param starter Who started this run by hand, when a request did — its tool lock applies. */
+  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, starter?: RequestPrincipal): Promise<void> {
     // §0 A10 — is this run happening BECAUSE a question was answered?
     //
     // The answered row carries both halves the new run needs: the thread the
@@ -1518,6 +1528,7 @@ export class WorkerLoop {
       // difference and the daily cap would be the thing that breaks. Null means nobody
       // reserved (a manual run), and then the constant is the only bound there is.
       costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
+      ...(starter ? { principal: starter } : {}),
     });
     // Cost control: cap agent loop iterations for background tasks
     // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
@@ -1865,7 +1876,7 @@ export class WorkerLoop {
 
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
-    const result = await session.run(prompt, { triggerOrigin: task.source });
+    const result = await session.run(prompt, { triggerOrigin: task.source, ...(starter ? { principal: starter } : {}) });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
     // knowing it ever happened: `costGuard` makes the agent stop and RETURN its text — it
@@ -1964,7 +1975,7 @@ export class WorkerLoop {
   }
 
   /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
-  private async executePipeline(task: TriggerRecord): Promise<void> {
+  private async executePipeline(task: TriggerRecord, starter?: RequestPrincipal): Promise<void> {
     const runHistory = this.engine.getRunHistory();
     if (!runHistory) return;
     if (!task.pipeline_id) {
@@ -2072,6 +2083,9 @@ export class WorkerLoop {
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
       origin: { kind: 'schedule', triggerId: task.id },
+      // Who started it by hand, when a request did: the workflow's steps get only the tools
+      // that principal's lock allows (PRD §3.13 E4 — the build site is here, not a session).
+      ...(starter ? { principal: starter } : {}),
     });
 
     if (!result.ok) {
@@ -2144,7 +2158,7 @@ export class WorkerLoop {
    * Only notifies (and runs agent analysis) when content has changed.
    * Uses Node.js crypto.createHash('sha256') for fast comparison.
    */
-  private async executeWatch(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
+  private async executeWatch(task: TriggerRecord, capUSD: number | null = null, starter?: RequestPrincipal): Promise<void> {
     // Captured BEFORE the fetch below, which this method awaits for up to 30 seconds.
     // A `stop()` during that window clears the map, so the lookup that used to sit at
     // the attach site returned `undefined`, the analysis session was attached to
@@ -2219,6 +2233,9 @@ export class WorkerLoop {
     // Content changed (or first run) — run analysis via agent
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
+      // A run without tools, but built for its starter all the same: the lock must not
+      // depend on which turns happen to carry tools today.
+      ...(starter ? { principal: starter } : {}),
       // A watch is a single summarize-what-changed turn — a fast-tier job.
       // Without this it inherited the engine's default tier (often
       // 'balanced'/Sonnet), paying a premium model for change-detection. A
@@ -2271,7 +2288,7 @@ export class WorkerLoop {
     // a non-critical dangerous tool would AUTO-GRANT — see permission-guard
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
-    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch' });
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(starter ? { principal: starter } : {}) });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;
