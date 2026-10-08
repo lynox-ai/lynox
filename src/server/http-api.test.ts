@@ -11476,10 +11476,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // Named per ITEM: one locked collection used to abandon the rest of the
         // loop and report only the store.
         expect(body.failed).toContain('datastore:boom');
-        // One collection left behind is enough to skip the store's VACUUM: it still
-        // holds data, and the step is named as not run.
-        expect(body.failed).toContain('datastore#scrub');
-        expect(scrubFreedPages, 'no VACUUM of a datastore that still holds a collection').not.toHaveBeenCalled();
+        // One collection left behind does NOT skip the store's scrub: `contacts` WAS
+        // dropped, and its values are in the freelist and the WAL until it runs.
+        expect(body.failed).not.toContain('datastore#scrub');
+        expect(scrubFreedPages, 'the dropped collections must still be scrubbed').toHaveBeenCalledTimes(1);
         expect(rebuildSchema, 'the repair must run on the failing path, not only the happy one').toHaveBeenCalledTimes(1);
         // The repair itself is not a wipe: when IT fails the drops have already
         // happened, so it belongs in `degraded`. Here it succeeds, so neither list

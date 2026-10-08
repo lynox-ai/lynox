@@ -10148,13 +10148,16 @@ export class LynoxHTTPApi {
       // blocked checkpoint is a failure of that store, not a degradation: the old
       // bytes may still be there.
       //
-      // Not on a store whose wipe failed: its data is still in it, so there is
-      // nothing to scrub, and a VACUUM of a full file needs a full temporary copy
-      // and leaves the WAL at that size if it runs out of space. The step is named
-      // as not run rather than left out, like any other step that did not happen.
+      // Not on a store whose wipe failed as a whole (the store's own key, or its
+      // listing): its data is still in it, so there is nothing to scrub, and a VACUUM
+      // of a full file needs a full temporary copy and writes the whole file through
+      // the WAL. The step is named as not run rather than left out, like any other
+      // step that did not happen. A store wiped item by item still runs it when only
+      // some items failed: the items that WERE dropped are in its freelist and WAL,
+      // and what the VACUUM copies is just the items left.
       // history.db carries the threads too (`ThreadStore` shares the connection).
       const scrub = (key: string, fn: () => void): void => {
-        if (failed.some(k => k === key || k.startsWith(`${key}:`) || k.startsWith(`${key}#`))) {
+        if (failed.some(k => k === key || k.startsWith(`${key}#`))) {
           note(`${key}#scrub`, new Error('not run: the wipe of this store failed'));
           return;
         }

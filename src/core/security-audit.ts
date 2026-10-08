@@ -46,7 +46,8 @@ export class SecurityAudit {
     this.db.pragma('journal_mode = WAL');
     // A second connection to history.db, and it writes user text (`input_preview`):
     // the same settings as the store's own, so it zeroes what it deletes and waits
-    // out the erasure's VACUUM instead of dropping its insert on an instant BUSY.
+    // for a writer in another process instead of dropping its insert on an instant
+    // BUSY.
     this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     zeroDeletedContent(this.db);
 
