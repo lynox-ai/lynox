@@ -86,7 +86,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { BulkTriggerLockedError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -6951,6 +6951,14 @@ export class LynoxHTTPApi {
       if (b['modelTier'] && requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
         errorResponse(res, 403, 'modelTier cannot be set on this plan.');
         return;
+      }
+      // Refused here as well as in `update`, which throws only after the mark below.
+      if (b['modelTier']) {
+        const trigger = taskManager.getTrigger(params['id']!);
+        if (trigger && !triggerTakesModelTier(trigger.effect)) {
+          errorResponse(res, 400, new TriggerTierUnsupportedError(trigger.effect).message);
+          return;
+        }
       }
       // The enabled switch below answers on its own and would drop the tier unseen.
       if (typeof b['enabled'] === 'boolean' && 'modelTier' in b) {

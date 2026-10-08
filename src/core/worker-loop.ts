@@ -21,6 +21,7 @@ import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
+import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
@@ -1512,6 +1513,7 @@ export class WorkerLoop {
     // objection — that "continuing" would promise a state restoration that does
     // not exist — does not apply to it.
     const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
+    const triggerTier = admittedTriggerTier(task.model_tier);
     const session = this.engine.createSession({
       autonomy: 'autonomous',
       // Same thread, so the run's own history shows the exchange it continues.
@@ -1530,7 +1532,7 @@ export class WorkerLoop {
       costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
       ...(starter ? { principal: starter } : {}),
       // The tier the user chose for this trigger, held to the ceiling by the session.
-      ...(task.model_tier ? { model: task.model_tier } : {}),
+      ...(triggerTier ? { model: triggerTier } : {}),
     });
     // Cost control: cap agent loop iterations for background tasks
     // Background model: the user's choice (`background_model`, already bounded at
@@ -1541,7 +1543,7 @@ export class WorkerLoop {
     session._recreateAgent({
       maxIterations: WORKER_MAX_ITERATIONS,
       autonomy: 'autonomous',
-      ...this.engine.workerRunModelOverride('standard', task.model_tier),
+      ...this.engine.workerRunModelOverride('standard', triggerTier),
     });
 
     // §0 A7 — did every question this run asked actually get an answer?
@@ -2240,6 +2242,7 @@ export class WorkerLoop {
     }
 
     // Content changed (or first run) — run analysis via agent
+    const watchTier = admittedTriggerTier(task.model_tier);
     const analysisSession = this.engine.createSession({
       autonomy: 'autonomous',
       // A run without tools, but built for its starter all the same: the lock must not
@@ -2250,7 +2253,7 @@ export class WorkerLoop {
       // 'balanced'/Sonnet), paying a premium model for change-detection. A
       // worker_profile (below) may still override the tier if the user set one. A tier
       // the user chose for this trigger replaces `fast`, and then nothing overrides it.
-      model: task.model_tier ?? 'fast',
+      model: watchTier ?? 'fast',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       // ⛔ The grant wins over the constant when the admission made one — same coupling
       // as in `executeStandard`, same consequence if it is unpicked. A watch's estimate
@@ -2274,7 +2277,7 @@ export class WorkerLoop {
     WorkerLoop.attachSession(stopEntry, analysisSession);
     // Only when there is a choice to apply: without one the analysis keeps the
     // `fast` session it was created with, and no rebuild happens.
-    const watchModel = this.engine.workerRunModelOverride('watch', task.model_tier);
+    const watchModel = this.engine.workerRunModelOverride('watch', watchTier);
     if (Object.keys(watchModel).length > 0) {
       analysisSession._recreateAgent(watchModel);
     }

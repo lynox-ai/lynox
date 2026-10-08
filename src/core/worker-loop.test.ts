@@ -305,6 +305,21 @@ describe('WorkerLoop', () => {
     expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', 'deep');
   });
 
+  it('executeStandard does not apply a stored trigger tier on a managed pool tier', async () => {
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    try {
+      const session = makeSession('Done.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask({ model_tier: 'deep' })]), session });
+      const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+      await loop.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).not.toHaveProperty('model');
+      expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', undefined);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('executeStandard without a trigger tier leaves the session\'s tier alone', async () => {
     const session = makeSession('Done.');
     const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
@@ -335,6 +350,17 @@ describe('WorkerLoop', () => {
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
     await fire(makeTask({ id: 't-tier2', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
     expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ model: 'fast' }));
+
+    // On a managed pool tier a stored tier is not applied: the watch stays `fast`.
+    vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    try {
+      mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+      await fire(makeTask({ id: 't-tier3', source: 'watch', effect: 'run_agent', model_tier: 'deep', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+      expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ model: 'fast' }));
+      expect(override).toHaveBeenLastCalledWith('watch', undefined);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   // ---- 2b. executeStandard wires a per-run cost guard (SEC-LC-1) ----

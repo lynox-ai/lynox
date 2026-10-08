@@ -128,6 +128,7 @@ const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'comple
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
 const mockTaskMarkEditedBy = vi.fn().mockReturnValue(true);
+const mockTaskGetTrigger = vi.fn().mockReturnValue({ id: 'task-1', effect: 'run_agent' });
 const mockConfirmTrigger = vi.fn().mockReturnValue({ id: 'task-1', confirmed_at: '2026-06-01T00:00:00.000Z' });
 const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
 const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
@@ -267,6 +268,7 @@ vi.mock('../core/engine.js', () => ({
       setEnabled: mockTaskSetEnabled,
       confirmTrigger: mockConfirmTrigger,
       markEditedBy: mockTaskMarkEditedBy,
+      getTrigger: mockTaskGetTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
     // Null is a real state of this accessor (`getCRM(): CRM | null`), and the
@@ -13273,6 +13275,14 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(res.status).toBe(200);
       expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
       expect(mockTaskMarkEditedBy.mock.invocationCallOrder[0]!).toBeLessThan(mockTaskUpdate.mock.invocationCallOrder[0]!);
+    });
+
+    it('refuses a tier on a trigger whose runs start no agent before marking it', async () => {
+      mockTaskGetTrigger.mockReturnValueOnce({ id: 'task-1', effect: 'notify' });
+      const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
+      expect(res.status).toBe(400);
+      expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
     });
 
     it('marks a trigger whose tier it changes, and refuses an invalid tier without marking it', async () => {
