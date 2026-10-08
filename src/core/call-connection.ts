@@ -51,6 +51,10 @@ export interface CallConnection {
 /** One call's slot. `connection` stays undefined when nothing was resolved. */
 export interface CallSlot {
   connection?: CallConnection | undefined;
+  /** Every `<untrusted_data>` block this call's handler produced, in order, byte for
+   *  byte. The result scan takes the closer of exactly these blocks as the engine's
+   *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
+  wrapped?: string[] | undefined;
 }
 
 const slotStorage = new AsyncLocalStorage<CallSlot>();
@@ -59,6 +63,16 @@ const slotStorage = new AsyncLocalStorage<CallSlot>();
  *  it adds no microtask between the caller and `fn`. */
 export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
   return slotStorage.run(slot, fn);
+}
+
+/**
+ * Record a block `wrapUntrustedData` produced inside the current call. Outside a slot
+ * (prompt building between calls, a test calling the wrapper directly) this is a
+ * no-op, so nothing recorded here can reach another call's scan.
+ */
+export function noteOwnWrapped(block: string): void {
+  const slot = slotStorage.getStore();
+  if (slot) (slot.wrapped ??= []).push(block);
 }
 
 /**

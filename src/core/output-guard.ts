@@ -101,62 +101,79 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
 // === Tool result injection scanning ===
 
 /**
- * The wrapper's OWN terminal closing tag — ours, not the content's.
+ * The engine's OWN closing tags — the ones that end a block this call produced.
  *
  * `wrapUntrustedData` emits `<untrusted_data …>\n{body}\n</untrusted_data>`, and
  * `detectInjectionAttempt` flags a literal `</untrusted_data>` as a boundary
- * escape. Scanning the finished block therefore flagged the block's own last
- * line, so EVERY wrapped external tool result came back prefixed with
- * "resembles prompt injection" — measured on a harmless page. A warning that is
- * always on carries no information, and this one reaches both the model context
- * and the audit table, so it was loudest exactly where a real escape would be.
+ * escape. Scanning a finished result therefore flagged the closer of every block
+ * the engine had put into it, so a result carrying a wrapped block came back
+ * prefixed with "resembles prompt injection" — a warning that is always on carries
+ * no information, and this one reaches both the model context and the audit table.
+ *
+ * Which closers are ours is decided by PROVENANCE, not by shape: the dispatcher
+ * passes the exact blocks `wrapUntrustedData` produced inside this call
+ * (`CallSlot.wrapped`, after the same secret masking as the result). Each is looked
+ * up in the result and consumed at most once; only its last line is exempted. That
+ * covers a result that is one block, a block with engine text around it, and
+ * several blocks, alike. A closer anywhere else stays in the scan: in text a tool
+ * returned unwrapped, in a copy of a block from another call, in a block a tool
+ * built by hand. An earlier version exempted by shape — any result that began with
+ * the tag and ended with the closer — and so also exempted an envelope forged in
+ * raw tool output.
  *
  * It costs no detection the body could have produced: `neutralizeBoundaryTags`
- * runs BEFORE wrapping and escapes the OPENING delimiter of any closing tag in
- * the body — a literal `<` becomes `&lt;`, an entity `&lt;` becomes `&amp;lt;` —
- * leaving every other byte alone. What this guard needs from that is unchanged
- * and is the only thing it relies on: in a well-formed block the terminal tag is
- * the only LITERAL one, and a complete tag anywhere earlier stays inside the
- * scanned region. (The wording here previously named the exact replacement
- * strings, which stopped being true when the replacement became a function of
- * the match; the property is stated instead, because the property is what is
- * load-bearing.)
+ * runs before wrapping and leaves no literal opener or closer inside a body, so the
+ * exempted closer is the block's real end, and the block's body stays in the
+ * scanned region.
  *
- * One thing it does NOT claim, measured:
- *  - This is a SHAPE check, not a provenance check. A tool returning raw
- *    external text can forge an envelope and buy the exemption. Contained by
- *    construction: the head test is strictly stronger than
- *    `containsUntrustedMarker`, so anything exempted is necessarily already
- *    marked untrusted — forging costs the attacker taint rather than buying
- *    trust, and a forgery carrying a real injection is still flagged on its body.
- *
- * Deliberately strict: byte-exact tail, and the head must be the tag itself
- * (`&lt;untrusted_data` followed by a space or `&gt;` — a plain prefix test also
- * matched `&lt;untrusted_database…`). Anything else is scanned whole, because a
- * missed exemption costs a spurious warning while a loose one costs a real
- * detection.
+ * A block the scan cannot find (a secret value straddling its edge, a handler that
+ * changed it after wrapping, a call with no slot) is simply not exempted: the
+ * warning stays. Noisy, never open.
  */
-const OWN_WRAPPER_HEAD = /^<untrusted_data[ >]/;
-const OWN_WRAPPER_TAIL = /\n<\/untrusted_data>$/;
+const OWN_CLOSER = '\n</untrusted_data>';
 
-function scanRegionOf(result: string): string {
-  // Replaced by the newline it consumed, NOT by nothing. That newline is the
-  // last character of the body, and three patterns need it: `role
+function scanRegionOf(result: string, ownBlocks: readonly string[] | undefined): string {
+  if (!ownBlocks || ownBlocks.length === 0) return result;
+  const taken: Array<[number, number]> = [];
+  const closers: number[] = [];
+  for (const block of ownBlocks) {
+    if (!block.endsWith(OWN_CLOSER)) continue;
+    let from = 0;
+    for (;;) {
+      const at = result.indexOf(block, from);
+      if (at < 0) break;
+      const stop = at + block.length;
+      if (taken.some(([a, b]) => at < b && stop > a)) { from = at + 1; continue; }
+      taken.push([at, stop]);
+      closers.push(stop - OWN_CLOSER.length);
+      break;
+    }
+  }
+  if (closers.length === 0) return result;
+  closers.sort((a, b) => a - b);
+  // Each closer is replaced by the newline it consumed, NOT by nothing. That
+  // newline is the last character of the body, and three patterns need it: `role
   // impersonation` (/^(assistant|human):\s/im) and both `provenance marker
   // forgery` variants match only when the body's final token is followed by
-  // whitespace. Dropping it silently disarmed all three for any wrapped result
-  // whose body ENDS in `assistant:`, `human:`, `<fact` or `&lt;fact` —
-  // measured, and doubly silent because `wrapUntrustedData`'s own inner scan
-  // runs on the raw body, where that trailing whitespace does not exist either.
-  return OWN_WRAPPER_HEAD.test(result) ? result.replace(OWN_WRAPPER_TAIL, '\n') : result;
+  // whitespace. Dropping it silently disarmed all three for any wrapped body that
+  // ENDS in `assistant:`, `human:`, `<fact` or `&lt;fact` — measured.
+  let out = '';
+  let cursor = 0;
+  for (const at of closers) {
+    out += result.slice(cursor, at) + '\n';
+    cursor = at + OWN_CLOSER.length;
+  }
+  return out + result.slice(cursor);
 }
 
 /**
  * Scan a tool result for prompt injection attempts.
  * Returns the result with a warning prefix if injection is detected.
+ * `ownBlocks` are the blocks this call's handler produced (`CallSlot.wrapped`), so
+ * their closers are not read as a boundary escape; see {@link scanRegionOf}.
  */
-export function scanToolResult(result: string, toolName: string): string {
-  const injection = detectInjectionAttempt(scanRegionOf(result));
+export function scanToolResult(result: string, toolName: string, ownBlocks?: readonly string[] | undefined): string {
+  const injection = detectInjectionAttempt(scanRegionOf(result, ownBlocks));
   if (injection.detected) {
     if (channels.securityInjection.hasSubscribers) {
       channels.securityInjection.publish({

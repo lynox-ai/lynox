@@ -15,6 +15,10 @@
 
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsUntrustedMarker, wrapUntrustedData } from '../../core/data-boundary.js';
+import { noteOwnWrapped } from '../../core/call-connection.js';
+
+/** One block, nothing before or after it: the shape `wrapUntrustedData` returns. */
+const ONE_BLOCK = /^<untrusted_data[ >][\s\S]*\n<\/untrusted_data>$/;
 
 interface RecallToolResultInput {
   /** The recall handle id, e.g. `tr-3`, from the post-compaction context. */
@@ -57,10 +61,20 @@ export const recallToolResultTool: ToolEntry<RecallToolResultInput> = {
     // LATER turn. Its trust boundary must ride with it — the untrusted-data marker set at
     // the original fetch must be present so the dispatcher re-flags this turn (else the
     // replay is a fail-open hole: memory extracted after a recall would look clean). Most
-    // wrapping tools' markers survive eviction verbatim; re-wrap only when absent so the
-    // signal is guaranteed without double-wrapping an already-marked payload.
-    return containsUntrustedMarker(blob.payload)
-      ? blob.payload
-      : wrapUntrustedData(blob.payload, `recalled:${blob.tool}`);
+    // wrapping tools' markers survive eviction verbatim; re-wrap only when absent. Wrapping
+    // a payload that already carries blocks would neutralize its tags, and the scan reads
+    // a neutralized closer as an escape too.
+    if (containsUntrustedMarker(blob.payload)) {
+      // The result scan exempts only closers of blocks produced inside THIS call, and the
+      // stored blocks came from an earlier one. A payload that is exactly one block and was
+      // not flagged when it was first returned (a flagged one starts with the scan's
+      // warning, not with the tag) is taken as this call's own, which keeps its replay as
+      // quiet as the shape rule this replaced kept it. Only its terminal closer is exempted;
+      // any other closer in it stays in the scan. A payload of several blocks is replayed
+      // with the warning.
+      if (ONE_BLOCK.test(blob.payload)) noteOwnWrapped(blob.payload);
+      return blob.payload;
+    }
+    return wrapUntrustedData(blob.payload, `recalled:${blob.tool}`);
   },
 };
