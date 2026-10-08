@@ -9835,6 +9835,16 @@ export class LynoxHTTPApi {
             // `agent-memory.db` in place while the answer named only the store. It
             // is also the largest table this route touches.
             //
+            // ⚠ These four guards — per item, dedupe, progress, round bound — cost
+            // three review rounds and introduced two regressions of their own, so
+            // putting the loop back to its pre-change form was considered and
+            // REJECTED on a measurement: without the bound, a delete that neither
+            // throws nor removes the row spins forever on the event loop, and the
+            // test below wedges the worker rather than failing. A demonstrated hang
+            // in an HTTP handler is worse than the guards' residual risk. What the
+            // history does mean is that this loop is where a reader should look
+            // first; the regressions are named in the two notes that follow.
+            //
             // ⚠ Stop when a round DELETED NOTHING, and read that from the deletes
             // rather than from the row count. The first version of this check
             // compared the length of the next listing against the last one, which is
