@@ -345,6 +345,14 @@ describe('SYSTEM_PROMPT doc-research hard rules', () => {
     expect(SYSTEM_PROMPT).toMatch(/(no empty promises|must call.*web_research.*same turn|verify.*same turn)/i);
   });
 
+  it('does not use a closed vendor path as its example of an admin-UI path', () => {
+    // Rule 1 cited "Settings → Apps → Develop apps" as its example, which is Shopify's
+    // admin-created custom-app path, closed to new apps since 2026-01-01. Models asked
+    // how to connect Shopify walked users down exactly that path, in those words.
+    expect(SYSTEM_PROMPT).toContain('an admin-UI path (e.g. "');
+    expect(SYSTEM_PROMPT).not.toMatch(/develop apps/i);
+  });
+
   it('requires holding ask_secret until user signals readiness', () => {
     // Premature ask_secret was the Haiku-mid-walkthrough failure mode.
     expect(SYSTEM_PROMPT).toMatch(/hold.*ask_secret/i);
