@@ -588,9 +588,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
   /**
    * The legacy memory store, `agent-memory.db`. The erasure used to SOFT-delete its
-   * memories (`UPDATE memories SET is_active = 0`): the text, plaintext by design on
-   * this store, stayed on disk until a later `gc()`, and a row that was already
-   * inactive was not touched at all. And it reached the other tables only through
+   * memories (`UPDATE memories SET is_active = 0`): every row, its text plaintext
+   * by design on this store, stayed readable until a later `gc()`, and a row that
+   * was already inactive stayed exactly as it was. And it reached the other tables only through
    * the entity listing, so `metrics` and anything not hanging off an entity stayed.
    *
    * Same shape as the history.db test above: over the FILE, against a list written
@@ -649,7 +649,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
 
     const db = new BetterSqlite3(join(dir, 'agent-memory.db'), { readonly: true });
     try {
-      // The register row's sentence: zero, the rows that were inactive before included.
+      // Zero memories, the rows that were inactive before included.
       expect((db.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n).toBe(0);
     } finally {
       db.close();
@@ -674,6 +674,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     expect(before, 'fixture: memories seeded').toBeGreaterThan(0);
     const w = new BetterSqlite3(path);
     try {
+      // Proves rollback only if `memories` is deleted BEFORE the refused table.
+      const order = memoryTables().map(t => t.name);
+      expect(order.indexOf('memories'), 'fixture: memories must come before metrics').toBeLessThan(order.indexOf('metrics'));
       w.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
       const { status, body } = await erase();
       expect(status).toBe(500);

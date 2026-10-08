@@ -11320,7 +11320,9 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // that the loop is gone (agent-memory.db is emptied by one transaction):
       //   · a failure list BOUNDED when every delete throws, and a stuck row named
       //     once across rounds — there are no rows and no rounds in the answer any
-      //     more, only the store, once; asserted here;
+      //     more, only the store, once, because the route makes ONE attempt; the
+      //     outcome is asserted here. (The dedupe in `note` that guarded the loop is
+      //     no longer reached by any step, so nothing here tests it.)
       //   · a wipe that drains PAST one listing page — `DELETE FROM` has no page;
       //     the real-file test seeds more than a page (`agent-memory-db.test.ts`);
       //   · an answer instead of a hang when deletes make no progress — there is no

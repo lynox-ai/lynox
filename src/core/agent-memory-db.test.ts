@@ -242,6 +242,8 @@ describe('AgentMemoryDb', () => {
       const a = db.createMemory({ text: 'one', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
       const b = db.createMemory({ text: 'two', namespace: 'methods', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
       db.supersedMemory(b, a);
+      const raw0 = (db as unknown as { db: Database.Database }).db;
+      expect((raw0.prepare('SELECT COUNT(*) AS n FROM memories WHERE is_active = 0').get() as { n: number }).n, 'fixture: one memory is inactive before the wipe').toBe(1);
       db.deleteAllData();
       const raw = (db as unknown as { db: Database.Database }).db;
       expect((raw.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n).toBe(0);
@@ -277,6 +279,9 @@ describe('AgentMemoryDb', () => {
       const raw = (db as unknown as { db: Database.Database }).db;
       db.createMemory({ text: 'kept', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
       db.upsertMetric({ metricName: 'm', value: 1 });
+      // Proves rollback only if `memories` is deleted BEFORE the refused table.
+      const order = (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>).map(r => r.name);
+      expect(order.indexOf('memories'), 'fixture: memories must come before metrics').toBeLessThan(order.indexOf('metrics'));
       raw.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
       expect(() => db.deleteAllData()).toThrow(/refused/);
       expect((raw.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n, 'a failed wipe must leave the memories in place').toBe(1);

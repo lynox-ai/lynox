@@ -151,7 +151,8 @@ export interface ScoredMemoryRow extends MemoryRow {
 /**
  * The tables an Art. 17 erasure keeps (`AgentMemoryDb.deleteAllData`). Only the
  * migration ledger: it holds no user data, and an emptied `schema_version` would
- * make the next open re-run every migration. Exported so
+ * make the next open re-run every migration — which fails on the first
+ * `ALTER TABLE memories ADD COLUMN` (v3) and leaves the store unopenable. Exported so
  * `erasure-covers-export.test.ts` can hold it against its own, independent list.
  */
 export const MEMORY_KEPT_ON_ERASURE: ReadonlySet<string> = new Set(['schema_version']);
@@ -908,11 +909,12 @@ export class AgentMemoryDb {
    * ledger (`MEMORY_KEPT_ON_ERASURE`). The one caller is `DELETE /api/data`.
    *
    * It replaces a soft delete (`UPDATE memories SET is_active = 0 WHERE is_active = 1`)
-   * that left every memory's text on disk — in plaintext, which this store keeps by
-   * design so the pattern match can run — until a later `gc()`, and never touched a
-   * row that was already inactive, the residue an erasure exists to remove. The
-   * route reached the other tables only through an entity listing, so `metrics` and
-   * the `supersedes` lineage stayed as well.
+   * that left every memory row in place — its text in plaintext, which this store
+   * keeps by design so the pattern match can run — readable through SQL, the export
+   * and every backup until a later `gc()` reaped inactive rows; a row that was
+   * already inactive stayed exactly as it was. The route reached the other tables
+   * only through an entity listing, so `metrics` and the `supersedes` lineage stayed
+   * as well.
    *
    * The table set comes from `sqlite_master`, the same way `RunHistory.deleteAllData`
    * and `EngineDb.deleteAllData` do it: a table a later migration adds is erased

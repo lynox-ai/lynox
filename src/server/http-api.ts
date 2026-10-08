@@ -9903,13 +9903,12 @@ export class LynoxHTTPApi {
       //
       // That loop — the per-entity wipe of agent-memory.db — is gone: the store is now
       // emptied by one transaction (`AgentMemoryDb.deleteAllData`), and no step of
-      // this route re-lists any more. The bound stays because it costs nothing and
-      // the next loop that re-lists would need it again.
+      // this route re-lists any more. The bound stays because it costs nothing, but
+      // no step can reach it today and no test exercises it; a loop that re-lists
+      // would need it again, and a test with it.
       //
       // ⚠ It suppresses the LOG line too, first-wins: a second, different failure of
-      // the same key is never written. If a row fails transiently in one round and
-      // permanently in the next, the operator keeps the transient message, which is
-      // the less diagnostic of the two.
+      // the same key is never written.
       const noted = new Set<string>();
       const note = (key: string, err: unknown, list: string[] = failed): void => {
         if (noted.has(key)) return;
@@ -9996,8 +9995,8 @@ export class LynoxHTTPApi {
       // enumerated from `sqlite_master` (`AgentMemoryDb.deleteAllData`).
       //
       // This replaces two steps. The memories were SOFT-deleted (`is_active = 0`):
-      // their text stayed on disk until a later `gc()`, and a row that was already
-      // inactive was not touched at all. And everything else was reached only
+      // every row stayed readable until a later `gc()`, and a row that was already
+      // inactive stayed exactly as it was. And everything else was reached only
       // through a paged entity listing, deleted one entity at a time, which needed
       // four guards of its own (per item, dedupe, progress, a round bound) against
       // a delete that throws, no-ops or never ends — and still left `metrics` and
