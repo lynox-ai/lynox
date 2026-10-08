@@ -3971,7 +3971,7 @@ describe('spawn_agent tool', () => {
     });
 
     it('rejects invisible and reordering characters in a name, one class at a time', async () => {
-      // A positive set: what a reader sees must be what the name holds.
+      // A positive set: the characters that hide or reorder text stay out of a name.
       const cases: Array<[string, string]> = [
         ['C1 control', '\u0090'],
         ['bidi override', '\u202e'],

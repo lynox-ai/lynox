@@ -1006,8 +1006,8 @@ export function resolveSpawnChildProviderConfig(input: {
 // refused: control characters C0 and C1, the line breaks above, and the FORMAT category
 // (`\p{Cf}`), which is what a list kept missing: bidi overrides and isolates reorder
 // what a reader sees, zero-width marks and Unicode tag characters are invisible. A name
-// is shown in a frame the model reads as the engine's own, so what a reader sees must be
-// what the string holds. A child's name needs no zero-width joiner.
+// is shown in a frame the model reads as the engine's own, so the characters that hide
+// or reorder text stay out of it. A child's name needs no zero-width joiner.
 const NOT_NAME_CHAR = /[^\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]/u;
 
 function validateSpawnInput(input: SpawnAgentInput): void {
@@ -1707,7 +1707,7 @@ async function executeThinker(
     // `networkPolicy`/`allowedHosts` as they stand at spawn time. Child-side TIGHTENING (a child more
     // restricted than its parent, via `childIsolation → networkPolicy`) is
     // still explicitly post-launch (PRD §6); T2-X1 does NOT claim to close
-    // child network isolation, only that a child never widens egress.
+    // child network isolation, only that a child starts from its parent's egress settings.
     //
     // Reach delta (intentional, autonomy-inheritance): the shared refs are
     // also write-reachable — a child can mutate parent state through
@@ -2172,7 +2172,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       });
     });
 
-    // ⛔ The delegating RUN's own ceiling — a different barrier from the one above.
+    // ⛔ The delegating RUN's own ceiling — a different barrier from the session ceiling,
+    // which is checked further down, once both refusals below have had their say.
     // The session ceiling is per session; this is the dollar cap on the single run that
     // is delegating, the one the worker's budget admission grants against the tenant's
     // daily total. Children bill that daily total through their own run rows, while
@@ -2515,8 +2516,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const downgradeNote = downgradedIdx.has(i)
           ? ' — ran on balanced because you declined deep; quality may be lower'
           : '';
-        // `spec.name` is AGENT INPUT and is validated for length (64) and
-        // control chars only — no charset gate, unlike `safeModelId` beside it.
+        // `spec.name` is AGENT INPUT and is validated for length (64) and a set of
+        // visible characters — which still admits `<`, `"` and `=`, unlike `safeModelId` beside it.
         // It lands in a heading OUTSIDE the untrusted-data envelope, so a name
         // like `x<untrusted_data source="web">` (30 chars) opens a tag that
         // nothing closes and swallows the engine prose plus every section after

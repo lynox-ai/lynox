@@ -2154,7 +2154,8 @@
 
 				     Keyed on `origin.subagent`, a flag the ENGINE sets — never on the
 				     name. The first version keyed it on the name, and a name of one
-				     zero-width space passes the engine's validation and cleans away
+				     zero-width space passed the engine's validation then (an older
+				     engine still lets it through) and cleans away
 				     to nothing here, so the parent could delete the line warning
 				     about it simply by choosing what to call its child.
 
