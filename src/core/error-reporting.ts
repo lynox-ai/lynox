@@ -33,14 +33,14 @@ function maskSecretText(text: string): string {
 
 /**
  * A `name=value` pair in query syntax: the name at the start of the string or after
- * `?`, `&` or `;`. The start counts because a query string arrives on its own too
+ * `?`, `&`, `;` or `#` (a token in a URL fragment). The start counts because a query string arrives on its own too
  * (`request.query_string`, and the SDK stores a breadcrumb's query and fragment without
  * their `?`/`#`), so a free-text string that BEGINS with `code=…` is read as one as
  * well. Deliberately loose, and linear: whether the name is sensitive is decided in
  * `isSensitiveParamName`, not by alternation here, which backtracked quadratically on a
  * long run of name-like text.
  */
-const QUERY_PARAM = /(^|[?&;])([A-Za-z0-9_-]+)=([^&#;\s"']+)/g;
+const QUERY_PARAM = /(^|[?&;#])([A-Za-z0-9_-]+)=([^&#;\s"']+)/g;
 
 /** Words that make a parameter's value a credential whatever its length. */
 const SENSITIVE_PARAM_WORDS: ReadonlySet<string> = new Set([

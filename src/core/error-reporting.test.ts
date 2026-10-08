@@ -497,6 +497,12 @@ describe('error-reporting scrubbing', () => {
     expect(qs).toBe('apiKey=***&accessToken=***&apikey=***&userPassword=***&pageSize=20');
   });
 
+  it('masks a token in a URL fragment', async () => {
+    const { beforeSend } = await hooks();
+    const out = beforeSend(eventWith('redirect landed at https://x/cb#access_token=t9&token_type=bearer'));
+    expect(firstValue(out as Record<string, unknown>)).toBe('redirect landed at https://x/cb#access_token=***&token_type=***');
+  });
+
   it('reads a string that starts with a pair as a query string, since one arrives on its own too', async () => {
     const { beforeSend } = await hooks();
     const out = beforeSend(eventWith('code=abc then more'));
