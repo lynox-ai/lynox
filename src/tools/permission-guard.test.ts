@@ -395,7 +395,8 @@ describe('isDangerous', () => {
 
     it.each([
       'cat ~/.lynox/./workspace/notes.md',
-      // Near misses: a name that only starts like a listed one is a different file.
+      // Near misses: a leading dot makes `.history` a different name, and `.env` is
+      // matched only as a whole word, so `.envrc` is a different file.
       'cat ~/.lynox/.history',
       'cat ~/.lynox/./.envrc',
     ])('leaves %s free', (command) => {
