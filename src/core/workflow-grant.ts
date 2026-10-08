@@ -225,23 +225,26 @@ export function prepareWorkflowGrant(planned: PlannedPipeline, req: WorkflowGran
 }
 
 /**
- * A name typed into the dialog, as stored: what a person can read and nothing that hides.
- * Control and line-separator characters become spaces; what stays is letters (with their
- * combining marks, which some scripts need), digits, punctuation, symbols and spaces. Every
- * other character goes: format characters (bidi, zero-width, the tag block), private use,
- * unassigned. Fillers that render as nothing although Unicode files them under letters or
- * marks (the Hangul fillers, the grapheme joiner, variation selectors) go too, so a displayed
- * name reads as what it is. Trimmed, collapsed, capped.
+ * A name typed into the dialog, as stored. Control and line-separator characters become
+ * spaces; what stays is letters (with their combining marks, which some scripts need), digits,
+ * punctuation, symbols and spaces. Every other character goes: format characters (bidi,
+ * zero-width, the tag block), private use, unassigned. So do characters that render as nothing
+ * although Unicode files them as letters, marks or symbols: the Hangul fillers, the braille
+ * blank, the grapheme joiner, the Mongolian and Khmer invisible marks, variation selectors (an
+ * emoji then shows in its text style). A name must keep at least one letter or digit. Trimmed,
+ * collapsed, capped at 120 code points. This reads as text; it does not tell look-alike letters
+ * from different scripts apart, and does not limit how many marks stack on one letter.
  */
 export function grantName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const cleaned = raw
     .normalize('NFC')
     .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
-    .replace(/[\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '')
+    .replace(/[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '')
     .replace(/[^\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]/gu, '')
-    .replace(/\s+/g, ' ').trim().slice(0, 120);
-  return cleaned === '' ? undefined : cleaned;
+    .replace(/\s+/g, ' ').trim();
+  const capped = [...cleaned].slice(0, 120).join('').trim();
+  return /[\p{L}\p{N}]/u.test(capped) ? capped : undefined;
 }
 
 /** What the acceptance needs from the stores; the scheduling route passes the engine's. */
