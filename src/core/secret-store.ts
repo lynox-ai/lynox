@@ -498,6 +498,22 @@ export class SecretStore implements SecretStoreLike {
   }
 
   /**
+   * Every name with a row in the vault FILE. Not the same set as `listNames()`: the
+   * map behind that is filled from the vault once, at construction, and code that
+   * holds the vault itself writes past it afterwards (mail credentials through
+   * `MailCredentialBackend`, Google OAuth tokens). Those rows are in the file and
+   * never in the map.
+   */
+  listVaultNames(): string[] {
+    return this.vault?.list().map(e => e.name) ?? [];
+  }
+
+  /** Rows in the vault file, or 0 without a vault. */
+  get vaultRowCount(): number {
+    return this.vault?.size ?? 0;
+  }
+
+  /**
    * Secret names the agent may see + reference. Excludes infrastructure secrets
    * (mail-account / OAuth / SMTP/IMAP / engine-internal) so they are never
    * advertised in the session briefing. `listNames()` still returns everything

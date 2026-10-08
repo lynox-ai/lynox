@@ -210,6 +210,8 @@ vi.mock('../core/engine.js', () => ({
     this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
+      listVaultNames: () => [],
+      vaultRowCount: 0,
       set: mockSecretSet,
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
@@ -11646,7 +11648,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [{ name: 'c1' }], dropCollection }),
-        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listVaultNames: () => [], vaultRowCount: 0, listNames: () => ['S1'], deleteSecret }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status, 'a recorded failure must not read as success').toBe(500);
@@ -11700,7 +11702,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getRunHistory: () => ({ scrubFreedPages: wal.history, deleteAllData: () => undefined }),
         getKnowledgeLayer: () => ({ getDb: () => ({ scrubFreedPages: wal.memory, deleteAllData: () => undefined }) }),
         getDataStore: () => ({ scrubFreedPages: wal.data, listCollections: () => [], dropCollection: () => undefined }),
-        getSecretStore: () => ({ hasVault: true, scrubFreedPages: wal.secrets, listNames: () => [], deleteSecret: () => undefined }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: wal.secrets, listVaultNames: () => [], vaultRowCount: 0, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
@@ -11784,7 +11786,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
         getMemory: () => null,
-        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listVaultNames: () => [], vaultRowCount: 0, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11792,6 +11794,27 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         expect(body.failed).toContain('secrets:S1');
         expect(body.skipped, 'the store that never opened must be in the answer').toContain('memory');
         expect(body.deleted).toBe(false);
+      });
+    });
+
+    // The vault is counted after its deletes: a row the enumeration did not reach
+    // (written between the list and the delete, or by a path the list does not
+    // see) must cost the answer its "all", not pass under it.
+    it('DELETE /api/data fails `secrets#residue` when vault rows outlive the deletes', async () => {
+      const deleted: string[] = [];
+      await swapEngine({
+        getSecretStore: () => ({
+          hasVault: true, scrubFreedPages: () => undefined,
+          listNames: () => ['S1'], listVaultNames: () => ['S1', 'V1'], vaultRowCount: 1,
+          deleteSecret: (name: string) => { deleted.push(name); },
+        }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        expect(body.failed).toContain('secrets#residue');
+        // Both sources are enumerated, each name once.
+        expect(deleted.sort()).toEqual(['S1', 'V1']);
       });
     });
 
@@ -11866,7 +11889,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getEngineDb: () => ({ scrubFreedPages: scrubbed.engine, deleteAllData: () => { throw new Error('a'); } }),
         getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
         getDataStore: () => ({ scrubFreedPages: scrubbed.data, listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
-        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listVaultNames: () => [], vaultRowCount: 0, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -12008,7 +12031,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     const vaultLessSecrets = {
       ...reachableExceptEngineDb,
       getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
-      getSecretStore: () => ({ hasVault: false, scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
+      getSecretStore: () => ({ hasVault: false, scrubFreedPages: () => undefined, listVaultNames: () => [], vaultRowCount: 0, listNames: () => [], deleteSecret: () => undefined }),
     };
     // `keyless` takes the real path: the vault opens and migrates its file, then
     // throws for the missing key, which leaves an empty vault.db behind.

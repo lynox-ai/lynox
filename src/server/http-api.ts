@@ -10328,8 +10328,17 @@ export class LynoxHTTPApi {
         }
         if (secretStore) {
           let names: string[] = [];
-          attempt('secrets#list', () => { names = secretStore.listNames(); });
+          // The names come from the vault FILE as well as the store's map. The map is
+          // filled once, at boot; a mail account or Google connected after that writes
+          // its credentials to the vault directly, so they never appear in it.
+          attempt('secrets#list', () => { names = [...new Set([...secretStore.listNames(), ...secretStore.listVaultNames()])]; });
           attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
+          // And the file is counted afterwards: whatever wrote a row between the list
+          // and here, or whatever the list missed, leaves the answer short of "all".
+          attempt('secrets#residue', () => {
+            const left = secretStore.vaultRowCount;
+            if (left > 0) throw new Error(`${String(left)} row(s) still in vault.db after the deletes`);
+          });
         }
 
         // Clear what the deletes above left in the files' bytes. `secure_delete` zeroes
