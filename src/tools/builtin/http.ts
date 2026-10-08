@@ -1591,7 +1591,25 @@ async function attachEngineManagedAuth(
     if (!resolved) {
       return { refusal: `Error: api_profile "${profile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${profile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.` };
     }
-    return put('Authorization', `Bearer ${resolved}`);
+    // Some APIs take the access token in a header of their own and answer
+    // `Authorization: Bearer` with 401, so the grant succeeds and every request
+    // after it fails. `header_name` names that header, and the token goes in raw,
+    // as for a `header` profile. Unset, or set to Authorization itself, it stays
+    // `Bearer`, which is what every profile saved before this sent.
+    // Same name check as the `header` branch below: the name comes from the profile.
+    if (auth.header_name !== undefined && !HTTP_HEADER_NAME.test(auth.header_name)) {
+      return { refusal: `Error: api_profile "${profile.id}" has an auth.header_name that is not a valid header name, so the access token was not attached. Fix it with api_setup action="update" (for example "X-Api-Key").` };
+    }
+    const ownHeader = auth.header_name !== undefined && auth.header_name.toLowerCase() !== 'authorization'
+      ? auth.header_name
+      : undefined;
+    const oauthSlot = ownHeader ?? 'Authorization';
+    const oauthValue = ownHeader !== undefined ? resolved : `Bearer ${resolved}`;
+    // The vault value came back from a token endpoint; it enters a header here.
+    if (/[\r\n\0]/.test(oauthValue)) {
+      return { refusal: `Error: api_profile "${profile.id}" holds an access token containing CRLF/null — refusing to send it. Mint a new one with api_setup({ action: "fetch_token", id: "${profile.id}" }).` };
+    }
+    return put(oauthSlot, oauthValue);
   }
 
   if (auth.type === 'basic' && auth.basic_format === 'user_pass_split') {

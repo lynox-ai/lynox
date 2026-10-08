@@ -4078,6 +4078,119 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // Some APIs take an OAuth access token in a header of their own and answer
+  // `Authorization: Bearer` with 401 — the client-credentials grant then succeeds
+  // and every request after it fails. `auth.header_name` names that header for an
+  // oauth2 profile the way it does for a `header` profile.
+  describe('oauth2 access token under the header the profile names', () => {
+    const ACK = { accepted: true, hosts: ['store.example.com'], accepted_at: '2026-10-08T10:00:00.000Z' };
+    // Secret-shaped on purpose: the engine's slot is scan-exempt, and only a value
+    // the scanner would object to shows whether the exemption follows the slot.
+    const TOKEN = ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9', 'eyJzdWIiOiJzdG9yZSJ9', 'c3RvcmVfc2ln'].join('.');
+    const HEADER = 'X-Store-Access-Token';
+
+    async function storeWith(extra: Record<string, unknown>): Promise<{ store: unknown; tokenKey: string }> {
+      const { ApiStore, accessTokenKey } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'store-api', name: 'Store API', base_url: 'https://store.example.com/admin', description: 'store',
+        auth: {
+          type: 'oauth2', vault_keys: ['STORE_CLIENT_ID'],
+          oauth: { token_url: 'https://store.example.com/oauth/token', grant_type: 'client_credentials', client_id_key: 'STORE_CLIENT_ID', client_secret_key: 'STORE_CLIENT_SECRET' },
+          ...extra,
+        } as never,
+        custom_endpoint_ack: ACK as never,
+      });
+      return { store, tokenKey: accessTokenKey('store-api') };
+    }
+
+    function agentWith(store: unknown, secrets: Record<string, string>): never {
+      return {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => secrets[k] ?? null },
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    function sent(hop = 0): Record<string, string> {
+      return Object.fromEntries(Object.entries(lastPinnedInputs[hop]?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v as string]));
+    }
+
+    it('sends the raw token under header_name, and no Authorization at all', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
+      const result = await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(result).toContain('HTTP 200');
+      expect(sent()['x-store-access-token']).toBe(TOKEN);
+      expect(sent()['authorization']).toBeUndefined();
+    });
+
+    it('without header_name keeps Authorization: Bearer', async () => {
+      const { store, tokenKey } = await storeWith({});
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(sent()['authorization']).toBe(`Bearer ${TOKEN}`);
+      expect(sent()['x-store-access-token']).toBeUndefined();
+    });
+
+    it('a header_name that IS Authorization, in any case, keeps the Bearer prefix', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: 'authorization' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(sent()['authorization']).toBe(`Bearer ${TOKEN}`);
+    });
+
+    it('replaces a model-set header of the same name in another case, once', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://store.example.com/admin/products.json', headers: { 'x-STORE-access-token': 'model-wrote-this' } },
+        agentWith(store, { [tokenKey]: TOKEN }),
+      );
+      expect(result).toContain('HTTP 200');
+      const names = Object.keys(lastPinnedInputs[0]!.headers).filter((k) => k.toLowerCase() === 'x-store-access-token');
+      expect(names).toHaveLength(1);
+      expect(sent()['x-store-access-token']).toBe(TOKEN);
+    });
+
+    it('SECURITY: the named header is dropped on a cross-origin redirect', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://evil.example.com/collect' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(lastPinnedInputs).toHaveLength(2);
+      expect(sent(0)['x-store-access-token']).toBe(TOKEN);
+      expect(sent(1)['x-store-access-token']).toBeUndefined();
+    });
+
+    it('SECURITY: an access token carrying CRLF is refused under its own header, not sent', async () => {
+      const { store, tokenKey } = await storeWith({ header_name: HEADER });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: 'tok\r\nX-Evil: yes' }));
+      expect(result).toContain('access token containing CRLF/null');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it.each([
+      ['carries CRLF', 'X-Key\r\nX-Evil: yes'],
+      ['is empty', ''],
+    ])('SECURITY: a header_name that %s is refused and nothing is sent', async (_label, name) => {
+      const { store, tokenKey } = await storeWith({ header_name: name });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [tokenKey]: TOKEN }));
+      expect(result).toContain('not a valid header name');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+  });
+
   // A connected service keeps working whatever key formats the outbound scan
   // knows: the engine attaches the profile's own credential, and that slot is
   // not scanned. Pinned with key shapes from several families, so widening the

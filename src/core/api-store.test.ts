@@ -363,6 +363,14 @@ describe('ApiStore', () => {
       expect(output).toContain('100/min');
       expect(output).toContain('Bearer Token');
     });
+
+    it('formatProfile names the header an oauth2 profile sends its token in', () => {
+      store.register({
+        ...SAMPLE_PROFILE,
+        auth: { type: 'oauth2', header_name: 'X-Store-Access-Token', vault_keys: ['TEST_CLIENT_ID'], oauth: { token_url: 'https://api.test.com/oauth/token', grant_type: 'client_credentials' } },
+      });
+      expect(store.formatProfile(store.get('test-api')!)).toContain('Auth header name: X-Store-Access-Token');
+    });
   });
 
   describe('getAll', () => {
