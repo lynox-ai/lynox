@@ -1241,11 +1241,15 @@ function parseDynamicRoute(scope: AuthScope, method: string, path: string, handl
 
 /** The 409 a chat run gets while `DELETE /api/data` is running. */
 const ERASURE_IN_PROGRESS = 'All data is being erased; start the run again once that has finished';
+/** The 410 a chat run gets when an erasure ran while it was being prepared. */
+const ERASED_DURING_REQUEST = 'All data was erased while this message was being prepared; start a new conversation';
 /**
  * How long `DELETE /api/data` waits for the chat runs it stopped to release their
- * slots. Stopping is the same `takeover` the stale-run reclaim uses, which drains
- * in well under a second; a run still holding its slot after this is reported,
- * and nothing is erased.
+ * slots. Stopping is the same `takeover` the stale-run reclaim uses: a run parked on
+ * a prompt or streaming from the model unwinds within a tick or two, but one inside
+ * a tool call releases only when that call returns, and the agent's end-of-run
+ * memory extraction is awaited too. Those can outlast this bound; the erasure then
+ * answers 409 and erases nothing, and the caller tries again.
  */
 const ERASURE_RUN_DRAIN_MS = 5_000;
 
@@ -1266,9 +1270,13 @@ export class LynoxHTTPApi {
    * True while `DELETE /api/data` stops the running chat runs and wipes the stores.
    * `/run` refuses while it is set, checked right before it takes a slot with no
    * await in between, so a run either holds a slot the erasure will stop or is
-   * refused.
+   * refused. That alone misses a third case: an erasure that starts AND finishes
+   * while `/run` is still awaiting its uploads, leaving the flag false again and
+   * the request holding a Session the erasure dropped. `erasureGeneration` counts
+   * erasures, so `/run` compares it with the value it saw on entry.
    */
   private erasureInProgress = false;
+  private erasureGeneration = 0;
 
   /**
    * Unwind whatever run holds this session's slot, so the slot's `finally` can
@@ -2963,6 +2971,10 @@ export class LynoxHTTPApi {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      // Which erasure this request started under; see `erasureGeneration`.
+      const erasureGenAtEntry = this.erasureGeneration;
+      const erasedSinceEntry = (): boolean =>
+        this.erasureInProgress || this.erasureGeneration !== erasureGenAtEntry;
 
       // Stale-run takeover. A previous /run whose SSE stream has closed +
       // one of these holds → hand control to the new request:
@@ -3259,7 +3271,9 @@ export class LynoxHTTPApi {
                   const kl = this.engine?.getKnowledgeLayer();
                   const durableStore = this.engine?.getKnowledgeStore();
                   const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
-                  if (kl && docScope) {
+                  // Not into a knowledge store an erasure is emptying or has emptied:
+                  // this run will be refused below, and the ingest would outlive it.
+                  if (kl && docScope && !erasedSinceEntry()) {
                     void ingestDocumentText(kl, {
                       text: safeBody,
                       fileName: safeName,
@@ -3344,6 +3358,12 @@ export class LynoxHTTPApi {
       // look for running runs, and one that gets here later is refused.
       if (this.erasureInProgress) {
         errorResponse(res, 409, ERASURE_IN_PROGRESS);
+        return;
+      }
+      if (erasedSinceEntry()) {
+        // The Session captured above was dropped by that erasure and still holds
+        // the erased conversation in memory; running it would send it to the model.
+        errorResponse(res, 410, ERASED_DURING_REQUEST);
         return;
       }
 
@@ -9979,7 +9999,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Stop the engine first. A chat run that keeps going while the stores are
+      // Stop the chat runs first. A chat run that keeps going while the stores are
       // emptied writes back into the gaps (its next message re-creates rows the
       // wipe just removed) or fails inside the run on a foreign key, after this
       // route has already answered. So: no new run may start (`/run` refuses while
@@ -9988,7 +10008,15 @@ export class LynoxHTTPApi {
       // until each has released its slot, which is the last thing a run does. A
       // run that does not stop in time means nothing is erased: an erasure that
       // ran beside a live run could not say what it left behind.
+      //
+      // One erasure at a time: the flag is a boolean, so a second one's `finally`
+      // would clear it while the first is still wiping.
+      if (this.erasureInProgress) {
+        errorResponse(res, 409, 'An erasure is already running');
+        return;
+      }
       this.erasureInProgress = true;
+      this.erasureGeneration++;
       try {
         for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
         const drainStart = Date.now();
@@ -9999,8 +10027,6 @@ export class LynoxHTTPApi {
           errorResponse(res, 409, 'A running chat did not stop, so nothing was erased; try again');
           return;
         }
-        // The in-memory sessions hold the conversations of the threads about to go.
-        this.sessionStore.resetAll();
 
         // Every store is attempted even when an earlier one throws — stopping at the
         // first failure would leave MORE data behind than carrying on does, and an
@@ -10149,6 +10175,11 @@ export class LynoxHTTPApi {
         // answered success — plus it never reached a thread whose rollup counter is 0,
         // whose title is user-written text. The store owns the completeness of its own
         // tables; a caller can only delete what some listing chose to return.
+        // The in-memory sessions hold the conversations of the threads about to go.
+        // Dropped HERE, inside the synchronous stretch, not before the flat-file step:
+        // that step awaits, and a session created or resumed during it would load the
+        // threads into memory again just before they are wiped.
+        this.sessionStore.resetAll();
         const threadStore = reach('threads', engine.getThreadStore());
         if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 

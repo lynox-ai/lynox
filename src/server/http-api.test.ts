@@ -1790,6 +1790,56 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // An erasure that starts AND finishes while /run is still awaiting (here: the
+    // stale-run drain, the same kind of await as the upload handling) leaves the
+    // erasure flag false again, and the request holding a Session the erasure dropped.
+    // The run must be refused, and its document must not be ingested into the
+    // knowledge store the erasure just emptied.
+    it('refuses a run, and skips its document ingest, when an erasure ran during the request', async () => {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = { kl: engineRef['getKnowledgeLayer'], scopes: engineRef['getActiveScopes'] };
+      const stored: string[] = [];
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => { stored.push(text); return Promise.resolve({}); },
+      });
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      const internals = api as unknown as {
+        erasureGeneration: number;
+        runningSessions: Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>;
+      };
+      const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
+      const upload = (name: string): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'lies das', files: [{ name, type: 'application/pdf', data: pdf }] }),
+      });
+      try {
+        // A dead, stale run on the session: /run takes it over and awaits its drain.
+        // The "erasure" happens inside that await, then the slot drains.
+        internals.runningSessions.set('test', {
+          streamAlive: false,
+          lastEventAt: 0,
+          takeover: () => {
+            setTimeout(() => {
+              internals.erasureGeneration++;
+              internals.runningSessions.delete('test');
+            }, 30);
+          },
+        });
+        const refused = await upload('during.pdf');
+        expect(refused.status).toBe(410);
+        expect((await refused.json() as { error: string }).error).toMatch(/erased while this message was being prepared/);
+
+        // Positive control on the same machinery, after: a normal upload ingests.
+        expect((await upload('after.pdf')).status).toBe(200);
+        await vi.waitFor(() => { expect(stored.length).toBeGreaterThan(0); });
+        expect(stored.some(t => t.includes('during.pdf')), 'the refused run ingested its document').toBe(false);
+      } finally {
+        internals.runningSessions.delete('test');
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getActiveScopes'] = orig.scopes;
+      }
+    });
+
     it.each([
       ['a plain text file', { name: 'lieferanten.csv', type: 'text/csv', data: Buffer.from('a,b\n1,2').toString('base64') }],
       ['an image',          { name: 'rechnung.png',    type: 'image/png', data: Buffer.from('\x89PNG\r\n\x1a\n').toString('base64') }],
@@ -2262,17 +2312,17 @@ describe('LynoxHTTPApi', () => {
         // first database wipe: from there to the last scrub nothing else runs.
         // And it is the one window in which another request can arrive: a run asked
         // for there must be refused, not take a slot beside the erasure.
-        let runStatusDuringErasure: number | undefined;
+        let runDuringErasure: { status: number; error: string } | undefined;
+        mockSessionStoreResetAll.mockImplementation(() => { order.push('resetAll'); });
         engineRef.getMemory = (): unknown => ({
           save: async () => {
             order.push('memory');
-            if (runStatusDuringErasure === undefined) {
+            if (runDuringErasure === undefined) {
               const r = await jsonFetch('/api/sessions/erase-parked-1b/run', {
                 method: 'POST',
                 body: JSON.stringify({ task: 'during the erasure', protocol: 1 }),
               });
-              runStatusDuringErasure = r.status;
-              await r.text();
+              runDuringErasure = { status: r.status, error: (await r.json() as { error: string }).error };
             }
           },
         });
@@ -2281,12 +2331,17 @@ describe('LynoxHTTPApi', () => {
           expect(slotHeldAtWipe, 'fixture: the thread wipe must have run').toBeDefined();
           expect(slotHeldAtWipe, 'the run still held its slot when the threads were wiped').toBe(false);
           expect(prompts.getPending('erase-parked-1')).toBeUndefined();
-          expect(mockSessionStoreResetAll, 'the in-memory sessions of the erased threads must go').toHaveBeenCalled();
           expect(order.lastIndexOf('memory'), 'every awaiting step before the first wipe').toBeLessThan(order.indexOf('threads'));
-          expect(runStatusDuringErasure, 'a run asked for during the erasure').toBe(409);
+          // Sessions dropped inside the synchronous stretch: after the last await,
+          // so none created during the flat-file step survives the wipe.
+          expect(order.indexOf('resetAll'), 'the sessions must be dropped').toBeGreaterThan(order.lastIndexOf('memory'));
+          expect(order.indexOf('resetAll')).toBeLessThan(order.indexOf('threads'));
+          expect(runDuringErasure?.status, 'a run asked for during the erasure').toBe(409);
+          expect(runDuringErasure?.error).toMatch(/being erased/);
         } finally {
           engineRef.getThreadStore = origGetThreadStore;
           engineRef.getMemory = origGetMemory;
+          mockSessionStoreResetAll.mockReset();
         }
       });
     });
@@ -2306,6 +2361,7 @@ describe('LynoxHTTPApi', () => {
         expect(takeover, 'the route must try to stop it').toHaveBeenCalled();
         expect(res.status).toBe(409);
         expect(deleteAllThreads, 'nothing may be erased beside a live run').not.toHaveBeenCalled();
+        expect((api as unknown as { erasureInProgress: boolean }).erasureInProgress, 'the flag must not outlive a refused erasure').toBe(false);
       } finally {
         slots.delete('erase-stuck-1');
         engineRef.getThreadStore = origGetThreadStore;
@@ -2324,14 +2380,41 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ task: 'anything', protocol: 1 }),
         });
         expect(res.status).toBe(409);
+        expect((await res.json() as { error: string }).error).toMatch(/being erased/);
         expect(mockSessionRun).not.toHaveBeenCalled();
       } finally {
         flag.erasureInProgress = false;
       }
       // And the flag does not outlive the erasure: after a DELETE /api/data the
       // next run is not refused for it.
+      // And each erasure counts once, which is what lets a /run that was still
+      // awaiting when it ran tell that it did (see the 410 test).
+      const gen = api as unknown as { erasureGeneration: number };
+      const before = gen.erasureGeneration;
       await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
       expect(flag.erasureInProgress).toBe(false);
+      expect(gen.erasureGeneration).toBe(before + 1);
+    });
+
+    // One erasure at a time: a second one would clear the shared flag in its
+    // `finally` while the first is still wiping, and let a run in beside it.
+    it('DELETE /api/data refuses while another erasure is running', async () => {
+      const flag = api as unknown as { erasureInProgress: boolean };
+      const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+      const origGetThreadStore = engineRef.getThreadStore;
+      const deleteAllThreads = vi.fn();
+      engineRef.getThreadStore = (): unknown => ({ deleteAllThreads });
+      flag.erasureInProgress = true;
+      try {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(409);
+        expect((await res.json() as { error: string }).error).toMatch(/already running/);
+        expect(deleteAllThreads).not.toHaveBeenCalled();
+        expect(flag.erasureInProgress, 'the refusal must not clear the running erasure\'s flag').toBe(true);
+      } finally {
+        flag.erasureInProgress = false;
+        engineRef.getThreadStore = origGetThreadStore;
+      }
     });
 
     // Two robustness properties of the reclaim, in one target situation: the
