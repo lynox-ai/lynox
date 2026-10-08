@@ -333,3 +333,96 @@ describe('ThreadStore.listBySubjectId (R2b subject footprint)', () => {
     db.close();
   });
 });
+
+describe('ThreadStore — reading and erasing ALL threads (GDPR Art. 15/17)', () => {
+  /** `count` listable threads (a listing needs `message_count > 0`), with a
+   *  deterministic, DESCENDING `updated_at` so page N holds ids N*size… */
+  function seedListable(db: Database.Database, count: number): void {
+    const ins = db.prepare('INSERT INTO threads (id, title, message_count, updated_at) VALUES (?, ?, 1, ?)');
+    const tx = db.transaction(() => {
+      for (let i = 0; i < count; i++) {
+        ins.run(`t${String(i).padStart(4, '0')}`, `Thread ${i}`, `2026-01-01T00:00:${String(count - i).padStart(5, '0')}`);
+      }
+    });
+    tx();
+  }
+
+  it('listThreads pages past 200 — every row reachable, none repeated or skipped', () => {
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    seedListable(db, 250);
+
+    // The ceiling the parameter was added for: the cap is a PAGE size, and before
+    // `offset` existed there was no second page, so rows 201-250 were unreachable
+    // to every caller — `GET /api/export` included.
+    const first = store.listThreads({ limit: 200, offset: 0, includeArchived: true });
+    const second = store.listThreads({ limit: 200, offset: 200, includeArchived: true });
+    expect(first).toHaveLength(200);
+    expect(second).toHaveLength(50);
+
+    // The property paging actually has to carry, and the one a length check cannot
+    // see: the union is the WHOLE set, each row exactly once. A page boundary that
+    // repeats or drops a row satisfies both lengths above.
+    const ids = [...first, ...second].map(t => t.id);
+    expect(new Set(ids).size).toBe(250);
+    const seeded = Array.from({ length: 250 }, (_, i) => `t${String(i).padStart(4, '0')}`);
+    expect([...ids].sort()).toEqual(seeded);
+
+    // And the cap still caps: a caller asking for more than 200 gets one page.
+    expect(store.listThreads({ limit: 1000, includeArchived: true })).toHaveLength(200);
+    db.close();
+  });
+
+  it('listThreads paging is stable when every thread shares a timestamp', () => {
+    // Ties are the normal case for imported or scripted data, and SQLite is free
+    // to order them differently per query. Without the `id` tiebreak the two pages
+    // can overlap — the shape of the bug is a GDPR export that contains thread A
+    // twice and never mentions thread B.
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    const ins = db.prepare("INSERT INTO threads (id, message_count, updated_at) VALUES (?, 1, '2026-01-01T00:00:00')");
+    db.transaction(() => { for (let i = 0; i < 40; i++) ins.run(`tie-${String(i).padStart(3, '0')}`); })();
+
+    const all: string[] = [];
+    for (let page = 0; page < 4; page++) {
+      all.push(...store.listThreads({ limit: 10, offset: page * 10, includeArchived: true }).map(t => t.id));
+    }
+    expect(new Set(all).size, 'no row may appear on two pages').toBe(40);
+    db.close();
+  });
+
+  it('deleteAllThreads removes rows no listing returns — past the cap, unread-count 0, archived', () => {
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    seedListable(db, 250);
+    // The three kinds a `listThreads` loop structurally cannot reach:
+    //  · past the 200-row cap (covered by the 250 above)
+    //  · `message_count = 0` — never listed, and its TITLE is user-written text
+    //  · archived, when the caller forgot `includeArchived`
+    db.prepare("INSERT INTO threads (id, title, message_count) VALUES ('empty-but-named', 'Scheidung Müller', 0)").run();
+    db.prepare("INSERT INTO threads (id, title, message_count, is_archived) VALUES ('archived', 'Alte Sache', 3, 1)").run();
+    db.prepare("INSERT INTO thread_messages (thread_id, seq, role, content_json) VALUES ('t0000', 0, 'user', '\"hi\"')").run();
+    // An orphan: a message whose parent thread row does not exist. It takes a
+    // pragma flip to CREATE one here (better-sqlite3 enforces FKs by default) and
+    // that is precisely its provenance in the wild — a write made while
+    // `foreign_keys` was off, which `run-history.ts` does around migrations. No
+    // cascade can ever reach such a row, because there is no parent to delete.
+    db.pragma('foreign_keys = OFF');
+    db.prepare("INSERT INTO thread_messages (thread_id, seq, role, content_json) VALUES ('vanished-thread', 0, 'user', '\"orphan\"')").run();
+    db.pragma('foreign_keys = ON');
+
+    const before = (db.prepare('SELECT COUNT(*) c FROM threads').get() as { c: number }).c;
+    expect(before, 'fixture guard — the wipe assertion must not be vacuous').toBe(252);
+
+    const removed = store.deleteAllThreads();
+
+    expect(removed).toBe(252);
+    expect((db.prepare('SELECT COUNT(*) c FROM threads').get() as { c: number }).c).toBe(0);
+    // Messages go too, and the ORPHAN is the one that matters: the cascade would
+    // have taken the other message row with its thread, but a row with no parent
+    // survives any number of thread deletions. It is only gone because the wipe
+    // deletes `thread_messages` outright.
+    expect((db.prepare('SELECT COUNT(*) c FROM thread_messages').get() as { c: number }).c).toBe(0);
+    db.close();
+  });
+});

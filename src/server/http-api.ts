@@ -65,6 +65,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
+import type { ThreadRecord } from '../core/thread-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -9436,7 +9437,24 @@ export class LynoxHTTPApi {
       // Threads + messages
       const threadStore = engine.getThreadStore();
       if (threadStore) {
-        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
+        // Page through ALL threads. A single { limit: 200 } call returned a GDPR
+        // Art. 15 copy that stopped at thread 200 and said nothing about it — the
+        // `durable_knowledge` block below at least marks its own truncation with
+        // `may_be_incomplete`, so a short thread list read as a complete one. The
+        // store had no `offset` at all, so no caller could have paged even
+        // deliberately. Same shape and same page cap as the entity loop below.
+        const THREAD_PAGE = 200;
+        const THREAD_MAX_PAGES = 1000;
+        const threads: ThreadRecord[] = [];
+        let threadsTruncated = true;
+        for (let page = 0; page < THREAD_MAX_PAGES; page++) {
+          const batch = threadStore.listThreads({ limit: THREAD_PAGE, offset: page * THREAD_PAGE, includeArchived: true });
+          threads.push(...batch);
+          if (batch.length < THREAD_PAGE) { threadsTruncated = false; break; }
+        }
+        if (threadsTruncated) {
+          process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_MAX_PAGES * THREAD_PAGE}-row cap — dump may be incomplete\n`);
+        }
         const threadsWithMessages = threads.map(t => ({
           ...t,
           messages: threadStore.getMessages(t.id, { limit: 50000 }).map(m => ({
@@ -9616,27 +9634,55 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Delete all threads + messages
-      const threadStore = engine.getThreadStore();
-      if (threadStore) {
-        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
-        for (const t of threads) {
-          threadStore.deleteThread(t.id);
+      // Every store is attempted even when an earlier one throws — stopping at the
+      // first failure would leave MORE data behind than carrying on does, and an
+      // erasure request is not a transaction across six independent stores. What
+      // changed is the ANSWER: each failure is recorded, and a route that did not
+      // erase everything must not say it did. Until this list existed, a throwing
+      // wipe was written to stderr and the caller still read
+      // "All user data has been permanently deleted" with HTTP 200 — the one case
+      // in which that sentence is a lie. Store keys only, never the error text: a
+      // SQLite message carries file paths, and this body goes to a browser.
+      const failed: string[] = [];
+      const attempt = (key: string, fn: () => void): void => {
+        try {
+          fn();
+        } catch (err) {
+          failed.push(key);
+          process.stderr.write(`⚠ /api/data: ${key} wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
         }
-      }
+      };
+
+      // Delete all threads + messages.
+      //
+      // `deleteAllThreads()` rather than a loop over `listThreads`: that listing is
+      // a UI read capped at 200 rows with a `message_count > 0` filter, so the loop
+      // it replaces erased the first 200 threads of a tenant that had more and
+      // answered success — plus it never reached a thread whose rollup counter is 0,
+      // whose title is user-written text. The store owns the completeness of its own
+      // tables; a caller can only delete what some listing chose to return.
+      const threadStore = engine.getThreadStore();
+      if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 
       // Delete all flat-file memory
       const memory = engine.getMemory();
       if (memory) {
         for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
-          await memory.save(ns, '');
+          // Awaited inside its own attempt so one unwritable namespace does not
+          // skip the other three (`attempt` is sync; `save` returns a promise).
+          try {
+            await memory.save(ns, '');
+          } catch (err) {
+            failed.push(`memory:${ns}`);
+            process.stderr.write(`⚠ /api/data: memory:${ns} wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
         }
       }
 
       // Delete all knowledge graph entities (cascades to relations, mentions, cooccurrences)
       const kg = engine.getKnowledgeLayer();
       if (kg) {
-        try {
+        attempt('knowledge_graph', () => {
           const db = kg.getDb();
           let entities = db.listEntities({ limit: 200 });
           while (entities.length > 0) {
@@ -9647,7 +9693,7 @@ export class LynoxHTTPApi {
           }
           // Also deactivate all memories
           db.deactivateAllMemories();
-        } catch { /* best effort */ }
+        });
       }
 
       // Delete all subject-graph data (engine.db) — Foundation Rework v2 tables.
@@ -9656,47 +9702,59 @@ export class LynoxHTTPApi {
       // artifacts, …) so a Right-to-Erasure request leaves no PII once the S1b/c
       // mirror writes are enabled. Mirror writes are flag-gated, so this lands with
       // the same release that turns them on — the engine.db is empty until then.
+      //
+      // It is ALSO the path that erases the Durable Knowledge Substrate:
+      // `KnowledgeStore` shares this connection (`knowledge_entries`,
+      // `memory_blocks` are engine.db tables) and `deleteAllData()` enumerates
+      // every table from `sqlite_master`, so DK is reached without being named
+      // here (asserted per-table in `engine-db.test.ts`, through the route in
+      // `erasure-covers-export.test.ts`). The store's own targeted deletes
+      // (`deleteEntry`/`deleteBySubject`) stay unwired by design — they serve a
+      // SINGLE data-subject request, not a tenant-wide wipe.
       const engineDb = engine.getEngineDb();
-      if (engineDb) {
-        try {
-          engineDb.deleteAllData();
-        } catch (err) {
-          // The wipe is one atomic transaction: a failure leaves ALL engine.db
-          // PII intact while the route still 200s. Surface it (an Art.17 erasure
-          // must not silently fail) rather than swallowing best-effort.
-          process.stderr.write(`⚠ /api/data: engine.db wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
-        }
-      }
+      // The wipe is one atomic transaction: a failure leaves ALL engine.db PII
+      // intact, which is exactly why it has to reach the answer rather than only
+      // stderr.
+      if (engineDb) attempt('engine_db', () => { engineDb.deleteAllData(); });
 
       // Clear the DORMANT legacy verb-def rows the B1 self-heal keeps alive (the
       // non-destructive v44 no longer drops the legacy `triggers` + workflow-def
       // `pipeline_runs`). Without this an Art.17 erasure would leave trigger/workflow
       // PII on disk, and an engine.db recreate would re-backfill it into live reads.
       const runHistoryForWipe = engine.getRunHistory();
-      if (runHistoryForWipe) {
-        try {
-          runHistoryForWipe.clearLegacyVerbDefs();
-        } catch (err) {
-          process.stderr.write(`⚠ /api/data: legacy verb-def wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
-        }
-      }
+      if (runHistoryForWipe) attempt('legacy_verb_defs', () => { runHistoryForWipe.clearLegacyVerbDefs(); });
 
       // Delete all DataStore collections (includes CRM tables)
       const ds = engine.getDataStore();
       if (ds) {
-        const collections = ds.listCollections();
-        for (const col of collections) {
-          ds.dropCollection(col.name);
-        }
+        attempt('datastore', () => {
+          const collections = ds.listCollections();
+          for (const col of collections) {
+            ds.dropCollection(col.name);
+          }
+          // Anything holding a CACHED view of those collections is now wrong, and
+          // only the code that dropped them knows it. Today that is exactly one
+          // consumer: `CRM.ensureSchema` memoises "the contacts/deals collections
+          // exist", so without this every CRM read threw
+          // `Collection "contacts" not found` for the rest of the process — the
+          // read inside `GET /api/export` included, so the tenant could not export
+          // their data to verify the erasure. 500 until a restart.
+          // The general guard is not this line but the witness around it: the
+          // real-engine test asserts the export still ANSWERS after an erasure,
+          // which fails for any store left in an unusable state, not just this one.
+          engine.getCRM()?.invalidateSchemaCache();
+        });
       }
 
       // Delete all secrets from vault
       const secretStore = engine.getSecretStore();
       if (secretStore) {
-        const names = secretStore.listNames();
-        for (const name of names) {
-          secretStore.deleteSecret(name);
-        }
+        attempt('secrets', () => {
+          const names = secretStore.listNames();
+          for (const name of names) {
+            secretStore.deleteSecret(name);
+          }
+        });
       }
 
       // Reset config to defaults
@@ -9704,8 +9762,23 @@ export class LynoxHTTPApi {
         const { saveUserConfig } = await import('../core/config.js');
         saveUserConfig({});
         await engine.reloadUserConfig();
-      } catch { /* best effort */ }
+      } catch (err) {
+        failed.push('config');
+        process.stderr.write(`⚠ /api/data: config reset failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
 
+      if (failed.length > 0) {
+        // 500, not a 200 with `deleted: false`: a client that reads the status code
+        // alone must not conclude the erasure succeeded, and an Art. 17 answer is
+        // the last place to be optimistic. `failed` names which stores still hold
+        // data, so a retry (or a human) knows where to look.
+        jsonResponse(res, 500, {
+          deleted: false,
+          failed,
+          error: 'Erasure incomplete — some stores still hold data',
+        });
+        return;
+      }
       jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
     });
 

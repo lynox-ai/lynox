@@ -132,6 +132,24 @@ export class CRM {
 
   // ── Schema ──
 
+  /**
+   * Forget that the schema was ensured, so the next read re-creates it.
+   *
+   * `ensureSchema` memoises in `_initialized`, and that memo asserts something
+   * about ANOTHER store: that two DataStore collections exist. The Art. 17
+   * erasure drops every collection, which made the memo a lie for the rest of
+   * the process — every CRM read then threw `Collection "contacts" not found`,
+   * including the one inside `GET /api/export`. So a tenant who erased their data
+   * could not afterwards export it to check: 500, until a restart.
+   *
+   * Called by the erasure route after the DataStore wipe. A cache that outlives
+   * the thing it describes has to be invalidated by whoever destroys it — nothing
+   * else knows it happened.
+   */
+  invalidateSchemaCache(): void {
+    this._initialized = false;
+  }
+
   /** Ensure CRM tables exist. Idempotent — safe to call multiple times. */
   ensureSchema(): void {
     if (this._initialized) return;

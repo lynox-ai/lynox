@@ -97,16 +97,54 @@ export class ThreadStore {
 
   listThreads(opts?: {
     limit?: number | undefined;
+    /**
+     * Rows to skip, for a caller that has to read EVERY thread rather than a
+     * screenful. Without it the 200-row cap below was not a page size but a
+     * ceiling: `GET /api/export` asked for 200 and a tenant with more threads
+     * got a GDPR Art. 15 copy that was silently short, with no way for any
+     * caller to reach thread 201 — the parameter did not exist.
+     *
+     * The ORDER BY is fully deterministic only up to ties on
+     * (is_unread, is_favorite, updated_at); `id` is appended as the final
+     * tiebreak so that paging cannot repeat or skip a row when several threads
+     * share a timestamp, which is routine for seeded or bulk-imported data.
+     */
+    offset?: number | undefined;
     includeArchived?: boolean | undefined;
   }): ThreadRecord[] {
     const limit = Math.min(opts?.limit ?? 50, 200);
+    const offset = Math.max(0, opts?.offset ?? 0);
     const includeArchived = opts?.includeArchived ?? false;
     // Slice B3: unread (agent-escalated) threads float to the very top, then the
     // existing favorite/recency order.
     const sql = includeArchived
-      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?'
-      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?';
-    return this.db.prepare(sql).all(limit) as ThreadRecord[];
+      ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?'
+      : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?';
+    return this.db.prepare(sql).all(limit, offset) as ThreadRecord[];
+  }
+
+  /**
+   * GDPR Art. 17: drop EVERY thread row and its messages, in one transaction.
+   *
+   * Not a loop over {@link listThreads} — deliberately, and the difference is the
+   * whole point of the method. That listing is a UI read: it caps at 200 rows and
+   * filters `message_count > 0`. An erasure driven by it therefore left behind
+   * (a) every thread past the cap and (b) every thread whose rollup counter is 0,
+   * whose `title` is user-written text and whose `primary_subject_id` names a
+   * person. A store is the only place that can answer "all of it" for its own
+   * tables; a caller can only ever delete what some listing chose to return.
+   *
+   * `thread_messages` is deleted explicitly rather than relying on the
+   * `ON DELETE CASCADE`: the cascade needs `foreign_keys = ON` on the connection
+   * that runs the DELETE, and a row whose parent thread never existed (writes made
+   * while the pragma was off, e.g. mid-migration) is not reachable by any cascade
+   * at all. Returns the number of thread rows removed.
+   */
+  deleteAllThreads(): number {
+    return this.db.transaction(() => {
+      this.db.prepare('DELETE FROM thread_messages').run();
+      return this.db.prepare('DELETE FROM threads').run().changes;
+    })();
   }
 
   /**

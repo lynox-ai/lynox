@@ -229,6 +229,12 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
+      // The Art.17 erasure calls this. It was MISSING here for as long as the
+      // route has had the call, and nothing noticed: the route's catch swallowed
+      // the resulting TypeError, so every erasure test ran against a route whose
+      // legacy verb-def wipe threw on its first line. A silent catch does not
+      // only hide a production fault — it hides a fixture that cannot answer.
+      clearLegacyVerbDefs: vi.fn(),
     });
     this.getBulkLedger = vi.fn(() => bulkHolder.ledger);
     this.getTaskManager = vi.fn().mockReturnValue({
@@ -241,6 +247,13 @@ vi.mock('../core/engine.js', () => ({
       confirmTrigger: mockConfirmTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    // Null is a real state of this accessor (`getCRM(): CRM | null`), and the
+    // erasure reads it to invalidate the CRM's cached schema after dropping the
+    // DataStore collections. Defined here rather than per-test because the method
+    // MISSING is not a state the real Engine has — an undefined accessor made
+    // three erasure cases report a `datastore` failure that production cannot
+    // produce.
+    this.getCRM = vi.fn().mockReturnValue(null);
     this.getApiStore = mockGetApiStore;
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
@@ -10726,6 +10739,107 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
     }
 
+    /**
+     * A thread store holding `threadCount` threads, whose `listThreads` HONOURS
+     * `offset` exactly as the real one does.
+     *
+     * That is the one thing this fixture is good for, and the reason it is a mock:
+     * the subject is the EXPORT ROUTE's paging loop, and a store that pages
+     * correctly is the only way to see whether the route asks for page 2. What
+     * `deleteAllThreads` actually removes is not observable here (it clears a Map) —
+     * that property belongs to the store and is witnessed on a real database in
+     * `thread-store.test.ts`, and through the real route in
+     * `erasure-covers-export.test.ts`.
+     */
+    function seededStores(threadCount: number): Record<string, unknown> {
+      const threads = new Map<string, { id: string; title: string; message_count: number }>();
+      for (let i = 0; i < threadCount; i++) threads.set(`t${i}`, { id: `t${i}`, title: `Thread ${i}`, message_count: 1 });
+      const dkEntries = new Map<string, { id: string; text: string }>([
+        ['k1', { id: 'k1', text: 'a durable fact about a person' }],
+      ]);
+      const memory = new Map<string, string>([
+        ['knowledge', 'remembered'], ['methods', ''], ['status', ''], ['learnings', ''],
+      ]);
+      const secrets = new Map<string, string>([['API_TOKEN', 'v']]);
+      const collections = [{ name: 'crm_contacts' }];
+      return {
+        getThreadStore: () => ({
+          // Honours `offset` so a route that never sends one is visibly capped.
+          listThreads: ({ limit, offset }: { limit?: number; offset?: number }) =>
+            [...threads.values()].slice(offset ?? 0, (offset ?? 0) + (limit ?? 50)),
+          getMessages: () => [{ seq: 1, role: 'user', content_json: '"hi"', display_only: 0, created_at: '' }],
+          deleteAllThreads: () => { const n = threads.size; threads.clear(); return n; },
+          deleteThread: (id: string) => { threads.delete(id); return true; },
+        }),
+        getMemory: () => ({
+          load: (ns: string) => Promise.resolve(memory.get(ns) ?? null),
+          save: (ns: string, v: string) => { memory.set(ns, v); return Promise.resolve(); },
+        }),
+        getKnowledgeLayer: () => null,
+        getKnowledgeStore: () => ({
+          listEntries: () => [...dkEntries.values()],
+          listQueue: () => [],
+          listBlocks: () => [],
+          countEntries: () => dkEntries.size,
+          deleteEntry: (id: string) => dkEntries.delete(id),
+          deleteBySubject: () => 0,
+        }),
+        getDataStore: () => ({
+          listCollections: () => [...collections],
+          dropCollection: (n: string) => { const i = collections.findIndex(c => c.name === n); if (i >= 0) collections.splice(i, 1); return true; },
+        }),
+        getCRM: () => null,
+        getSecretStore: () => ({
+          listNames: () => [...secrets.keys()],
+          deleteSecret: (n: string) => { secrets.delete(n); return true; },
+          listSecretsForExport: () => [...secrets.keys()].map(name => ({ name })),
+        }),
+        getEngineDb: () => null,
+        getRunHistory: () => null,
+      };
+    }
+
+    it('DELETE /api/data never reads a capped thread listing — it asks the store to wipe', async () => {
+      // This is the CALL SHAPE, not the outcome, and the distinction is the point.
+      // The erasure used to loop over `listThreads({ limit: 200 })` and delete what
+      // came back: 200 threads of a tenant that had more, and never a thread whose
+      // `message_count` rollup is 0 (its title is user-written text). A mock cannot
+      // show what survived — it clears a Map — but it can show that the route no
+      // longer derives the set it erases from a UI listing. How much
+      // `deleteAllThreads` actually removes is asserted on a real database in
+      // `thread-store.test.ts`, and end-to-end in `erasure-covers-export.test.ts`.
+      const listThreads = vi.fn(() => []);
+      const deleteAllThreads = vi.fn(() => 0);
+      const deleteThread = vi.fn();
+      await swapEngine({
+        getThreadStore: () => ({ listThreads, deleteAllThreads, deleteThread, getMessages: () => [] }),
+        // The mock Engine class defines no `getDataStore`/`getEngineDb` at all, so
+        // every erasure test has to hand them over — the route calls the accessor
+        // before it can guard on the result.
+        getEngineDb: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        expect(deleteAllThreads).toHaveBeenCalledTimes(1);
+        expect(listThreads, 'the erasure must not derive its set from a listing').not.toHaveBeenCalled();
+        expect(deleteThread, 'nor delete row by row from one').not.toHaveBeenCalled();
+      });
+    });
+
+    it('GET /api/export returns ALL threads, not the first 200', async () => {
+      // The same cap in the sibling route.
+      // Art. 15 asks for a complete copy; the DK block of this very export marks its
+      // own incompleteness with `may_be_incomplete`, and the threads block marks
+      // nothing — so a truncated access answer reads as a complete one.
+      await swapEngine(seededStores(250), async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { threads: unknown[] };
+        expect(body.threads).toHaveLength(250);
+      });
+    });
+
     it('GET /api/export pages through ALL entities (no silent 200-cap drop)', async () => {
       // 250 entities: the old single { limit: 200 } call silently dropped 50 from
       // a user's GDPR export. The route must paginate and return every one.
@@ -10898,7 +11012,42 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data still 200s (best-effort) when deleteAllData throws', async () => {
+    it('DELETE /api/data keeps wiping every other store when one throws (best-effort ORDER)', async () => {
+      // The half of the old `still 200s (best-effort)` test that was right, and is
+      // kept verbatim in intent: stopping at the first failure would leave MORE
+      // data behind, so every later store is still attempted. Only the ANSWER
+      // changed (next test). `engine_db` is deliberately the one that throws
+      // because the two stores below it in the route are the ones that would be
+      // skipped by an early return.
+      const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
+      const dropCollection = vi.fn();
+      const deleteSecret = vi.fn();
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+        }),
+        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret }),
+      }, async () => {
+        await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(deleteAllData).toHaveBeenCalledTimes(1);
+        expect(dropCollection, 'a later store must still be wiped').toHaveBeenCalledWith('c1');
+        expect(deleteSecret, 'and the last one too').toHaveBeenCalledWith('S1');
+      });
+    });
+
+    it('DELETE /api/data does NOT claim success when a wipe failed — 500 + the failed store', async () => {
+      // The sentence is the subject. Until this test the route wrote the failure to
+      // stderr and answered HTTP 200 with "All user data has been permanently
+      // deleted" — while the entire engine.db half (people.email/phone,
+      // memories.text, subjects.name, knowledge_entries) was still on disk. An
+      // Art. 17 answer that overstates itself is worse than an error: the one
+      // person who would have retried reads that they are done.
+      //
+      // Asserted together on purpose — a route that keeps the sentence while
+      // losing a wipe is exactly the defect, so status, flag, list and the absence
+      // of the sentence all hang on one failure.
       const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
@@ -10908,8 +11057,31 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
-        expect(res.status).toBe(200);
-        expect(deleteAllData).toHaveBeenCalledTimes(1);
+        expect(res.status).toBe(500);
+        const body = await res.json() as { deleted: boolean; failed: string[]; message?: string; error: string };
+        expect(body.deleted).toBe(false);
+        expect(body.failed).toEqual(['engine_db']);
+        expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
+        expect(JSON.stringify(body)).not.toContain('permanently deleted');
+        // The store key, never the SQLite message — it carries file paths and this
+        // body goes to a browser.
+        expect(JSON.stringify(body)).not.toContain('disk full');
+      });
+    });
+
+    it('DELETE /api/data reports EVERY failed store, not just the first', async () => {
+      // `failed` is the retry instruction, so a list that stops at the first entry
+      // sends a human to look in one place out of three.
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData: () => { throw new Error('a'); } }),
+        getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
+        getDataStore: () => ({ listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
+        getSecretStore: () => ({ listNames: () => [], deleteSecret: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        expect(body.failed).toEqual(['knowledge_graph', 'engine_db', 'datastore']);
       });
     });
 
