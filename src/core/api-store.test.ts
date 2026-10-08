@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDerivedSlot, STORED_PROFILE_PREAMBLE } from './api-store.js';
 import { vaultKeyForAccount } from '../integrations/mail/auth/app-password.js';
+import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { containsUntrustedMarker } from './data-boundary.js';
 import type { ApiProfile } from './api-store.js';
 import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
@@ -1342,6 +1343,22 @@ describe('vault slot derivation — one function, and it must stay injective at 
       // its id would refuse a working profile for a name it never uses.
       const bearer = { ...profile('lynox-x'), auth: { type: 'bearer', vault_keys: ['MY_KEY'] } } as unknown as ApiProfile;
       expect(protectedDerivedSlot(bearer)).toBeNull();
+    });
+
+    it('asks the refresh half on its own, for a protected name that only one half matches', () => {
+      // Every protected name today is a prefix both halves share, so no real name
+      // separates them. A provider slot with the refresh suffix would; this adds
+      // one for the length of the test, which is the case the predicate's comment
+      // says the second half exists for.
+      const slots = PROVIDER_KEY_SLOTS as Set<string>;
+      slots.add('CRMX_REFRESH_TOKEN');
+      try {
+        expect(protectedDerivedSlot(profile('crmx'))).toBe('CRMX_REFRESH_TOKEN');
+      } finally {
+        slots.delete('CRMX_REFRESH_TOKEN');
+      }
+      // And the control: without that entry, the same id derives nothing protected.
+      expect(protectedDerivedSlot(profile('crmx'))).toBeNull();
     });
 
     it('save refuses it and says which slot', () => {

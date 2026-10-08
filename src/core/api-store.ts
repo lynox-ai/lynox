@@ -634,8 +634,9 @@ export function refreshTokenKey(id: string): string {
  * Both halves are asked although today one answers for both: every infra
  * pattern is a prefix, which the two names share, and no provider slot ends in
  * `_ACCESS_TOKEN` or `_REFRESH_TOKEN`. That is a fact about the current set, not
- * a rule — a protected name with either suffix would split them, and dropping
- * the refresh half would then go unnoticed by the tests that pin this gate.
+ * a rule — a protected name with either suffix would split them. No real name
+ * does that today, so `api-store.test.ts` adds one for the length of a test;
+ * that is what keeps the refresh half from being dropped unnoticed.
  *
  * Kept pure and exported so the question can be asserted on its own; the
  * refusal lives in `_admit`, behind both {@link ApiStore.register} and save — the one gate every profile
