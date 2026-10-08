@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, truncateSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { sweepDataDir, OVERSIZE_BYTES } from './data-dir-sweep.js';
@@ -14,6 +14,9 @@ describe('data-dir sweep', () => {
   const dirs: string[] = [];
   const tmp = (): string => { const d = mkdtempSync(join(tmpdir(), 'lynox-sweep-')); dirs.push(d); return d; };
   afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+  /** A file of `bytes` that occupies almost nothing: the sweep reads `stat().size`, so a sparse
+   *  file carries the same size without writing 100 MiB into a temp directory other runs share. */
+  const sparse = (path: string, bytes: number): void => { writeFileSync(path, ''); truncateSync(path, bytes); };
 
   it('reports a store no code creates — the shape the static scan cannot see', () => {
     const dir = tmp();
@@ -58,12 +61,15 @@ describe('data-dir sweep', () => {
   it('flags a backed-up directory that has grown past the oversize bar', () => {
     const dir = tmp();
     mkdirSync(join(dir, 'workspace'));
-    writeFileSync(join(dir, 'workspace', 'big.bin'), Buffer.alloc(OVERSIZE_BYTES + 1024));
+    sparse(join(dir, 'workspace', 'big.bin'), OVERSIZE_BYTES + 1024);
     mkdirSync(join(dir, 'memory'));
     writeFileSync(join(dir, 'memory', 'small.txt'), 'x', 'utf-8');
 
     const res = sweepDataDir(dir);
     expect(res.oversize.map(f => f.name)).toEqual(['workspace']);
+    // The sweep sees the full size, and the file itself holds well under a megabyte on disk.
+    expect(res.oversize[0]?.bytes).toBe(OVERSIZE_BYTES + 1024);
+    expect(statSync(join(dir, 'workspace', 'big.bin')).blocks * 512).toBeLessThan(1024 * 1024);
     // It is declared, so it must NOT also be reported as an unknown store.
     expect(res.undeclared).toEqual([]);
   });
@@ -71,7 +77,7 @@ describe('data-dir sweep', () => {
   it('does not flag an entry that is large but NOT in any backup', () => {
     const dir = tmp();
     mkdirSync(join(dir, 'backups'));
-    writeFileSync(join(dir, 'backups', 'big.bin'), Buffer.alloc(OVERSIZE_BYTES + 1024));
+    sparse(join(dir, 'backups', 'big.bin'), OVERSIZE_BYTES + 1024);
     // `backups/` is declared and deliberately not carried — its size costs nothing per run.
     expect(sweepDataDir(dir).oversize).toEqual([]);
   });
