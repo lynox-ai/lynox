@@ -59,6 +59,17 @@ export interface DisplayNoteInput {
   content: unknown;
 }
 
+/**
+ * The largest page {@link ThreadStore.listThreadsForExport} will return.
+ *
+ * Exported because an exhaustive caller has to know it: such a walk stops when a
+ * page comes back SHORT, so a caller that asks for more than this gets a short
+ * page on the first call and concludes it has everything. Two independent
+ * constants that merely happen to be equal is the version of this that breaks
+ * silently the day one of them moves.
+ */
+export const EXPORT_PAGE_MAX = 500;
+
 export class ThreadStore {
   private readonly db: Database.Database;
 
@@ -136,7 +147,7 @@ export class ThreadStore {
    * Pass the previous page's last `id` as `after`; omit it for the first page.
    */
   listThreadsForExport(opts: { after?: string | undefined; limit: number }): ThreadRecord[] {
-    const limit = Math.max(1, Math.min(opts.limit, 500));
+    const limit = Math.max(1, Math.min(opts.limit, EXPORT_PAGE_MAX));
     const after = opts.after;
     return (after === undefined
       ? this.db.prepare('SELECT * FROM threads ORDER BY id ASC LIMIT ?').all(limit)

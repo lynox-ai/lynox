@@ -66,6 +66,7 @@ import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
+import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -9456,7 +9457,7 @@ export class LynoxHTTPApi {
         // the `durable_knowledge` block below and unlike this route's entity loop,
         // because a recipient who cannot see the truncation reads a short answer as
         // a complete one — which is the defect this whole route is being fixed for.
-        const THREAD_PAGE = 500;
+        const THREAD_PAGE = EXPORT_PAGE_MAX;
         const THREAD_CAP = 20_000;
         const threads: ThreadRecord[] = [];
         let threadsTruncated = false;

@@ -10889,6 +10889,58 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('GET /api/export marks the thread list incomplete when it hits the cap', async () => {
+      // Same shape as the entity-cap case below, and for the same reason: a store
+      // that always hands back a FULL page drives the route to its bound in cheap
+      // mock calls, so the cap is reachable without seeding twenty thousand real
+      // threads. Without this the truncation flag had no witness at all — a
+      // mutation that hard-codes it to `false` survived every test in the repo,
+      // and the one input that discriminates it is a tenant past the cap.
+      //
+      // The flag is the whole point of the cap. An Art. 15 answer that is short
+      // and says so is a different thing from one that is short and looks
+      // complete, which is the defect this route was fixed for; a cap without the
+      // marker would have reproduced it one bound higher.
+      let served = 0;
+      const listThreadsForExport = vi.fn(({ limit }: { limit: number }) => {
+        const page = Array.from({ length: limit }, (_, i) => ({ id: `cap-${served + i}`, title: 't', message_count: 1 }));
+        served += limit;
+        return page;
+      });
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages: () => [] }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { threads: unknown[]; threads_may_be_incomplete: boolean };
+        expect(body.threads_may_be_incomplete, 'the dump is short and must say so').toBe(true);
+        // And the walk stopped AT the cap rather than running on: the page size is
+        // the store's own `EXPORT_PAGE_MAX`, so the count is a multiple of it.
+        expect(body.threads.length).toBeGreaterThanOrEqual(20_000);
+        expect(body.threads.length).toBeLessThan(21_000);
+      });
+    });
+
+    it('GET /api/export does NOT mark the thread list incomplete on a short page', async () => {
+      // The other direction, because a flag that is always true is as useless as
+      // one that is always false — and `true` is the value a careless fix would
+      // reach for after the case above.
+      const listThreadsForExport = vi.fn(() => [{ id: 'only', title: 't', message_count: 1 }]);
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages: () => [] }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const body = await (await jsonFetch('/api/export')).json() as { threads_may_be_incomplete: boolean };
+        expect(body.threads_may_be_incomplete).toBe(false);
+        expect(listThreadsForExport).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {
       // A store that always returns a full PAGE would loop forever without the
       // MAX_PAGES bound — assert the loop stops at the 1000-page cap.
