@@ -205,7 +205,9 @@ function scaledShares(asks: readonly number[], remainingRunUSD: number): number[
   // every `x`, so the closest reachable sum is one ULP under. Measured offline over 385 624 scaled
   // batches with realistic asks: exact in 384 106, one ULP short in the rest, never over. With a
   // last ask far below `ulp(R)` the cap at the ask leaves the prefix's own rounding error, a few
-  // ULPs, unabsorbed — under, never over. A lone child has no prefix and always gets exactly `R`.
+  // ULPs, unabsorbed. "Never over" holds while the last share is positive: when the prefix alone
+  // rounds past `R`, the last share is 0 and the batch is refused for that zero share before the
+  // reservation reads the sum. A lone child has no prefix and always gets exactly `R`.
   //
   // ⚠ THE STEP-DOWN IS NOT DECORATION. When the last child takes more than half the remainder,
   // `R − prefix` can round UP, and `prefix + share` then lands one ULP past `R` — refused by the
