@@ -18,6 +18,7 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
+  NetworkPolicy,
 } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -111,6 +112,28 @@ function configureHistoryBackedLimits(
 }
 
 function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolContext): void {
+  const resolvedPolicy = applyEgressSettings(userConfig, toolContext);
+  // Boot-log the active egress posture. The `guarded-capable build` marker is
+  // present on every W1+ image regardless of the active value — the rollout-order
+  // gate (Pro CP) greps the fleet boot logs for it to confirm an image can honour
+  // `guarded` BEFORE emitting LYNOX_NETWORK_POLICY=guarded (a pre-W1 image would
+  // silently drop the unknown value to allow-all). See PRD-EGRESS-POSTURE §3.4.
+  // The line is BUILT from the wire contract (`src/contract/marker.ts`), which
+  // is also where the matching pattern comes from — rewording it here is a
+  // contract change, not a log tweak.
+  process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
+}
+
+/**
+ * Write the egress settings of `userConfig` onto `toolContext`: `enforce_https`,
+ * `network_policy` and the operator host floor. Returns the policy it applied.
+ *
+ * Called at boot and again by `Engine.reloadUserConfig`, so a policy changed at
+ * runtime is the policy the tools read, in both directions. Sessions share the
+ * engine's ToolContext and see the change on their next call. A sub-agent copies
+ * the context when it is spawned and keeps the values it started with.
+ */
+export function applyEgressSettings(userConfig: LynoxUserConfig, toolContext: ToolContext): NetworkPolicy {
   applyEnforceHttps(toolContext, userConfig.enforce_https === true);
   // Outbound egress policy. Default 'allow-all' = unchanged behaviour.
   // 'allow-list'/'deny-all'/'guarded' are opt-in operator/CP controls enforced
@@ -133,15 +156,7 @@ function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolCon
     resolvedPolicy,
     userConfig.network_allowed_hosts,
   );
-  // Boot-log the active egress posture. The `guarded-capable build` marker is
-  // present on every W1+ image regardless of the active value — the rollout-order
-  // gate (Pro CP) greps the fleet boot logs for it to confirm an image can honour
-  // `guarded` BEFORE emitting LYNOX_NETWORK_POLICY=guarded (a pre-W1 image would
-  // silently drop the unknown value to allow-all). See PRD-EGRESS-POSTURE §3.4.
-  // The line is BUILT from the wire contract (`src/contract/marker.ts`), which
-  // is also where the matching pattern comes from — rewording it here is a
-  // contract change, not a log tweak.
-  process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
+  return resolvedPolicy;
 }
 
 /**
