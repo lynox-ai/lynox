@@ -7,6 +7,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
+import { isInputRequired } from '../../core/input-required.js';
 
 // === Types ===
 
@@ -215,6 +216,8 @@ export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<Sh
           default: return `Error: Unknown action "${input.action}". Valid: read, write, append, create, list, format.`;
         }
       } catch (err: unknown) {
+        // A confirmation nobody can answer ends the run; as text, the model would work around it.
+        if (isInputRequired(err)) throw err;
         return `Sheets error: ${getErrorMessage(err)}`;
       }
     },

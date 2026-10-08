@@ -25,6 +25,7 @@ import {
   checkRecipientDedup,
   recordMailSend,
 } from './rate-limit.js';
+import { isInputRequired } from '../../../core/input-required.js';
 
 interface MailReplyToolInput {
   account?: string | undefined;
@@ -251,6 +252,8 @@ ${bodyPreview}`;
         } catch { /* reconcile is best-effort — never fail an already-sent reply */ }
         return `Reply sent from ${sendProvider.accountId}.\nMessage-ID: ${result.messageId}\nAccepted: ${result.accepted.join(', ') || '(none)'}${result.rejected.length > 0 ? `\nRejected: ${result.rejected.join(', ')}` : ''}`;
       } catch (err: unknown) {
+        // A confirmation nobody can answer ends the run; as text, the model would work around it.
+        if (isInputRequired(err)) throw err;
         if (err instanceof MailError) return `mail_reply error (${err.code}): ${err.message}`;
         return `mail_reply error: ${getErrorMessage(err)}`;
       }

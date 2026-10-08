@@ -340,12 +340,23 @@ export class Agent implements IAgent {
   private _promptSecret: PromptSecretFn | undefined;
   get promptUser(): PromptUserFn | undefined {
     const raw = this._promptUser;
-    return raw ? (question, options, meta) => raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+    return raw ? (question, options, meta) => this._notingAskedNobody(raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
   }
   set promptUser(fn: PromptUserFn | undefined) { this._promptUser = fn; }
   get promptTabs(): PromptTabsFn | undefined {
     const raw = this._promptTabs;
-    return raw ? (questions, meta) => raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+    return raw ? (questions, meta) => this._notingAskedNobody(raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
+  }
+  /** A prompt that could reach nobody, noted HERE — where every prompt passes — and not only
+   *  where it is thrown: a tool that catches the error and returns it as text would otherwise
+   *  turn the end of the run back into a result the model reads and works around. The batch
+   *  ends the run on it (`_dispatchTools`). Reset at the start of each run. */
+  private _askedNobodyInRun: InputRequiredError | undefined;
+  private _notingAskedNobody<T>(answer: Promise<T>): Promise<T> {
+    return answer.catch((err: unknown) => {
+      if (isInputRequired(err)) this._askedNobodyInRun ??= err;
+      throw err;
+    });
   }
   set promptTabs(fn: PromptTabsFn | undefined) { this._promptTabs = fn; }
   get promptSecret(): PromptSecretFn | undefined {
@@ -2080,6 +2091,7 @@ export class Agent implements IAgent {
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
+    this._askedNobodyInRun = undefined;
     // F5: everything already in the buffer is a PREVIOUS turn — replace the
     // bodies of successfully saved artifacts with a reference (next-turn
     // eviction, D4). Runs here rather than pre-send so the turn that produced
@@ -3667,6 +3679,13 @@ export class Agent implements IAgent {
         await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, isError: true });
       }
       throw masked;
+    }
+    // …and the same end when a tool caught the error and returned it as text: the prompt was
+    // noted where it passed (`_notingAskedNobody`). That call's result is already streamed.
+    const swallowed = this._askedNobodyInRun;
+    if (swallowed !== undefined) {
+      this._askedNobodyInRun = undefined;
+      throw this._maskedNeedsInput(swallowed);
     }
 
     const results: BetaToolResultBlockParam[] = settled.map((outcome, i) => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ToolEntry, StreamEvent } from '../types/index.js';
+import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 
 // === Mocks ===
@@ -5755,6 +5755,37 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', handler)], secretStore: gateStore() });
     await expect(agent.send('Fetch it')).resolves.toBe('done');
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tool that catches the error and returns it as text does not turn the end back into a result', async () => {
+    // The shape a catch-all tool has: confirm, and on ANY error return "<tool> error: …". Noted
+    // where the prompt passed, the run still ends — for a tool written tomorrow as well.
+    const swallowing = makeTool('confirm_tool', vi.fn(async (_input: unknown, a: IAgent) => {
+      try { await a.promptUser!('Use key sk-live-SECRET?', ['Yes', 'No']); return 'done'; }
+      catch (err) { return `confirm_tool error: ${(err as Error).message}`; }
+    }));
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'confirm_tool', input: {} }]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    // A store that masks but sees no `secret:` reference, so no gate fires before the handler.
+    const secretStore = Object.assign(gateStore(), { extractSecretNames: vi.fn().mockReturnValue([]) });
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [swallowing], promptUser, secretStore });
+    const err = await agent.send('Go').then(() => null, (e: unknown) => e);
+    expect(swallowing.handler, 'the handler ran and swallowed the error').toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect(mockProcess, 'the model gets no turn to work around it').toHaveBeenCalledTimes(1);
+    expect((err as InputRequiredError).question).not.toContain('sk-live-SECRET');
+  });
+
+  it('…and a NEXT run on the same agent starts clean: an unanswerable prompt before it does not end it', async () => {
+    // What the content-policy refusal leaves behind: the prompt was raised (and refused) before
+    // any run. The next run must not inherit the note.
+    const promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Allow this request?'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('plain_tool', vi.fn().mockResolvedValue('ok'))], promptUser });
+    await agent.promptUser!('Allow this request?', ['Allow', 'Deny']).catch(() => {});
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_p', name: 'plain_tool', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('fine'));
+    await expect(agent.send('Go')).resolves.toBe('fine');
   });
 
   it('with a question path nothing changes: the answer comes back and the run goes on', async () => {
