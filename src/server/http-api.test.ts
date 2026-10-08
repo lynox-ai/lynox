@@ -6565,6 +6565,21 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    it('PATCH hands a valid modelTier to the update, null included, and answers 400 for any other value', async () => {
+      mockTaskUpdate.mockClear();
+      for (const modelTier of ['fast', 'balanced', 'deep', null, '']) {
+        const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier }) });
+        expect(res.status, String(modelTier)).toBe(200);
+        expect(mockTaskUpdate).toHaveBeenLastCalledWith('task-1', expect.objectContaining({ modelTier }));
+      }
+      mockTaskUpdate.mockClear();
+      for (const modelTier of ['opus', 'DEEP', 3, {}]) {
+        const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier }) });
+        expect(res.status, JSON.stringify(modelTier)).toBe(400);
+      }
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+
     it('PATCH returns 404 for unknown task', async () => {
       mockTaskUpdate.mockReturnValue(undefined);
       const res = await jsonFetch('/api/tasks/nonexistent', {
@@ -13228,6 +13243,17 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(res.status).toBe(200);
       expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
       expect(mockTaskMarkEditedBy.mock.invocationCallOrder[0]!).toBeLessThan(mockTaskUpdate.mock.invocationCallOrder[0]!);
+    });
+
+    it('marks a trigger whose tier it changes, and refuses an invalid tier without marking it', async () => {
+      const bad = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'opus' }) });
+      expect(bad.status).toBe(400);
+      expect(mockTaskMarkEditedBy).not.toHaveBeenCalled();
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+      const ok = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
+      expect(ok.status).toBe(200);
+      expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
+      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }));
     });
 
     it('marks a trigger before switching it on or off, and before completing it', async () => {

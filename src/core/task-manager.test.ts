@@ -218,6 +218,21 @@ describe('TaskManager', () => {
       expect(tm.update('nope', { title: 'x' })).toBeUndefined();
     });
 
+    it('sets, and with an empty value or null clears, a trigger\'s model tier', () => {
+      const trigger = tm.create({ title: 'Nightly', taskType: 'scheduled', scheduleCron: '0 9 * * *' });
+      expect(tm.getTrigger(trigger.id)?.model_tier).toBeUndefined();
+      expect(tm.update(trigger.id, { modelTier: 'deep' })?.model_tier).toBe('deep');
+      expect(tm.update(trigger.id, { modelTier: '' })?.model_tier).toBeUndefined();
+      tm.update(trigger.id, { modelTier: 'fast' });
+      expect(tm.update(trigger.id, { modelTier: null })?.model_tier).toBeUndefined();
+    });
+
+    it('refuses a model tier it does not know, legacy aliases included', () => {
+      const trigger = tm.create({ title: 'Nightly', taskType: 'scheduled', scheduleCron: '0 9 * * *' });
+      expect(() => tm.update(trigger.id, { modelTier: 'opus' as never })).toThrow('Invalid model_tier');
+      expect(tm.getTrigger(trigger.id)?.model_tier).toBeUndefined();
+    });
+
     it('should reject invalid status', () => {
       const task = tm.create({ title: 'Test' });
       expect(() => tm.update(task.id, { status: 'invalid' as never }))

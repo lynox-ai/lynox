@@ -86,7 +86,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { BulkTriggerLockedError, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, isTriggerModelTierUpdate, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -6938,8 +6938,14 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
-      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       const b = body as Record<string, unknown>;
+      // Checked here rather than left to `update`, which throws: a thrown error answers
+      // 500, and a refused request must not mark the trigger as a mandate's edit either.
+      if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
+        errorResponse(res, 400, 'Invalid modelTier: use fast, balanced or deep, or null to clear it.');
+        return;
+      }
+      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
         let found: boolean;

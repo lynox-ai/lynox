@@ -264,7 +264,7 @@ describe('WorkerLoop', () => {
     const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard');
+    expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', undefined);
     expect(session._recreateAgent).toHaveBeenCalledWith(expect.objectContaining({ autonomy: 'autonomous', backgroundSlot: slot }));
   });
 
@@ -284,7 +284,7 @@ describe('WorkerLoop', () => {
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
     await fire(makeTask({ id: 't-bgm', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
-    expect(override).toHaveBeenCalledWith('watch');
+    expect(override).toHaveBeenCalledWith('watch', undefined);
     expect(analysisSession._recreateAgent).toHaveBeenCalledWith({ backgroundSlot: slot });
 
     vi.mocked(analysisSession._recreateAgent).mockClear();
@@ -292,6 +292,49 @@ describe('WorkerLoop', () => {
     mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
     await fire(makeTask({ id: 't-bgm2', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
     expect(analysisSession._recreateAgent).not.toHaveBeenCalled();
+  });
+
+  it('executeStandard runs a trigger at its own tier: the session asks for it and the override is told', async () => {
+    const task = makeTask({ model_tier: 'deep' });
+    const session = makeSession('Done.');
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'deep' }));
+    expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', 'deep');
+  });
+
+  it('executeStandard without a trigger tier leaves the session\'s tier alone', async () => {
+    const session = makeSession('Done.');
+    const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).not.toHaveProperty('model');
+  });
+
+  it('executeWatch analyses at the trigger\'s tier instead of fast, and tells the override', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
+    const override = vi.fn((): Record<string, unknown> => ({}));
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: override,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+    await fire(makeTask({ id: 't-tier', source: 'watch', effect: 'run_agent', model_tier: 'balanced', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'balanced' }));
+    expect(override).toHaveBeenCalledWith('watch', 'balanced');
+
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+    await fire(makeTask({ id: 't-tier2', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ model: 'fast' }));
   });
 
   // ---- 2b. executeStandard wires a per-run cost guard (SEC-LC-1) ----

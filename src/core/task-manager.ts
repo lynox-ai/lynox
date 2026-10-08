@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
-import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode } from '../types/index.js';
+import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode, ModelTier } from '../types/index.js';
 import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { compose, renderFence } from '../core/data-boundary.js';
@@ -129,6 +129,15 @@ export interface TaskUpdateParams {
   /** Reschedule a recurring task. Standard cron or shorthand (e.g. '30m').
    *  Empty string clears the schedule. Mutually exclusive with nextRunAt. */
   scheduleCron?: string | undefined;
+  /** The model tier a trigger's runs ask for: `fast`, `balanced` or `deep`. Empty
+   *  string or null clears the choice. A TODO has no runs, so it ignores this. */
+  modelTier?: ModelTier | '' | null | undefined;
+}
+
+/** Whether `value` is something {@link TaskUpdateParams.modelTier} accepts. Only the
+ *  current tier names: the legacy aliases are read, never written. */
+export function isTriggerModelTierUpdate(value: unknown): value is ModelTier | '' | null {
+  return value === null || value === '' || value === 'fast' || value === 'balanced' || value === 'deep';
 }
 
 export interface WeekSummary {
@@ -351,6 +360,9 @@ export class TaskManager {
     if (params.scheduleCron && !isValidCron(params.scheduleCron)) {
       throw new Error(`Invalid schedule: ${params.scheduleCron}. Use cron (e.g. '0 9 * * *') or shorthand ('30m', '1h', '1d').`);
     }
+    if (params.modelTier !== undefined && !isTriggerModelTierUpdate(params.modelTier)) {
+      throw new Error('Invalid model_tier: use fast, balanced or deep, or an empty value to clear it.');
+    }
 
     // AGENT-TRIGGER path: schedule fields live here (the `triggers` table). The
     // schedule normalization is part of the trigger update — a TODO has no
@@ -365,8 +377,10 @@ export class TaskManager {
         assignee?: string | undefined;
         nextRunAt?: string | null | undefined;
         scheduleCron?: string | null | undefined;
+        modelTier?: ModelTier | null | undefined;
       } = {};
       if (params.title !== undefined) triggerUpdate.title = params.title;
+      if (params.modelTier !== undefined) triggerUpdate.modelTier = params.modelTier || null;
       if (params.description !== undefined) triggerUpdate.description = params.description;
       if (params.status !== undefined) triggerUpdate.status = params.status;
       if (params.assignee !== undefined) triggerUpdate.assignee = params.assignee;

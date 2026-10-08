@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
+import { normalizeTier, type ModelTier } from '../types/index.js';
 
 /**
  * The parked status, as a typed constant rather than a SQL literal, so the two
@@ -199,6 +200,7 @@ interface TriggerFullDbRow {
   created_by: string | null;
   edited_by: string | null;
   confirmed_by: string | null;
+  model_tier: string | null;
 }
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
@@ -206,7 +208,7 @@ const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by`;
+   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by, model_tier`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -271,6 +273,8 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     created_by: row.created_by ?? undefined,
     edited_by: row.edited_by ?? undefined,
     confirmed_by: row.confirmed_by ?? undefined,
+    // Read through `normalizeTier`, so a value no writer can produce reads as no choice.
+    model_tier: normalizeTier(row.model_tier ?? undefined),
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
   };
 }
@@ -583,6 +587,8 @@ export class TriggerStore {
      *  it, mirroring `nextRunAt` — un-parking must be able to remove the deadline,
      *  not just move it, or a trigger that resumed early would still be swept. */
     waitingUntil?: string | null | undefined;
+    /** The model tier the user chose for this trigger's runs; null clears the choice. */
+    modelTier?: ModelTier | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -635,6 +641,10 @@ export class TriggerStore {
       sets.push("condition_json = json_set(condition_json, '$.schedule_cron', ?)");
       values.push(params.scheduleCron || null);
     }
+    // The tier changes which model runs the instruction and what a run costs, not what
+    // it is told to do, so like a schedule change it leaves consent as it was. A
+    // mandate's change is marked by the request route, as every mandate edit is.
+    if (params.modelTier !== undefined) { sets.push('model_tier = ?'); values.push(params.modelTier); }
     // `assignee` has no engine.db column (const 'lynox' for every trigger) — a
     // legacy assignee update was a no-op-in-effect. Count it as a touch so the
     // changes>0 return still matches legacy when it is the only field.

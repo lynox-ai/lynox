@@ -1529,16 +1529,19 @@ export class WorkerLoop {
       // reserved (a manual run), and then the constant is the only bound there is.
       costGuard: { maxBudgetUSD: capUSD ?? WORKER_MAX_COST_USD },
       ...(starter ? { principal: starter } : {}),
+      // The tier the user chose for this trigger, held to the ceiling by the session.
+      ...(task.model_tier ? { model: task.model_tier } : {}),
     });
     // Cost control: cap agent loop iterations for background tasks
     // Background model: the user's choice (`background_model`, already bounded at
     // config load) beats the operator's `worker_profile`, which routes background
     // tasks to a cheaper provider (managed: Mistral). The choice is made in one place,
-    // `Engine.workerRunModelOverride`, which `resolveWorkerRunModel` reads too.
+    // `Engine.workerRunModelOverride`, which `resolveWorkerRunModel` reads too. A
+    // trigger's own tier beats both, and then the override is empty.
     session._recreateAgent({
       maxIterations: WORKER_MAX_ITERATIONS,
       autonomy: 'autonomous',
-      ...this.engine.workerRunModelOverride('standard'),
+      ...this.engine.workerRunModelOverride('standard', task.model_tier),
     });
 
     // §0 A7 — did every question this run asked actually get an answer?
@@ -2245,8 +2248,9 @@ export class WorkerLoop {
       // A watch is a single summarize-what-changed turn — a fast-tier job.
       // Without this it inherited the engine's default tier (often
       // 'balanced'/Sonnet), paying a premium model for change-detection. A
-      // worker_profile (below) may still override the tier if the user set one.
-      model: 'fast',
+      // worker_profile (below) may still override the tier if the user set one. A tier
+      // the user chose for this trigger replaces `fast`, and then nothing overrides it.
+      model: task.model_tier ?? 'fast',
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       // ⛔ The grant wins over the constant when the admission made one — same coupling
       // as in `executeStandard`, same consequence if it is unpicked. A watch's estimate
@@ -2270,7 +2274,7 @@ export class WorkerLoop {
     WorkerLoop.attachSession(stopEntry, analysisSession);
     // Only when there is a choice to apply: without one the analysis keeps the
     // `fast` session it was created with, and no rebuild happens.
-    const watchModel = this.engine.workerRunModelOverride('watch');
+    const watchModel = this.engine.workerRunModelOverride('watch', task.model_tier);
     if (Object.keys(watchModel).length > 0) {
       analysisSession._recreateAgent(watchModel);
     }

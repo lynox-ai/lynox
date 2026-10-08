@@ -442,17 +442,18 @@ export class Engine {
    * that run's own session will resolve it, through the same helpers: the session's
    * initial tier (`sessionInitialTier`; a watch analysis asks for `fast`), the user's
    * `worker_profile` applied the way the loop applies it, and `resolveAgentModel`.
-   * An unknown profile throws here, as it would in the run.
+   * An unknown profile throws here, as it would in the run. `triggerTier` is the
+   * trigger's own `model_tier`, passed as the loop passes it.
    *
    * Not for "the model of this agent now": a running agent carries what it sends
    * (`agent.model`), and a spawned child's model is decided in spawn.ts — read those.
    */
-  resolveWorkerRunModel(kind: 'standard' | 'watch'): { modelId: string; provider: ReturnType<typeof resolveAgentModel>['provider'] } {
+  resolveWorkerRunModel(kind: 'standard' | 'watch', triggerTier?: ModelTier | undefined): { modelId: string; provider: ReturnType<typeof resolveAgentModel>['provider'] } {
     const userConfig = this.userConfig;
-    const pick = this.workerRunModelOverride(kind);
+    const pick = this.workerRunModelOverride(kind, triggerTier);
     const profile = 'profile' in pick && pick.profile !== undefined ? resolveNamedProfile(userConfig, pick.profile) : undefined;
     const { modelId, provider } = resolveAgentModel({
-      tier: sessionInitialTier(this, kind === 'watch' ? 'fast' : undefined),
+      tier: sessionInitialTier(this, triggerTier ?? (kind === 'watch' ? 'fast' : undefined)),
       baseProvider: getActiveProvider(),
       profile,
       configProvider: userConfig.provider,
@@ -469,11 +470,16 @@ export class Engine {
    * 2. else the operator's `worker_profile` — a standard run passes it as given (an
    *    empty name throws there), a watch analysis only when it is set;
    * 3. else nothing, and the session's tier decides, as it always has.
+   *
+   * A trigger with its own `model_tier` skips all three: the loop creates that run's
+   * session at the trigger's tier, which `sessionInitialTier` holds to `max_tier` and
+   * the blocklist, and nothing here may then replace the model it resolves to.
    */
-  workerRunModelOverride(kind: 'standard' | 'watch'):
+  workerRunModelOverride(kind: 'standard' | 'watch', triggerTier?: ModelTier | undefined):
     | { backgroundSlot: import('../types/index.js').TierSlot }
     | { profile: string | undefined }
     | Record<string, never> {
+    if (triggerTier) return {};
     const backgroundSlot = this.getBackgroundSlot();
     if (backgroundSlot) return { backgroundSlot };
     const name = this.userConfig.worker_profile;

@@ -909,6 +909,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE triggers ADD COLUMN edited_by TEXT;
    ALTER TABLE triggers ADD COLUMN confirmed_by TEXT;
    UPDATE triggers SET confirmed_by = 'owner' WHERE confirmed_at IS NOT NULL;`,
+
+  // v21 (trigger model tier): the model tier the user chose for this trigger's runs —
+  // `fast` / `balanced` / `deep` — or NULL for no choice, in which case a run picks its
+  // model the way it did before this column existed. Existing rows stay NULL.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (21);
+   ALTER TABLE triggers ADD COLUMN model_tier TEXT;`,
 ];
 
 /**
