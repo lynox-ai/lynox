@@ -559,6 +559,9 @@ export class Engine {
       this.userConfig = prevConfig;
       throw e;
     }
+    // This path installs a freshly loaded config as well, so the tools must read its egress
+    // settings too (see `reloadUserConfig`).
+    applyEgressSettings(this.userConfig, this._toolContext);
     if (this.userConfig.provider && this.userConfig.provider !== 'anthropic') {
       await initLLMProvider(this.userConfig.provider);
     }

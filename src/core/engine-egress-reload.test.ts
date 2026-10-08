@@ -120,6 +120,19 @@ describe('Engine — egress settings follow a config reload', () => {
     expect(gate(engine, 'https://api.example.com/v1')).not.toThrow();
   });
 
+  it('a credential reload, which installs a freshly loaded config too, applies its egress settings', async () => {
+    const dir = freshDataDir();
+    writeUserConfig(dir, {});
+    const engine = await boot();
+    expect(gate(engine, 'https://api.example.com/v1')).not.toThrow();
+
+    writeUserConfig(dir, { network_policy: 'deny-all' });
+    reloadConfig();
+    await engine.reloadCredentials();
+    expect(engine.getUserConfig().network_policy).toBe('deny-all');
+    expect(gate(engine, 'https://api.example.com/v1')).toThrow(/network_policy=deny-all/);
+  });
+
   it('enforce_https switched on at runtime refuses plain http on the next call', async () => {
     const dir = freshDataDir();
     writeUserConfig(dir, {});
