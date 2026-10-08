@@ -18,10 +18,10 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
-import { accessTokenKey, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, isMandateAuthored, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { authTypeForModel, slotNameForModel, shapedForLog, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
+import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -1336,6 +1336,18 @@ function deletedMeanwhile(
 }
 
 /**
+ * What the owner takes over when their save replaces a profile a mandate wrote: the vault
+ * names and the host the mandate chose. Shaped like every other profile value this tool echoes.
+ */
+function adoptionNote(prior: ApiProfile): string {
+  const names = collectVaultKeys(prior).map((k) => shapedForLog(k, DERIVED_NAME_SHAPE, 80));
+  let host = '';
+  // The parser's hostname holds only letters, digits, dots, hyphens and IPv6 brackets.
+  try { host = new URL(prior.base_url).hostname; } catch { /* named as unknown below */ }
+  return `This profile had been set up in a mandate's session; it is now yours. It names ${names.length > 0 ? `the vault keys ${names.join(', ')}` : 'no vault keys'} and the host ${host !== '' ? host : '(unreadable)'}; requests now carry what those keys hold, from the environment too.`;
+}
+
+/**
  * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
  * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
  * host, the names the engine resolves — holds only while the profile is the one its author
@@ -1610,13 +1622,18 @@ ${draftJson}
       // to record, never the input's: a mandate's save records the mandate.
       const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
       if (foreignSave) return foreignSave;
+      // A provider preset connects an account, and connecting is the owner's: a mandate's turn
+      // prepares a profile but does not name a preset (PRD §3.13, interim scope — see the
+      // register row on who owns a connection).
+      if (!isOwnerPrincipal(agent.principal) && profile.auth?.oauth?.preset_id !== undefined) {
+        return `Error: profile "${profile.id}" names a provider preset, and connecting an account through one is for the owner to do. Nothing was saved. Save it without auth.oauth.preset_id, or ask the owner to set it up and connect.`;
+      }
       delete profile.created_by;
-      const priorAuthor = agent.toolContext?.apiStore?.get(profile.id)?.created_by;
+      const prior = agent.toolContext?.apiStore?.get(profile.id);
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
-      // The owner's save of a mandate's profile keeps the mandate as author. Clearing it would
-      // put every name and host the mandate chose behind the owner's name with no question
-      // asked; a profile the owner wants as their own is one they create.
-      else if (priorAuthor !== undefined) profile.created_by = priorAuthor;
+      // The owner's save of a mandate's profile makes it the owner's, and the answer says what
+      // the mandate had chosen, so the owner adopts it knowingly rather than by a re-save.
+      const adopted = isOwnerPrincipal(agent.principal) && prior !== undefined && isMandateAuthored(prior) ? prior : undefined;
 
       // Wave 5d BYOK liability gate: a profile pointed at a host outside
       // lynox's vetted sub-processor list cannot be saved without explicit
@@ -1864,6 +1881,7 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
+      if (adopted !== undefined) parts.push(adoptionNote(adopted));
       if (grantDiscarded) {
         parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
       }
@@ -1894,8 +1912,9 @@ ${draftJson}
       if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
-      const foreignConnect = foreignProfileRefusal(agent, profile, id);
-      if (foreignConnect) return foreignConnect;
+      if (!isOwnerPrincipal(agent.principal)) {
+        return `Error: connecting an account is for the owner to do, so this session does not hand out a link for profile "${id}". Ask the owner to connect it.`;
+      }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
@@ -1995,7 +2014,10 @@ ${draftJson}
       // model to collect a value the user already gave — and the user then has to
       // decide which half of the sentence is about them.
       const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
-      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
+      // Asked through the profile's view, as the route reads them, so a link is not handed out
+      // that the route then refuses.
+      const connectStore = agent.secretStore ? secretsForProfile(agent.secretStore, profile, apiStore) : undefined;
+      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds({ secretStore: connectStore } as IAgent, k));
       if (unnamed.length > 0 || unfilled.length > 0) {
         if (unnamed.length > 0) {
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
@@ -2211,7 +2233,9 @@ ${draftJson}
       // from the environment, or another author's preset account, whose requests would then
       // carry a token this profile minted (`profile-secret-view.ts`).
       if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName)) {
-        return `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
+        return input.output_secret_name === undefined
+          ? `Error: "${outputName}", where this profile's token would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its token gets a name of its own.`
+          : `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       // Never a slot the refresh token lives in: the access token would be written
       // over it, and the grant would go with it. Both slots, because a profile can

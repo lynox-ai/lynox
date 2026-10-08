@@ -3269,6 +3269,39 @@ describe('LynoxHTTPApi', () => {
   // PRD customer-granted-operator-access §3.13 (H2): the link a connection starts with reads
   // the vault through the profile's view, so a profile a mandate wrote does not put a value
   // from the environment into it. The owner's profile is the control.
+  // Interim scope (register row on who owns a connection): connecting an account is the
+  // owner's, and a mandate's session is refused before the profile is looked up.
+  describe('GET /api/oauth/connect/:id and a mandate\'s session', () => {
+    const MANDATE_LOGIN = {
+      kind: 'mandate' as const, email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+      mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    };
+    it.each([
+      ['refuses a mandate\'s session before it looks the profile up', true],
+      ['control: lets the owner\'s session through to the lookup', false],
+    ])('%s', async (_label, asMandate) => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      const lookup = vi.spyOn(store, 'get');
+      mockGetApiStore.mockReturnValue(store);
+      const priorSecret = process.env['LYNOX_HTTP_SECRET'];
+      process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+      try {
+        const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/oauth/connect/books`, {
+          redirect: 'manual',
+          headers: { cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' },
+        });
+        expect(res.status === 403 && (await res.text()).includes('for the owner of this instance')).toBe(asMandate);
+        expect(lookup.mock.calls.length > 0).toBe(!asMandate);
+      } finally {
+        if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
+        else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+  });
+
   describe('GET /api/oauth/connect/:id reads the client id through the profile', () => {
     it.each([
       ['a profile a mandate wrote does not send', 'mandate:setup@example.org', false],
@@ -3287,6 +3320,10 @@ describe('LynoxHTTPApi', () => {
       mockSecretIsEnvironment.mockImplementation((n: string) => n === 'BOOKS_CLIENT_ID');
       const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
       mockDerivePresetEndpoints.mockImplementation((id: string, params: Record<string, unknown> | undefined) => presets.derivePresetEndpoints(id, params));
+      // The route signs its state with the secret it reads at request time; earlier tests in
+      // this file change the environment, so it is set here for this request.
+      const priorSecret = process.env['LYNOX_HTTP_SECRET'];
+      process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
       try {
         const res = await fetch(`${baseUrl}/api/oauth/connect/books`, {
           redirect: 'manual',
@@ -3299,6 +3336,8 @@ describe('LynoxHTTPApi', () => {
         mockSecretIsEnvironment.mockReset();
         mockSecretIsEnvironment.mockReturnValue(false);
         mockDerivePresetEndpoints.mockReset();
+        if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
+        else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
         mockSecretResolve.mockReturnValue(null);

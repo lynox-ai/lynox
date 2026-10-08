@@ -8681,6 +8681,13 @@ export class LynoxHTTPApi {
       //   - `authenticated` is passed as a fact rather than assumed inside
       //     `decideConnect`, because the same function answers for the tool,
       //     where there is no dispatch to have done it.
+      // Connecting an account is the owner's (PRD §3.13, interim scope — see the register row
+      // on who owns a connection). Asked before the profile is looked up, so a mandate's
+      // session learns nothing about which ids exist.
+      if (!isOwnerPrincipal(this._principalOf(req))) {
+        sendOAuthHtml(res, 403, 'Connecting an account is for the owner of this instance. Nothing was sent to the provider.');
+        return;
+      }
       const profile = engine.getApiStore()?.get(id);
 
       const decision = decideConnect({

@@ -571,7 +571,6 @@ describe('api_setup tool', () => {
       ['create over the same id', { action: 'create', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }],
       ['refine', { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } }],
       ['delete', { action: 'delete', id: 'test-api' }],
-      ['connect', { action: 'connect', id: 'test-api' }],
       ['fetch_token into a name of its choosing', { action: 'fetch_token', id: 'test-api', output_secret_name: 'COPY_TOKEN' }],
     ])('a mandate may not %s a profile the owner set up, and nothing changes', async (_label, input) => {
       const store = new ApiStore();
@@ -600,12 +599,46 @@ describe('api_setup tool', () => {
       expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent)).toContain('Deleted');
     });
 
-    it('the owner\'s update of a mandate\'s profile keeps the mandate as author, so what it chose stays under its rules', async () => {
+    it('the owner\'s update of a mandate\'s profile makes it the owner\'s, and says what the mandate had chosen', async () => {
       const store = new ApiStore();
-      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store, undefined, undefined, mandate));
-      await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
+      await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type: 'bearer', vault_keys: ['SETUP_TOKEN'] } } }, createMockAgent(store, undefined, undefined, mandate));
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
       expect(stored(store).name).toBe('Changed');
-      expect(stored(store).created_by).toBe('mandate:setup@example.org');
+      expect(stored(store).created_by).toBeUndefined();
+      expect(out).toContain('set up in a mandate\'s session; it is now yours');
+      expect(out).toContain('SETUP_TOKEN');
+      expect(out).toContain('api.openai.com');
+    });
+
+    it('control: the owner\'s update of their own profile says nothing about a mandate', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store));
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
+      expect(out).not.toContain('mandate');
+    });
+
+    // Interim scope (register row on who owns a connection): connecting an account through a
+    // provider preset is the owner's.
+    it.each([
+      ['create', 'create'],
+      ['update of its own profile', 'update'],
+    ])('a mandate\'s %s naming a provider preset is refused, and nothing is saved', async (_label, action) => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, undefined, mandate);
+      if (action === 'update') await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const before = store.get('test-api') === undefined ? undefined : JSON.stringify(stored(store));
+      const preset = { ...SAMPLE_PROFILE, auth: { type: 'oauth2', vault_keys: ['C_ID'], oauth: { preset_id: 'bexio', client_id_key: 'C_ID' } } };
+      const out = await apiSetupTool.handler({ action, profile: preset } as never, agent);
+      expect(out).toContain('connecting an account through one is for the owner');
+      expect(store.get('test-api') === undefined ? undefined : JSON.stringify(stored(store))).toBe(before);
+    });
+
+    it('a mandate gets no connect link, on any profile', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, undefined, mandate);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const out = await apiSetupTool.handler({ action: 'connect', id: 'test-api' }, agent);
+      expect(out).toContain('connecting an account is for the owner');
     });
 
     it('a mandate\'s fetch_token on the owner\'s profile without a name of its own is not refused here (a read renews the same way)', async () => {

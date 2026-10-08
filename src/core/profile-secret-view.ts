@@ -19,9 +19,8 @@ import type { ApiProfile, ApiStore } from './api-store.js';
 /**
  * Whether the view below hides `name` from `profile`: always false for a profile the owner
  * wrote. For one a mandate wrote: a value from the environment (a store that cannot say counts
- * as one), or a credential of a preset account written by someone else — the profile's own
- * connection, and its author's other ones, stay usable. Read at each call, not once: the owner
- * can connect a preset after the mandate's profile already names its token.
+ * as one), or a credential of any account connected through a preset. Read at each call, not
+ * once: the owner can connect a preset after the mandate's profile already names its token.
  */
 export function hiddenFromProfile(
   store: SecretStoreLike,
@@ -31,7 +30,7 @@ export function hiddenFromProfile(
 ): boolean {
   if (!isMandateAuthored(profile)) return false;
   return (store.isEnvironmentSecret?.(name) ?? true)
-    || presetCredentialNames(apiStore, { author: profile.created_by }).has(name);
+    || presetCredentialNames(apiStore).has(name);
 }
 
 export function secretsForProfile(

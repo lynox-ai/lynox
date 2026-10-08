@@ -242,7 +242,7 @@ export interface ApiProfile {
    * Who wrote this profile, when it was not the owner: `mandate:<address>`
    * (PRD customer-granted-operator-access §3.13, H2). Absent means the owner's, which
    * every profile from before this field is. Set by the engine on a save, never taken
-   * from the input; the owner's save keeps it.
+   * from the input; the owner's save removes it, and says so.
    */
   created_by?: string | undefined;
   auth?: ApiAuth | undefined;
@@ -506,17 +506,13 @@ export function isMandateAuthored(profile: ApiProfile): boolean {
 /**
  * Every vault name a profile connected through a provider preset reads: its credentials,
  * its token pair and what its exchanges wrote. A mandate's turn may not write to such an
- * account (`http_request`), so it may not hold what authenticates there either.
- *
- * `exceptAuthor` leaves out the preset profiles that author wrote: a mandate's own
- * connection is its own to use. `undefined` there means the owner, matching
- * {@link ApiProfile.created_by}.
+ * account (`http_request`), so it may not hold what authenticates there either. A mandate
+ * connects no preset account of its own (`api_setup`), so there is no exception here.
  */
-export function presetCredentialNames(store: Pick<ApiStore, 'getAll'>, exceptAuthor?: { author: string | undefined }): Set<string> {
+export function presetCredentialNames(store: Pick<ApiStore, 'getAll'>): Set<string> {
   const names = new Set<string>();
   for (const p of store.getAll()) {
     if (p.auth?.oauth?.preset_id === undefined) continue;
-    if (exceptAuthor !== undefined && p.created_by === exceptAuthor.author) continue;
     for (const k of collectVaultKeys(p)) names.add(k);
   }
   return names;

@@ -3315,10 +3315,22 @@ describe('mandates and stored credentials', () => {
     expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
   });
 
-  it('a preset connection a mandate made itself keeps its own credentials', async () => {
-    const own: ApiProfile = { ...presetProfile(), created_by: M };
-    const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, mandate);
-    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
+  // No preset profile carries a mandate as author any more (api_setup refuses to save one);
+  // one stored before that gets no preset credentials either, its own included.
+  it('a preset profile with a mandate as author gets no preset credentials, its own included', async () => {
+    const own: ApiProfile = { ...presetProfile(), created_by: M, auth: { ...presetProfile().auth!, oauth: { ...presetProfile().auth!.oauth!, token_expires_at: Date.now() + 3_600_000 } } };
+    const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
+  });
+
+  it('when the derived token name of a profile a mandate wrote comes from the environment, fetch_token says to change the id, not to leave the name out', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, vault(SEED, ['CRM_API_ACCESS_TOKEN']) as never, undefined, undefined, mandate));
+    expect(out).toContain('Save the profile under a different id');
+    expect(out).not.toContain('Leave output_secret_name out');
   });
 
   it('control: the owner\'s profile may fetch_token into a name a mandate\'s profile could not', async () => {

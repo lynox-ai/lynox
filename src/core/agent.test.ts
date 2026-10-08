@@ -2119,8 +2119,7 @@ describe('Agent', () => {
     it.each([
       ['a mandate\'s turn does not resolve', { kind: 'mandate', email: 'setup@example.org' } as const, false],
       ['control: the owner\'s turn resolves', { kind: 'owner' } as const, true],
-      ['a mandate\'s turn resolves, for a connection it made itself,', { kind: 'mandate', email: 'setup@example.org' } as const, true, 'mandate:setup@example.org'],
-      ['a mandate\'s turn does not resolve, for another mandate\'s connection,', { kind: 'mandate', email: 'setup@example.org' } as const, false, 'mandate:other@example.org'],
+      ['a mandate\'s turn does not resolve, even for a profile it is the author of,', { kind: 'mandate', email: 'setup@example.org' } as const, false, 'mandate:setup@example.org'],
     ])('%s the token of a preset account', async (_label, principal, runs, author?: string) => {
       const { ApiStore } = await import('./api-store.js');
       const apiStore = new ApiStore();

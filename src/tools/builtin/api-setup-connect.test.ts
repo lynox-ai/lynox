@@ -136,6 +136,7 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLI
     principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
     secretStore: {
+      extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
       resolveSecretRefs: (input: unknown): unknown => {
         const text = JSON.stringify(input);
         return JSON.parse(text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (m, name: string) => secrets[name] ?? m)) as unknown;
@@ -199,6 +200,20 @@ describe('connect refuses a scope the preset does not allow', () => {
     const result = await connect(agentWith(store));
 
     expect(result).toContain('/api/oauth/connect/shop-api');
+  });
+
+  // The tool asks for the client pair as the route reads it, through the profile's view of the
+  // vault, so it does not hand out a link the route then refuses. A preset profile with a
+  // mandate as author cannot be saved any more; one stored before that is the case here.
+  it.each([
+    ['hands out no link for a profile a mandate wrote, whose client pair the route would not read', 'mandate:setup@example.org', false],
+    ['control: hands out the link for the owner\'s profile', undefined, true],
+  ])('%s', async (_label, author, linked) => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders' } }, ...(author === undefined ? {} : { created_by: author }) });
+    const result = await connect(agentWith(store));
+    expect(result.includes('/api/oauth/connect/shop-api')).toBe(linked);
   });
 
   it('fetch_token refuses a preset profile whose token endpoint cannot be derived', async () => {
