@@ -451,17 +451,20 @@ function measureStaticPrefixTokens(): number {
 // The slack ratchet above pins the result from the other side — budget minus measurement
 // must stay under 50, so a budget left at 23954 over a 23939 prefix would still pass
 // this test and fail that one.
-// 2026-10-08: +9 (23939 → 23948, measured) — system-prompt rule 11 promised that an
-// oauth2 profile always sends `Authorization: Bearer` and that the engine overrides a
-// hand-set Authorization. With `auth.header_name` on oauth2 (some APIs reject Bearer and
-// take the token in a header of their own) neither holds. The wording that shipped names
-// header_name in one parenthesis and drops the override clause, which pays for part of it.
-// Three wordings measured, not derived: 24025 for a first draft with a provider example
-// and a sentence on a 401 right after a fresh mint, 23970 for the precise parenthesis with
-// that sentence, 23948 without it. The 401 case is told by the 401 reminder in http.ts,
-// which reaches the model when it happens and is not part of this prefix. Baseline
-// re-measured in the same session with main's prompts.ts and api-setup.ts: 23938.
-const STATIC_PREFIX_BUDGET = 23948;
+// 2026-10-08: budget 23939 → 23950; measured prefix 23938 on main → 23950 (+12) — system-
+// prompt rule 11 promised that an oauth2 profile always sends `Authorization: Bearer`, that
+// the engine overrides a hand-set Authorization, and that a 401 means a stale token. With
+// `auth.header_name` on oauth2 (some APIs reject Bearer and take the token in a header of
+// their own) none of the three holds. The wording that shipped names header_name in one
+// parenthesis, drops the override clause, and says "usually stale".
+// Wordings measured, not derived: 24025 for a first draft with a provider example and a
+// sentence on a 401 right after a fresh mint, 23970 for the precise parenthesis with that
+// sentence, 23948 without it, 23950 with "usually". The 401-after-a-fresh-token case is told
+// by the 401 reminder in http.ts (both of its branches), which reaches the model when it
+// happens and is not part of this prefix; a profile the reminder does not fire for (no
+// token_url stored) gets only this rule. Baseline re-measured the same day with main's
+// prompts.ts and api-setup.ts: 23938.
+const STATIC_PREFIX_BUDGET = 23950;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

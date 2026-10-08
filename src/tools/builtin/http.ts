@@ -1704,7 +1704,7 @@ async function attachEngineManagedAuth(
     // A stored header_name that is not a header name (an empty string among them, which `??`
     // does not catch) is refused here rather than sent: the request would otherwise fail in
     // the HTTP layer with a message that does not name the profile.
-    if (auth.type !== 'bearer' && auth.header_name !== undefined && !HTTP_HEADER_NAME.test(auth.header_name)) {
+    if (auth.type !== 'bearer' && auth.header_name !== undefined && (typeof auth.header_name !== 'string' || !HTTP_HEADER_NAME.test(auth.header_name))) {
       return { refusal: `Error: api_profile "${profile.id}" has an auth.header_name that is not a valid header name, so the credential was not attached. Fix it with api_setup action="update" (for example "X-Api-Key").` };
     }
     const slot = auth.type === 'bearer' ? 'Authorization' : (auth.header_name ?? 'X-Api-Key');
@@ -2702,12 +2702,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // stderr diagnosis, where free text is a log-hygiene problem and not
             // an instruction channel.
             //
-            // The managed branch also SWITCHES on `auth.header_name` (whether the
-            // token went out as Bearer) to pick a second fixed sentence. That is a
+            // Both branches also SWITCH on `auth.header_name` (whether the token
+            // went out as Bearer) to pick a second fixed sentence each. That is a
             // choice between constants, not an interpolation: no part of the
             // field's value reaches the text. Keep it that way.
             wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null)
-              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.`
+              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own (Shopify\'s Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
               : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own (Shopify\'s Admin API: `X-Shopify-Access-Token`). Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
           }
         } catch {

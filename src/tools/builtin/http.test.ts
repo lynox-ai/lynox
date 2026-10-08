@@ -3956,6 +3956,15 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
+    it('a header_name that is not a string (a file-loaded profile) is refused, not thrown on', async () => {
+      const store = await storeWith({ type: 'header', header_name: 123, vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      expect(result).toContain('not a valid header name');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
     it('SECURITY: a custom auth header is dropped on a cross-origin redirect', async () => {
       // CROSS_ORIGIN_DROP_HEADERS is a fixed set and cannot know the slot a `header`
       // profile names. The engine fills that slot from the vault on every request and
@@ -4201,6 +4210,47 @@ describe('httpRequestTool', () => {
         expect(result).toContain(MANAGED_401 + HEADER_HINT);
       } else {
         expect(result).not.toContain(MANAGED_401 + '\n');
+        expect(result).not.toContain('auth.header_name');
+      }
+    });
+
+    // The delegated-access branch (a connection the user authorized) says fetch_token is the
+    // wrong move; when the token went out as Bearer it also names the header, with its own
+    // fixed sentence. Byte for byte, both states.
+    const DELEGATED_401 = '**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\n'
+      + 'This URL maps to api_profile "store-api". An exchange for it would replace a token '
+      + 'somebody is relying on with an app-level one that can see different data, and the old '
+      + 'access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the '
+      + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
+      + 'it to the person who owns it. The engine has written the details to its log.';
+    const DELEGATED_HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
+      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+
+    it.each([
+      ['without header_name points at the header', undefined, true],
+      ['with its own header_name stays as it was', HEADER, false],
+    ])('the delegated 401 reminder %s, byte for byte', async (_label, headerName, hints) => {
+      const { ApiStore, accessTokenKey } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'store-api', name: 'Store API', base_url: 'https://store.example.com/admin', description: 'store',
+        auth: {
+          type: 'oauth2', vault_keys: ['STORE_CLIENT_ID'],
+          oauth: { token_url: 'https://store.example.com/oauth/token', client_id_key: 'STORE_CLIENT_ID', client_secret_key: 'STORE_CLIENT_SECRET' },
+          ...(headerName === undefined ? {} : { header_name: headerName }),
+        } as never,
+        custom_endpoint_ack: ACK as never,
+        oauth_grant: { origin: 'callback', state: 'no-refresh' },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, headers: { 'content-type': 'application/json' }, json: {} })));
+      const result = await visible({ url: 'https://store.example.com/admin/products.json' }, agentWith(store, { [accessTokenKey('store-api')]: TOKEN }));
+      expect(result, 'the reminder text changed; if that is intended, change this literal too and say why').toContain(DELEGATED_401);
+      if (hints) {
+        expect(result).toContain(DELEGATED_401 + DELEGATED_HINT);
+      } else {
+        expect(result).not.toContain(DELEGATED_401 + '\n');
         expect(result).not.toContain('auth.header_name');
       }
     });
