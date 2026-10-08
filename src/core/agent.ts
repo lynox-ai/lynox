@@ -350,7 +350,17 @@ export class Agent implements IAgent {
   /** A prompt that could reach nobody, noted HERE — where every prompt passes — and not only
    *  where it is thrown: a tool that catches the error and returns it as text would otherwise
    *  turn the end of the run back into a result the model reads and works around. The batch
-   *  ends the run on it (`_dispatchTools`). Reset at the start of each run. */
+   *  ends the run on it (`_dispatchTools`). Reset at the start of each run.
+   *
+   *
+   *  Per INSTANCE, not per run, like the rest of the Agent's run state: `send` is not
+   *  re-entrant, so a caller keeps one run per Agent at a time, as these do: the HTTP `/run` route
+   *  refuses a second run on a session with a 409 (`runningSessions`) and, after a takeover,
+   *  waits until the previous handler has unwound; the worker builds a fresh Session, and with
+   *  it a fresh Agent, per execution (`engine.createSession`); a session's next turn waits for
+   *  its background compaction (`Session.run`, `_compactionInFlight`); spawned children and
+   *  workflow steps get their own Agent. Two `send`s overlapping on one Agent are outside
+   *  what this note supports, as they are outside what the Agent supports. */
   private _askedNobodyInRun: InputRequiredError | undefined;
   private _notingAskedNobody<T>(answer: Promise<T>): Promise<T> {
     return answer.catch((err: unknown) => {
