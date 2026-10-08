@@ -207,10 +207,19 @@
 		return new Date(iso).toLocaleString(getLocale() === 'de' ? 'de-CH' : 'en-US', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 	}
 
+	// A missing key renders with NO class, which reads as "no verdict" rather than as
+	// the verdict it is — so a word added to the engine's vocabulary has to be added
+	// here in the same change. `stopped` is not a failure: the owner ended the run on
+	// purpose, so it gets the muted colour rather than the danger one.
 	const runStatusColor: Record<string, string> = {
 		success: 'text-success',
 		failed: 'text-danger',
 		timeout: 'text-danger',
+		// ⚠ `text-text-muted`, not `text-muted`: the theme token is `--color-text-muted`
+		// (app.css), while success and danger are `--color-success`/`--color-danger`. A
+		// utility for a token that does not exist compiles and renders NOTHING — the
+		// same silent no-verdict this entry exists to remove.
+		stopped: 'text-text-muted',
 	};
 
 	$effect(() => { void loadTriggers(); /* catches and sets its error */ });

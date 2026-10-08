@@ -3181,6 +3181,11 @@ export class RunHistory {
     return this._triggerStore?.getById(id, opts);
   }
 
+  /** See `TriggerStore.isAmbiguousId`. False without a trigger store. */
+  isAmbiguousTriggerId(id: string): boolean {
+    return this._triggerStore?.isAmbiguousId(id) ?? false;
+  }
+
   deleteTask(id: string): boolean {
     // Capture legacy's direct-subtask ids BEFORE its cascade delete, so the mirror
     // removes exactly the set legacy removes. The mirror's own parent_task_id may be
