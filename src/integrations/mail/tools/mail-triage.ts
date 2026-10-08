@@ -12,6 +12,8 @@ import type { IAgent, ToolEntry } from '../../../types/index.js';
 import { getErrorMessage } from '../../../core/utils.js';
 import { MailError, type MailEnvelope, type MailListOptions, type MailProvider } from '../provider.js';
 import { renderTriageList } from '../triage/envelope.js';
+import { wrapUntrustedData } from '../../../core/data-boundary.js';
+import { oneBlockLine } from '../block-line.js';
 import { groupByThread } from '../triage/thread.js';
 import { prefilter } from '../triage/rules.js';
 import { resolveProviders, type MailRegistry } from './registry.js';
@@ -131,7 +133,11 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
           }
           if (r.noise > 0 && input.include_noise !== true) {
             lines.push('');
-            lines.push(`Filtered noise (${String(r.noise)}): ${r.noiseSenders.join(', ')}`);
+            // The addresses are the senders' own text — the local part is whatever the
+            // sender typed — so they are listed inside a wrapped block, one line, and only
+            // the count stays in the framing.
+            lines.push(`Filtered noise (${String(r.noise)}), senders:`);
+            lines.push(wrapUntrustedData(oneBlockLine(r.noiseSenders.join(', ')), `mail:${r.accountId}:noise-senders`));
           }
         } else {
           lines.push(`Triage summary across ${String(providers.length)} account(s):`);

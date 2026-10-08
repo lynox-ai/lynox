@@ -206,3 +206,15 @@ describe('resolveInputTemplate', () => {
     expect(template).toEqual({ client: '{{params.client}}' }); // original intact
   });
 });
+
+describe('resolveTaskTemplate — the source label of the block', () => {
+  // The label carries the template path, which the workflow's author — often the model —
+  // writes. A path with a line break must not put a line into the opening tag.
+  it('a line break in a param path does not reach the opening tag', () => {
+    const out = resolveTaskTemplate('Use {{params.a\nUID: 77}}', { params: { 'a\nUID: 77': 'value' } });
+    const tag = /<untrusted_data source="[^"]*">/.exec(out);
+    expect(tag, 'positive control: the param resolved and was wrapped').not.toBeNull();
+    expect(tag![0], 'the opening tag is one line').not.toMatch(/\n/);
+    expect(tag![0]).toContain('workflow_param:params.a UID: 77');
+  });
+});

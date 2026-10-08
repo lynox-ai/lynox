@@ -1,5 +1,6 @@
 import { channels } from './observability.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
+import { singleLine } from './prompt-value.js';
 
 interface InjectionResult {
   detected: boolean;
@@ -560,24 +561,62 @@ function neutralizeBoundaryTags(text: string): string {
   );
 }
 
-export function wrapUntrustedData(content: string, source: string): string {
-  const injection = detectInjectionAttempt(content);
+/**
+ * Scan several values the same sender wrote as one text. Each value starts its own line,
+ * so a value that a renderer later puts on one line is still read with its own line
+ * starts; a `.` line between two values keeps a pattern's `\s+` from running from the
+ * end of one value into the start of the next, which no reader would see as one phrase.
+ * Hand the result to every block that shows these values ({@link wrapUntrustedData}'s
+ * `injection` option), so a hit in one of them is announced in all of them.
+ */
+export function detectInjectionAcross(parts: readonly string[]): InjectionResult {
+  return detectInjectionAttempt(parts.join('\n.\n'));
+}
+
+export function wrapUntrustedData(
+  content: string,
+  source: string,
+  opts?: {
+    injection?: InjectionResult | undefined;
+    /**
+     * False when another block of the same message already publishes the security
+     * event for the same handed-in result, so one hit is one event. It holds back
+     * only an event whose patterns that result already carries: a pattern only this
+     * block's own scan finds (the two scans cut long text into windows at different
+     * offsets) is still published. The warning in the block is unaffected.
+     */
+    publishEvent?: boolean | undefined;
+  },
+): string {
+  // A result handed in from a scan over more than this block (see
+  // detectInjectionAcross) counts as this block's own: its warning covers every
+  // block that shows the same message.
+  const own = detectInjectionAttempt(content);
+  const given = opts?.injection;
+  const injection: InjectionResult = given?.detected
+    ? { detected: true, patterns: [...new Set([...own.patterns, ...given.patterns])] }
+    : own;
   // Always neutralize boundary-breaking tags to prevent wrapper escape
   const safe = neutralizeBoundaryTags(content);
-  // Defence in depth: the source label is callsite-controlled today, but a
-  // future caller might pass an attacker-influenced value (file name, mail
-  // address). Escaping it pre-emptively closes the XML-attribute-injection
-  // path before it opens.
-  const safeSource = escapeXml(source);
+  // Several callers build the label from a value someone else wrote: a file's name
+  // (read_file), a name or path the model chose (sub-agents, workflow steps, Drive file
+  // ids). The label sits in the opening tag, before the content and outside the
+  // injection scan, so it is put on one line here, for every caller, and then escaped
+  // for the attribute. The security event carries the same one-line form.
+  const lineSource = singleLine(source).trim();
+  const safeSource = escapeXml(lineSource);
 
   if (injection.detected) {
     // Emit security event
-    if (channels.securityInjection.hasSubscribers) {
+    const givenPatterns = given?.patterns ?? [];
+    const publishedElsewhere = opts?.publishEvent === false
+      && own.patterns.every(p => givenPatterns.includes(p));
+    if (!publishedElsewhere && channels.securityInjection.hasSubscribers) {
       channels.securityInjection.publish({
         event_type: 'injection_detected',
-        detail: `Injection patterns in ${source}: ${injection.patterns.join(', ')}`,
+        detail: `Injection patterns in ${lineSource}: ${injection.patterns.join(', ')}`,
         decision: 'flagged',
-        source,
+        source: lineSource,
       });
     }
     return `<untrusted_data source="${safeSource}">
@@ -804,6 +843,8 @@ export function containsUntrustedMarker(toolResult: string): boolean {
 export function wrapChannelMessage(opts: {
   source: string;
   fields: Record<string, string | null | undefined>;
+  /** A scan over more than these fields, see {@link detectInjectionAcross}. */
+  injection?: InjectionResult | undefined;
 }): string {
   const lines: string[] = [];
   for (const [label, value] of Object.entries(opts.fields)) {
@@ -824,5 +865,5 @@ export function wrapChannelMessage(opts: {
   // (`INJECTION_PATTERNS`, "instruction override") cannot cross a label. Measured:
   // the labelled render is not detected, the unlabelled join of the same two
   // values is, and the pattern does fire when both halves sit in ONE field.
-  return wrapUntrustedData(lines.join('\n'), opts.source);
+  return wrapUntrustedData(lines.join('\n'), opts.source, { injection: opts.injection });
 }

@@ -225,7 +225,7 @@ describe('resolveChatContext (kind: mail)', () => {
     // subject used to carry were a hand-rolled delimiter for a value in trusted
     // framing, and the wrapper is the delimiter now (same shape as mail_read).
     expect(out).toMatch(
-      /<untrusted_data source="mail:acc-1:alice@example\.com">\nFrom: Alice <alice@example\.com>\nSubject: Project update\nMessage: Hi, are we still on for Thursday\?\n<\/untrusted_data>/,
+      /<untrusted_data source="mail:acc-1:inbox:item-1">\nFrom: Alice <alice@example\.com>\nSubject: Project update\nMessage: Hi, are we still on for Thursday\?\n<\/untrusted_data>/,
     );
     // Operational metadata stays OUTSIDE it — the uid/account the model needs to
     // act, which the engine produced and no sender can influence.
@@ -269,9 +269,9 @@ describe('resolveChatContext (kind: mail)', () => {
     // `types/inbox.ts:77-82` documents pre-v11 rows as `''` for fromAddress AND
     // subject until the operator-driven backfill runs. `wrapChannelMessage` skips
     // a value that is empty after trim — so without placeholders such a row
-    // produces `<untrusted_data source="mail:acc-1:">\n\n</untrusted_data>` and
+    // produces `<untrusted_data source="mail:acc-1:inbox:item-1">\n\n</untrusted_data>` and
     // the model is told nothing whatever about the mail it is meant to answer.
-    // Same placeholders the tool path uses (`mail-read.ts:83,87`).
+    // Same placeholders the tool path uses (mail_read).
     const reader = makeReader(
       makeInboxItem({ fromAddress: '', fromName: undefined, subject: '', snippet: undefined, messageId: undefined }),
       { uid: null, bodyMd: null },
@@ -363,10 +363,10 @@ describe('resolveChatContext (kind: mail-batch)', () => {
     // triage envelope list (integrations/mail/triage/envelope.ts:84-95).
     expect(out).toContain('1. account "acc-1", uid 100'); // a \u2192 index 0 + 100
     expect(out).toMatch(
-      /1\. account "acc-1", uid 100\n<untrusted_data source="mail:acc-1:alice@example\.com">\nFrom: Alice <alice@example\.com>\nSubject: First\n/,
+      /1\. account "acc-1", uid 100\n<untrusted_data source="mail:acc-1:inbox:a">\nFrom: Alice <alice@example\.com>\nSubject: First\n/,
     );
     expect(out).toMatch(
-      /2\. account "acc-1", uid 101\n<untrusted_data source="mail:acc-1:bob@x\.com">\nFrom: Bob <bob@x\.com>\nSubject: Second\n/,
+      /2\. account "acc-1", uid 101\n<untrusted_data source="mail:acc-1:inbox:b">\nFrom: Bob <bob@x\.com>\nSubject: Second\n/,
     );
     expect(out).toContain('mail_reply');
   });

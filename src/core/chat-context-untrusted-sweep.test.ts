@@ -363,9 +363,11 @@ describe('chat-context untrusted-data sweep', () => {
       expect(out).toContain('⚠ WARNING');
       const injection = events.filter((e) => e.event_type === 'injection_detected');
       expect(injection).toHaveLength(1);
-      // The source names the account AND the sender, so an alert says which
-      // mailbox and which sender — a bare 'mail' label would not be actionable.
-      expect(injection[0]?.source).toBe(`mail:${TRUSTED_ACCOUNT}:${CANARY.fromAddress}`);
+      // The source names the account AND the inbox item, so an alert says which
+      // mailbox and which message — a bare 'mail' label would not be actionable.
+      // It does not carry the sender's address: that is text the sender wrote.
+      expect(injection[0]?.source).toBe(`mail:${TRUSTED_ACCOUNT}:inbox:tainted-1`);
+      expect(injection[0]?.source).not.toContain(CANARY.fromAddress);
     } finally {
       channels.securityInjection.unsubscribe(onMsg);
     }
